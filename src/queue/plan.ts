@@ -5,14 +5,25 @@ export const STACK_WIDTH = 4;
 export const COALESCE_MS = 2_000;
 export const MAX_DIAGNOSTICS = 8;
 
-export interface PlannedEntry { changeId: Id; sequence: number; dependencyChangeIds: readonly Id[] }
+export interface PlannedEntry { changeId: Id; sequence: number; dependencyChangeIds: readonly Id[]; unitKeys?: readonly string[] }
+
+export function unitsOverlap(a: readonly string[], b: readonly string[]): boolean {
+  return a.some(left => b.some(right => left === right ||
+    left.startsWith('file:') && right.startsWith(`symbol:${left.slice(5)}#`) ||
+    right.startsWith('file:') && left.startsWith(`symbol:${right.slice(5)}#`)));
+}
 
 /** Stable, dependency-closed prefix. An unavailable prerequisite leaves its dependent waiting. */
 export function selectStack(waiting: readonly PlannedEntry[], available: ReadonlySet<Id>, width = STACK_WIDTH): Id[] {
   const selected: Id[] = [];
+  const ordered = [...waiting].sort((a, b) => a.sequence - b.sequence);
   for (const entry of [...waiting].sort((a, b) => a.sequence - b.sequence)) {
     if (selected.length >= width) break;
-    if (entry.dependencyChangeIds.every(id => available.has(id) || selected.includes(id))) selected.push(entry.changeId);
+    if (!entry.dependencyChangeIds.every(id => available.has(id) || selected.includes(id))) continue;
+    const closure = new Set(dependencyClosure([entry.changeId], ordered));
+    const overlapsSelected = ordered.some(prior => selected.includes(prior.changeId) &&
+      prior.unitKeys && entry.unitKeys && unitsOverlap(prior.unitKeys, entry.unitKeys) && !closure.has(prior.changeId));
+    if (!overlapsSelected) selected.push(entry.changeId);
   }
   return selected;
 }
