@@ -41,6 +41,7 @@ export interface Change extends Versioned {
   changeId: Id; repoId: Id; authorId: Id; intentKey: string; intentText: string;
   issueNumber?: number | null;
   authorModel?: string | null;
+  closeReason?: string | null;
   candidateStorageName: string; branch: string; baseOid: Oid | null;
   headOid: Oid | null; revision: number; unitKeys: string[];
   dependencyChangeIds: Id[];

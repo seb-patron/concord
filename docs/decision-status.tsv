@@ -137,7 +137,7 @@ D-CLI-MCP-FIRST	manual	CLI and MCP agent self-service	in progress	Land 105, 106 
 D-CHANGE-REVISIONS	manual	repairs republish the same change	in progress	Verify first stable-key repair republishes.
 D-RUNNER-BACKOFF	manual	idle runner backoff 1 s -> 30 s	landed da2fb26	#70 part 2 is #75.
 D-ISSUE-CLAIM-SPIKE	manual	issue claim semantics researched	spike done (artifact GAU8hBkQjNeyZWBEXoM1Vg)	Read spike; ask Q-ISSUE-CLAIM questions.
-D-CLOSE-REASON	manual	optional stored close reason	decided	Spec after 107 (cli/main.ts + mcp/tools.ts lane).
+D-CLOSE-REASON	manual	optional stored close reason	live	None.
 D-CF-CHECKER-MORNING	manual	containers checker experiment decided	deferred to Wed morning	Ask Q-CF-CHECKER Wed morning with the cost caps.
 D-REVIEW-ORDER	manual	Luna reviews first, SWE-2 fallback	live in chain template	None.
 D-FILM-PLAN	manual	Wed freeze noon, film 2-4 pm, submit 6 pm	scheduled	Freeze at noon CT; prep DEMO.md and swarm for the 1 pm dry run.

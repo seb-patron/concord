@@ -187,7 +187,8 @@ export function liveLeaseHolders(leases, now = Date.now()) {
  */
 export function changeNextAction(change, ctx = {}) {
   const status = change && change.status;
-  const terminal = { merged: 'Landed to canonical history.', superseded: 'Superseded by a competing candidate.', closed: 'Closed without landing.' };
+  const terminal = { merged: 'Landed to canonical history.', superseded: 'Superseded by a competing candidate.' };
+  if (status === 'closed') return { label: 'No action (closed)', kind: 'terminal', detail: change.closeReason ? `Closed without landing: ${change.closeReason}` : 'Closed without landing.' };
   if (status && terminal[status]) {
     return { label: status === 'merged' ? 'Landed' : `No action (${status})`, kind: 'terminal', detail: terminal[status] };
   }

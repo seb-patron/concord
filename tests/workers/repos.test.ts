@@ -346,7 +346,35 @@ describe('repository and change lifecycle', () => {
     const closed = await fetchApi(mutation(`/v1/repos/${name}/changes/${body.data.changeId}/close`,
       { expectedVersion: body.version }, 'legacy-close'));
     expect(closed.status).toBe(200);
-    expect((await responseBody(closed)).data).toMatchObject({ status: 'closed', authorModel: null });
+    expect((await responseBody(closed)).data).toMatchObject({ status: 'closed', authorModel: null, closeReason: null });
+  });
+  it('stores an optional close reason and validates it before closing', async () => {
+    const name = 'close_reason_case';
+    await create(name);
+    const created = await fetchApi(mutation(`/v1/repos/${name}/changes`, {
+      intentKey: 'close-reason', intentText: 'close reason', baseOid: null,
+      branch: 'refs/heads/close-reason', unitKeys: [], dependencyChangeIds: [],
+    }, 'close-reason-create'));
+    const change = (await responseBody(created)).data;
+    for (const [index, reason] of ['x'.repeat(2001), '   ', 42].entries()) {
+      const rejected = await fetchApi(mutation(`/v1/repos/${name}/changes/${change.changeId}/close`,
+        { expectedVersion: change.version, reason }, `close-reason-invalid-${index}`));
+      expect(rejected.status).toBe(422);
+      expect((await responseBody(rejected)).error.code).toBe('INVALID_REASON');
+      expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes/${change.changeId}`)))).data.status).toBe('draft');
+    }
+    const reason = 'superseded by 0e85466d';
+    const closed = await fetchApi(mutation(`/v1/repos/${name}/changes/${change.changeId}/close`,
+      { expectedVersion: change.version, reason }, 'close-reason-valid'));
+    expect(closed.status).toBe(200);
+    expect((await responseBody(closed)).data).toMatchObject({ status: 'closed', closeReason: reason });
+    const detail = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes/${change.changeId}`)))).data;
+    expect(detail.closeReason).toBe(reason);
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/events`)))).data.items;
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'change.closed', relatedIds: [change.changeId], payload: { reason } }));
+    const replay = await fetchApi(mutation(`/v1/repos/${name}/changes/${change.changeId}/close`,
+      { expectedVersion: change.version, reason }, 'close-reason-valid'));
+    expect((await responseBody(replay)).data.closeReason).toBe(reason);
   });
   it('releases active and reserved leases when closing a change, leaving other changes untouched', async () => {
     const name = 'close_releases_leases';

@@ -753,11 +753,16 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   return scheduleBootstrap(context, context.state.get<BootstrapPending>('bootstrap')!, seed);
 }
 
-function close(context: ModuleContext, changeId: string): Response {
+function close(context: ModuleContext, changeId: string, body: Record<string, unknown>): Response {
   const change = getChange(context, changeId);
   ownChange(context, change);
   if (context.state.get<BootstrapPending>('bootstrap')?.changeId === changeId) fail(409, 'BOOTSTRAP_FROZEN', 'Seed draft has a pending bootstrap request');
   if (!['draft', 'ready'].includes(change.status)) fail(409, 'CHANGE_FROZEN', 'Only unfrozen draft or ready changes can close');
+  const reason = body.reason == null ? null : (() => {
+    const value = body.reason;
+    if (typeof value !== 'string' || new TextEncoder().encode(value).byteLength > 2000 || !value.trim()) fail(422, 'INVALID_REASON', 'reason is invalid');
+    return value as string;
+  })();
   context.transaction(() => {
     try {
       const release = context.call('leases.releaseForChange', changeId, 'change-closed');
@@ -766,7 +771,8 @@ function close(context: ModuleContext, changeId: string): Response {
       if (!(error instanceof HttpError) || error.code !== 'MODULE_UNAVAILABLE') throw error;
     }
     change.status = 'closed';
-    change.version = versioned(context, 'change.closed', [changeId], {});
+    change.closeReason = reason;
+    change.version = versioned(context, 'change.closed', [changeId], { reason });
     storeChange(context, change);
     context.state.put('intents', list<Intent>(context, 'intents').map(item => item.changeId === changeId ? { ...item, terminal: true, version: change.version } : item));
     context.state.delete(`inspection:${changeId}`);
@@ -881,7 +887,7 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
-    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match, body) => close(context, match[2], body as Record<string, unknown>) },
   ],
   snapshot: context => ({ repo: context.state.get<Repo>('repo'),
     unitPolicy: context.trusted.policies[context.state.get<Repo>('repo')?.policyId ?? ''],
