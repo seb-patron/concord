@@ -1,32 +1,49 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
-  getSnapshot, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
+  getSnapshot, getVerdicts, hasToken, isForbidden, listPrincipals, listRepos, newIdempotencyKey,
   redactError, setSessionToken, submitVerdict, withdrawChange,
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
-  normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
+  liveLeaseHolders, normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
 import { createRepoPage } from './repo.js';
+import { appendObservedEvents, createTracker, observedDailyCount } from './tracker.js';
+import { createVerdictLoader } from './verdicts.js';
 
 const $ = id => document.getElementById(id);
 const repoPage = createRepoPage($('code-view'));
-const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
+const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
-  inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
+  inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
   awaitingFreshSnapshot: false };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
-const mainViews = {
-  code: { render: () => { state.view = 'repo'; } },
-  desk: { render: () => { state.view = 'desk'; } },
-  inbox: { render: () => { state.view = 'inbox'; } },
-};
 const node = (tag, value, className) => {
   const n = document.createElement(tag);
   if (value !== undefined && value !== null) n.textContent = safeText(value);
   if (className) n.className = className;
   return n;
+};
+const verdictLoader = createVerdictLoader({
+  fetchPage: (id, cursor) => getVerdicts(state.repoId, id, cursor),
+  onEvict: id => { delete state.verdicts[id]; delete state.verdictErrors[id]; },
+  onResult: (id, items, error) => {
+    if (error) state.verdictErrors[id] = error;
+    else { state.verdicts[id] = items; delete state.verdictErrors[id]; }
+    render();
+  },
+});
+const tracker = createTracker($('tracker-view'), {
+  refresh: () => loadRepo(state.generation, false),
+  loadVerdicts: (ids, terminalIds) => verdictLoader.request(ids, terminalIds),
+});
+const views = {
+  code: { render: () => repoPage.show(state.repoId, state.snapshot) },
+  tracker: { render: context => tracker.render(context) },
+  milestones: { render: () => {} },
+  desk: { render: () => {} },
+  inbox: { render: () => {} },
 };
 const list = value => Array.isArray(value) ? value : [];
 const projections = () => state.snapshot?.data?.projections ?? {};
@@ -78,11 +95,12 @@ function showSession() {
 function signOut(message) {
   ++state.generation; clearSessionToken();
   repoPage.hide();
-  state.repoId = null; state.snapshot = null; state.identity = null; state.repos = [];
+  state.repoId = null; state.snapshot = null; state.identity = null; state.repos = []; state.principals = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
+  verdictLoader.reset();
   state.observedVersions.clear();
   state.awaitingFreshSnapshot = false;
-  state.selected = null; state.inboxSelected = null;
+  state.selected = null; state.inboxSelected = null; state.view = 'tracker';
   $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = '';
   $('inbox-detail').replaceChildren(); $('inbox-detail').dataset.itemId = '';
   state.deskMessage = null;
@@ -102,6 +120,7 @@ async function signIn(token, preferredRepo) {
     const page = await listRepos();
     if (gen !== state.generation) return;
     state.identity = identity;
+    void refreshPrincipals(gen);
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
     const select = $('repo-select'); select.replaceChildren();
     if (!state.repos.length) {
@@ -124,9 +143,23 @@ async function signIn(token, preferredRepo) {
     signOut(message);
   }
 }
+async function refreshPrincipals(gen) {
+  try {
+    const items = []; const seen = new Set(); let cursor = null;
+    for (let pageNumber = 0; pageNumber < 5; pageNumber++) {
+      const page = await listPrincipals(cursor);
+      if (gen !== state.generation) return;
+      items.push(...list(page?.data?.items)); cursor = page?.data?.nextCursor ?? null;
+      if (!cursor || seen.has(cursor)) break;
+      if (cursor) seen.add(cursor);
+    }
+    if (gen === state.generation) { state.principals = items; render(); }
+  } catch { /* Principal visibility is narrower than repo visibility for some tokens. */ }
+}
 async function loadRepo(gen = state.generation, resetSelection = true) {
   if (resetSelection) {
     state.snapshot = null; state.verdicts = {}; state.verdictErrors = {}; state.events = [];
+    verdictLoader.reset();
     state.seq = 0; state.version = 0;
   }
   state.deskMessage = null;
@@ -158,40 +191,23 @@ function observeVersion(repoId, version) {
 function acceptSnapshot(body, repoId) {
   if (!Number.isSafeInteger(body?.version) || body.version < (state.observedVersions.get(repoId) ?? 0)) return false;
   observeVersion(repoId, body.version);
+  verdictLoader.request([], list(body?.data?.projections?.repos?.changes)
+    .filter(change => change?.status === 'merged').map(change => change.changeId));
+  verdictLoader.advanceVersion(body.version);
   state.snapshot = body; state.version = body.version;
   state.awaitingFreshSnapshot = false;
   return true;
 }
 async function refreshVerdicts(gen = state.generation) {
-  const ids = new Set(changes().filter(c => c?.status === 'ready').map(c => c.changeId));
-  if (state.selected) ids.add(state.selected);
-  if (state.inboxSelected) {
+  const ids = [];
+  const terminal = [];
+  if (state.view === 'desk' && state.selected) ids.push(state.selected);
+  if (state.view === 'inbox' && state.inboxSelected) {
     const item = deriveInbox(state.snapshot).find(i => i.id === state.inboxSelected);
-    if (item?.changeId) ids.add(item.changeId);
+    if (item?.changeId) ids.push(item.changeId);
   }
-  await Promise.all([...ids].map(async id => {
-    try {
-      const items = [];
-      const seen = new Set();
-      let cursor = null;
-      do {
-        const page = await getVerdicts(state.repoId, id, cursor);
-        if (gen !== state.generation) return;
-        items.push(...list(page?.data?.items));
-        cursor = page?.data?.nextCursor ?? null;
-        if (cursor && seen.has(cursor)) throw new Error('Repeated verdict cursor');
-        if (cursor) seen.add(cursor);
-      } while (cursor);
-      if (gen !== state.generation) return;
-      state.verdicts[id] = items;
-      delete state.verdictErrors[id];
-    } catch (error) {
-      if (gen !== state.generation) return;
-      state.verdictErrors[id] = error.status === 403 ? 'Approval history is visible to reviewers' :
-        `Approval history unavailable (${redactError(error).code})`;
-    }
-  }));
-  if (gen === state.generation) render();
+  for (const id of ids) if (changeFor(id)?.status === 'merged') terminal.push(id);
+  if (gen === state.generation) verdictLoader.request(ids, terminal);
 }
 async function poll(gen = state.generation) {
   if (!state.repoId || gen !== state.generation || state.busy) return;
@@ -209,7 +225,7 @@ async function poll(gen = state.generation) {
       if (items.length === 0) break;
       const last = items.at(-1)?.sequence;
       if (!Number.isSafeInteger(last) || last <= state.seq) break;
-      state.events.push(...items); state.events = state.events.slice(-2000); state.seq = last;
+      state.events = appendObservedEvents(state.events, items); state.seq = last;
       if (last >= (page.eventSeq ?? last)) break;
     }
     if (page?.version > state.version) {
@@ -233,29 +249,29 @@ function stat(label, value, sub) {
   return box;
 }
 function renderStats() {
-  const live = leases().filter(l => ['active','reserved'].includes(l.state) && l.expiresAt > Date.now());
-  const working = new Set(changes().filter(c => ['draft','ready','checking'].includes(c.status)).map(c => c.authorId).filter(Boolean));
+  const allHeld = projections().leases?.heldItems ?? [];
+  const live = liveLeaseHolders(allHeld);
+  const working = live;
   const queued = entries().filter(e => ['admitted','reserved','checking','waiting'].includes(e.state));
   const today = new Date().toDateString();
-  const landed = state.events.filter(e => e.kind === 'queue.promotion_applied' && new Date(e.timestamp).toDateString() === today)
-    .flatMap(e => list(e.relatedIds));
+  const landed = observedDailyCount(state.events, 'Landed today');
   const main = projections().queue?.observedMain ?? projections().queue?.finalCanonicalOid ??
     projections().repos?.repo?.observedCanonicalOid ?? null;
   const diagnosis = normalizeDiagnosis(projections().queue?.diagnosis);
   const mainState = diagnosis.reason === 'BASE_RED' ? 'red' :
     projections().queue?.activeStackJobId ? 'checking' :
-    state.events.some(e => e.kind === 'queue.promotion_applied') ? 'green' : 'unknown';
+    landed > 0 ? 'green' : 'unknown';
   $('stat-strip').replaceChildren(
-    stat('Agents working', working.size, 'active changes'),
-    stat('Leases held', live.length, live.length ? `shortest ${leaseCountdown(live.reduce((a,b) => a.expiresAt < b.expiresAt ? a : b), Date.now()).text}` : 'no active leases'),
+    stat('Agents working', working.count, 'live lease holders'),
+    stat('Leases held', live.evidence.length, live.evidence.length ? `shortest ${leaseCountdown(live.evidence.reduce((a,b) => a.expiresAt < b.expiresAt ? a : b), Date.now()).text}` : 'no active leases'),
     stat('In queue', queued.length, 'ordered for checking'),
-    stat('Landed today', landed.length, 'from observed events'),
+    stat('Landed today', landed, 'from observed events'),
     stat('Main', !state.repoId ? '0' : mainState, main ? `tip ${String(main).slice(0,9)}` : 'tip unavailable'),
   );
   const red = state.events.filter(e => e.kind === 'queue.diagnosis' && e.payload?.reason === 'BASE_RED' && new Date(e.timestamp).toDateString() === today).length;
   $('main-footer').replaceChildren(node('strong','main'), document.createTextNode(!state.repoId
     ? 'No repositories yet. Create one to see main branch activity.'
-    : `${landed.length} landings today · ${red} red events · tip ${main ? String(main).slice(0,9) : 'unavailable'}`));
+    : `${landed} landings today · ${red} red events · tip ${main ? String(main).slice(0,9) : 'unavailable'}`));
 }
 function statusFor(change) {
   const diag = normalizeDiagnosis(projections().queue?.diagnosis);
@@ -459,6 +475,7 @@ function renderVerdicts(id, target) {
   if (state.verdictErrors[id]) { target.append(node('p',state.verdictErrors[id],'muted')); return; }
   const items=state.verdicts[id];
   if (!Array.isArray(items)) { target.append(node('p','Loading approval history…','muted')); return; }
+  if (items.olderNotLoaded) target.append(node('p','Older approvals not loaded.','muted'));
   if (!items.length) { target.append(node('p','No verdict recorded.','muted')); return; }
   for (const v of items) {
     const card=node('div',null,'verdict-record');
@@ -575,7 +592,7 @@ function renderInbox() {
     const b=node('button',null,'inbox-item'); b.type='button'; b.id=`inbox-${item.id.replace(/[^A-Za-z0-9_-]/g,'-')}`;
     b.setAttribute('aria-current',String(item.id===state.inboxSelected));
     b.append(node('span',item.kind,`tone-${item.tone}`),node('strong',item.title));
-    b.addEventListener('click',()=>{state.inboxSelected=item.id;renderInbox();});
+    b.addEventListener('click',()=>{state.inboxSelected=item.id;renderInbox(); void refreshVerdicts();});
     nav.append(b);
   }
   const detail=$('inbox-detail');
@@ -589,6 +606,9 @@ function renderInbox() {
   if (!sameItem || !content.isConnected) detail.prepend(content);
   const c=changeFor(item.changeId);
   if (c) {
+    if (state.view === 'inbox' && !Object.hasOwn(state.verdicts,c.changeId) && !state.verdictErrors[c.changeId]) {
+      verdictLoader.request([c.changeId], c.status === 'merged' ? [c.changeId] : []);
+    }
     const approval=node('div'); approval.append(node('h3','Approval history'));
     const records=node('div'); approval.append(records); renderVerdicts(c.changeId,records); content.append(approval);
     const open=node('button','Open change details'); open.type='button';
@@ -607,14 +627,19 @@ function render() {
   preserve(()=>{
     showSession();
     if (!hasToken() || !state.identity) return;
-    $('code-view').hidden = state.view !== 'repo';
-    for (const button of document.querySelectorAll('[data-main-view]')) button.setAttribute('aria-current', String(button.dataset.mainView === (state.view === 'repo' ? 'code' : state.view)));
-    if (state.view === 'repo') repoPage.show(state.repoId, state.snapshot);
-    else repoPage.hide();
+    $('desk').dataset.mainViewActive = state.view;
+    const sections = { code: $('code-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
+    for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
+    $('stat-strip').hidden = state.view !== 'desk';
+    $('inbox-alert').hidden = state.view === 'inbox' || deriveInbox(state.snapshot).length === 0;
+    for (const button of document.querySelectorAll('[data-main-view]')) button.setAttribute('aria-current', String(button.dataset.mainView === state.view));
+    if (state.view !== 'code') repoPage.hide();
+    views[state.view]?.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
+      identity: state.identity, principals: state.principals, verdicts: state.verdicts,
+      verdictErrors: state.verdictErrors, message: state.deskMessage });
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
-    $('stat-strip').hidden = state.view !== 'desk';
     if (!state.snapshot) {
       renderInbox();
       if (!state.repoId) {
@@ -679,12 +704,17 @@ function doVerdict(change,decision,manifest,evidenceDigest) {
   void mutate('Verdict',()=>submitVerdict(state.repoId,change.changeId,{expectedVersion:state.snapshot.version,revision:evidence.revision,reviewManifestDigest:manifest.trim(),findingSetVersion:evidence.findingSetVersion,decision,evidenceDigest:evidenceDigest.trim()},newIdempotencyKey()));
 }
 function boot() {
-  for (const button of document.querySelectorAll('[data-main-view]')) button.addEventListener('click',()=>{mainViews[button.dataset.mainView]?.render();render();});
+  $('desk').addEventListener('click', event => {
+    const tab = event.target.closest('[data-main-view]');
+    if (!tab || !Object.hasOwn(views, tab.dataset.mainView)) return;
+    state.view = tab.dataset.mainView;
+    render();
+  });
   $('demo-open').hidden=!demo;
   $('demo-open').addEventListener('click',()=>{if(demo) void signIn(demo,window.CONCORD_DEMO_REPO_ID);});
   $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value.trim();if(token)void signIn(token);});
   $('token-clear').addEventListener('click',()=>signOut());
-  $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; ++state.generation;void loadRepo();});
+  $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; state.view='tracker'; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
   $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});
