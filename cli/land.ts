@@ -222,7 +222,7 @@ export function approvedHead(evidence: string, head: string): boolean {
     approvedFooter &&
     !/CHANGES REQUIRED|REQUEST CHANGES|NOT APPROVED/i.test(evidence);
 }
-export async function land(input: LandOptions): Promise<Obj> {
+async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj> {
   let options = input;
   if (input.awRun) {
     if (!input.base) throw new ConcordError('REFUSED: AW run requires an explicit run-start base; supply --base', 'usage');
@@ -445,7 +445,18 @@ export async function land(input: LandOptions): Promise<Obj> {
         if (carriedFromOid) emit({ state: 'review-carried', sourceOid: carriedFromOid, publishedOid: prepared.head });
         emit({ state: 'reviewed', verdictId: verdict.verdictId, headOid: prepared.head });
         await renew();
-        entry = (await api(client, `${root}/queue/enqueue`, { changeId, verdictId: verdict.verdictId, leaseFences: fences() }, await currentVersion(client, root))).data;
+        try {
+          entry = (await api(client, `${root}/queue/enqueue`, { changeId, verdictId: verdict.verdictId, leaseFences: fences() }, await currentVersion(client, root))).data;
+        } catch (error) {
+          const staleBase = error instanceof ConcordError && (error.payload as Obj)?.error?.code === 'STALE_BASE';
+          if (!staleBase) throw error;
+          if (staleBaseRounds >= 3) throw new ConcordError('STALE_BASE: main kept moving; re-run land', 'conflict', 409);
+          const movedRepository = (await api(client, root)).data;
+          if (!movedRepository.observedCanonicalOid || !sha.test(movedRepository.observedCanonicalOid))
+            throw new ConcordError('canonical main is unavailable after STALE_BASE', 'server');
+          emit({ state: 'rebased', fromBase: targetBase, toBase: movedRepository.observedCanonicalOid, publishedOid: prepared.head });
+          return await landAttempt(input, staleBaseRounds + 1);
+        }
         emit({ state: 'enqueued', entryId: entry.entryId });
       }
       let previous = '';
@@ -485,4 +496,8 @@ export async function land(input: LandOptions): Promise<Obj> {
     }
   }
   } finally { await squash?.cleanup(); }
+}
+
+export async function land(input: LandOptions): Promise<Obj> {
+  return landAttempt(input);
 }

@@ -18,7 +18,7 @@ async function git(dir: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFile('git', args, { cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.test', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.test' } });
   return stdout.trim();
 }
-afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 
 async function source(): Promise<{ dir: string; commit: string; parent: string }> {
   const dir = await temp();
@@ -34,6 +34,114 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
+  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving') {
+    const sourceDir = await temp(); await git(sourceDir, 'init', '-q', '-b', 'main');
+    await writeFile(join(sourceDir, 'value.txt'), 'before\n');
+    await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'base');
+    const base = await git(sourceDir, 'rev-parse', 'HEAD');
+    await writeFile(join(sourceDir, 'value.txt'), 'candidate\n');
+    await git(sourceDir, 'add', 'value.txt'); await git(sourceDir, 'commit', '-qm', 'candidate');
+    const commit = await git(sourceDir, 'rev-parse', 'HEAD');
+    const canonical = await temp(); await git(canonical, 'clone', '-q', sourceDir, '.'); await git(canonical, 'checkout', '-q', base);
+    const nextBase = async () => {
+      if (mode === 'conflict') await writeFile(join(canonical, 'value.txt'), 'main change\n');
+      else await writeFile(join(canonical, `other-${enqueues}.txt`), 'main advance\n');
+      await git(canonical, 'add', '.'); await git(canonical, 'commit', '-qm', 'advance main');
+      return git(canonical, 'rev-parse', 'HEAD');
+    };
+    const candidate = await temp(); await git(candidate, 'init', '-q', '--bare');
+    const allowedFiles = join(await temp(), 'allowed.txt'); await writeFile(allowedFiles, 'value.txt\n');
+    const evidence = join(await temp(), 'review.txt');
+    await writeFile(evidence, `# ✅ APPROVED FOR MERGE — head ${commit}\nAPPROVED for merge\n`);
+    const change: Record<string, any> = { changeId: 'change', intentKey: 'task', intentText: 'stale base test',
+      provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
+      authorId: 'agent', baseOid: base, headOid: null, revision: 0, status: 'draft',
+      branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`, unitKeys: ['file:value.txt'] };
+    let observedBase = base; let enqueues = 0; let verdicts = 0; const verdictBodies: Record<string, any>[] = [];
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, any> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: observedBase,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${canonical}` }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'change', revision: change.revision, jobId: `job-${change.revision}`, state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        if (change.revision) throw new ConcordError('intent exists', 'conflict', 409, { error: { code: 'INTENT_CONFLICT' } });
+        return { data: change, version: 1 };
+      }
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: enqueues > (mode === 'keeps-moving' ? 4 : 1)
+        ? { entries: [{ changeId: 'change', state: 'landed' }], finalCanonicalOid: observedBase, promotion: {} }
+        : { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'change', state: 'active',
+        unitKey: 'file:value.txt', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote:
+        options?.body?.storageName === 'canonical' ? `file://${canonical}` : `file://${candidate}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes/change/publish') {
+        change.headOid = options?.body?.headOid; change.baseOid = options?.body?.baseOid; change.revision++; change.status = 'ready';
+        return { data: change, version: 1 };
+      }
+      if (method === 'GET' && path.startsWith('/repos/demo/jobs/')) return { data: { result: { outcome: 'PASS', reviewManifestDigest: 'manifest' } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/queue/enqueue') {
+        enqueues++;
+        if (enqueues <= (mode === 'keeps-moving' ? 4 : 1)) {
+          observedBase = await nextBase();
+          throw new ConcordError('STALE_BASE', 'conflict', 409, { error: { code: 'STALE_BASE' } });
+        }
+        return { data: { entryId: 'entry' }, version: 1 };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_REVIEWER_TOKEN', 'local-reviewer');
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      const method = init?.method ?? 'GET';
+      let data: Record<string, any> = {};
+      if (method === 'GET' && url.pathname.endsWith('/snapshot')) data = { projections: { runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'change', revision: change.revision, jobId: `job-${change.revision}`, state: 'completed' },
+      ] } } };
+      else if (method === 'GET' && url.pathname.endsWith('/job-0/result') || method === 'GET' && url.pathname.endsWith(`/job-${change.revision}/result`))
+        data = { result: { outcome: 'PASS', reviewManifestDigest: 'manifest' } };
+      else if (method === 'GET' && url.pathname.endsWith('/findings')) data = { findingSetVersion: 0 };
+      else if (method === 'GET' && url.pathname.endsWith('/verdicts')) data = { items: [] };
+      else if (method === 'POST' && url.pathname.endsWith('/verdicts')) {
+        verdicts++; verdictBodies.push(JSON.parse(String(init?.body))); data = { verdictId: `verdict-${verdicts}` };
+      }
+      else throw new Error(`unexpected reviewer ${method} ${url.pathname}`);
+      return new Response(JSON.stringify({ data, version: 1 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    let error: unknown; let result: Awaited<ReturnType<typeof land>> | undefined; const events: Record<string, any>[] = [];
+    try { result = await land({ repo: 'demo', source: sourceDir, commit, intentKey: 'task', intent: 'stale base test',
+      allowedFiles, reviewEvidence: evidence, waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never,
+      emit: event => events.push(event) }); } catch (caught) { error = caught; }
+    return { request, events, result, error, enqueues, verdicts, verdictBodies, change, base };
+  }
+
+  it('re-publishes and carries approval after enqueue reports a stale base', async () => {
+    const outcome = await staleBaseCase('unrelated');
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.result?.status).toBe('landed');
+    expect(outcome.events.filter(event => event.state === 'rebased')).toHaveLength(1);
+    expect(outcome.events.filter(event => event.state === 'review-carried')).toHaveLength(1);
+    expect(outcome.verdictBodies[1].carriedFrom).toMatchObject({ method: 'patch-id' });
+    expect(outcome.verdicts).toBe(2);
+    expect(outcome.enqueues).toBe(2);
+  });
+
+  it('stops on a rebase conflict without posting another approval', async () => {
+    const outcome = await staleBaseCase('conflict');
+    expect(outcome.error).toMatchObject({ kind: 'conflict', message: expect.stringContaining('MERGE_CONFLICT') });
+    expect(outcome.verdicts).toBe(1);
+  });
+
+  it('stops after three stale-base rebase rounds', async () => {
+    const outcome = await staleBaseCase('keeps-moving');
+    expect(outcome.error).toMatchObject({ kind: 'conflict', message: 'STALE_BASE: main kept moving; re-run land' });
+    expect(outcome.events.filter(event => event.state === 'rebased')).toHaveLength(3);
+    expect(outcome.enqueues).toBe(4);
+  });
+
   it('advertises lease claims by normalized count rather than raw array length', () => {
     const claim = tools.find(tool => tool.name === 'lease_claim');
     expect(claim?.inputSchema.properties?.unitKeys).toEqual({ type: 'array', items: { type: 'string' } });
