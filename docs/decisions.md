@@ -1537,3 +1537,27 @@ Liveness: `decision-status.tsv` has one row per ID: `id  check  argument  expect
 - **Decision:** `concord change close --reason TEXT` (and MCP change_close `reason?`) is optional; when given it is stored in the close event and shown in the change history (UI, CLI, MCP). Closing without a reason still works.
 - **Status:** spec after 107 on the cli/main.ts + mcp/tools.ts lane.
 - **Source:** Concord chat 10-13 9:32 pm.
+
+## D-CF-CHECKER-MORNING — Cloudflare Containers checker experiment waits for the morning
+
+- **Date:** 2026-10-14, 12:11 am CT.
+- **Owner words:** "lets hold off on it until tomorrow morning".
+- **Decision:** No container experiment tonight. Said at 12:11 am Wednesday, so "tomorrow morning" means Wednesday morning after sleep (the submission is Wednesday 6 pm CT; Thursday would be after it). Ask Q-CF-CHECKER again Wednesday morning (options: a capped experiment: 1 instance, 15-min job limit, idle sleep, read-only token, stop after 3 checks; b 2-vCPU; c not now). Seb's concern: cost.
+- **Status:** deferred to Wed morning.
+- **Source:** Concord chat 10-13 9:32 pm.
+
+## D-REVIEW-ORDER — Luna reviews first, SWE-2 is the fallback
+
+- **Date:** 2026-10-14, 12:12 am CT.
+- **Owner words:** "Q-REVIEW-ORDER: a".
+- **Decision:** Concord chain reviews run on Codex gpt-6-luna first; SWE-2 (swe-2-high) only if Luna's review dies. Replaces the 10-13 ~1 pm rule (SWE-2 first). Reason: SWE-2 reviewers died with no report 7 of 7 times on 10-13 night (~12 min lost each).
+- **Status:** live in the chain template (/tmp/claude-501/concord-path.sh) for every launch after 12:12 am.
+- **Source:** Concord chat 10-13 9:32 pm.
+
+## D-FILM-PLAN — Wednesday schedule: freeze noon, film 2-4 pm, submit 6 pm
+
+- **Date:** 2026-10-14, 12:15 am CT.
+- **Owner words:** "Q-FILM:yes".
+- **Decision:** Wed 10-14 (CT): 12:00 pm feature freeze (fixes only after); 1 pm demo dry run (docs/DEMO.md, Mother Base swarm as the live part); 2-4 pm film (5-10 min video); 4-5 pm final secrets/private-name sweep, then make seb-patron/concord public; 6 pm Seb submits the form himself. Hard deadline Thu 10-15 1:59 am CT.
+- **Status:** scheduled.
+- **Source:** Concord chat 10-13 9:32 pm.
