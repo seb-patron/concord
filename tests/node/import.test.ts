@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
-import { ConcordClient } from '../../cli/client.ts';
+import { ConcordClient, ConcordError } from '../../cli/client.ts';
 import { gitEnvironment } from '../../cli/git.ts';
 import { importRepo } from '../../cli/import.ts';
 
@@ -378,14 +378,22 @@ describe('adopted root import', () => {
     let timeoutArmed = false;
     let timeoutReads = 0;
     let bootstrapRequests = 0;
+    let tokenRequests = 0;
+    const tokenKeys: string[] = [];
     const now = vi.spyOn(Date, 'now').mockImplementation(() => timeoutArmed ?
       (timeoutReads++ === 0 ? 0 : 300_001) : actualNow());
     const reply = (data: Record<string, unknown>) => ({ version: 1, data });
-    const client = { baseUrl: 'http://127.0.0.1:8787/v1', request: async (method: string, path: string) => {
+    const client = { baseUrl: 'http://127.0.0.1:8787/v1', request: async (method: string, path: string, requestOptions?: { idempotencyKey?: string }) => {
       if (method === 'POST' && path === '/repos') return reply({ status: 'ready' });
       if (method === 'POST' && path.endsWith('/changes')) return reply({ candidateStorageName: 'candidate',
         authorId: 'owner', provisioning: { state: 'observed' } });
-      if (method === 'POST' && path.endsWith('/git-token')) return reply({ remote: `file://${candidate}`, secret: 'test-token' });
+      if (method === 'POST' && path.endsWith('/git-token')) {
+        tokenRequests++;
+        tokenKeys.push(requestOptions?.idempotencyKey ?? '');
+        if (tokenRequests === 1) throw new ConcordError('Git token request failed with HTTP 409 STALE_VERSION', 'conflict', 409,
+          { error: { code: 'STALE_VERSION', details: { currentVersion: 2 } } });
+        return reply({ remote: `file://${candidate}`, secret: 'test-token' });
+      }
       if (method === 'POST' && path.endsWith('/branches')) return reply({});
       if (method === 'POST' && path.endsWith('/bootstrap')) {
         bootstrapRequests++;
@@ -400,6 +408,8 @@ describe('adopted root import', () => {
       await expect(importRepo({ source, ref: 'main', repo: 'blocked-import', policyId: 'local-demo', profileId: 'local-demo' }, client))
         .rejects.toThrow(/Timed out waiting for canonical main \(PROFILE_CHANGED\)/);
       expect(bootstrapRequests).toBe(1);
+      expect(tokenRequests).toBe(2);
+      expect(tokenKeys[0]).not.toBe(tokenKeys[1]);
       expect(error).toHaveBeenCalledWith('Bootstrap blocked: PROFILE_CHANGED; re-requesting bootstrap');
     } finally { now.mockRestore(); error.mockRestore(); }
   });

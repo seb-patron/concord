@@ -177,7 +177,18 @@ export class ConcordClient {
           continue;
         }
         const kind: ConcordErrorKind = response.status === 409 ? 'conflict' : response.status === 401 || response.status === 403 ? 'auth' : 'server';
-        if (url.pathname.endsWith('/git-token')) throw new ConcordError(`Git token request failed with HTTP ${response.status}`, kind, response.status);
+        if (url.pathname.endsWith('/git-token')) {
+          const source = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
+          const errorPayload = source && typeof source === 'object' ? source as Record<string, unknown> : {};
+          const code = typeof errorPayload.code === 'string' ? errorPayload.code : undefined;
+          const safeError: Record<string, unknown> = {};
+          if (code !== undefined) safeError.code = code;
+          if (typeof errorPayload.message === 'string') safeError.message = errorPayload.message;
+          if (errorPayload.details !== undefined) safeError.details = errorPayload.details;
+          const count = { omittedMembers: 0 };
+          const safePayload = { error: redactOutput(safeError, count) };
+          throw new ConcordError(`Git token request failed with HTTP ${response.status}${code ? ` ${code}` : ''}`, kind, response.status, safePayload, count.omittedMembers);
+        }
         const count = { omittedMembers: 0 };
         const safePayload = redactOutput(payload, count);
         throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload, count.omittedMembers);

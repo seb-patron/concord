@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { ConcordClient, ConcordError, idempotencyKey, rememberCredential } from './client.ts';
+import { mintGitToken } from './git-token.ts';
 import { git, gitEnvironment, pushCandidate, rejectCanonicalTarget, type GitOptions } from './git.ts';
 
 const execFile = promisify(execFileCallback);
@@ -18,6 +19,7 @@ const importerGit = (args: string[], options: GitOptions = {}, cwd?: string) =>
 
 export interface ImportOptions {
   source: string; ref: string; repo: string; policyId?: string; profileId?: string;
+  expectedVersion?: number;
   excludes?: string[]; excludeFile?: string; requireMatch?: boolean; printTree?: boolean; verbose?: boolean; withHistory?: boolean;
 }
 
@@ -215,10 +217,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     const change = data(changeResponse);
     const storageName = field(change, 'candidateStorageName');
     const repoDetail = await client.request('GET', root);
-    const access = data(await client.request('POST', `${root}/git-token`, {
-      body: { storageName, scope: 'write', ttlSeconds: 300 },
-      expectedVersion: version(repoDetail), idempotencyKey: idempotencyKey(),
-    }));
+    const access = data(await mintGitToken(client, { repoPath: root, storageName, scope: 'write', expectedVersion: options.expectedVersion }));
     const remote = field(access, 'remote');
     const secret = typeof access.secret === 'string' ? access.secret : field(access, 'token');
     rememberCredential(secret);
