@@ -30,6 +30,8 @@ export interface Repo extends Versioned {
   defaultBranch: 'main'; observedCanonicalOid: Oid | null;
   policyId: Id; policyDigest: Digest; profileId: Id;
   status: 'provisioning' | 'ready' | 'blocked';
+  /** Owner-controlled anonymous read flag. Absent on records written before the flag existed; treated as false. */
+  public?: boolean;
 }
 export interface Branch extends Versioned {
   logicalRepoId: Id; storageName: string; ref: string; ownerId: Id;
@@ -158,7 +160,7 @@ export interface ApiSuccess<T> { data: T; version: number; eventSeq: number }
 export interface ApiFailure { error: { code: string; message: string; details?: unknown }; requestId: string }
 export interface Page<T> { items: T[]; nextCursor: string | null }
 export interface MutationBody { expectedVersion?: number }
-export interface CreateRepoBody { name: string; policyId: Id; profileId: Id }
+export interface CreateRepoBody { name: string; policyId: Id; profileId: Id; public?: boolean }
 export interface BootstrapBody extends MutationBody {
   seedStorageName: string; seedRef: string; headOid: Oid; policyId: Id; profileId: Id; withHistory?: boolean;
 }
@@ -318,6 +320,9 @@ export interface PromotionResult extends ResultBase {
   observedCanonicalOid: Oid | null;
 }
 export type JobResult = InspectionResult | StackResult | DeltaResult | PromotionResult;
+
+/** Name of the shared TenantCatalog index mapping public repo IDs to their tenant for anonymous reads. */
+export const PUBLIC_DIRECTORY_NAME = 'public:directory';
 
 /** Internal handoff for a creation token; never included in JSON responses. */
 export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');

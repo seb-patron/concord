@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -340,6 +340,7 @@ describe('Fleet desk DOM', () => {
       return new Response(JSON.stringify(body), { status });
     }) as any;
     try {
+      vi.resetModules();
       // @ts-expect-error Browser JS is intentionally untyped.
       await import('../../web/app.js');
       expect(byId('signed-out').hidden).toBe(false);
@@ -619,9 +620,115 @@ describe('Fleet desk DOM', () => {
       dom.window.close();
     }
   }, 20_000);
+
+  async function publicDom(repoId: string, isPublic: boolean, readyCount = 1) {
+    clearSessionToken();
+    const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/?repo=' + repoId });
+    const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+    dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+    dom.window.scrollTo = () => {};
+    dom.window.setInterval = (() => 1) as any;
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const publicSnapshot = {
+      ...fixture,
+      data: { projections: {
+        ...fixture.data.projections,
+        repos: { ...fixture.data.projections.repos,
+          changes: [fixture.data.projections.repos.changes[0],
+            ...Array.from({ length: readyCount - 1 }, (_, i) => ({ ...fixture.data.projections.repos.changes[0],
+              changeId: 'ready-' + i, issueNumber: i + 2 }))] },
+      } },
+      version: 7, eventSeq: 0,
+    };
+    globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+      requests.push({ url, authorization: new Headers(init.headers).get('authorization') });
+      if (url === '/health') return Response.json({ data: { mode: 'production', storageBackend: 'artifacts' } });
+      if (url === '/v1/session') return new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED' } }), { status: 401 });
+      if (url.endsWith('/snapshot')) return new Response(JSON.stringify(isPublic
+        ? publicSnapshot : { error: { code: 'UNAUTHORIZED', message: 'Bearer credential required' } }), { status: isPublic ? 200 : 401 });
+      if (url.includes('/events?')) return Response.json({ data: { items: [] }, version: 7, eventSeq: 0 });
+      if (url.includes('/metrics?')) return new Response(JSON.stringify({ error: { code: 'NOT_FOUND' } }), { status: 404 });
+      if (url.includes('/verdicts')) return Response.json({ data: { items: [], nextCursor: null }, version: 7 });
+      return Response.json({ data: {} });
+    }) as any;
+    const doc = dom.window.document;
+    const byId = (id: string) => doc.getElementById(id)!;
+    const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+    return { dom, doc, byId, flush, requests, previous };
+  }
+
+  it('opens public URL reads without a token and labels the view read-only', async () => {
+    const { dom, byId, flush, requests, previous } = await publicDom('public-demo', true);
+    try {
+      vi.resetModules();
+      // @ts-expect-error Browser JS is intentionally untyped.
+      await import('../../web/app.js');
+      await flush(); await flush(); await flush(); await flush();
+      expect(byId('desk').hidden).toBe(false);
+      expect(byId('signed-out').hidden).toBe(true);
+      expect(byId('principal').textContent).toBe('Public, read-only');
+      expect(byId('tracker-view').textContent).toContain('#1');
+      expect((byId('repo-select') as HTMLSelectElement).disabled).toBe(true);
+      expect(requests.some(request => request.url.endsWith('/snapshot'))).toBe(true);
+      expect(requests.every(request => request.authorization === null)).toBe(true);
+      expect(byId('tracker-view').querySelectorAll('form')).toHaveLength(0);
+    } finally {
+      clearSessionToken();
+      Object.assign(globalThis, previous);
+      dom.window.close();
+    }
+  });
+
+  it('shows the sign-in view for a private repo URL', async () => {
+    const { dom, byId, flush, requests, previous } = await publicDom('private-demo', false);
+    try {
+      vi.resetModules();
+      // @ts-expect-error Browser JS is intentionally untyped.
+      await import('../../web/app.js');
+      await flush(); await flush(); await flush();
+      expect(byId('desk').hidden).toBe(true);
+      expect(byId('signed-out').hidden).toBe(false);
+      expect(byId('session-error').textContent).toContain('private or does not exist');
+      expect(requests.every(request => request.authorization === null)).toBe(true);
+    } finally {
+      clearSessionToken();
+      Object.assign(globalThis, previous);
+      dom.window.close();
+    }
+  });
+
+  it('shares the anonymous request budget across change selections', async () => {
+    const { dom, doc, byId, flush, requests, previous } = await publicDom('crowded-public', true, 19);
+    try {
+      vi.resetModules();
+      // @ts-expect-error Browser JS is intentionally untyped.
+      await import('../../web/app.js');
+      await flush(); await flush(); await flush(); await flush();
+      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      for (let index = 0; index < 19; index++) {
+        const changeId = index === 0 ? 'x' : 'ready-' + (index - 1);
+        (doc.querySelector('[data-change-id="' + changeId + '"]') as HTMLElement)?.click();
+        await flush();
+      }
+      const repoRequests = requests.filter(request => request.url.startsWith('/v1/repos/'));
+      expect(repoRequests.length).toBeLessThanOrEqual(18);
+      expect(repoRequests.some(request => request.url.includes('/changes/ready-17/verdicts'))).toBe(false);
+      expect(byId('principal').textContent).toBe('Public, read-only');
+    } finally {
+      clearSessionToken();
+      Object.assign(globalThis, previous);
+      dom.window.close();
+    }
+  });
 });
 
 describe('layout and token contract', () => {
+  it('documents public repository read authentication', () => {
+    const guide = readFileSync(new URL('../../docs/api-repos.md', import.meta.url), 'utf8');
+    expect(guide).not.toContain('All routes use `Authorization: Bearer');
+    expect(guide).toContain('except credentialless GET reads under a public repository');
+  });
   it('keeps the dashboard HTML balanced and all views inside the signed-in shell', () => {
     const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
     const stack: string[] = [];

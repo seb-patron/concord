@@ -1,7 +1,7 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe, getSession,
   getSnapshot, getMetrics, getVerdicts, hasToken, isForbidden, listPrincipals, listRepos, newIdempotencyKey,
-  redactError, redactText, setSessionToken, submitVerdict, withdrawChange,
+  redactError, redactText, setSessionToken, setAnonymousReadBudget, submitVerdict, withdrawChange,
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
@@ -17,7 +17,18 @@ const repoPage = createRepoPage($('code-view'));
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
-  awaitingFreshSnapshot: false, accessSignIn: false, metrics: null, metricsFetchedAt: 0 };
+  awaitingFreshSnapshot: false, accessSignIn: false, metrics: null, metricsFetchedAt: 0,
+  publicRead: false, publicPollAt: 0, publicRequestTimes: [] };
+// Keep anonymous traffic below the Worker's shared authentication limit.
+function publicRequestAvailable() {
+  if (!state.publicRead) return true;
+  const now = Date.now();
+  state.publicRequestTimes = state.publicRequestTimes.filter(time => now - time < 60_000);
+  if (state.publicRequestTimes.length >= 18) return false;
+  state.publicRequestTimes.push(now);
+  return true;
+}
+setAnonymousReadBudget(() => publicRequestAvailable());
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
 const node = (tag, value, className) => {
@@ -83,24 +94,27 @@ function preserve(render) {
 }
 function sessionError(message) { $('session-error').textContent = message ?? ''; $('session-error').hidden = !message; }
 function showSession() {
-  const signedIn = (hasToken() || state.identity?.authMethod === 'access') && !!state.identity;
+  const publicMode = state.publicRead && !!state.identity && !!state.repoId;
+  const signedIn = ((hasToken() || state.identity?.authMethod === 'access') && !!state.identity) || publicMode;
   const access = state.identity?.authMethod === 'access';
   $('signed-out').hidden = signedIn;
   $('desk').hidden = !signedIn;
   $('repo-picker').hidden = !signedIn;
   $('principal').hidden = !signedIn;
-  $('token-clear').hidden = !signedIn || access;
+  $('token-clear').hidden = !signedIn || access || publicMode;
   $('access-logout').hidden = !signedIn || !access;
   $('access-signin').hidden = signedIn || !state.accessSignIn;
   if (access) {
     $('principal').textContent = `Signed in as ${state.identity.principalId} via Cloudflare Access`;
     $('access-logout').href = state.identity.logoutUrl;
-  } else if (signedIn) $('principal').textContent = state.identity.principalId
+  } else if (publicMode) $('principal').textContent = 'Public, read-only';
+  else if (signedIn) $('principal').textContent = state.identity.principalId
     ? `Signed in as ${state.identity.principalId} · ${roles().join(', ') || 'role unverified'}${state.identity.model ? ` · ${state.identity.model}` : ''} · token in memory`
     : `Signed in · ${roles().join(', ') || 'role unverified'} · token in memory`;
 }
 function signOut(message) {
   ++state.generation; clearSessionToken();
+  state.publicRead = false; state.publicPollAt = 0; state.publicRequestTimes = [];
   repoPage.hide();
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = []; state.principals = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
@@ -117,6 +131,7 @@ function signOut(message) {
 }
 async function signIn(token, preferredRepo, accessSession = null) {
   const gen = ++state.generation;
+  state.publicRead = false; state.publicRequestTimes = [];
   setSessionToken(token); $('token-input').value = ''; sessionError(null);
   try {
     let identity;
@@ -131,7 +146,7 @@ async function signIn(token, preferredRepo, accessSession = null) {
     state.identity = identity;
     void refreshPrincipals(gen);
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
-    const select = $('repo-select'); select.replaceChildren();
+    const select = $('repo-select'); select.replaceChildren(); select.disabled = false;
     if (!state.repos.length) {
       const option = node('option', 'No repositories yet'); option.value = ''; select.append(option);
     }
@@ -153,6 +168,18 @@ async function signIn(token, preferredRepo, accessSession = null) {
       `Could not sign in (${safe.code}): ${detail}`;
     signOut(message);
   }
+}
+async function enterPublicRead(repoId) {
+  const gen = ++state.generation;
+  state.publicRead = true; state.publicPollAt = 0; state.publicRequestTimes = [];
+  state.identity = { principalId: 'anonymous', roles: ['viewer'], repoIds: [repoId] };
+  state.repos = [{ repoId, displayName: repoId }];
+  state.repoId = repoId;
+  const select = $('repo-select'); select.replaceChildren();
+  const option = node('option', repoId); option.value = repoId; select.append(option);
+  select.value = repoId; select.disabled = true;
+  showSession();
+  await loadRepo(gen);
 }
 async function refreshPrincipals(gen) {
   try {
@@ -189,7 +216,9 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
     return true;
   } catch (error) {
     if (gen !== state.generation) return;
-    if (error.status === 401) return signOut('Sign in again: this token is invalid or expired.');
+    if (error.status === 401) return signOut(state.publicRead
+      ? 'This repository is private or does not exist. Sign in to view it.'
+      : 'Sign in again: this token is invalid or expired.');
     state.deskMessage = error.status === 403 ? 'Your token cannot see this repository.' :
       `Snapshot unavailable (${redactError(error).code}).`;
     render();
@@ -223,10 +252,14 @@ async function refreshVerdicts(gen = state.generation) {
 }
 async function poll(gen = state.generation) {
   if (!state.repoId || gen !== state.generation || state.busy) return;
+  if (state.publicRead) {
+    if (Date.now() - state.publicPollAt < 60_000) return;
+    state.publicPollAt = Date.now();
+  }
   state.busy = true;
   try {
     let page;
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < (state.publicRead ? 1 : 20); i++) {
       const repoId = state.repoId;
       page = await getEvents(repoId, state.seq);
       if (gen !== state.generation) return;
@@ -265,7 +298,9 @@ async function poll(gen = state.generation) {
     state.connected = true; render();
   } catch (error) {
     if (gen !== state.generation) return;
-    if (error.status === 401) return signOut('Sign in again: this token is invalid or expired.');
+    if (error.status === 401) return signOut(state.publicRead
+      ? 'This repository is private or does not exist. Sign in to view it.'
+      : 'Sign in again: this token is invalid or expired.');
     state.connected = false;
     state.deskMessage = error.status === 403 ? 'Your token cannot see this repository.' : 'Disconnected. Showing the last known state.';
     render();
@@ -661,7 +696,7 @@ function renderTabs() {
 function render() {
   preserve(()=>{
     showSession();
-    if (!hasToken() || !state.identity) return;
+    if ((!hasToken() && !state.publicRead) || !state.identity) return;
     $('desk').dataset.mainViewActive = state.view;
     const sections = { code: $('code-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
     for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
@@ -771,10 +806,19 @@ function boot() {
     const next=cards[(index+(e.key==='ArrowLeft'||e.key==='ArrowUp'?-1:1)+cards.length)%cards.length];
     selectChange(next.dataset.changeId);$(next.id)?.focus();
   });
-  window.setInterval(()=>{if((hasToken()||state.identity?.authMethod==='access')&&state.repoId)void poll();},1000);
+  window.setInterval(()=>{
+    if (!(hasToken() || state.identity?.authMethod === 'access' || state.publicRead) || !state.repoId) return;
+    if (state.publicRead && Date.now() - state.publicPollAt < 60_000) return;
+    void poll();
+  },1000);
+  const urlRepo = new URLSearchParams(window.location.search).get('repo');
+  const tryPublicRead = () => {
+    if (!hasToken() && urlRepo && /^[A-Za-z0-9_-]{1,64}$/.test(urlRepo)) void enterPublicRead(urlRepo);
+  };
   void getSession().then(body=>{
     if (body?.data?.authMethod === 'access' && !hasToken()) void signIn(null, null, body.data);
-  }).catch(()=>{});
+    else tryPublicRead();
+  }).catch(tryPublicRead);
   void getHealth().then(body=>{state.accessSignIn=body?.data?.accessSignIn===true;showSession();const info=environmentBadge(body?.data,false);$('env-badge').textContent=info.label==='live Artifacts'?'Live · Cloudflare Artifacts':info.label;}).catch(()=>{$('env-badge').textContent='Backend unavailable';});
   render();
 }
