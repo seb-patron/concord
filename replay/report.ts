@@ -66,6 +66,105 @@ export function buildReplayReport(data: ReplayExport, options?: SimulationOption
   };
 }
 
+export interface GithubBaseline {
+  taskCount: number;
+  incompleteCount: number;
+  mergedCount: number;
+  refusedCount: number;
+  censoredCount: number;
+  openToMerge: { medianMs: number | null; p90Ms: number | null; count: number };
+  staleApprovalCount: number;
+  supersededCount: number;
+  medianReviewRounds: number | null;
+  overlapPairCount: number;
+  overlapPairPossible: number;
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+function nearestRank(values: number[], fraction: number): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(fraction * sorted.length) - 1))];
+}
+
+export function buildGithubBaseline(data: ReplayExport, incompleteCountOverride?: number): GithubBaseline {
+  const taskIds = data.header.selected.taskIds;
+  const incompleteCount = incompleteCountOverride ?? data.header.ownerReportedAggregates?.prs_incomplete_history?.value ?? 0;
+  const mergeDurations: number[] = [];
+  const roundCounts: number[] = [];
+  const supersededTargets = new Set<string>();
+  const overlapPairs = new Set<string>();
+  let mergedCount = 0;
+  let refusedCount = 0;
+  let staleApprovalCount = 0;
+  for (const taskId of taskIds) {
+    const events = data.events.filter(e => e.taskId === taskId);
+    const opened = events.find(e => e.type === 'task_started');
+    const merged = events.find(e => e.type === 'merged' && e.outcome === 'landed') ?? events.find(e => e.type === 'merged');
+    const refused = events.find(e => (e.type === 'task_finished' || e.type === 'task_refused') && e.outcome === 'refused');
+    if (merged) mergedCount++;
+    else if (refused) refusedCount++;
+    if (opened && merged) mergeDurations.push(Date.parse(merged.occurredAt) - Date.parse(opened.occurredAt));
+    const reviewTimes = events.filter(e => e.type === 'check_finished').map(e => Date.parse(e.occurredAt));
+    roundCounts.push(reviewTimes.length);
+    const firstReview = Math.min(...reviewTimes);
+    if (Number.isFinite(firstReview) && events.some(e => e.type === 'repair_submitted' && Date.parse(e.occurredAt) > firstReview)) staleApprovalCount++;
+    for (const event of events) {
+      for (const dep of event.dependencyTaskIds ?? []) supersededTargets.add(dep);
+      for (const peer of event.overlapTaskIds ?? []) if (peer !== taskId) overlapPairs.add([taskId, peer].sort().join('|'));
+    }
+  }
+  return {
+    taskCount: taskIds.length,
+    incompleteCount,
+    mergedCount,
+    refusedCount,
+    censoredCount: taskIds.length - mergedCount - refusedCount,
+    openToMerge: { medianMs: median(mergeDurations), p90Ms: nearestRank(mergeDurations, 0.9), count: mergeDurations.length },
+    staleApprovalCount,
+    supersededCount: supersededTargets.size,
+    medianReviewRounds: median(roundCounts),
+    overlapPairCount: overlapPairs.size,
+    overlapPairPossible: (taskIds.length * (taskIds.length - 1)) / 2,
+  };
+}
+
+function formatDurationMs(ms: number | null): string {
+  if (ms === null) return 'n/a';
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
+  if (ms < 172_800_000) return `${(ms / 3_600_000).toFixed(1)}h`;
+  return `${(ms / 86_400_000).toFixed(1)}d`;
+}
+
+export function renderGithubBaselineTable(baseline: GithubBaseline, context: { cohortId?: string; window?: { startAt: string; endAt: string } } = {}): string {
+  const share = baseline.taskCount === 0 ? 'n/a' : `${baseline.supersededCount}/${baseline.taskCount} (${(baseline.supersededCount / baseline.taskCount * 100).toFixed(1)}%)`;
+  const rows: [string, string, number][] = [
+    ['pull requests', String(baseline.taskCount), baseline.taskCount],
+    ['incomplete history', String(baseline.incompleteCount), baseline.taskCount],
+    ['merged', String(baseline.mergedCount), baseline.taskCount],
+    ['closed unmerged', String(baseline.refusedCount), baseline.taskCount],
+    ['open at window end (censored)', String(baseline.censoredCount), baseline.taskCount],
+    ['median open->merge', formatDurationMs(baseline.openToMerge.medianMs), baseline.openToMerge.count],
+    ['p90 open->merge', formatDurationMs(baseline.openToMerge.p90Ms), baseline.openToMerge.count],
+    ['head change after first review', String(baseline.staleApprovalCount), Math.max(0, baseline.taskCount - baseline.incompleteCount)],
+    ['superseded share', share, baseline.taskCount],
+    ['median review rounds', baseline.medianReviewRounds === null ? 'n/a' : String(baseline.medianReviewRounds), baseline.taskCount],
+    ['overlapping PR pairs', String(baseline.overlapPairCount), baseline.overlapPairPossible],
+  ];
+  const width = Math.max(...rows.map(row => row[0].length));
+  const lines = ['GitHub PR-history baseline'];
+  if (context.window) lines.push(`window ${context.window.startAt} -> ${context.window.endAt}`);
+  if (context.cohortId) lines.push(`cohort ${context.cohortId}`);
+  for (const [label, value, denominator] of rows) lines.push(`${label.padEnd(width)}  ${value.padStart(12)}  n=${denominator}`);
+  return lines.join('\n');
+}
+
 export function unavailableReport(): ReplayReport {
   return {
     status: 'unavailable',

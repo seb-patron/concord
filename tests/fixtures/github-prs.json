@@ -1,0 +1,389 @@
+{
+  "description": "Recorded `gh api -i` REST pages for acme/widgets used by tests/node/github-export.test.ts. Pages are consumed in order; duplicate paths replay a rate-limited first response.",
+  "pages": [
+    {
+      "path": "repos/acme/widgets/pulls?state=all&per_page=100&sort=created&direction=desc&page=1",
+      "status": 200,
+      "headers": {
+        "link": "<https://api.github.com/repos/acme/widgets/pulls?state=all&per_page=100&sort=created&direction=desc&page=2>; rel=\"next\"",
+        "x-ratelimit-remaining": "4998"
+      },
+      "body": [
+        {
+          "number": 105,
+          "title": "wip: experimental checkout rewrite",
+          "state": "open",
+          "draft": false,
+          "created_at": "2026-01-15T09:00:00Z",
+          "closed_at": null,
+          "merged_at": null,
+          "user": { "login": "seb-patron" },
+          "body": "Trying a different approach.",
+          "head": { "sha": "c105a", "ref": "checkout-rewrite" },
+          "base": { "ref": "main" },
+          "html_url": "https://github.com/acme/widgets/pull/105"
+        },
+        {
+          "number": 104,
+          "title": "Rewrite billing pipeline (supersedes earlier attempt)",
+          "state": "closed",
+          "draft": false,
+          "created_at": "2026-01-12T09:00:00Z",
+          "closed_at": "2026-01-13T09:00:00Z",
+          "merged_at": "2026-01-13T09:00:00Z",
+          "user": { "login": "kara-ops" },
+          "body": "Supersedes #102 with a cleaner approach.",
+          "head": { "sha": "c104a", "ref": "billing-v3" },
+          "base": { "ref": "main" },
+          "html_url": "https://github.com/acme/widgets/pull/104"
+        },
+        {
+          "number": 103,
+          "title": "docs: fix setup instructions for Acme Corp VPN",
+          "state": "closed",
+          "draft": false,
+          "created_at": "2026-01-10T09:00:00Z",
+          "closed_at": "2026-01-11T10:00:00Z",
+          "merged_at": "2026-01-11T10:00:00Z",
+          "user": { "login": "dependabot[bot]" },
+          "body": "Fixes the docs.",
+          "head": { "sha": "c103a", "ref": "docs-setup" },
+          "base": { "ref": "main" },
+          "html_url": "https://github.com/acme/widgets/pull/103"
+        }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls?state=all&per_page=100&sort=created&direction=desc&page=2",
+      "status": 200,
+      "headers": {
+        "link": "<https://api.github.com/repos/acme/widgets/pulls?state=all&per_page=100&sort=created&direction=desc&page=3>; rel=\"next\"",
+        "x-ratelimit-remaining": "4997"
+      },
+      "body": [
+        {
+          "number": 102,
+          "title": "feat: proprietary invoice pipeline v2 for Acme Corp",
+          "state": "closed",
+          "draft": false,
+          "created_at": "2026-01-06T09:00:00Z",
+          "closed_at": "2026-01-09T12:00:00Z",
+          "merged_at": null,
+          "user": { "login": "seb-patron" },
+          "body": "Superseded by #104.",
+          "head": { "sha": "c102a", "ref": "invoice-pipeline" },
+          "base": { "ref": "main" },
+          "html_url": "https://github.com/acme/widgets/pull/102"
+        },
+        {
+          "number": 101,
+          "title": "feat: add proprietary ledger reconciliation for Acme Corp",
+          "state": "closed",
+          "draft": false,
+          "created_at": "2026-01-05T09:00:00Z",
+          "closed_at": "2026-01-08T17:00:00Z",
+          "merged_at": "2026-01-08T17:00:00Z",
+          "user": { "login": "seb-patron" },
+          "body": "Adds reconciliation.",
+          "head": { "sha": "c101d", "ref": "ledger-reconcile" },
+          "base": { "ref": "main" },
+          "html_url": "https://github.com/acme/widgets/pull/101"
+        },
+        {
+          "number": 99,
+          "title": "chore: bump copyright year",
+          "state": "closed",
+          "draft": false,
+          "created_at": "2025-12-20T09:00:00Z",
+          "closed_at": "2025-12-21T09:00:00Z",
+          "merged_at": "2025-12-21T09:00:00Z",
+          "user": { "login": "seb-patron" },
+          "body": "Yearly bump.",
+          "head": { "sha": "c099a", "ref": "year-bump" },
+          "base": { "ref": "main" },
+          "html_url": "https://github.com/acme/widgets/pull/99"
+        }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/105/files?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "filename": "src/billing/ledger.ts", "status": "modified", "additions": 40, "deletions": 12 }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/105/commits?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "sha": "c105a", "commit": { "committer": { "date": "2026-01-14T22:00:00Z" } } }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/issues/105/timeline?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        {
+          "event": "review_requested",
+          "created_at": "2026-01-15T10:00:00Z",
+          "review_requester": { "login": "seb-patron" },
+          "requested_reviewer": { "login": "kara-ops" }
+        }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/104/files?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "filename": "src/billing/invoices.ts", "status": "modified", "additions": 120, "deletions": 30 }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/104/commits?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "sha": "c104a", "commit": { "committer": { "date": "2026-01-11T22:00:00Z" } } }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/issues/104/timeline?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        {
+          "event": "review_requested",
+          "created_at": "2026-01-12T10:00:00Z",
+          "review_requester": { "login": "kara-ops" },
+          "requested_reviewer": { "login": "seb-patron" }
+        },
+        {
+          "event": "commented",
+          "created_at": "2026-01-12T11:00:00Z",
+          "user": { "login": "kara-ops" },
+          "body": "This supersedes #102 — see the old diff for context."
+        },
+        {
+          "event": "reviewed",
+          "state": "approved",
+          "submitted_at": "2026-01-13T08:00:00Z",
+          "user": { "login": "seb-patron" }
+        },
+        { "event": "merged", "created_at": "2026-01-13T09:00:00Z" },
+        { "event": "closed", "created_at": "2026-01-13T09:00:00Z" }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/103/files?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "filename": "docs/setup.md", "status": "modified", "additions": 6, "deletions": 2 }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/103/commits?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "sha": "c103a", "commit": { "committer": { "date": "2026-01-10T08:00:00Z" } } }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/issues/103/timeline?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "event": "merged", "created_at": "2026-01-11T10:00:00Z" },
+        { "event": "closed", "created_at": "2026-01-11T10:00:00Z" }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/102/files?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "filename": "src/billing/invoices.ts", "status": "modified", "additions": 200, "deletions": 40 },
+        { "filename": "web/checkout.tsx", "status": "modified", "additions": 30, "deletions": 8 }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/102/commits?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "sha": "c102a", "commit": { "committer": { "date": "2026-01-05T18:00:00Z" } } }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/issues/102/timeline?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        {
+          "event": "review_requested",
+          "created_at": "2026-01-06T10:00:00Z",
+          "review_requester": { "login": "seb-patron" },
+          "requested_reviewer": { "login": "kara-ops" }
+        },
+        {
+          "event": "reviewed",
+          "state": "changes_requested",
+          "submitted_at": "2026-01-06T16:00:00Z",
+          "user": { "login": "kara-ops" }
+        },
+        {
+          "event": "commented",
+          "created_at": "2026-01-09T11:50:00Z",
+          "user": { "login": "seb-patron" },
+          "body": "Closing this; superseded by #104."
+        },
+        { "event": "closed", "created_at": "2026-01-09T12:00:00Z" }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/101/files?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "filename": "src/billing/invoices.ts", "status": "modified", "additions": 80, "deletions": 10 },
+        { "filename": "src/billing/ledger.ts", "status": "added", "additions": 160, "deletions": 0 }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/101/commits?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "sha": "c101a", "commit": { "committer": { "date": "2026-01-04T20:00:00Z" } } },
+        { "sha": "c101f", "commit": { "committer": { "date": "2026-01-07T09:00:00Z" } } },
+        { "sha": "c101d", "commit": { "committer": { "date": "2026-01-07T15:00:00Z" } } }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/issues/101/timeline?per_page=100&page=1",
+      "status": 403,
+      "headers": {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": "1780000000"
+      },
+      "body": { "message": "API rate limit exceeded for user ID 42." }
+    },
+    {
+      "path": "repos/acme/widgets/issues/101/timeline?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        {
+          "event": "review_requested",
+          "created_at": "2026-01-05T10:00:00Z",
+          "review_requester": { "login": "seb-patron" },
+          "requested_reviewer": { "login": "kara-ops" }
+        },
+        {
+          "event": "reviewed",
+          "state": "approved",
+          "submitted_at": "2026-01-06T14:00:00Z",
+          "user": { "login": "kara-ops" }
+        },
+        {
+          "event": "head_ref_force_pushed",
+          "created_at": "2026-01-07T09:00:00Z",
+          "commit_id": "c101f"
+        },
+        {
+          "event": "committed",
+          "created_at": "2026-01-07T09:00:00Z",
+          "sha": "c101f",
+          "committer": { "date": "2026-01-07T09:00:00Z" }
+        },
+        {
+          "event": "committed",
+          "created_at": "2026-01-07T15:00:00Z",
+          "sha": "c101d",
+          "committer": { "date": "2026-01-07T15:00:00Z" }
+        },
+        {
+          "event": "review_requested",
+          "created_at": "2026-01-07T09:30:00Z",
+          "review_requester": { "login": "seb-patron" },
+          "requested_reviewer": { "login": "kara-ops" }
+        },
+        {
+          "event": "commented",
+          "created_at": "2026-01-07T09:35:00Z",
+          "user": { "login": "seb-patron" },
+          "body": "rebased onto main, PTAL"
+        },
+        { "event": "merged", "created_at": "2026-01-08T17:00:00Z" },
+        { "event": "closed", "created_at": "2026-01-08T17:00:00Z" }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/101",
+      "status": 200,
+      "headers": {},
+      "body": { "number": 101, "mergeable": true, "mergeable_state": "clean" }
+    },
+    {
+      "path": "repos/acme/widgets/pulls/101/comments?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": []
+    },
+    {
+      "path": "repos/acme/widgets/pulls/102",
+      "status": 200,
+      "headers": {},
+      "body": { "number": 102, "mergeable": false, "mergeable_state": "dirty" }
+    },
+    {
+      "path": "repos/acme/widgets/pulls/102/comments?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": [
+        { "body": "Line-level nit: naming could be clearer here." }
+      ]
+    },
+    {
+      "path": "repos/acme/widgets/pulls/103",
+      "status": 200,
+      "headers": {},
+      "body": { "number": 103, "mergeable": true, "mergeable_state": "clean" }
+    },
+    {
+      "path": "repos/acme/widgets/pulls/103/comments?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": []
+    },
+    {
+      "path": "repos/acme/widgets/pulls/104",
+      "status": 200,
+      "headers": {},
+      "body": { "number": 104, "mergeable": true, "mergeable_state": "clean" }
+    },
+    {
+      "path": "repos/acme/widgets/pulls/104/comments?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": []
+    },
+    {
+      "path": "repos/acme/widgets/pulls/105",
+      "status": 200,
+      "headers": {},
+      "body": { "number": 105, "mergeable": null, "mergeable_state": "unknown" }
+    },
+    {
+      "path": "repos/acme/widgets/pulls/105/comments?per_page=100&page=1",
+      "status": 200,
+      "headers": {},
+      "body": []
+    }
+  ]
+}
