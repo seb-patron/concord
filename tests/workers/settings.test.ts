@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import type { ModuleContext, Principal } from '../../src/contracts';
 import type { RepoCoordinator } from '../../src/coordinator';
@@ -189,6 +189,32 @@ describe('repository path settings', () => {
         { pattern: '**/AGENTS.md', level: 'agents' },
       ] });
       expect(protectionFor(context, 'AGENTS.md')?.level).toBe('human-only');
+    });
+  });
+
+  it('compiles a repeated pattern only once across protection lookups', async () => {
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${repo}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const principal: Principal = { tenantId: 'local', principalId: 'viewer', roles: ['viewer'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+      const context = (instance as unknown as { context(name: 'settings', principal: Principal, repoId: string): ModuleContext }).context('settings', principal, repo);
+      const pattern = 'matcher-cache-probe-152/**/*.txt';
+      sqlState(context.sql).put('module:settings:record', { version: 12, protectedPaths: [
+        { pattern, level: 'human-approval' },
+      ] });
+      const NativeRegExp = RegExp;
+      let compileCount = 0;
+      class CountingRegExp extends NativeRegExp {
+        constructor(pattern: string | RegExp, flags?: string) {
+          super(pattern, flags);
+          compileCount++;
+        }
+      }
+      vi.stubGlobal('RegExp', CountingRegExp);
+      try {
+        expect(protectionFor(context, 'matcher-cache-probe-152/nested/file.txt')?.pattern).toBe(pattern);
+        expect(protectionFor(context, 'matcher-cache-probe-152/other.txt')?.pattern).toBe(pattern);
+        expect(compileCount).toBe(1);
+      } finally { vi.unstubAllGlobals(); }
     });
   });
 });

@@ -8,11 +8,15 @@ export interface ProtectedPath { pattern: string; level: ProtectionLevel; note?:
 export interface RepoSettings { version: number; protectedPaths: ProtectedPath[] }
 
 const key = 'module:settings:record';
+const matcherCache = new Map<string, RegExp>();
+const matcherCacheLimit = 512;
 export function repoSettings(context: ModuleContext): RepoSettings {
   return sqlState(context.sql).get<RepoSettings>(key) ?? { version: 0, protectedPaths: [] };
 }
 
 function expression(pattern: string): RegExp {
+  const cached = matcherCache.get(pattern);
+  if (cached) return cached;
   if (!pattern || pattern.length > 512 || pattern.startsWith('/') || pattern.includes('\\') || pattern.includes('\0') ||
     pattern.split('/').some((part, index, parts) => (!part && index !== parts.length - 1) || part === '.' || part === '..') ||
     /[\[\]{}]/.test(pattern)) throw new HttpError(422, 'INVALID_PATTERN', 'Use normalized Git paths and *, **, or ?');
@@ -27,7 +31,10 @@ function expression(pattern: string): RegExp {
     else if (ch === '?') source += '[^/]';
     else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
-  return new RegExp(source + '$');
+  const compiled = new RegExp(source + '$');
+  if (matcherCache.size >= matcherCacheLimit) matcherCache.delete(matcherCache.keys().next().value!);
+  matcherCache.set(pattern, compiled);
+  return compiled;
 }
 
 function specificity(pattern: string): [number, number, number, number] {
@@ -38,8 +45,8 @@ function specificity(pattern: string): [number, number, number, number] {
 }
 
 /** Exact paths win over any wildcard match; then longest literal scope, fewer wildcards, longer patterns. */
-export function protectionFor(context: ModuleContext, path: string): ProtectedPath | null {
-  const matches = repoSettings(context).protectedPaths.filter(rule => expression(rule.pattern).test(path));
+export function protectionFor(context: ModuleContext, path: string, settings = repoSettings(context)): ProtectedPath | null {
+  const matches = settings.protectedPaths.filter(rule => expression(rule.pattern).test(path));
   matches.sort((a, b) => {
     const left = specificity(a.pattern), right = specificity(b.pattern);
     for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) return right[i] - left[i];
@@ -48,11 +55,12 @@ export function protectionFor(context: ModuleContext, path: string): ProtectedPa
   return matches[0] ?? null;
 }
 
-export function matchingProtections(context: ModuleContext, manifest: ReviewManifest, level: ProtectionLevel): ProtectedPath[] {
+export function matchingProtections(context: ModuleContext, manifest: ReviewManifest, level: ProtectionLevel,
+  settings = repoSettings(context)): ProtectedPath[] {
   const found = new Map<string, ProtectedPath>();
   for (const unit of manifest.changedUnits) for (const path of [unit.beforePath, unit.afterPath]) {
     if (!path) continue;
-    const rule = protectionFor(context, path);
+    const rule = protectionFor(context, path, settings);
     if (rule?.level === level) found.set(rule.pattern, rule);
   }
   return [...found.values()].sort((a, b) => a.pattern.localeCompare(b.pattern));
