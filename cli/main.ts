@@ -7,6 +7,7 @@ import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCred
 import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 import { importRepo } from './import.ts';
 import { land } from './land.ts';
+import { mintGitToken } from './git-token.ts';
 import { releaseByIntent, start } from './start.ts';
 
 const HELP = `Concord agent CLI
@@ -100,6 +101,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       reviewEvidence: typeof flags['review-evidence'] === 'string' ? flags['review-evidence'] : undefined,
       mirrorTo: typeof flags['mirror-to'] === 'string' ? flags['mirror-to'] : undefined,
       waitSeconds: flags['wait-seconds'] === undefined ? undefined : numberFlag(flags, 'wait-seconds'),
+      expectedVersion: flags['expected-version'] === undefined ? undefined : numberFlag(flags, 'expected-version'),
       awRun: typeof flags['aw-run'] === 'string' ? flags['aw-run'] : undefined, json: values.json === true });
     return;
   }
@@ -111,6 +113,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       profileId: typeof flags['profile-id'] === 'string' ? flags['profile-id'] : undefined,
       excludes: Array.isArray(values.exclude) ? values.exclude : [], excludeFile: typeof flags['exclude-file'] === 'string' ? flags['exclude-file'] : undefined,
       requireMatch: values['require-match'] === true,
+      expectedVersion: flags['expected-version'] === undefined ? undefined : numberFlag(flags, 'expected-version'),
       printTree, verbose: values.verbose === true, withHistory: values['with-history'] === true }, printTree ? undefined : await clientFor(flags));
     return print(result);
   }
@@ -183,7 +186,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const destination = required(flags, 'path');
     const repoResult = unwrap(await send('GET', `/repos/${id}`)) as Record<string, unknown>;
     const storageName = stringField(repoResult, 'canonicalStorageName');
-    const tokenResult = unwrap(await client.request('POST', `/repos/${id}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoResult, 'version')))) as Record<string, unknown>;
+    const tokenResult = unwrap(await mintGitToken(client, { repoPath: `/repos/${id}`, storageName, scope: 'read',
+      ...(flags['expected-version'] !== undefined ? { expectedVersion: numberFlag(flags, 'expected-version') } : {}) })) as Record<string, unknown>;
     const remote = stringField(tokenResult, 'remote', true);
     const token = tokenField(tokenResult);
     await cloneRepo(remote, destination, token);
@@ -235,7 +239,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const repository = unwrap(await send('GET', `/repos/${rid}`)) as Record<string, unknown>;
     const storageName = stringField(change, 'candidateStorageName');
     const branch = stringField(change, 'branch');
-    const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
+    const access = unwrap(await mintGitToken(client, { repoPath: root, storageName, scope: 'read',
+      ...(flags['expected-version'] !== undefined ? { expectedVersion: numberFlag(flags, 'expected-version') } : {}) })) as Record<string, unknown>;
     const remote = stringField(access, 'remote', true);
     await fetchFork(worktree, remote, branch, tokenField(access));
     return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, remote: redactRemote(remote) });
@@ -257,7 +262,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const unitKeys = change.unitKeys as string[];
     const fences = parseFences(required(flags, 'lease-fences'));
     const payload = validatePublishPayload(body ?? { baseOid, headOid, branch, unitKeys, leaseFences: fences }, { baseOid, headOid, branch, unitKeys, fences });
-    const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'write', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
+    const access = unwrap(await mintGitToken(client, { repoPath: root, storageName, scope: 'write',
+      ...(flags['expected-version'] !== undefined ? { expectedVersion: numberFlag(flags, 'expected-version') } : {}) })) as Record<string, unknown>;
     const remote = stringField(access, 'remote', true);
     rejectCanonicalTarget(storageName, repository.canonicalStorageName, remote,
       typeof repository.canonicalRemote === 'string' ? repository.canonicalRemote : typeof repository.remote === 'string' ? repository.remote : undefined);

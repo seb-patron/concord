@@ -8,12 +8,13 @@ import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
 import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
 import { changeByIntent, leaseCovers } from './start.ts';
+import { mintGitToken } from './git-token.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
 export type LandOptions = { repo?: string; source?: string; commit?: string; intentKey?: string; intent?: string;
   allowedFiles?: string; dependsOn?: string[]; reviewEvidence?: string; mirrorTo?: string; waitSeconds?: number;
-  base?: string; awRun?: string; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient };
+  base?: string; awRun?: string; expectedVersion?: number; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient };
 const sha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 const hash = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -51,8 +52,8 @@ function safeRemote(remote: string, client: ConcordClient): string {
   validateRemote(remote);
   return remote;
 }
-async function access(client: ConcordClient, root: string, repository: Obj, scope: 'read' | 'write', storageName: string): Promise<{ remote: string; token: string }> {
-  const response = (await api(client, `${root}/git-token`, { storageName, scope, ttlSeconds: 300 }, await currentVersion(client, root))).data;
+async function access(client: ConcordClient, root: string, repository: Obj, scope: 'read' | 'write', storageName: string, expectedVersion?: number): Promise<{ remote: string; token: string }> {
+  const response = (await mintGitToken<Envelope>(client, { repoPath: root, storageName, scope, expectedVersion })).data;
   const token = required(response.secret ?? response.token ?? response.plaintext, 'Git token');
   rememberCredential(token);
   return { remote: safeRemote(required(response.remote, 'Git remote'), client), token };
@@ -348,7 +349,7 @@ export async function land(input: LandOptions): Promise<Obj> {
     }
     const current = (await api(client, path)).data;
     const latestRepo = (await api(client, root)).data;
-    const canonical = await access(client, root, latestRepo, 'read', latestRepo.canonicalStorageName);
+    const canonical = await access(client, root, latestRepo, 'read', latestRepo.canonicalStorageName, options.expectedVersion);
     const targetBase = alreadyQueued || current.headOid && current.baseOid === latestRepo.observedCanonicalOid ? current.baseOid : latestRepo.observedCanonicalOid;
     const prepared = await prepareHead(squash?.work ?? source, squash?.oid ?? commit, changed.parent, targetBase, canonical,
       !squash && !(options.dependsOn?.length));
@@ -363,7 +364,7 @@ export async function land(input: LandOptions): Promise<Obj> {
       if (change.headOid !== prepared.head || !change.headOid || change.baseOid !== targetBase) {
         if (change.headOid && change.baseOid === targetBase && alreadyQueued)
           throw new ConcordError('INSPECTION_FAILED: environment inspection cannot be retried for an admitted change; use a new intent key', 'server');
-        const candidate = await access(client, root, repository, 'write', change.candidateStorageName);
+        const candidate = await access(client, root, repository, 'write', change.candidateStorageName, options.expectedVersion);
         rejectCanonicalTarget(change.candidateStorageName, repository.canonicalStorageName, candidate.remote, repository.canonicalRemote);
         const evidence = options.reviewEvidence ? await reviewEvidence() : null;
         const priorJobs = evidence && !approvedHead(evidence, commit)
@@ -459,7 +460,7 @@ export async function land(input: LandOptions): Promise<Obj> {
           emit({ state: 'landed', changeId, canonicalOid: landed, ticket: state.promotion });
           if (options.mirrorTo) {
             const destinationRemote = options.mirrorTo;
-            const latest = await access(client, root, readback, 'read', readback.canonicalStorageName);
+            const latest = await access(client, root, readback, 'read', readback.canonicalStorageName, options.expectedVersion);
             const plan = await mirrorGit({ sourceRemote: latest.remote, sourceToken: latest.token, sourceOid: landed, destinationRemote, destinationToken: process.env.CONCORD_MIRROR_TOKEN, execute: true });
             emit({ state: 'mirrored', ...plan });
           }

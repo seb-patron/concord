@@ -72,7 +72,9 @@ describe('land input and evidence gates', () => {
     const active = files.map((file, index) => ({ changeId: 'started', state: 'active', unitKey: `file:${file}`,
       leaseId: `lease-${index}`, fence: 1, remainingSeconds: 7200 }));
     const released: string[] = [];
-    const request = vi.fn(async (method: string, path: string) => {
+    const tokenKeys: string[] = [];
+    let tokenAttempts = 0;
+    const request = vi.fn(async (method: string, path: string, options?: { idempotencyKey?: string }) => {
       if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
         canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}` }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [
@@ -82,7 +84,13 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: active.filter(item => !released.includes(item.leaseId)) }, version: 1 };
-      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') {
+        tokenAttempts++;
+        tokenKeys.push(options?.idempotencyKey ?? '');
+        if (tokenAttempts === 1) throw new ConcordError('Git token request failed with HTTP 409 STALE_VERSION', 'conflict', 409,
+          { error: { code: 'STALE_VERSION', details: { currentVersion: 2 } } });
+        return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      }
       if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result')
         throw new ConcordError('result read denied', 'auth', 403);
       if (method === 'POST' && path.endsWith('/release')) {
@@ -95,6 +103,8 @@ describe('land input and evidence gates', () => {
       waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
     expect(result.status).toBe('awaiting-review');
     expect(released.sort()).toEqual(active.slice(1).map(item => item.leaseId).sort());
+    expect(tokenAttempts).toBe(2);
+    expect(tokenKeys[0]).not.toBe(tokenKeys[1]);
   });
   it.each(['live', 'expired', 'renew'])('adopts a started TSV change with a %s file lease', async mode => {
     const dir = await temp(); await git(dir, 'init', '-q');

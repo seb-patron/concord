@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
+import { mintGitToken } from '../../cli/git-token.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
 import { land } from '../../cli/land.ts';
 import { parseArgs as parseRunnerArgs, runLoop } from '../../runner/main.ts';
@@ -58,6 +59,113 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('retries git-token version races with a new version and idempotency key', async () => {
+    const calls: Array<{ method: string; path: string; body?: any; key?: string }> = [];
+    let version = 10;
+    const client = new ConcordClient({ url: 'http://concord.invalid', fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      const key = new Headers(init?.headers).get('idempotency-key') ?? undefined;
+      calls.push({ method: String(init?.method), path, body, key });
+      if (path === '/v1/repos/r') return Response.json({ data: { version }, version });
+      if (path.endsWith('/git-token') && calls.filter(call => call.path.endsWith('/git-token')).length === 1) {
+        version = 11;
+        return Response.json({ error: { code: 'STALE_VERSION', message: 'stale', details: { currentVersion: 11 } } }, { status: 409 });
+      }
+      return Response.json({ data: { token: 'never-print-this-token' } });
+    } });
+    const result = await mintGitToken(client, { repoPath: '/repos/r', storageName: 'fork', scope: 'read' });
+    const posts = calls.filter(call => call.path.endsWith('/git-token'));
+    expect(result).toMatchObject({ data: { token: 'never-print-this-token' } });
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.body.expectedVersion).toBe(10);
+    expect(posts[1]?.body.expectedVersion).toBe(11);
+    expect(posts[0]?.key).not.toBe(posts[1]?.key);
+    expect(JSON.stringify(calls)).not.toContain('never-print-this-token');
+  });
+
+  it('does not retry a pinned stale version and includes non-stale Git-token codes', async () => {
+    let stalePosts = 0;
+    const staleClient = new ConcordClient({ url: 'http://concord.invalid', fetch: async () => {
+      stalePosts++;
+      return Response.json({ error: { code: 'STALE_VERSION' } }, { status: 409 });
+    } });
+    await expect(mintGitToken(staleClient, { repoPath: '/repos/r', storageName: 'fork', scope: 'write', expectedVersion: 7 }))
+      .rejects.toMatchObject({ message: 'Git token request failed with HTTP 409 STALE_VERSION' });
+    expect(stalePosts).toBe(1);
+
+    let conflictPosts = 0;
+    const conflictClient = new ConcordClient({ url: 'http://concord.invalid', fetch: async () => {
+      conflictPosts++;
+      return Response.json({ error: { code: 'LEASE_CONFLICT', message: 'denied' } }, { status: 409 });
+    } });
+    await expect(mintGitToken(conflictClient, { repoPath: '/repos/r', storageName: 'fork', scope: 'write', expectedVersion: 8 }))
+      .rejects.toMatchObject({ message: 'Git token request failed with HTTP 409 LEASE_CONFLICT', payload: { error: { code: 'LEASE_CONFLICT' } } });
+    expect(conflictPosts).toBe(1);
+  });
+
+  it('stops Git-token retries after five stale responses', async () => {
+    let posts = 0;
+    const client = new ConcordClient({ url: 'http://concord.invalid', fetch: async input => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/v1/repos/r') return Response.json({ data: {}, version: ++posts });
+      return Response.json({ error: { code: 'STALE_VERSION' } }, { status: 409 });
+    } });
+    await expect(mintGitToken(client, { repoPath: '/repos/r', storageName: 'fork', scope: 'read' }))
+      .rejects.toMatchObject({ message: 'STALE_VERSION: git token mint lost the version race 5 times' });
+    expect(posts).toBe(5);
+  });
+
+  it('retries repo clone and change checkout after a stale Git-token version', async () => {
+    const root = await tempDir('git-token-retry-callers');
+    const destination = join(root, 'clone');
+    const checkout = join(root, 'checkout');
+    await mkdir(checkout);
+    const shimDir = join(root, 'bin');
+    await mkdir(shimDir);
+    await writeFile(join(shimDir, 'git'), '#!/bin/sh\nexit 0\n');
+    await chmod(join(shimDir, 'git'), 0o755);
+    const requests: Array<{ method: string; path: string; body?: any; key?: string }> = [];
+    let tokenAttempts = 0;
+    let latestVersion = 10;
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let text = ''; for await (const part of request) text += part;
+      const path = request.url ?? '';
+      const body = text ? JSON.parse(text) : undefined;
+      requests.push({ method: request.method ?? '', path, body, key: request.headers['idempotency-key'] as string | undefined });
+      response.setHeader('content-type', 'application/json');
+      if (request.method === 'GET' && path === '/v1/repos/r/changes/c') response.end(JSON.stringify({ data: {
+        candidateStorageName: 'fork', branch: 'agent-branch' }, version: latestVersion }));
+      else if (request.method === 'GET' && path === '/v1/repos/r') response.end(JSON.stringify({ data: {
+        canonicalStorageName: 'canonical', version: latestVersion }, version: latestVersion }));
+      else if (request.method === 'POST' && path === '/v1/repos/r/git-token') {
+        tokenAttempts++;
+        if (tokenAttempts === 1 || tokenAttempts === 3) {
+          latestVersion++;
+          response.statusCode = 409;
+          response.end(JSON.stringify({ error: { code: 'STALE_VERSION', details: { currentVersion: 11 } } }));
+        } else response.end(JSON.stringify({ data: { remote: 'https://git.invalid/fork.git', token: 'cli-git-secret' } }));
+      } else { response.statusCode = 404; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      const env = { ...process.env, PATH: `${shimDir}:${process.env.PATH ?? ''}`, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' };
+      const cloned = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'r', '--path', destination], { cwd: process.cwd(), env });
+      const fetched = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'change', 'checkout', '--repo', 'r', '--id', 'c', '--worktree', checkout], { cwd: process.cwd(), env });
+      expect(cloned.stdout + cloned.stderr + fetched.stdout + fetched.stderr).not.toContain('cli-git-secret');
+      const tokens = requests.filter(request => request.method === 'POST' && request.path.endsWith('/git-token'));
+      expect(tokens).toHaveLength(4);
+      expect(tokens[0]?.body.expectedVersion).toBe(10);
+      expect(tokens[1]?.body.expectedVersion).toBe(11);
+      expect(tokens[0]?.key).not.toBe(tokens[1]?.key);
+      expect(tokens[2]?.body.expectedVersion).toBe(11);
+      expect(tokens[3]?.body.expectedVersion).toBe(12);
+      expect(tokens[2]?.key).not.toBe(tokens[3]?.key);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it('routes forced lease release with its audit reason', async () => {
     const calls: Array<{ method: string; path: string; body: any; expectedVersion?: number }> = [];
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
@@ -559,18 +667,19 @@ describe('Concord agent CLI client', () => {
     }
   });
 
-  it('does not expose any Git-token error response fields in diagnostics', async () => {
+  it('keeps only sanitized Git-token error fields in diagnostics', async () => {
     const secret = 'unexpected-git-credential';
     const client = new ConcordClient({
       url: 'https://concord.invalid',
-      fetch: async () => new Response(JSON.stringify({ plaintext: secret, error: { message: secret }, arbitrary: { credential: secret } }), { status: 400 }),
+      fetch: async () => new Response(JSON.stringify({ plaintext: secret, error: { code: 'LEASE_CONFLICT', message: secret }, arbitrary: { credential: secret } }), { status: 400 }),
     });
     try {
       await client.request('POST', '/repos/r/git-token', { body: { scope: 'read' } });
       throw new Error('expected Git-token request to fail');
     } catch (error) {
-      expect(error).toMatchObject({ kind: 'server', status: 400, message: 'Git token request failed with HTTP 400' });
-      expect((error as ConcordError).payload).toBeUndefined();
+      expect(error).toMatchObject({ kind: 'server', status: 400, message: 'Git token request failed with HTTP 400 LEASE_CONFLICT',
+        payload: { error: { code: 'LEASE_CONFLICT', message: '[REDACTED]' } } });
+      expect((error as ConcordError).payload).not.toHaveProperty('arbitrary');
       expect(JSON.stringify(error)).not.toContain(secret);
     }
   });
@@ -792,8 +901,8 @@ describe('Concord agent CLI client', () => {
       const pushArgs = await import('node:fs/promises').then(({ readFile }) => readFile(pushLog, 'utf8'));
       expect(pushArgs).toContain(`${verifiedOid}:refs/heads/agent-branch`);
       expect(pushArgs).not.toContain('HEAD:refs/heads/agent-branch');
-      expect(server.calls.map(call => call.path)).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1', '/v1/repos/repo-1/git-token', '/v1/repos/repo-1/changes/change-1/publish']);
-      expect(server.calls[3]?.body).toMatchObject({ headOid: verifiedOid, baseOid, branch: 'agent-branch' });
+      expect(server.calls.map(call => call.path)).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1', '/v1/repos/repo-1', '/v1/repos/repo-1/git-token', '/v1/repos/repo-1/changes/change-1/publish']);
+      expect(server.calls[4]?.body).toMatchObject({ headOid: verifiedOid, baseOid, branch: 'agent-branch' });
     } finally { await server.close(); }
   });
 

@@ -65,7 +65,7 @@ npm run concord -- repo list --json
 npm run concord -- repo clone --repo REPO_ID --path './canonical read-only'
 ```
 
-`repo create` requires `name`, `policyId`, and `profileId`. `repo clone` requires `--repo` and `--path`; it obtains read-scoped access for the canonical storage repository and clones it read-only.
+`repo create` requires `name`, `policyId`, and `profileId`. `repo clone` requires `--repo` and `--path`; it obtains read-scoped access for the canonical storage repository and clones it read-only. Git-token requests retry a `STALE_VERSION` conflict up to five attempts, re-reading the repository version and using a fresh idempotency key each time. Supplying `--expected-version` pins the version and disables these retries. Other Git-token errors include the Concord error code in the printed message (for example, `Git token request failed with HTTP 409 LEASE_CONFLICT`).
 
 ## Changes
 
