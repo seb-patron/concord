@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { avatarInitials, canRender, deriveInbox, inboxCount, normalizeDiagnosis, pickTheme, signOutTarget, trackerLaneForIssue, trackerLaneNames, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders, changeNextAction } = require('../../web/views.js') as any;
-const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
+const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, getSnapshot, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
 
 describe('view access', () => {
   it('allows token, Access and public sessions, but not anonymous private views', () => {
@@ -960,6 +960,23 @@ describe('layout and token contract', () => {
         await expect(apiFetch(path, {}, () => { throw new Error('fetch must not run'); })).rejects.toMatchObject({ code: 'INVALID_PATH' });
       }
     } finally { clearSessionToken(); }
+  });
+  it('sends If-None-Match and reuses the cached snapshot body after 304', async () => {
+    clearSessionToken();
+    const seen: RequestInit[] = [];
+    let calls = 0;
+    const fetchSnapshot = async (_url: string, init: RequestInit) => {
+      seen.push(init);
+      calls++;
+      if (calls === 1) return Response.json({ data: { projections: { repos: { changes: [{ changeId: 'cached' }] } } }, version: 4, eventSeq: 8 },
+        { headers: { etag: '"v4-owner-t3"' } });
+      return new Response(null, { status: 304, headers: { etag: '"v4-owner-t3"' } });
+    };
+    const first = await getSnapshot('snapshot-ui-cache', fetchSnapshot);
+    const second = await getSnapshot('snapshot-ui-cache', fetchSnapshot);
+    expect(new Headers(seen[1].headers).get('if-none-match')).toBe('"v4-owner-t3"');
+    expect(second).toEqual(first);
+    expect(snapshotCollections(second).changes.items[0].changeId).toBe('cached');
   });
   it('preserves only safe lease-conflict details', async () => {
     await expect(apiFetch('/v1/repos/demo/leases', {}, async () => new Response(JSON.stringify({ error: {

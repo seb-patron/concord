@@ -441,6 +441,7 @@ export interface ModuleRoute {
 }
 export interface FeatureModule {
   name: ModuleName; migrations: Migration[]; routes: ModuleRoute[];
+  /** May depend on principal visibility and time; the coordinator caches by visibility and time bucket. */
   snapshot(context: ModuleContext): unknown;
   nextDeadline(context: ModuleContext): number | null;
   onAlarm(context: ModuleContext): void | Promise<void>;

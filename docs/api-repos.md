@@ -6,6 +6,8 @@ An `AUTH_TOKENS` principal may have an optional `model` label of 1–64 characte
 
 After verified canonical readback, a landed change becomes `merged` and records `canonicalOid` in change detail, list, and snapshot responses. Merged changes are terminal and no longer count toward the 64 active-change limit. Owners can run the additive repair route below for older landings; it requires both a landed queue entry and a promotion commit reachable from canonical `main`.
 
+`GET /v1/repos/:r/snapshot` memoizes its serialized response by repo version, principal visibility class, and a 15-second time bucket. Time-dependent runner and lease fields refresh when the bucket changes. The response includes an ETag in the form `"v<version>-<class>-t<bucket>"`; send it as `If-None-Match` to receive `304 Not Modified` with no body when that version, class, and bucket are still current. Owner, reviewer, and viewer (including anonymous public readers) snapshots use separate cache entries. The web client keeps the response body in memory and reuses it after a matching `304`.
+
 | Method and path | Role | Request / result |
 | --- | --- | --- |
 | `GET /v1/repos` | Any authorized principal | Page of tenant repos; `?cursor=` advances. |

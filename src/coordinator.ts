@@ -18,6 +18,7 @@ import { measureSqlMetrics, metricsWindow, type RepoMetrics } from './features/m
 
 /** The modules are registered once. Each supplies migrations, routes, alarms and projections. */
 export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature, settings];
+const SNAPSHOT_TIME_BUCKET_MS = 15_000;
 
 export function selectStorage(env: Env, sql: SqlStorage, now: () => number): RepoStorage {
   if (env.CONCORD_MODE === 'local' && env.STORAGE_BACKEND === 'fake') return new FakeStorage(sqlState(sql), now);
@@ -29,6 +30,8 @@ export function selectStorage(env: Env, sql: SqlStorage, now: () => number): Rep
 export class RepoCoordinator extends DurableObject<Env> {
   private readonly now: () => number;
   private readonly metricsCache = new Map<string, { expiresAt: number; data: RepoMetrics }>();
+  private snapshotCacheVersion: number | null = null;
+  private readonly snapshotCache = new Map<string, { timeBucket: number; body: string }>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.now = clock(env);
@@ -136,8 +139,26 @@ export class RepoCoordinator extends DurableObject<Env> {
         return json(cached.data, version, eventSequence(core.sql));
       }
       if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/snapshot`) {
-        const projections = Object.fromEntries(modules.map(module => [module.name, module.snapshot(this.context(module.name, principal, repoId))]));
-        return json({ repoId, projections }, version, eventSequence(core.sql));
+        const visibility = principal.roles.includes('owner') ? 'owner'
+          : principal.roles.includes('reviewer') ? 'reviewer' : 'viewer';
+        if (this.snapshotCacheVersion !== version) {
+          this.snapshotCache.clear();
+          this.snapshotCacheVersion = version;
+        }
+        const timeBucket = Math.floor(this.now() / SNAPSHOT_TIME_BUCKET_MS);
+        let cached = this.snapshotCache.get(visibility);
+        if (!cached || cached.timeBucket !== timeBucket) {
+          const projections = Object.fromEntries(modules.map(module => [module.name, module.snapshot(this.context(module.name, principal, repoId))]));
+          cached = { timeBucket, body: JSON.stringify({ data: { repoId, projections }, version, eventSeq: eventSequence(core.sql) }) };
+          this.snapshotCache.set(visibility, cached);
+        }
+        const etag = `"v${version}-${visibility}-t${timeBucket}"`;
+        const responseHeaders = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', etag };
+        const ifNoneMatch = request.headers.get('if-none-match');
+        if (ifNoneMatch?.split(',').some(value => value.trim() === '*' || value.trim() === etag)) {
+          return new Response(null, { status: 304, headers: responseHeaders });
+        }
+        return new Response(cached.body, { status: 200, headers: responseHeaders });
       }
       if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/events`) {
         const afterRaw = url.searchParams.get('after');
