@@ -1,0 +1,140 @@
+id	check	argument	expected	next_action
+D-DECISIONS-IN-GIT	file	docs/decisions.md:^## D-	present	Land the seed via Concord with an AGENTS.md rule and a status check script.
+D-LEASE-LANGUAGE-AGNOSTIC	file	src/leases/units.ts:'symbol:'	present	Spec the engine against main, land it, and regenerate the MB and concord-v2 policies.
+D-LEASE-UNPARK	test	tests/node/markdown-units.test.ts	pass	Land md sections, generated files, keyed lines on the new engine.
+D-NUMBERING	test	tests/workers/numbering.test.ts	pass	Seb answers Q1-3; launch slice 1.
+D-LEASE-WAIT-LINE	route	POST /v1/repos/:r/leases/emergency/force-release	registered	Launch s16 after #1 + #50, then s16b.
+D-FREEZE-RESPEC	manual	ship list artifact published	live	Remove approved items from its Parked section.
+D-SPEC-AND-CONCORD	manual	every launch since 1:29 pm cites an s-spec	live	None.
+D-START-OPUS	file	cli/main.ts:^\s+start --repo	present	None.
+D-CHANGE-LIMIT	file	src/features/repos.ts:activeChangeLimit	present	None.
+D-SWE2-LUNA	manual	codex-mode == review-only	live	Muse back after 10-18 7 pm CT.
+D-LEASE-LONG-TTL	route	POST /v1/repos/:r/leases/renew-batch	registered	Publish 997141a after #1 lands.
+D-MORE-CHECKERS	manual	3 concord-v2 checkers polling	live	None.
+D-REVIEWERS-NO-SUITE	manual	AW review template without full-suite step	live	None.
+D-LEASE-WAIT-SPIKE	manual	wait-line emergency spike published	live	None.
+D-START-ASAP	file	cli/main.ts:^\s+start --repo	present	None.
+D-CHECKER-PASS-COUNTS	manual	review claims carry the checker-PASS policy	live	None.
+D-FLEET-HOLD	manual	fleet/pinning work paused	live	Remind Seb (still unread).
+D-DEMO-BATCH-P	file	docs/replay-ab.md:[Gg]roup P|P\.json	present	Land #18 and #19.
+D-PUBLIC-FLAG	test	tests/workers/public-repos.test.ts	pass	Resume after #1.
+D-NO-REASK	manual	docs/decisions.md consulted before every owner question	pending	Decision file in source control (D-DECISIONS-IN-GIT).
+D-QUESTIONS-FORMAT	manual	questions labelled Qn of N	live	None.
+D-SWE2-EFFORT	manual	AW refuses --effort for devin at launch	live	None.
+D-MB-MIRROR	manual	seb-patron/mother-base main == mother-base-v2 canonical	pending	Confirm with the MB chat.
+D-STANDING-APPROVALS	manual	Concord #46 holds the approval text	live	None.
+D-MUSE-SPARK	manual	rotation applied	live	None.
+D-UI-AGENT-COUNT	file	web/tracker.js:lease	present	Land #1, then s23.
+D-RUNNER-FLEET-SPIKE	manual	runner fleet spike in reading artifact	live	Seb reads it (he asked to be reminded).
+D-DEMO-NOT-SYNTHETIC	manual	Seb decision on demo.test from spike #40	pending	Seb reads spike #40.
+D-TEST-SUITE-SPIKE	manual	Seb decision on suite tiers from spike #40	pending	Seb reads; then s14/s48.
+D-REVIEW-NETWORK	manual	review runs use --sandbox network	live	None.
+D-CF-CONTAINERS-SPIKE	manual	CF containers spike in reading artifact	live	Seb reads; cloud checkers stay held.
+D-AGENT-MILESTONES	route	GET /v1/repos/:r/milestone-settings	registered	Land s38.
+D-TESTS-EVERY-FIX	manual	spec for the 6 coverage gaps + N-way concurrent land test landed	pending	Write one spec from the 12:35 am audit list.
+D-DECOMP-DBOS-LAND	manual	decomp DBOS merge step calls concord land	pending	After the decomp import.
+D-MWCC-GATE-SPIKE	manual	mwcc-rs gate design doc merged	live	Spec the Concord gate fit (Gate A in queue, Gate B per round).
+D-MWCC-HISTORY	manual	mwcc-rs repo imported with history	pending	After the PC runner and gate fit.
+D-ONBOARD-NOW	manual	mwcc-rs and decomp repos exist in Concord with history	pending	Decide #36 (spike 5txBEz1ofJm1ct2m8ntz5Q), spec the PC runner, import both.
+D-NO-GITHUB-WORK	manual	no GitHub PR opened after 2026-10-12 9:30 pm CT	live	Land Concord #4 (clone/checkout) so agents fetch from Concord.
+D-PUBLIC-REPO	manual	gh repo view seb-patron/concord visibility == PUBLIC	pending	Wed pm: sweep, then flip.
+D-RUNNER-S3	file	cli/main.ts:--role [a-z|]*checker	present	None.
+D-RUNNER-S1	file	runner/execute.ts:COMMAND_SWAPPED	present	Waits on Seb reading the runner-fleet spike.
+D-RUNNER-DRAIN-SWITCH	manual	drained-queue profile switch documented/implemented	pending	Fold into the fleet decision after Seb reads the spike.
+D-SCOPE-KEEP-ALL	manual	Access, passkeys, 69-73 all on the ship list	pending	Restore them or get an explicit owner withdrawal.
+D-RUNNER-SPIKE	manual	runner spike published	live	None.
+D-LEASE-Q5-CPLUS	file	cli/main.ts:^\s+claim --repo	present	Specs 69/70/71/73 back on the ship list after #1 and s16.
+D-LOGIN-ACCESS	route	GET /v1/session/signin	registered	Land s67; Seb enables Access in the dashboard.
+D-LOGIN-PASSKEYS	route	POST /v1/session/passkeys/login/options	registered	Owner call: keep (per 'Keep everything as planned') or withdraw.
+D-LAND-VIA-CONCORD	manual	every landed legacy PR closed on GitHub (#61, #72 still open)	pending	Close GitHub #61 and #72 with links to their Concord landings.
+D-PATH-PROTECTION	route	PUT /v1/repos/:r/settings	registered	Back on the ship list; respec.
+D-AGENTS-TAB	file	web/repo.js:For agents	present	None.
+D-LONG-TOKENS	manual	7-day principals in AUTH_TOKENS	live	Refresh before 10-19.
+D-GLOSSARY	file	docs/GLOSSARY.md:[Ll]anding	present	Docs-only; land it now.
+D-CONCORD-ON-CONCORD	manual	concord-v2 canonical == seb-patron/concord main	live	None (per-land mirror replaces hourly backup).
+D-DIRECT-AGENTS	manual	permission recorded	live	None.
+D-DEMO-NUMBERS	route	GET /v1/repos/:r/metrics	registered	Resume #13 and #18 right after #1; they are the demo's numbers.
+D-UI-FOR-HUMANS	file	web/repo.js:For humans	present	None.
+D-DEPLOY-FLOW	file	docs/deploy.md:Let's deploy	present	Put on the ship list; docs-only, one SWE-2 run.
+D-AW-PRIVATE-AUTH	manual	AW private-repo authorization gate removed	live	None.
+D-MUSE-SWE2-LANES	manual	Concord runs since 10-13 12:50 pm are SWE-2 implement + SWE-2/luna review	live	Keep codex-mode review-only.
+D-UI-PROJECT-PAGE	route	GET /v1/repos/:r/tree	registered	None.
+D-UI-ISSUES-TRACKER	file	web/tracker.js:.	present	Land s23 and s38.
+D-UI-ISSUE-EDITOR	manual	issue editor in web UI (Concord #22)	pending	Respec with s23 or put it on the ship list explicitly.
+D-UI-PLAN-VIEW	manual	plan view in web UI (Concord #21)	pending	Review the published change e6f6c892 or close it, and decide.
+D-I7-LANES	manual	i7 registered for concord lanes	live	None.
+D-MB-HISTORY	file	cli/main.ts:--with-history	present	None.
+D-DECOMP-PC-RUNNER	manual	decomp checker runner polling concord on the PC	pending	Spec it with PC Support (Ubuntu distro off-limits).
+D-CODEX-LANES	manual	lanes running	live	None.
+D-SWARMS	manual	10 concurrent agents land on concord-v2 without orchestrator pauses	pending	#1, #50, s16, then a swarm run as demo evidence.
+D-AGENT-NEUTRAL	file	cli/land.ts:readAwRun	absent	Move AW parsing into AW's delegate-concord; keep the mock out of the main demo.
+D-FORGE-ISSUES	route	POST /v1/repos/:r/issues	registered	Finish the human-editable issues UI (D-UI-ISSUES-TRACKER).
+D-NO-DEFER	manual	ship list has no approved item under 'out of scope until submission'	pending	Re-list every approved item as ship or owner-withdrawn.
+D-NO-COORDINATOR	manual	a worker lands a change in concord-v2 with no orchestrator script in its loop	pending	After #1: run one SWE-2 worker end to end (start, publish, review, land) with no cpath script.
+D-LEASE-AGENTS-CLAIM	file	cli/main.ts:^\s+start --repo	present	None.
+D-MB-FULL-CONCORD	manual	MB intake/review in Concord and GitHub main == mother-base-v2 canonical	pending	Ask the MB chat for its current state.
+D-LEASE-OVERLAP-SPIKE	manual	spike artifact RSDBC1MYRzVHKHpKekSRDF published	live	None.
+D-UI-MOBILE	manual	live page at 375 px has no horizontal scroll	live	Re-check after the s23/s24/s38 UI lands.
+D-UI-FLEET-DESK	file	web/app.js:authorModel	present	None.
+D-UI-REDESIGN	file	web/index.html:Inbox	present	None.
+D-SUBDOMAIN	manual	Seb answers subdomain question before recording	pending	Ask once (Q1 of 1) before the recording.
+D-DEPLOY-COSTS	manual	live Worker version == concord-v2 main	pending	Deploy batch with #1 (install-trusted).
+D-CONTESTS-SPIKE	file	src/features/queue.ts:Contests require a dispatch-lab policy	absent	Owner call: bonus scope or drop. Close GitHub #30 either way.
+D-GENERIC-FIRST	file	cli/main.ts:--aw-run	absent	Move AW run parsing into AW's delegate-concord (it already uses the public CLI); drop the AW scene from DEMO.md.
+D-DEMO-REAL-PROJECTS	file	docs/DEMO.md:mother-base|concord-v2	present	Rewrite DEMO.md around concord-v2 + MB + replay A/B.
+D-MB-SNAPSHOT	manual	mother-base repo imported	live	None.
+D-MB-V1-ON-CONCORD	manual	MB V1 changes landed through Concord	live	None.
+D-LEASE-ADAPTERS	file	src/leases/units.ts:'(symbol|section|line):'	present	See D-LEASE-LANGUAGE-AGNOSTIC.
+D-LEASE-15-PLAN	file	src/features/queue.ts:STALE_MAIN	present	None.
+D-LEASE-TSV-ROWS	file	src/leases/units.ts:'row:'	present	None.
+D-LEASE-GENERATED-DECL	test	tests/node/generators.test.ts	pass	Land the respecced generated-files slice (Concord #9).
+D-LEASE-SPIKE-15	manual	spike artifact 3HLf8PNh3UNS4DKE9DfLao published	live	None.
+D-MCP-AGENTS	file	mcp/tools.ts:milestone_list	present	None.
+D-SUBAGENT-TOKENS	file	cli/main.ts:principals mint --role	present	None.
+D-RECORD-TUE	manual	dry run completed and logged	pending	Dry run this afternoon on the live Worker.
+D-HANDOFF-60	manual	handoffs before 60%	live	None.
+D-CLAUDE-MERGES	manual	merge.sh used	live	None.
+D-PLAN-ASTRA	route	POST /v1/repos/:r/queue/enqueue	registered	None.
+D-DECOMP-C-DEMO	manual	decomp numbers shown in the demo	pending	Owner call: drop from demo or add a numbers-only segment.
+D-ROUTING-1013	manual	concord-path routing SWE-2 first, luna fallback	live	Keep routing; no Sol implementation.
+D-SUITE-BLOAT-ASTRA	manual	test-suite trim spec from the Astra investigation	pending	Publish the Astra report as an artifact; respec the trim; land it.
+D-NO-REPEAT-RUNS	manual	no repeated runs as proof in any spec	live	Keep: grep new specs for 3x / in a row before launch.
+D-NO-LOAD-REPRO	manual	no load/flake reproduction in any Concord spec or run	live	Grep new specs for slow-host, port thief, stress, repeat before launch.
+D-LOAD-SPECS-DROPPED	manual	Concord issues 14 and 48 closed	live	None.
+D-E2E-LESS-OFTEN	manual	test tiers in validate.sh, package.json and the checker profile	pending	Tier spec from the Astra report; land it.
+D-DEMO-DOCS-TESTS-OUT	file	tests/node/demo.test.ts:^	absent	Land t1 via Concord.
+D-52-MERGE-NOW	manual	owner override and follow-up findings	pending	Wait for the owner decision on the blocked override; deliver the review findings in a follow-up.
+D-UNIT-PLUGINS	manual	agnostic core, optional language plugins	active	None.
+D-SPIKE-MEANS-RESEARCH	manual	spike research judged against the long-term goal	active	None.
+D-FREEZE-AFTER-START	manual	after #1 lands, only spikes until the owner review	active	None.
+D-FREEZE-EXCEPT-DEPLOY-43	manual	deploy allowed; fix the 32-change limit	done (#43 landed b6c24e1, deployed)	None.
+D-CHECKER-SPEED-LATER	manual	checker speed is discussed later	parked	None.
+D-COMMIT-IDENTITY-SPIKE	manual	spike squash policy and approval binding	spike delivered; questions pending	None.
+D-RETRO-SUSTAIN	manual	retrospective covers why things get missed	spike delivered	None.
+D-POLICY-DRAWING-BOARD	manual	policy and scale-out back to the drawing board	spike delivered (SM7bQ2oubQKiCNCfWKU35y)	None.
+D-CHANGE-MODEL-SPIKE	manual	no question without a spike; change-model spike	active rule; spike delivered (9EeAo6UJ6MpLfSjVWXH4Pj)	None.
+D-LEASE-5MIN-EXTEND	manual	leases default to 5 minutes, extension made reliable	in progress	None.
+D-OWNER-FORCE-RELEASE	manual	owner can force-release a lease	in progress (#66 waits for #65)	None.
+D-CLOSE-RELEASES-LEASES	manual	closing a change releases its leases	in progress (Seb owner-override land)	None.
+D-WORKER-FAILURE-SPIKE	manual	spike the 43 worker failure; recommend other spikes	spike delivered (TRR9MVdyNkEkoYFhYUbyX5)	None.
+D-QA-OPS-SPIKES	manual	launch Bug Escapes and Identity & Operator spikes	spikes delivered	None.
+D-FORCE-RELEASE-OWNER-TOKEN	manual	any owner token may force-release (Q-OPS-1 b)	active	None.
+D-PLAN-A-PLUS-C	manual	core-loop bugs first, UI asap, submission in parallel (Q-PLAN-STRATEGY)	active	None.
+D-POLICY-6B-9A	manual	slim decomp policy now; hygiene h1+h2; remind 6D/6E (Q-POLICY-6)	h1 landed 28c62f4; h2 pending (#69)	None.
+D-TARGET-10-WORKERS	manual	target 10+ concurrent workers on real repos	target	None.
+D-ISSUE-CLAIMS-MUST-FIX	manual	issue claims and lease granularity must be fixed	pending question	None.
+D-CLI-TOKEN-PROFILE	manual	CLI loads its own token by profile (#67)	open	None.
+D-OPUS-NEEDS-OK	manual	no Opus/Claude subagent without Seb's OK	superseded	None.
+D-NO-CLAUDE-SUBAGENTS	manual	Concord chats stop using Claude subagents	active	None.
+D-POLICY-4-CODEX-SPIKE	manual	rule changes for existing repos: Codex research spike (Q-POLICY-4)	spike done (run work-codex-20261013T231353Z-d4e7fea9); questions pending	None.
+D-65-OWNER-LAND	manual	owner-override land of #65 (Q-65-LAND a)	in progress (re-run ~6:55 pm)	None.
+D-ISSUECLOSE-OWNER-TOKEN	manual	Mother Base closes its 5 issues with the owner token; option C filed (Q-ISSUECLOSE)	active	None.
+D-WORKER-NO-ADOPT	manual	a worker run that failed validation is not landed (Q-WORKER-2 a)	active	None.
+D-DECISIONS-HOME	manual	decisions go in the decisions log, not memory	active	None.
+D-DEPLOY-WORKERS-BUILDS	manual	Workers Builds deploys main on mirror push	live (100 landed de7848a 9:00 pm, Builds deployed 8348eaf1 at 9:00:42 pm CT)	None.
+D-STORAGE-SCALE	manual	storage repo lifecycle scales (#71)	spike done (artifact QfNzczqthjSCUGqn38kXnn)	Ask Q-STORAGE-1..6, then spec and land.
+D-CLI-MCP-FIRST	manual	CLI and MCP agent self-service	in progress	Land 105, 106 (#67), 107.
+D-CHANGE-REVISIONS	manual	repairs republish the same change	in progress	Verify first stable-key repair republishes.
+D-RUNNER-BACKOFF	manual	idle runner backoff 1 s -> 30 s	landed da2fb26	#70 part 2 is #75.
+D-ISSUE-CLAIM-SPIKE	manual	issue claim semantics researched	spike done (artifact GAU8hBkQjNeyZWBEXoM1Vg)	Read spike; ask Q-ISSUE-CLAIM questions.
+D-CLOSE-REASON	manual	optional stored close reason	decided	Spec after 107 (cli/main.ts + mcp/tools.ts lane).

@@ -1,5 +1,12 @@
 # Concord agent loop
 
+## Owner decisions
+
+- Read `docs/decisions.md` before asking the owner a question or changing a decided policy. Never re-ask a recorded decision.
+- Cite decision IDs (`D-…`) in specs that rely on an owner's decision.
+- The change that delivers a decision updates its row in `docs/decision-status.tsv` in the same change.
+- Every orchestrator report and handoff starts with the current `npm run -s decisions` output, including its `Approved but not live:` list.
+
 The lease workflow below applies only when the repository being edited is registered in Concord and both `CONCORD_URL` and `CONCORD_TOKEN` are set in the agent environment. Otherwise, work normally.
 
 Concord coordinates candidate changes by semantic unit. Read this before editing any Concord managed repository.
