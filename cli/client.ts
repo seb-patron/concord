@@ -37,10 +37,10 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 const credentials = new Set<string>();
 export function rememberCredential(value: string): void {
-  if (!value) return;
+  if (value.trim().length < 8) return;
   credentials.add(value);
   const bearer = /^Bearer\s+(.+)$/i.exec(value);
-  if (bearer) credentials.add(bearer[1]);
+  if (bearer) rememberCredential(bearer[1]);
 }
 export function rememberCredentialsIn(value: unknown): void {
   if (!value || typeof value !== 'object') return;
@@ -51,7 +51,7 @@ export function rememberCredentialsIn(value: unknown): void {
   }
 }
 function rememberCredentialValues(value: unknown): void {
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') rememberCredential(String(value));
+  if (typeof value === 'string') rememberCredential(value);
   else if (Array.isArray(value)) for (const item of value) rememberCredentialValues(item);
   else if (value && typeof value === 'object') for (const item of Object.values(value)) rememberCredentialValues(item);
 }
