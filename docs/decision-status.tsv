@@ -141,3 +141,8 @@ D-CLOSE-REASON	manual	optional stored close reason	live	None.
 D-CF-CHECKER-MORNING	manual	containers checker experiment decided	deferred to Wed morning	Ask Q-CF-CHECKER Wed morning with the cost caps.
 D-REVIEW-ORDER	manual	Luna reviews first, SWE-2 fallback	live in chain template	None.
 D-FILM-PLAN	manual	Wed freeze noon, film 2-4 pm, submit 6 pm	scheduled	Freeze at noon CT; prep DEMO.md and swarm for the 1 pm dry run.
+D-STRANDED-1014	manual	stranded items 7 dispositions	in progress	Spike #11 and #16; repair+land #9 #10 #21; #8 held; #6 owner call.
+D-RUNNER-PIN-GO	manual	#6 runner pin repaired and landed	in progress	Repair and land #6.
+D-CF-CHECKER-GO	manual	capped containers checker experiment	in progress	Spec and run the capped experiment; Seb deploys.
+D-LEASE-WAIT-V2	manual	new wait queue spec and land	in progress	Close #16; spec spike; implement.
+D-FREEZE-2PM	manual	freeze at 2 pm CT	active	None.

@@ -1561,3 +1561,43 @@ Liveness: `decision-status.tsv` has one row per ID: `id  check  argument  expect
 - **Decision:** Wed 10-14 (CT): 12:00 pm feature freeze (fixes only after); 1 pm demo dry run (docs/DEMO.md, Mother Base swarm as the live part); 2-4 pm film (5-10 min video); 4-5 pm final secrets/private-name sweep, then make seb-patron/concord public; 6 pm Seb submits the form himself. Hard deadline Thu 10-15 1:59 am CT.
 - **Status:** scheduled.
 - **Source:** Concord chat 10-13 9:32 pm.
+
+## D-STRANDED-1014 — what happens to the 7 stranded items
+
+- **Date:** 2026-10-14, ~10:45 am CT.
+- **Owner words:** "#8 i thought we had worked on a language agnostic system? not sure this makes sense / #11 feel like we should spike to see if theres a better system that could be built into concord thats not tsv files in source control, can we spike that? if #11 is the best option we cna proceed but if something built into concord that requires some changes but is better im down, otherwise we can continue this track / #16 can we spike quickly first to make sure it still fits with the current way concord works / #9 #10 #21 continue / #6 what would it help with".
+- **Decision:** #8 (Markdown section units) stays held under D-UNIT-PLUGINS / D-LEASE-LANGUAGE-AGNOSTIC. #11 (keyed-line units): spike first, compare built-in Concord options against keyed lines in TSV files; proceed with #11 only if it is the best option. #16 (lease wait queue): quick fit spike against current main first. #9 (generated files), #10 (path protection), #21 (plan view): continue (repair + land). #6 (runner pin): explained, owner to decide.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-RUNNER-PIN-GO — build #6 runner profile pin now
+
+- **Date:** 2026-10-14, ~11:05 am CT.
+- **Owner words:** "#6 do it".
+- **Decision:** Repair and land stranded #6 (check profiles pin the check config, not Mac executables, so the i7, PC and container checkers can run checks). Lifts the 10-13 hold on config-pin work for #6.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-CF-CHECKER-GO — run the capped Cloudflare Containers checker experiment
+
+- **Date:** 2026-10-14, ~11:05 am CT.
+- **Owner words:** "Q-CF-CHECKER: lets do it but be carefule with costs".
+- **Decision:** Option a: capped experiment (1 instance, 15-min job limit, idle sleep, read-only token, stop after 3 checks). Cost caps are binding.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-LEASE-WAIT-V2 — close #16 as built; spec a newer wait queue and try to land it before submission
+
+- **Date:** 2026-10-14, ~11:05 am CT.
+- **Owner words:** "#16 lets close it, then spike a spec for the newer better version and lets try to finish before submission".
+- **Decision:** Close stranded #16 (10-13 build). A spike writes a spec for a wait queue that fits main (lease-wait-fit.md); implement and land it before submission if possible.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-FREEZE-2PM — feature freeze moves from noon to 2 pm CT
+
+- **Date:** 2026-10-14, ~11:05 am CT.
+- **Owner words:** "im moving the freeze to 2pm so we have more tiem".
+- **Decision:** Feature freeze at 2:00 pm CT Wed 10-14 (was 12:00 pm in D-FILM-PLAN). Fixes only after 2 pm. Other D-FILM-PLAN times unchanged unless Seb says.
+- **Status:** active.
+- **Source:** Concord chat 10-14 7:16 am.
