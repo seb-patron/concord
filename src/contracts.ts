@@ -344,6 +344,7 @@ export interface ServiceHooks {
   'leases.reserve': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate<{ reservationFences: Record<string, number> }>;
   'leases.reservationLive': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate;
   'leases.releaseReservation': (context: ModuleContext, changeId: Id) => Gate;
+  'leases.releaseForChange': (context: ModuleContext, changeId: Id, reason?: 'change-closed' | 'change-merged') => Gate;
   'findings.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ findingSetVersion: number; unresolvedIds: Id[]; pendingRound: number | null }>;
   'verdicts.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ verdictId: Id; reviewManifestDigest: Digest; findingSetVersion: number }>;
   'verdicts.evaluateCarry': (context: ModuleContext, result: DeltaResult) => Gate<{ verdictId: Id }>;

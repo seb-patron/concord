@@ -13,6 +13,7 @@ import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
 import { manifestDigest } from '../../src/verdicts/manifest';
 import { localFixtureConfig, sqlState } from '../../src/state';
+import { mergeLandedChanges } from '../../src/repos/model';
 import { FakeStorage } from '../../src/storage/fake';
 import { arbitrate, accepted } from '../../src/queue/arbitrate';
 import { advanceDiagnosis, dependencyClosure, startDiagnosis } from '../../src/queue/plan';
@@ -417,6 +418,101 @@ async function contestReal(h: Harness): Promise<void> {
 }
 
 describe('queue with real lease hooks', () => {
+  it('releases every lease of a landed change while preserving another change\'s lease', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:L' }], ['A', 'B']);
+    const config = JSON.parse((env as Env).TRUSTED_CONFIG!) as ReturnType<typeof localFixtureConfig>;
+    config.policies['local-demo'].units['row:K'] = { canonicalKey: 'row:K', file: 'data/queue.tsv', resources: ['row:K'], dependencyKeys: [] };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const store = sqlState(context.sql);
+      const a = store.get<any>('module:repos:change:A');
+      const b = store.get<any>('module:repos:change:B');
+      store.put('module:repos:changes', [a, b]);
+      context.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'lease-A-extra', 'row:K', 'agent-a', 'A', 'A extra', 1, Date.now() + 7_200_000, 'active', 1, Date.now(), Date.now());
+      context.sql.exec("INSERT INTO leases_fences(unit_key, fence) VALUES(?, ?)", 'row:K', 1);
+    });
+    await enqueueReal(h, 'A', 'row:J');
+    await h.tick();
+    await h.deliver(h.jobs[0], 'PASS'); await h.tick();
+    expect((await h.state()).promotion.state).toBe('pending');
+    const promotion = h.jobs.find(job => job.kind === 'promote')!;
+    expect((await h.promoteResult(promotion, 'APPLIED', oid('e'))).status).toBe('eligible');
+    await h.tick();
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries[0].state).toBe('landed');
+    const landed = await runInDurableObject<RepoCoordinator, { status: string }>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      return sqlState(internal.context('queue', principal, h.repoId).sql).get<{ status: string }>('module:repos:change:A')!;
+    });
+    expect(landed.status).toBe('merged');
+    const rows = await runInDurableObject<RepoCoordinator, { lease_id: string; state: string }[]>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      return internal.context('queue', principal, h.repoId).sql.exec<{ lease_id: string; state: string }>(
+        'SELECT lease_id, state FROM leases_claims ORDER BY lease_id').toArray();
+    });
+    expect(rows).toEqual(expect.arrayContaining([
+      { lease_id: 'lease-A', state: 'released' }, { lease_id: 'lease-A-extra', state: 'released' },
+      { lease_id: 'lease-B', state: 'active' },
+    ]));
+    const event = await runInDurableObject<RepoCoordinator, { payload: string }>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      return internal.context('queue', principal, h.repoId).sql.exec<{ payload: string }>(
+        "SELECT payload FROM concord_events WHERE kind = 'lease.released' AND related_ids LIKE '%lease-A-extra%'").toArray()[0];
+    });
+    expect(JSON.parse(event.payload)).toMatchObject({ reason: 'change-merged' });
+  });
+
+  it('releases active leases from mergeLandedChanges once and allows another claimant', async () => {
+    const h = await prepareReal([{ id: 'C', unit: 'row:C' }], []);
+    const config = JSON.parse((env as Env).TRUSTED_CONFIG!) as ReturnType<typeof localFixtureConfig>;
+    config.policies['local-demo'].units['row:D'] = { canonicalKey: 'row:D', file: 'data/queue.tsv', resources: ['row:D'], dependencyKeys: [] };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    h.views.set('D', { authorId: 'agent-b', headOid: oid('d'), revision: 1, status: 'ready', unitKeys: ['row:C'], frozen: false,
+      baseOid: main, candidateStorageName: 'candidate-D', branch: 'refs/heads/work', dependencyChangeIds: [],
+      canonicalStorageName: `canonical-${h.repoId}`, scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'D' });
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const store = sqlState(context.sql);
+      const change = store.get<any>('module:repos:change:C');
+      store.put('module:repos:changes', [change]);
+      store.put('module:repos:change:D', { ...change, changeId: 'D', authorId: 'agent-b', intentKey: 'D', intentText: 'D' });
+      for (const [leaseId, unit] of [['lease-C-one', 'row:C'], ['lease-C-two', 'row:D']]) {
+        context.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          leaseId, unit, 'agent-a', 'C', 'C', 1, Date.now() + 7_200_000, 'active', 1, Date.now(), Date.now());
+        context.sql.exec('INSERT INTO leases_fences(unit_key, fence) VALUES(?, ?)', unit, 1);
+      }
+      context.transaction(() => mergeLandedChanges(context, ['C'], oid('e')));
+    });
+    const claim = await worker.fetch(mutation(`/v1/repos/${h.repoId}/leases`, { changeId: 'D', unitKeys: ['row:C'], intentText: 'claim released unit' }, 'claim-after-land', 'local-agent-b'), env);
+    expect(claim.status).toBe(201);
+    const beforeRetry = await runInDurableObject<RepoCoordinator, { states: string[]; events: string[] }>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      return { states: context.sql.exec<{ state: string }>("SELECT state FROM leases_claims WHERE change_id = 'C' ORDER BY lease_id").toArray().map(row => row.state),
+        events: context.sql.exec<{ payload: string }>("SELECT payload FROM concord_events WHERE kind = 'lease.released' ORDER BY sequence").toArray().map(row => JSON.parse(row.payload)) };
+    });
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      context.transaction(() => mergeLandedChanges(context, ['C'], oid('e')));
+    });
+    const afterRetry = await runInDurableObject<RepoCoordinator, { states: string[]; events: string[] }>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      return { states: context.sql.exec<{ state: string }>("SELECT state FROM leases_claims WHERE change_id = 'C' ORDER BY lease_id").toArray().map(row => row.state),
+        events: context.sql.exec<{ payload: string }>("SELECT payload FROM concord_events WHERE kind = 'lease.released' ORDER BY sequence").toArray().map(row => JSON.parse(row.payload)) };
+    });
+    expect(beforeRetry).toMatchObject({ states: ['released', 'released'], events: [{ reason: 'change-merged' }, { reason: 'change-merged' }] });
+    expect(afterRetry).toEqual(beforeRetry);
+  });
+
   it('releases a withdrawn reservation', async () => {
     const h = await prepareReal([{ id: 'A', unit: 'row:A' }], ['A']);
     await enqueueReal(h, 'A', 'row:A');
