@@ -171,6 +171,14 @@ export function leaseCountdown(lease, nowMs) {
   return { text: seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s left` : `${seconds}s left`, expired: false };
 }
 
+/** Live lease evidence and distinct holders shared by the tracker and desk. */
+export function liveLeaseHolders(leases, now = Date.now()) {
+  const evidence = (Array.isArray(leases) ? leases : []).filter(lease =>
+    ['active', 'reserved'].includes(lease?.state) && Number.isFinite(lease.expiresAt) && lease.expiresAt > now);
+  const holders = new Set(evidence.map(lease => lease.holderId).filter(Boolean));
+  return { count: holders.size, holders, evidence };
+}
+
 /**
  * Next useful action for one change card.
  * `ctx` carries related records when the snapshot provides them:

@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
-  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
+  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
 
 const fixture = {
@@ -16,6 +16,13 @@ const fixture = {
       { changeId: 'y', authorId: 'agent-b', intentText: 'Rename logs', unitKeys: ['file:log'], status: 'blocked', revision: 1, headOid: 'def456' },
     ], repo: { observedCanonicalOid: 'main123' } },
     leases: { items: [{ leaseId: 'l1', changeId: 'x', holderId: 'agent-a', intentText: 'Protect retry path', unitKey: 'fn:retry', fence: 3, expiresAt: Date.now() + 120000, state: 'active' }],
+      heldItems: [
+        ...Array.from({ length: 3 }, (_, index) => ({ leaseId: `a${index}`, changeId: 'x', holderId: 'agent-a',
+          intentText: 'Protect retry path', unitKey: `fn:retry-${index}`, fence: 3, expiresAt: Date.now() + 120000, state: 'active', issueNumber: 1 })),
+        { leaseId: 'b', changeId: 'x', holderId: 'agent-b', intentText: 'Protect retry path', unitKey: 'fn:retry-b', fence: 4, expiresAt: Date.now() + 120000, state: 'reserved', issueNumber: 1 },
+        { leaseId: 'expired', changeId: 'x', holderId: 'agent-c', unitKey: 'fn:expired', expiresAt: Date.now() - 1, state: 'active', issueNumber: 1 },
+        { leaseId: 'released', changeId: 'x', holderId: 'agent-d', unitKey: 'fn:released', expiresAt: Date.now() + 120000, state: 'released', issueNumber: 1 },
+      ],
       refusals: [{ changeId: 'x', requesterId: 'agent-c', keys: ['fn:retry'], createdAt: Date.now(), conflicts: [{ holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: Date.now() + 120000 }] }] },
     queue: { entries: [
       { changeId: 'y', state: 'blocked', revision: 1, sequence: 41, blockedReason: 'CHECK_FAILED' },
@@ -33,6 +40,19 @@ const fixture = {
 };
 
 describe('Fleet desk derivation', () => {
+  it('counts distinct current lease holders and keeps every live lease as evidence', () => {
+    const now = new Date('2026-10-13T00:02:00Z').valueOf();
+    const held = [
+      ...Array.from({ length: 3 }, (_, i) => ({ leaseId: `a${i}`, holderId: 'a', unitKey: `u${i}`, state: 'active', expiresAt: now + 60000 })),
+      { leaseId: 'b', holderId: 'b', unitKey: 'ub', state: 'reserved', expiresAt: now + 60000 },
+      { leaseId: 'expired', holderId: 'c', state: 'active', expiresAt: now - 1 },
+      { leaseId: 'released', holderId: 'd', state: 'released', expiresAt: now + 60000 },
+    ];
+    const result = liveLeaseHolders(held, now);
+    expect(result.count).toBe(2);
+    expect(result.evidence).toHaveLength(4);
+    expect(result.holders).toEqual(new Set(['a', 'b']));
+  });
   it('derives blamed changes, lease waits, and ready changes without reading verdicts', () => {
     const items = deriveInbox(fixture);
     expect(items.map((item: any) => item.kind)).toEqual(['Blamed by bisection', 'Waiting on a lease', 'Review requested']);
@@ -64,7 +84,10 @@ describe('Fleet desk derivation', () => {
   it('derives open issue cards with milestone, change and held lease', () => {
     const snapshot = structuredClone(fixture) as any;
     snapshot.data.projections.leases.items[0].issueNumber = 1;
-    expect(openIssueRows(snapshot)[0]).toMatchObject({ number: 1, title: '<task>', milestone: 'Release', changes: [{ status: 'ready' }], leases: [{ leaseId: 'l1' }] });
+    snapshot.data.projections.leases.heldItems[0].issueNumber = 1;
+    const row = openIssueRows(snapshot)[0];
+    expect(row).toMatchObject({ number: 1, title: '<task>', milestone: 'Release', changes: [{ status: 'ready' }] });
+    expect(row.leases.map((lease: any) => lease.leaseId)).toEqual(['a0', 'a1', 'a2', 'b']);
   });
   it('uses the complete held lease projection for issue cards beyond the first page', () => {
     for (const count of [100, 101, 128]) {
@@ -134,6 +157,12 @@ describe('Fleet desk DOM', () => {
     let claimConflict = false;
     let interaction = false;
     let changeStatus = 'ready';
+    let extraChanges: any[] = [];
+    let extraIssues: any[] = [];
+    let verdictInflight = 0;
+    let verdictMaxInflight = 0;
+    const verdictRequests: string[] = [];
+    let principalPageCalls = 0;
     const history = [
       { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
       { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
@@ -151,6 +180,10 @@ describe('Fleet desk DOM', () => {
         else if (token === 'Bearer empty') body = { data: { principalId: 'owner', roles: ['owner'], repoIds: '*', model: null } };
         else body = { data: { principalId: 'reviewer', roles: ['reviewer'], repoIds: ['demo', 'second'], model: null } };
       } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }, { repoId: 'second', displayName: 'Second' }] } };
+      else if (url.startsWith('/v1/principals')) {
+        principalPageCalls++;
+        body = { data: { items: [], nextCursor: `page-${principalPageCalls}` } };
+      }
       else if (url.endsWith('/snapshot')) {
         if (url === '/v1/repos/second/snapshot') return await new Promise<Response>(resolve => {
           releaseSecondSnapshot = () => resolve(new Response(JSON.stringify(fixture)));
@@ -172,8 +205,10 @@ describe('Fleet desk DOM', () => {
         });
         else body = { ...fixture, version: snapshotVersion, data: { projections: {
           ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
-            changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x'
-              ? { ...c, status: changeStatus, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c) },
+            changes: [...fixture.data.projections.repos.changes.map(c => c.changeId === 'x'
+              ? { ...c, status: changeStatus, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c), ...extraChanges] },
+          issues: { ...fixture.data.projections.issues,
+            items: [...fixture.data.projections.issues.items, ...extraIssues] },
           queue: interaction ? { ...fixture.data.projections.queue, diagnosis: { reason: 'INTERACTION', blame: ['x', 'y'] },
             diagnosticResults: [{ jobId: 'job-1', memberIds: ['x'], outcome: 'PASS', sequence: 4 },
               { jobId: 'job-2', memberIds: ['y'], outcome: 'PASS', sequence: 5 },
@@ -192,6 +227,15 @@ describe('Fleet desk DOM', () => {
       else if (url.endsWith('/changes/x/verdicts?cursor=MTAw')) body = { data: { items: [
         { verdictId: 'v101', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 2, findingSetVersion: 0, parentVerdictId: null },
       ], nextCursor: null } };
+      else if (/\/changes\/([^/?]+)\/verdicts/.test(url) && init.method !== 'POST') {
+        const id = /\/changes\/([^/?]+)\/verdicts/.exec(url)![1];
+        verdictRequests.push(id); verdictInflight += 1;
+        verdictMaxInflight = Math.max(verdictMaxInflight, verdictInflight);
+        await Promise.resolve();
+        verdictInflight -= 1;
+        body = { data: { items: [{ verdictId: `v-${id}`, changeId: id, reviewerId: 'other-reviewer',
+          decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: `v-parent-${id}` }] } };
+      }
       else if (url.endsWith('/leases') && init.method === 'POST' && claimConflict) {
         status = 409; body = { error: { code: 'LEASE_CONFLICT', message: 'Already claimed', details: {
           holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: Date.now() + 120000,
@@ -220,7 +264,17 @@ describe('Fleet desk DOM', () => {
       (byId('token-input') as HTMLInputElement).value = 'good';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush(); await flush();
+      expect(principalPageCalls).toBe(5);
       expect(byId('desk').hidden).toBe(false);
+      expect(byId('tracker-view').hidden).toBe(false);
+      expect(byId('tracker-view').textContent).toContain('#1 <task>');
+      expect(byId('tracker-view').querySelector('task')).toBeNull();
+      expect([...doc.querySelectorAll('[data-main-view]')].map((button: any) => button.textContent)).toEqual(['Code', 'Tracker', 'Milestones', 'Fleet desk', 'Inbox']);
+      expect(byId('inbox-alert').hidden).toBe(false);
+      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      expect(byId('desk-view').hidden).toBe(false);
+      expect(byId('stat-strip').textContent).toContain('Agents working2');
+      expect(byId('stat-strip').textContent).toContain('live lease holders');
       expect(byId('work-board').textContent).toContain('Cap retries');
       expect(byId('issue-list').textContent).toContain('#1 <task>');
       expect(byId('issue-list').textContent).toContain('Milestone: Release');
@@ -232,6 +286,7 @@ describe('Fleet desk DOM', () => {
       expect(byId('inbox-view').hidden).toBe(false);
       expect(byId('inbox-list').textContent).toContain('Waiting on a lease');
       (byId('inbox-list').querySelector('button:last-child') as HTMLButtonElement).click();
+      await flush(); await flush();
       expect(byId('inbox-detail').textContent).toContain('Cap retries');
       expect(byId('inbox-detail').textContent).toContain('ready for independent review');
       expect(byId('inbox-detail').textContent).toContain('Head: abc123');
@@ -301,7 +356,9 @@ describe('Fleet desk DOM', () => {
       (byId('token-input') as HTMLInputElement).value = 'good';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
+      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
       (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      await flush(); await flush();
       expect(byId('verdict-list').textContent).toContain('Approval history is visible to reviewers');
       expect(byId('inbox-list').textContent).toContain('Review requested');
       byId('token-clear').click();
@@ -422,13 +479,37 @@ describe('Fleet desk DOM', () => {
       tick!(); await flush();
       expect(byId('action-panel').querySelector('input[name="intentText"]')).toBe(retainedClaim);
       expect(retainedClaim.value).toBe('Unsubmitted lease intent');
+      const historyRequests = requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts').length;
       changeStatus = 'merged'; snapshotVersion = 12; eventVersion = 12;
       tick!(); await flush(); await flush();
+      expect(requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts')).toHaveLength(historyRequests);
       expect(byId('detail-body').textContent).toContain('Status: merged');
       expect(byId('action-panel').textContent).not.toContain('Claim');
       expect(byId('action-panel').textContent).not.toContain('Enqueue');
       expect(byId('action-panel').textContent).not.toContain('Submit verdict');
       expect(byId('action-panel').querySelectorAll('form')).toHaveLength(0);
+      extraIssues = [
+        { number: 50, title: 'Old landed', state: 'closed', milestoneId: 'm1', closedBy: { changeId: 'm0' }, labels: [] },
+        ...Array.from({ length: 8 }, (_, index) => ({ number: 60 + index, title: `Ready ${index}`, state: 'open', milestoneId: 'm1', labels: [] })),
+      ];
+      extraChanges = [
+        { changeId: 'm0', issueNumber: 50, status: 'merged', revision: 1, authorId: 'agent-z' },
+        ...Array.from({ length: 8 }, (_, index) => ({ changeId: `r${index}`, issueNumber: 60 + index, status: 'ready', revision: 1, authorId: `agent-${index}` })),
+      ];
+      snapshotVersion = 13; eventVersion = 13;
+      tick!(); await flush(); await flush(); await flush();
+      expect(verdictRequests).not.toContain('m0');
+      for (let index = 0; index < 8; index++) expect(verdictRequests).not.toContain(`r${index}`);
+      expect(verdictMaxInflight).toBeLessThanOrEqual(4);
+      (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
+      const landedCard = [...byId('tracker-view').querySelectorAll('.tracker-card')]
+        .find(card => card.textContent?.includes('#50')) as HTMLButtonElement;
+      landedCard.click(); await flush(); await flush(); await flush();
+      expect(verdictRequests.filter(id => id === 'm0')).toHaveLength(1);
+      expect(byId('tracker-view').querySelector('.tracker-timeline')?.textContent).toContain('verdict.carried');
+      snapshotVersion = 14; eventVersion = 14;
+      tick!(); await flush(); await flush();
+      expect(verdictRequests.filter(id => id === 'm0')).toHaveLength(1);
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
 
