@@ -746,38 +746,55 @@ describe('queue state machine', () => {
     await h.tick();
     expect((await h.state()).entries[0].state).toBe('landed');
   });
-  it('re-stacks a checking entry with a newly admitted change and lands both', async () => {
+  it('admission while a stack is checking keeps that check', async () => {
     const h = await setup('A');
     await h.tick();
     const first = h.jobs[0];
     if (first.kind !== 'validate-stack') throw new Error('expected stack job');
     expect(first.candidates.map(candidate => candidate.changeId)).toEqual(['A']);
     expect((await h.state()).entries[0].state).toBe('checking');
+    const before = await h.state();
 
+    // D-LAND-FIX-NOW: admission waits for the active check instead of invalidating it.
     expect((await addChange(h, 'B')).response.status).toBe(201);
     let state = await h.state();
     expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.stackMember]))
-      .toEqual([['A', 'reserved', false], ['B', 'reserved', false]]);
-    expect(state.activeStackJobId).toBeNull();
+      .toEqual([['A', 'checking', true], ['B', 'reserved', false]]);
+    expect(state.generation).toBe(before.generation);
+    expect(state.activeStackJobId).toBe(before.activeStackJobId);
 
-    await h.tick();
-    const next = h.jobs[1];
-    if (next.kind !== 'validate-stack') throw new Error('expected re-stacked job');
-    expect(next.candidates.map(candidate => candidate.changeId)).toEqual(['A', 'B']);
-    expect((await h.deliver(first, 'PASS', { composed: oid('d') })))
-      .toMatchObject({ status: 'blocked', code: 'STALE_GENERATION' });
-    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['checking', 'checking']);
-    expect((await h.deliver(next, 'PASS')).status).toBe('eligible');
-    await h.tick();
-    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A', 'B'] });
-    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    expect((await h.deliver(first, 'PASS', { composed: oid('d') }))).toMatchObject({ status: 'eligible' });
     await h.tick();
     state = await h.state();
-    expect(state.entries.map((entry: any) => [entry.state, entry.blockedReason]))
-      .toEqual([['landed', null], ['landed', null]]);
+    expect(state.promotion).toMatchObject({ state: 'pending', memberIds: ['A'] });
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state]))
+      .toEqual([['A', 'checking'], ['B', 'reserved']]);
   });
 
-  it('withdrawing one stack member re-stacks the other', async () => {
+  it('admission during diagnosis keeps the diagnosis', async () => {
+    const h = await setup('A', 'B');
+    await h.tick();
+    const first = h.jobs[0];
+    if (first.kind !== 'validate-stack') throw new Error('expected stack job');
+    expect((await h.deliver(first, 'FAIL')).status).toBe('eligible');
+    await h.tick();
+    const before = await h.state();
+    const diagnosis = structuredClone(before.diagnosis);
+    const diagnosticJob = h.jobs.find(job => job.jobId === before.activeStackJobId);
+    expect(diagnosticJob?.kind).toBe('validate-stack');
+    expect(diagnosis).toMatchObject({ phase: 'baseline' });
+
+    expect((await addChange(h, 'C')).response.status).toBe(201);
+    const after = await h.state();
+    expect(after.generation).toBe(before.generation);
+    expect(after.activeStackJobId).toBe(before.activeStackJobId);
+    expect(after.diagnosis).toEqual(diagnosis);
+    expect(after.entries.map((entry: any) => [entry.changeId, entry.state]))
+      .toEqual([['A', 'checking'], ['B', 'checking'], ['C', 'reserved']]);
+    expect(h.jobs.find(job => job.jobId === after.activeStackJobId)).toEqual(diagnosticJob);
+  });
+
+  it('withdrawing a running stack member still invalidates the check', async () => {
     const h = await setup('A', 'B');
     await h.tick();
     const first = h.jobs[0];
@@ -790,6 +807,8 @@ describe('queue state machine', () => {
     expect(withdrawn.response.status).toBe(200);
     expect((await h.state()).entries.map((entry: any) => [entry.changeId, entry.state]))
       .toEqual([['A', 'reserved'], ['B', 'withdrawn']]);
+    expect((await h.deliver(first, 'PASS', { composed: oid('d') })))
+      .toMatchObject({ status: 'blocked', code: 'STALE_GENERATION' });
     await h.tick();
     const next = h.jobs[1];
     if (next.kind !== 'validate-stack') throw new Error('expected re-stacked job');

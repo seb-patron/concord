@@ -527,6 +527,16 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           }
           return { status: 'landed', changeId, canonicalOid: landed };
         }
+        if (entry?.state === 'blocked' && entry.blockedReason === 'STALE_MAIN') {
+          if (staleBaseRounds >= 3) throw new ConcordError('STALE_BASE: main kept moving; re-run land', 'conflict', 409);
+          const movedRepository = (await api(client, root)).data;
+          if (!movedRepository.observedCanonicalOid || !sha.test(movedRepository.observedCanonicalOid))
+            throw new ConcordError('canonical main is unavailable after STALE_MAIN', 'server');
+          emit({ state: 'rebased', fromBase: targetBase, toBase: movedRepository.observedCanonicalOid, publishedOid: prepared.head });
+          if (renewTimer) clearInterval(renewTimer);
+          if (renewInFlight) await renewInFlight.catch(() => {});
+          return await landAttempt(input, staleBaseRounds + 1);
+        }
         if (['blocked', 'failed', 'withdrawn'].includes(entry?.state)) throw new ConcordError(`QUEUE_${entry.state.toUpperCase()}: ${entry.blockedReason ?? state.blockedReason ?? 'diagnostic failure'}`, 'server');
         await renew(); await pause(1000);
       }

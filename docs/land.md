@@ -27,6 +27,8 @@ When land cleanly cherry-picks a source commit onto canonical main, evidence may
 
 If canonical main advances after publication and enqueue returns `STALE_BASE`, `land` refreshes main, republishes the change, reruns inspection, and carries the approval only when the changed paths and patch ID still match. It retries this rebase up to three times in one invocation; a changed patch or merge conflict requires fresh review, and continued main movement exits with `STALE_BASE: main kept moving; re-run land`.
 
+If an admitted queue entry is later blocked with `STALE_MAIN` because an earlier landing advanced main, `land` performs the same bounded rebase and re-enqueue flow. Approval carries forward only when the changed paths and patch ID still match.
+
 With owner or reviewer credentials (set `CONCORD_REVIEWER_TOKEN` for an agent run), the inspection wait reports a terminal non-PASS outcome for the current revision immediately as `INSPECTION_FAILED: <outcome>`; the `--json` error details include the redacted checker log tail. An unchanged head reaches this wait and reports its prior failure without re-inspection. After `ENV_ERROR` or `TIMEOUT`, fix the environment and rerun with a new `--intent-key`. `FAIL` and `MERGE_CONFLICT` remain content verdicts.
 
 `--mirror-to https://github.com/OWNER/REPO.git` mirrors confirmed canonical main through the existing mirror implementation. Set `CONCORD_MIRROR_TOKEN` for a private destination. The mirror checks that destination main is absent or an ancestor and uses a normal push; it never force pushes.

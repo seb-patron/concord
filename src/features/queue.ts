@@ -413,10 +413,13 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     const entry: Entry = { ...checked, issueNumber: view?.status === 'eligible' ? view.value.issueNumber : null, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
     transition(context, state, entry, 'reserved');
     state.entries.push(entry);
-    bump(context, state, 'ADMITTED', [changeId]);
+    const landingInProgress = Boolean(state.activeStackJobId
+      || state.diagnosis && state.diagnosis.phase !== 'done'
+      || state.entries.some(item => item.state === 'checking'));
+    if (!landingInProgress) bump(context, state, 'ADMITTED', [changeId]);
     const waiting = ordered(state).filter(item => item.state === 'reserved');
     const first = waiting[0];
-    if (first) {
+    if (first && !landingInProgress) {
       const cohort = waiting.filter(item => item.policyId === first.policyId && item.profileId === first.profileId
         && item.canonicalStorageName === first.canonicalStorageName && item.scratchStorageName === first.scratchStorageName);
       const available = new Set(state.entries.filter(item => item.state === 'landed').map(item => item.changeId));

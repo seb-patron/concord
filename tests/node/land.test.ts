@@ -34,7 +34,7 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
-  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving') {
+  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving' | 'stale-main') {
     const sourceDir = await temp(); await git(sourceDir, 'init', '-q', '-b', 'main');
     await writeFile(join(sourceDir, 'value.txt'), 'before\n');
     await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'base');
@@ -70,9 +70,11 @@ describe('land input and evidence gates', () => {
       }
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/queue') return { data: enqueues > (mode === 'keeps-moving' ? 4 : 1)
-        ? { entries: [{ changeId: 'change', state: 'landed' }], finalCanonicalOid: observedBase, promotion: {} }
-        : { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: mode === 'stale-main' && enqueues === 1
+        ? { entries: [{ changeId: 'change', state: 'blocked', blockedReason: 'STALE_MAIN' }] }
+        : enqueues > (mode === 'keeps-moving' ? 4 : 1)
+          ? { entries: [{ changeId: 'change', state: 'landed' }], finalCanonicalOid: observedBase, promotion: {} }
+          : { entries: [] }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'change', state: 'active',
         unitKey: 'file:value.txt', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote:
@@ -85,7 +87,11 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path.startsWith('/repos/demo/jobs/')) return { data: { result: { outcome: 'PASS', reviewManifestDigest: 'manifest' } }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/queue/enqueue') {
         enqueues++;
-        if (enqueues <= (mode === 'keeps-moving' ? 4 : 1)) {
+        if (mode === 'stale-main' && enqueues === 1) {
+          observedBase = await nextBase();
+          return { data: { entryId: 'entry' }, version: 1 };
+        }
+        if (mode !== 'stale-main' && enqueues <= (mode === 'keeps-moving' ? 4 : 1)) {
           observedBase = await nextBase();
           throw new ConcordError('STALE_BASE', 'conflict', 409, { error: { code: 'STALE_BASE' } });
         }
@@ -140,6 +146,17 @@ describe('land input and evidence gates', () => {
     expect(outcome.error).toMatchObject({ kind: 'conflict', message: 'STALE_BASE: main kept moving; re-run land' });
     expect(outcome.events.filter(event => event.state === 'rebased')).toHaveLength(3);
     expect(outcome.enqueues).toBe(4);
+  });
+
+  it('re-publishes and carries approval after an admitted entry becomes stale main', async () => {
+    const outcome = await staleBaseCase('stale-main');
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.result?.status).toBe('landed');
+    expect(outcome.events.filter(event => event.state === 'rebased')).toHaveLength(1);
+    expect(outcome.events.filter(event => event.state === 'review-carried')).toHaveLength(1);
+    expect(outcome.verdictBodies[1].carriedFrom).toMatchObject({ method: 'patch-id' });
+    expect(outcome.verdicts).toBe(2);
+    expect(outcome.enqueues).toBe(2);
   });
 
   it('advertises lease claims by normalized count rather than raw array length', () => {
@@ -1490,8 +1507,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     const snapshot = await api('/snapshot').catch(() => null);
     const changeId = snapshot?.data?.projections?.repos?.changes?.find((change: any) => change.intentKey === 'parallel-1')?.changeId;
     const queue = await api('/queue').catch(() => null);
-    // Admission bumps the queue, so two seconds later the coalesce alarm may select the entry into its own
-    // stack. A poll stalled past that window sees checking, which still means admitted.
+    // Admission waits for the running stack; a poll may see the entry reserved or selected afterward.
     if (changeId && queue?.data?.entries?.some((entry: any) => entry.changeId === changeId && ['reserved', 'checking'].includes(entry.state))) {
       secondAdmitted = true;
       break;
@@ -1510,12 +1526,13 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     expect(attempt, `parallel land child ${index} failed`).toHaveProperty('result');
     if (!('result' in attempt)) continue;
     expect(attempt.result.stdout).toContain('"state":"landed"');
-    expect(attempt.result.stdout.toString() + attempt.result.stderr.toString()).not.toContain('STALE_MAIN');
   }
   const parallelIds = (await api('/snapshot')).data.projections.repos.changes
     .filter((change: any) => ['parallel-0', 'parallel-1'].includes(change.intentKey)).map((change: any) => change.changeId);
-  expect((await api('/queue')).data.entries.filter((entry: any) => parallelIds.includes(entry.changeId))
-    .map((entry: any) => entry.state)).toEqual(['landed', 'landed']);
+  const parallelEntries = (await api('/queue')).data.entries.filter((entry: any) => parallelIds.includes(entry.changeId));
+  expect(parallelEntries.filter((entry: any) => entry.state === 'landed').map((entry: any) => entry.changeId).sort())
+    .toEqual([...parallelIds].sort());
+  expect(parallelEntries.filter((entry: any) => entry.blockedReason === 'STALE_MAIN')).toHaveLength(1);
   expect((await api('')).data.observedCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
   const sameFile = await Promise.all([1, 18].map(async (line, index) => {
     const checkout = await temp(); await git(checkout, 'clone', '-q', '-b', 'main', canonical, '.');
