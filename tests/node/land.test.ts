@@ -535,7 +535,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const api = async (path: string) => fetch(`${url}/v1/repos/landdemo${path}`, {
     headers: { authorization: 'Bearer local-owner' },
   }).then(response => response.json()) as Promise<any>;
-  async function drive<T>(work: Promise<T>): Promise<T> {
+  async function drive<T>(work: Promise<T>, beforeRun?: (job: any) => Promise<void>): Promise<T> {
     let finished = false;
     work.finally(() => { finished = true; }).catch(() => {});
     const handled = new Set<string>(); const until = Date.now() + 150_000;
@@ -545,6 +545,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
         job.state === 'pending' && !handled.has(job.jobId));
       if (pending) {
         handled.add(pending.jobId);
+        if (beforeRun) await beforeRun(pending);
         const role = pending.kind === 'promote' ? 'promoter' : 'checker';
         const args = ['--import', 'tsx', 'runner/main.ts', '--repo', 'landdemo', '--role', role, '--once'];
         if (role === 'checker') args.push('--profile', profilePath);
@@ -637,6 +638,16 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const carryVerdicts = await api(`/changes/${carryChange.changeId}/verdicts`);
   expect(carryVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid, method: 'patch-id' });
 
+  const republishCases = await Promise.all(['a.txt', 'b.txt', 'bulk-0.txt'].map(async (file, index) => {
+    const checkout = await temp(); await git(checkout, 'clone', '-q', '-b', 'main', canonical, '.');
+    await writeFile(join(checkout, file), `${file}=reviewed-${index}\n`);
+    await git(checkout, 'add', file); await git(checkout, 'commit', '-qm', 'reviewed patch');
+    const head = await git(checkout, 'rev-parse', 'HEAD');
+    const paths = join(dir, `republish-allowed-${index}.txt`); await writeFile(paths, `${file}\n`);
+    const review = join(dir, `republish-review-${index}.txt`);
+    return { file, checkout, head, paths, review, intent: `republish-${index}`, reviewedHead: '' };
+  }));
+
   const rangeSource = await temp(); await git(rangeSource, 'clone', '-q', '-b', 'main', seed, '.');
   const rangeBase = await git(rangeSource, 'rev-parse', 'HEAD');
   await git(rangeSource, 'checkout', '-qb', 'agent-range');
@@ -682,6 +693,19 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const rangeVerdicts = await api(`/changes/${rangeChange.changeId}/verdicts`);
   expect(rangeVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid: rangeHead, method: 'patch-id' });
 
+  for (const item of republishCases) {
+    const args = ['--repo', 'landdemo', '--source', item.checkout, '--commit', item.head,
+      '--intent-key', item.intent, '--intent', `Republish ${item.file}`, '--allowed-files', item.paths,
+      '--wait-seconds', '150', '--json'];
+    const first = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...args],
+      { cwd: root, env: authorEnv, timeout: 155_000 }));
+    const events = first.stdout.trim().split('\n').map(line => JSON.parse(line));
+    expect(events.at(-1).state).toBe('awaiting-review');
+    item.reviewedHead = events.at(-1).headOid;
+    expect(item.reviewedHead).not.toBe(item.head);
+    await writeFile(item.review, `# ✅ APPROVED FOR MERGE — head ${item.reviewedHead}\nAPPROVED for merge\n`);
+  }
+
   const contextSource = await temp(); await git(contextSource, 'clone', '-q', '-b', 'main', canonical, '.');
   const context = await readFile(join(contextSource, 'shared.txt'), 'utf8');
   await writeFile(join(contextSource, 'shared.txt'), context.replace('line-5\n', 'line-5-canonical\n'));
@@ -695,6 +719,64 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     '--intent', 'Update shared context', '--allowed-files', sharedAllowed, '--review-evidence', contextEvidence,
     '--wait-seconds', '150', '--json'], { cwd: root, env: landEnv, timeout: 155_000 }));
   expect(contextLand.stdout).toContain('"state":"landed"');
+
+  const changedEvidence = republishCases[2];
+  const originalEvidence = await readFile(changedEvidence.review, 'utf8');
+  const rejectingEvidence = `# ✅ APPROVED FOR MERGE — head ${changedEvidence.reviewedHead}\nREQUEST CHANGES\n`;
+  expect(approvedHead(rejectingEvidence, changedEvidence.reviewedHead)).toBe(false);
+  const changedEvidenceArgs = ['--repo', 'landdemo', '--source', changedEvidence.checkout, '--commit', changedEvidence.head,
+    '--intent-key', changedEvidence.intent, '--intent', `Republish ${changedEvidence.file}`,
+    '--allowed-files', changedEvidence.paths, '--review-evidence', changedEvidence.review, '--wait-seconds', '150', '--json'];
+  let replacedDuringInspection = false;
+  const changedEvidenceResult = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...changedEvidenceArgs],
+    { cwd: root, env: landEnv, timeout: 155_000 }), async job => {
+    if (job.kind === 'inspect-candidate' && !replacedDuringInspection) {
+      await writeFile(changedEvidence.review, rejectingEvidence);
+      replacedDuringInspection = true;
+    }
+  });
+  expect(replacedDuringInspection).toBe(true);
+  expect(changedEvidenceResult.stdout).toContain('"state":"landed"');
+  const changedEvidenceChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === changedEvidence.intent);
+  expect(changedEvidenceChange.revision).toBe(2);
+  expect(changedEvidenceChange.headOid).not.toBe(changedEvidence.reviewedHead);
+  const changedEvidenceVerdicts = await api(`/changes/${changedEvidenceChange.changeId}/verdicts`);
+  expect(changedEvidenceVerdicts.data.items.at(-1)).toMatchObject({
+    carriedFrom: { sourceOid: changedEvidence.reviewedHead, method: 'patch-id' },
+    evidenceDigest: `sha256:${createHash('sha256').update(originalEvidence).digest('hex')}`,
+  });
+
+  const unchanged = republishCases[0];
+  const unchangedArgs = ['--repo', 'landdemo', '--source', unchanged.checkout, '--commit', unchanged.head,
+    '--intent-key', unchanged.intent, '--intent', `Republish ${unchanged.file}`, '--allowed-files', unchanged.paths,
+    '--review-evidence', unchanged.review, '--wait-seconds', '150', '--json'];
+  const republished = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...unchangedArgs],
+    { cwd: root, env: landEnv, timeout: 155_000 }));
+  const republishedEvents = republished.stdout.trim().split('\n').map(line => JSON.parse(line));
+  expect(republishedEvents.at(-1).state).toBe('landed');
+  expect(republishedEvents.find(item => item.state === 'review-carried')).toMatchObject({
+    sourceOid: unchanged.reviewedHead, publishedOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
+  const unchangedChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === unchanged.intent);
+  expect(unchangedChange.revision).toBe(2);
+  const unchangedVerdicts = await api(`/changes/${unchangedChange.changeId}/verdicts`);
+  expect(unchangedVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid: unchanged.reviewedHead, method: 'patch-id' });
+
+  const altered = republishCases[1];
+  const alteredSource = await temp(); await git(alteredSource, 'clone', '-q', '-b', 'main', canonical, '.');
+  await writeFile(join(alteredSource, altered.file), `${altered.file}=different-patch\n`);
+  await git(alteredSource, 'add', altered.file); await git(alteredSource, 'commit', '-qm', 'different patch');
+  const alteredHead = await git(alteredSource, 'rev-parse', 'HEAD');
+  const alteredArgs = ['--repo', 'landdemo', '--source', alteredSource, '--commit', alteredHead,
+    '--intent-key', altered.intent, '--intent', `Republish ${altered.file}`, '--allowed-files', altered.paths,
+    '--review-evidence', altered.review, '--wait-seconds', '150', '--json'];
+  const refusal = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...alteredArgs],
+    { cwd: root, env: landEnv, timeout: 155_000 }).then(() => null, error => error as { code: number; stderr: string }));
+  expect(refusal).toMatchObject({ code: 2 });
+  const alteredChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === altered.intent);
+  expect(alteredChange.revision).toBe(2);
+  expect(refusal?.stderr).toContain(altered.reviewedHead);
+  expect(refusal?.stderr).toContain(alteredChange.headOid);
+  expect((await api(`/changes/${alteredChange.changeId}/verdicts`)).data.items).toEqual([]);
   const staleContext = await temp(); await git(staleContext, 'clone', '-q', '-b', 'main', seed, '.');
   const stale = await readFile(join(staleContext, 'shared.txt'), 'utf8');
   await writeFile(join(staleContext, 'shared.txt'), stale.replace('line-7\n', 'line-7-source\n'));

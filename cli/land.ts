@@ -301,7 +301,11 @@ export async function land(input: LandOptions): Promise<Obj> {
     const canonical = await access(client, root, latestRepo, 'read', latestRepo.canonicalStorageName);
     const targetBase = alreadyQueued || current.headOid && current.baseOid === latestRepo.observedCanonicalOid ? current.baseOid : latestRepo.observedCanonicalOid;
     const prepared = await prepareHead(squash?.work ?? source, squash?.oid ?? commit, changed.parent, targetBase, canonical);
+    let priorWork: string | null = null;
+    let priorHead: string | null = null;
     try {
+      let capturedEvidence: string | undefined;
+      const reviewEvidence = async () => capturedEvidence ??= await readFile(required(options.reviewEvidence, 'review evidence'), 'utf8');
       let change = (await api(client, path)).data;
       if (change.revision !== current.revision || change.headOid !== current.headOid || change.baseOid !== current.baseOid)
         throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change changed during preparation', 'conflict');
@@ -310,6 +314,25 @@ export async function land(input: LandOptions): Promise<Obj> {
           throw new ConcordError('INSPECTION_FAILED: environment inspection cannot be retried for an admitted change; use a new intent key', 'server');
         const candidate = await access(client, root, repository, 'write', change.candidateStorageName);
         rejectCanonicalTarget(change.candidateStorageName, repository.canonicalStorageName, candidate.remote, repository.canonicalRemote);
+        const evidence = options.reviewEvidence ? await reviewEvidence() : null;
+        const priorJobs = evidence && !approvedHead(evidence, commit)
+          ? (await api(client, `${root}/snapshot`)).data.projections?.runners?.jobs ?? [] : [];
+        const priorJob = priorJobs.find((job: Obj) => job.kind === 'inspect-candidate' &&
+          job.changeId === changeId && job.state === 'completed' && job.revision <= change.revision &&
+          job.candidate?.storageName === change.candidateStorageName &&
+          typeof job.candidate?.headOid === 'string' && approvedHead(evidence!, job.candidate.headOid));
+        if (priorJob) {
+          priorHead = priorJob.candidate.headOid;
+          priorWork = await mkdtemp(join(tmpdir(), 'concord-land-prior-'));
+          await git(['clone', '--quiet', '--no-checkout', '--', candidate.remote, priorWork], { token: candidate.token });
+          if (priorJob.candidate.headOid !== change.headOid) {
+            try { await git(['cat-file', '-e', `${priorJob.candidate.headOid}^{commit}`], {}, priorWork); }
+            catch {
+              try { await git(['fetch', '--no-tags', '--', candidate.remote, priorJob.candidate.headOid], { token: candidate.token }, priorWork); }
+              catch { throw new ConcordError(`review evidence for earlier published head ${priorJob.candidate.headOid} cannot be verified against ${prepared.head}: prior commit is unavailable`, 'usage'); }
+            }
+          }
+        }
         await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags',
           ...(change.headOid ? [`--force-with-lease=${change.branch}:${change.headOid}`] : []),
           '--', candidate.remote, `${prepared.head}:${change.branch}`], { token: candidate.token }, prepared.work);
@@ -336,20 +359,26 @@ export async function land(input: LandOptions): Promise<Obj> {
         if (!options.reviewEvidence) { emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
         const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
-        const evidence = await readFile(options.reviewEvidence, 'utf8');
-        let carried = false;
+        const evidence = await reviewEvidence();
+        let carriedFromOid: string | null = null;
         if (!approvedHead(evidence, prepared.head)) {
-          if ((prepared.cherryPicked || squash) && prepared.head !== commit && approvedHead(evidence, commit)) {
+          const sourceApproval = (prepared.cherryPicked || squash) && prepared.head !== commit && approvedHead(evidence, commit);
+          const previousHead = priorWork && priorHead;
+          if (sourceApproval || previousHead) {
+            const reviewedOid = previousHead ?? squash?.oid ?? commit;
+            const reviewedWork = previousHead ? priorWork! : squash?.work ?? source;
             const published = await filesChanged(prepared.work, prepared.head);
-            carried = published.parent === targetBase &&
-              published.files.length === changed.files.length &&
-              published.files.every(file => allowed.has(file) && changed.files.includes(file)) &&
-              (!squash || (await git(['rev-parse', `${squash.oid}^{tree}`], {}, squash.work)) ===
-                (await git(['rev-parse', `${commit}^{tree}`], {}, source)) &&
-                (await git(['rev-parse', `${squash.oid}^`], {}, squash.work)).toLowerCase() === changed.parent.toLowerCase()) &&
-              await patchId(squash?.work ?? source, squash?.oid ?? commit) === await patchId(prepared.work, prepared.head);
+            const reviewedFiles = previousHead ? (await filesChanged(reviewedWork, reviewedOid)).files : changed.files;
+            const sameFiles = published.parent === targetBase && published.files.length === reviewedFiles.length &&
+              published.files.every(file => allowed.has(file) && reviewedFiles.includes(file));
+            const sameSquash = previousHead || !squash || (await git(['rev-parse', `${squash.oid}^{tree}`], {}, squash.work)) ===
+              (await git(['rev-parse', `${commit}^{tree}`], {}, source)) &&
+              (await git(['rev-parse', `${squash.oid}^`], {}, squash.work)).toLowerCase() === changed.parent.toLowerCase();
+            if (sameFiles && sameSquash && await patchId(reviewedWork, reviewedOid) === await patchId(prepared.work, prepared.head))
+              carriedFromOid = previousHead ?? commit;
+            else if (previousHead) throw new ConcordError(`review evidence for earlier published head ${previousHead} cannot be carried to ${prepared.head}: patch ID or changed files differ`, 'usage');
           }
-          if (!carried) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
+          if (!carriedFromOid) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
         }
         const reviewer = new ConcordClient({ url, token: reviewerToken });
         const inspected = await inspection(reviewer, root, change);
@@ -357,11 +386,11 @@ export async function land(input: LandOptions): Promise<Obj> {
         const findings = (await api(reviewer, `${path}/findings`)).data;
         const verdicts = (await api(reviewer, `${path}/verdicts`)).data;
         let verdict = (verdicts.items ?? []).find((item: Obj) => item.revision === change.revision && item.decision === 'approve' && item.evidenceDigest === hash(evidence) &&
-          (carried ? item.carriedFrom?.sourceOid === commit && item.carriedFrom?.method === 'patch-id' : !item.carriedFrom));
+          (carriedFromOid ? item.carriedFrom?.sourceOid === carriedFromOid && item.carriedFrom?.method === 'patch-id' : !item.carriedFrom));
         requirePublishedChange((await api(client, path)).data);
         if (!verdict) verdict = (await api(reviewer, `${path}/verdicts`, { revision: change.revision, reviewManifestDigest: inspected.reviewManifestDigest, findingSetVersion: findings.findingSetVersion, decision: 'approve', evidenceDigest: hash(evidence),
-          ...(carried ? { carriedFrom: { sourceOid: commit, method: 'patch-id' } } : {}) }, await currentVersion(reviewer, root))).data;
-        if (carried) emit({ state: 'review-carried', sourceOid: commit, publishedOid: prepared.head });
+          ...(carriedFromOid ? { carriedFrom: { sourceOid: carriedFromOid, method: 'patch-id' } } : {}) }, await currentVersion(reviewer, root))).data;
+        if (carriedFromOid) emit({ state: 'review-carried', sourceOid: carriedFromOid, publishedOid: prepared.head });
         emit({ state: 'reviewed', verdictId: verdict.verdictId, headOid: prepared.head });
         await renew();
         entry = (await api(client, `${root}/queue/enqueue`, { changeId, verdictId: verdict.verdictId, leaseFences: fences() }, await currentVersion(client, root))).data;
@@ -389,7 +418,7 @@ export async function land(input: LandOptions): Promise<Obj> {
         await renew(); await pause(1000);
       }
       throw new ConcordError('QUEUE_TIMEOUT: landing did not finish', 'server');
-    } finally { await prepared.cleanup(); }
+    } finally { if (priorWork) await rm(priorWork, { recursive: true, force: true }); await prepared.cleanup(); }
   } finally {
     await refresh().catch(() => {});
     for (const item of held) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
