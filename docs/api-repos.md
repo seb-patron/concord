@@ -27,6 +27,8 @@ After verified canonical readback, a landed change becomes `merged` and records 
 
 The active-change limit caps non-terminal changes per repo. It is owner trusted configuration only — there is no API or CLI for an agent to set it. `costLimits.maxActiveChangesPerRepo` sets the install-wide default (integer 1–1000, default 32) and `costLimits.activeChangeLimits` maps a repoId to a per-repo override in the same range. `GET /v1/repos/:r` reports the effective number as `activeChangeLimit` so agents and the UI can show it. Both keys are optional; Mother Base and every repo keep 32.
 
+Closing a change also releases its active and reserved leases in the same transaction. Each released lease is recorded in the lease event history as `lease.released` with reason `change-closed`; the close response remains unchanged.
+
 ```json
 { "costLimits": { "maxActiveChangesPerRepo": 32, "activeChangeLimits": { "swarm_repo": 128 } } }
 ```
