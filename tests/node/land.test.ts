@@ -1,5 +1,5 @@
 import { execFile as callback, execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1194,7 +1194,16 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const evidence = join(dir, 'review.txt'); await writeFile(evidence, `# ✅ APPROVED FOR MERGE — head ${commit}\n\nReview of ${commit}\n\nAPPROVED for merge\n`);
   const baseArgs = ['--repo', 'landdemo', '--source', sourceDir, '--commit', commit, '--intent-key', 'generic-task',
     '--intent', 'Update a value', '--allowed-files', allowed, '--wait-seconds', '150', '--json'];
-  const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
+  const authorTokenFile = join(dir, 'author-token'); const reviewerTokenFile = join(dir, 'reviewer-token');
+  const credentialConfig = join(dir, 'concord-profiles.json');
+  await writeFile(authorTokenFile, 'local-agent-a'); await chmod(authorTokenFile, 0o600);
+  await writeFile(reviewerTokenFile, 'local-reviewer'); await chmod(reviewerTokenFile, 0o600);
+  await writeFile(credentialConfig, JSON.stringify({ profiles: {
+    author: { url, tokenFile: authorTokenFile }, reviewer: { url, tokenFile: reviewerTokenFile },
+  } })); await chmod(credentialConfig, 0o600);
+  const landEnv: NodeJS.ProcessEnv = { ...environment, CONCORD_CONFIG: credentialConfig,
+    CONCORD_PROFILE: 'author', CONCORD_REVIEWER_PROFILE: 'reviewer' };
+  delete landEnv.CONCORD_TOKEN; delete landEnv.CONCORD_REVIEWER_TOKEN;
   const authorEnv: NodeJS.ProcessEnv = { ...landEnv };
   delete authorEnv.CONCORD_REVIEWER_TOKEN;
   const startedRun = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'start', '--repo', 'landdemo',
@@ -1216,7 +1225,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     '--review-evidence', evidence], { cwd: root, env: { ...landEnv, CONCORD_REVIEWER_TOKEN: 'local-agent-a' }, timeout: 30_000 }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('reviewer token must differ') });
   const landed = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
-    ...baseArgs, '--review-evidence', evidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    ...baseArgs, '--profile', 'author', '--reviewer-profile', 'reviewer', '--review-evidence', evidence], { cwd: root, env: landEnv, timeout: 155_000 }))
     .catch(error => { throw new Error(`land failed after: ${(error as { stdout?: string }).stdout ?? ''}\n${(error as Error).message}`); });
   const afterResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
   expect(afterResume.changeId).toBe(started.changeId);

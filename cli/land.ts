@@ -9,13 +9,14 @@ import { readAwRun } from './aw-run.ts';
 import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
 import { changeByIntent, leaseCovers } from './start.ts';
 import { mintGitToken } from './git-token.ts';
+import { addProfileRejectionContext, loadProfile, resolveCredential, reviewerProfileName, type ProfileCredential } from './profile.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
 export type LandOptions = { repo?: string; source?: string; commit?: string; intentKey?: string; intent?: string;
   allowedFiles?: string; dependsOn?: string[]; reviewEvidence?: string; mirrorTo?: string; waitSeconds?: number;
   base?: string; awRun?: string; expectedVersion?: number; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient;
-  renewEveryMs?: number };
+  renewEveryMs?: number; profile?: string; reviewerProfile?: string; tokenStdin?: string };
 const sha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 const hash = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -248,13 +249,18 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
   const allowed = parseAllowed(await readFile(allowedFile, 'utf8'));
   const outside = changed.files.filter(file => !allowed.has(file));
   if (outside.length) throw new ConcordError(`OUTSIDE_ALLOWED_FILES: ${outside.join(', ')}`, 'usage');
-  const token = input.client ? '' : required(process.env.CONCORD_TOKEN, 'CONCORD_TOKEN');
-  const url = input.client?.baseUrl ?? required(process.env.CONCORD_URL, 'CONCORD_URL');
-  const client = input.client ?? new ConcordClient({ url, token });
-  if (options.reviewEvidence && token && process.env.CONCORD_REVIEWER_TOKEN === token)
+  const authorCredential = input.client ? undefined : await resolveCredential({ profile: input.profile, tokenStdin: input.tokenStdin });
+  const token = authorCredential?.token ?? '';
+  const url = input.client?.baseUrl ?? authorCredential?.url ?? process.env.CONCORD_URL ?? '';
+  const client = input.client ?? addProfileRejectionContext(new ConcordClient({ url, token }), authorCredential?.profileName);
+  const reviewerProfile = reviewerProfileName(input.reviewerProfile);
+  const reviewerCredential: ProfileCredential | undefined = !input.client && !process.env.CONCORD_REVIEWER_TOKEN && reviewerProfile
+    ? await loadProfile(reviewerProfile) : undefined;
+  const reviewerTokenForInspection = process.env.CONCORD_REVIEWER_TOKEN ?? reviewerCredential?.token;
+  if (options.reviewEvidence && token && reviewerTokenForInspection === token)
     throw new ConcordError('reviewer token must differ from author token', 'usage');
-  const inspector = !input.client && process.env.CONCORD_REVIEWER_TOKEN && process.env.CONCORD_REVIEWER_TOKEN !== token
-    ? new ConcordClient({ url, token: process.env.CONCORD_REVIEWER_TOKEN }) : client;
+  const inspector = !input.client && reviewerTokenForInspection && reviewerTokenForInspection !== token
+    ? addProfileRejectionContext(new ConcordClient({ url: reviewerCredential?.url ?? url, token: reviewerTokenForInspection }), reviewerCredential?.profileName ?? 'environment') : client;
   const emit = (event: Obj) => (options.emit ?? ((value: Obj) => { process.stdout.write(`${JSON.stringify(redactOutput(value))}\n`); }))({ repo, intentKey, ...event });
   let squash = options.base ? await squashRange(source, changed.parent, commit) : null;
   if (squash) emit({ state: 'squashed', base: changed.parent, headOid: commit, squashOid: squash.oid });
@@ -441,8 +447,18 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         requirePublishedChange(change);
         await assertLeasesLive();
         if (!options.reviewEvidence) { awaitingReview = true; emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
-        const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
+        const reviewerToken = required(reviewerTokenForInspection, 'CONCORD_REVIEWER_TOKEN or --reviewer-profile');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
+        const reviewer = reviewerCredential
+          ? addProfileRejectionContext(new ConcordClient({ url: reviewerCredential.url, token: reviewerToken }), reviewerCredential.profileName)
+          : addProfileRejectionContext(new ConcordClient({ url, token: reviewerToken }), 'environment');
+        if (!input.client) {
+          const [authorIdentity, reviewerIdentity] = await Promise.all([
+            client.request<Envelope>('GET', '/me'), reviewer.request<Envelope>('GET', '/me'),
+          ]);
+          if (authorIdentity.data.principalId === reviewerIdentity.data.principalId)
+            throw new ConcordError('reviewer principal must differ from author principal', 'usage');
+        }
         const evidence = await reviewEvidence();
         let carriedFromOid: string | null = null;
         if (!approvedHead(evidence, prepared.head)) {
@@ -464,7 +480,6 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           }
           if (!carriedFromOid) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
         }
-        const reviewer = new ConcordClient({ url, token: reviewerToken });
         const inspected = await inspection(reviewer, root, change);
         if (!inspected || inspected.outcome !== 'PASS' || !inspected.reviewManifestDigest) throw new ConcordError('trusted inspection result is unavailable', 'server');
         const findings = (await api(reviewer, `${path}/findings`)).data;

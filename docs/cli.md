@@ -21,6 +21,20 @@ export CONCORD_TOKEN='operator-provided-scoped-token'
 npm run concord -- repo list --json
 ```
 
+## Authentication profiles
+
+Profiles let an agent load its connection token without reading the token file itself. Set `CONCORD_CONFIG` to a private JSON file, or use `~/.config/concord/profiles.json`:
+
+```json
+{ "default": "aw-author", "profiles": {
+  "aw-author": { "url": "https://concord.example", "tokenFile": "/Users/me/.config/concord/long/tokens.json", "tokenKey": "aw-author" }
+} }
+```
+
+Use `npm run concord -- repo list --profile aw-author` or set `CONCORD_PROFILE=aw-author`; `npm run concord -- whoami [--profile NAME]` reports the selected profile, URL host, principal ID, and roles from `GET /v1/me`. Both the profile file and token file must be owned by the current user and have no group/world permission bits (`chmod 600`). `tokenFile` may also contain a single plain token. Profile errors use `PROFILE_NOT_FOUND`, `PROFILE_TOKEN_UNREADABLE`, or `PROFILE_PERMISSIONS` and identify the profile without printing its token.
+
+Credential precedence is `CONCORD_TOKEN` (CI) > `--token-stdin` > `--profile NAME` > `CONCORD_PROFILE` > the profile file's `default`. `CONCORD_URL` overrides the URL in a selected profile. For `land`, `CONCORD_REVIEWER_TOKEN` takes precedence over `--reviewer-profile NAME` or `CONCORD_REVIEWER_PROFILE`; the reviewer credential must resolve to a different token and principal from the author. A rejected profile credential reports the profile and safe server principal/expiry fields.
+
 To avoid putting the API token in an environment file, pipe it to `--token-stdin`. The option consumes stdin, so a JSON body file cannot also be piped on that invocation.
 
 ```sh
@@ -31,7 +45,7 @@ The CLI never invents a local server or fixture identity. For an explicitly conf
 
 ## Common options and output
 
-`CONCORD_URL` and `CONCORD_TOKEN` are required for requests. `--token-stdin` reads the token from stdin and takes precedence over `CONCORD_TOKEN`. `--repo ID` selects a repository for commands that operate on one. Command responses and help (`help` or `--help`) are JSON on stdout. Errors are JSON on stderr.
+Requests resolve credentials in this order: `CONCORD_TOKEN` > `--token-stdin` > `--profile NAME` > `CONCORD_PROFILE` > the profile file's `default`. `CONCORD_URL` overrides the selected profile URL. `--repo ID` selects a repository for commands that operate on one. Command responses and help (`help` or `--help`) are JSON on stdout. Errors are JSON on stderr.
 
 Mutations accept `--idempotency-key KEY`; when omitted, the CLI creates one for that invocation. Reuse the same key and body when retrying a request whose response was lost. Mutations to existing resources require `--expected-version N`. `change publish` and internal Git-token requests use the version returned by their preceding repository/change reads unless the option overrides it. Create repo and create change do not require an existing-resource version. `--body-file PATH` supplies a complete JSON object for commands with a body. Arrays and objects supplied directly as options must be valid JSON.
 

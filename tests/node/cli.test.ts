@@ -1,5 +1,5 @@
-import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile as execFileCallback, execFileSync } from 'node:child_process';
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -20,6 +20,82 @@ async function tempDir(label: string): Promise<string> {
   return dir;
 }
 afterEach(async () => { await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+
+describe('Concord authentication profiles', () => {
+  it('selects profiles, preserves environment precedence, and rejects unsafe or special files', async () => {
+    const dir = await tempDir('profiles');
+    const tokensPath = join(dir, 'tokens.json');
+    const configPath = join(dir, 'profiles.json');
+    await writeFile(tokensPath, JSON.stringify({ first: 'profile-one-secret', second: 'profile-two-secret' }));
+    await chmod(tokensPath, 0o600);
+    const config = { default: 'one', profiles: {
+      one: { url: 'http://profiles.test', tokenFile: tokensPath, tokenKey: 'first' },
+      two: { url: 'http://profiles.test', tokenFile: tokensPath, tokenKey: 'second' },
+    } };
+    await writeFile(configPath, JSON.stringify(config)); await chmod(configPath, 0o600);
+    const originalFetch = globalThis.fetch;
+    const stdout: string[] = [];
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => { stdout.push(String(chunk)); return true; });
+    const previous = { CONCORD_CONFIG: process.env.CONCORD_CONFIG, CONCORD_URL: process.env.CONCORD_URL,
+      CONCORD_TOKEN: process.env.CONCORD_TOKEN, CONCORD_PROFILE: process.env.CONCORD_PROFILE };
+    const authorization: string[] = [];
+    let rejectAuth = false;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      authorization.push(new Headers(init?.headers).get('authorization') ?? '');
+      const path = new URL(String(input)).pathname;
+      if (rejectAuth) return new Response(JSON.stringify({ error: { code: 'CREDENTIAL_EXPIRED', principalId: 'profile-principal', expiresAt: 123 } }), { status: 401 });
+      const data = path.endsWith('/me') ? { principalId: 'profile-principal', roles: ['agent'] } : { items: [] };
+      return new Response(JSON.stringify({ data, version: 0, eventSeq: 0 }), { status: 200 });
+    }) as typeof fetch;
+    process.env.CONCORD_CONFIG = configPath; delete process.env.CONCORD_URL;
+    delete process.env.CONCORD_TOKEN; delete process.env.CONCORD_PROFILE;
+    try {
+      await runCli(['repo', 'list']);
+      await runCli(['repo', 'list', '--profile', 'two']);
+      process.env.CONCORD_PROFILE = 'two';
+      await runCli(['repo', 'list']);
+      process.env.CONCORD_TOKEN = 'environment-secret';
+      await runCli(['repo', 'list', '--profile', 'one']);
+      delete process.env.CONCORD_TOKEN;
+      await runCli(['whoami', '--profile', 'two']);
+      expect(authorization).toEqual(['Bearer profile-one-secret', 'Bearer profile-two-secret', 'Bearer profile-two-secret',
+        'Bearer environment-secret', 'Bearer profile-two-secret']);
+      rejectAuth = true;
+      await expect(runCli(['repo', 'list', '--profile', 'two'])).rejects.toThrow('credential for profile two was rejected (CREDENTIAL_EXPIRED) principalId=profile-principal expiresAt=123');
+      rejectAuth = false;
+      await expect(runCli(['repo', 'list', '--profile', 'missing'])).rejects.toThrow('PROFILE_NOT_FOUND: profile missing');
+      await chmod(configPath, 0o644);
+      await expect(runCli(['repo', 'list', '--profile', 'one'])).rejects.toThrow('PROFILE_PERMISSIONS: profile one');
+      const runnerEnv: NodeJS.ProcessEnv = { ...process.env, CONCORD_CONFIG: configPath, CONCORD_PROFILE: 'one' };
+      delete runnerEnv.CONCORD_URL; delete runnerEnv.CONCORD_TOKEN;
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'runner/main.ts', '--repo', 'demo', '--role', 'promoter', '--once'],
+        { env: runnerEnv, timeout: 10_000 })).rejects.toMatchObject({ stderr: expect.stringContaining('CONCORD_URL_AND_TOKEN_REQUIRED PROFILE_PERMISSIONS: profile one') });
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'runner/main.ts', '--repo', 'demo', '--role', 'promoter', '--once'],
+        { env: { ...runnerEnv, CONCORD_URL: '', CONCORD_TOKEN: 'nonempty-test-token' }, timeout: 10_000 }))
+        .rejects.toMatchObject({ stderr: expect.stringContaining('CONCORD_URL_AND_TOKEN_REQUIRED') });
+      await chmod(configPath, 0o600);
+      const linkedToken = join(dir, 'linked-token');
+      await symlink(tokensPath, linkedToken);
+      config.profiles.one.tokenFile = linkedToken;
+      await writeFile(configPath, JSON.stringify(config));
+      await expect(runCli(['repo', 'list', '--profile', 'one'])).rejects.toThrow('PROFILE_TOKEN_UNREADABLE: profile one');
+      const fifoToken = join(dir, 'fifo-token');
+      execFileSync('mkfifo', [fifoToken]);
+      config.profiles.one.tokenFile = fifoToken;
+      await writeFile(configPath, JSON.stringify(config));
+      await expect(runCli(['repo', 'list', '--profile', 'one'])).rejects.toThrow('PROFILE_TOKEN_UNREADABLE: profile one');
+      expect(stdout.join('')).not.toContain('profile-one-secret');
+      expect(stdout.join('')).not.toContain('profile-two-secret');
+      expect(stdout.join('')).not.toContain('environment-secret');
+    } finally {
+      stdoutSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+});
 
 it('renews an intent with one versionless batch call and supports an injected heartbeat', async () => {
   const calls: Array<{ method: string; path: string; options?: { body?: Record<string, unknown>; expectedVersion?: number } }> = [];

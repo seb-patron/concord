@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { ConcordClient, ConcordError, idempotencyKey } from './client.ts';
 import { parseAllowed } from './land.ts';
 import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
+import { addProfileRejectionContext, resolveCredential } from './profile.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
@@ -11,10 +12,10 @@ export type StartOptions = { repo: string; intentKey: string; intent: string; al
 const oid = /^[a-f0-9]{40}$/i;
 const keyPattern = /^[A-Za-z0-9_-]{1,128}$/;
 
-function clientFor(input?: ConcordClient): ConcordClient {
+async function clientFor(input?: ConcordClient): Promise<ConcordClient> {
   if (input) return input;
-  if (!process.env.CONCORD_URL || !process.env.CONCORD_TOKEN) throw new ConcordError('CONCORD_URL and CONCORD_TOKEN are required', 'usage');
-  return new ConcordClient({ url: process.env.CONCORD_URL, token: process.env.CONCORD_TOKEN });
+  const credential = await resolveCredential({});
+  return addProfileRejectionContext(new ConcordClient({ url: credential.url, token: credential.token }), credential.profileName);
 }
 async function get(client: ConcordClient, path: string): Promise<Envelope> { return client.request('GET', path); }
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
@@ -72,7 +73,7 @@ export async function start(input: StartOptions): Promise<Obj> {
   if (allowed.length > MAX_NORMALIZED_UNITS) throw new ConcordError(unitsOverCapMessage(allowed.length), 'usage');
   const units = allowed.map(file => `file:${file}`);
   const ttlSeconds = holdSeconds(input.hold);
-  const client = clientFor(input.client);
+  const client = await clientFor(input.client);
   const root = `/repos/${encodeURIComponent(input.repo)}`;
   const repo = (await get(client, root)).data;
   const existing = await changeByIntent(client, root, input.intentKey);
@@ -121,7 +122,7 @@ export async function start(input: StartOptions): Promise<Obj> {
 }
 export async function releaseByIntent(repo: string, intentKey: string, clientInput?: ConcordClient): Promise<Obj> {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(repo) || !keyPattern.test(intentKey)) throw new ConcordError('valid --repo and --intent-key are required', 'usage');
-  const client = clientFor(clientInput); const root = `/repos/${encodeURIComponent(repo)}`;
+  const client = await clientFor(clientInput); const root = `/repos/${encodeURIComponent(repo)}`;
   const change = await changeByIntent(client, root, intentKey);
   if (!change) throw new ConcordError('change for intent key was not found', 'usage');
   const reused = (await post(client, `${root}/changes`, {
@@ -150,7 +151,7 @@ export async function renewByIntent(input: RenewOptions): Promise<Obj> {
   if (input.whilePid !== undefined && (!Number.isSafeInteger(input.whilePid) || input.whilePid < 1))
     throw new ConcordError('--while-pid must be a positive process ID', 'usage');
   const ttlSeconds = holdSeconds(input.hold ?? '5m');
-  const client = clientFor(input.client); const root = `/repos/${encodeURIComponent(repo)}`;
+  const client = await clientFor(input.client); const root = `/repos/${encodeURIComponent(repo)}`;
   const sleep = input.sleep ?? pause;
   const alive = input.alive ?? ((pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } });
   const change = await changeByIntent(client, root, intentKey, true);
