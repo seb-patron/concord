@@ -27,7 +27,7 @@ export const tools: Tool[] = [
   tool('issue_close', 'Close an issue with a reason and current issue version.', { ...repo, issueNumber: { type: 'integer', minimum: 1 }, reason: s, expectedVersion: n, idempotencyKey: s }, ['repoId', 'issueNumber', 'reason', 'expectedVersion']),
   tool('milestone_list', 'List milestones with issue and landed change progress.', { ...repo, cursor: s }, ['repoId']),
   tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
-  tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result.', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 300 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
+  tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result. TTL is bounded by trusted maxLeaseHoldSeconds (default 14400).', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 86400 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
   tool('lease_list', 'List active leases and recent refusals.', { ...repo, cursor: s }, ['repoId']),
   tool('change_checkout', 'Fetch the candidate revision, or create a new local branch at its base, with a short-lived, process-local Git credential.', { ...change, worktree: s }, ['repoId', 'changeId', 'worktree']),

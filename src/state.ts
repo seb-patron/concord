@@ -116,11 +116,11 @@ const fixtureDigest = `sha256:${'0'.repeat(64)}` as const;
 export const MAX_RESULT_OUTPUT_BYTES = 16 * 1024;
 export interface CostLimits {
   maxReposPerTenant: number; maxForksPerTenant: number; maxTokenMintsPerTenantPerDay: number;
-  maxActiveChangesPerRepo: number; activeChangeLimits: Record<string, number>;
+  maxActiveChangesPerRepo: number; activeChangeLimits: Record<string, number>; maxLeaseHoldSeconds: number;
 }
 const defaultCostLimits: CostLimits = {
   maxReposPerTenant: 100, maxForksPerTenant: 1000, maxTokenMintsPerTenantPerDay: 1000,
-  maxActiveChangesPerRepo: 32, activeChangeLimits: {},
+  maxActiveChangesPerRepo: 32, activeChangeLimits: {}, maxLeaseHoldSeconds: 14400,
 };
 export function costLimits(config: TrustedConfiguration): CostLimits {
   return { ...defaultCostLimits, ...config.costLimits };
@@ -172,9 +172,10 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   const limits = config.costLimits;
   const outOfRange = (value: unknown, max: number) => !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > max;
   if (limits !== undefined && (!limits || typeof limits !== 'object' || Array.isArray(limits) ||
-    Object.keys(limits).some(key => !['maxReposPerTenant', 'maxForksPerTenant', 'maxTokenMintsPerTenantPerDay', 'maxActiveChangesPerRepo', 'activeChangeLimits'].includes(key)) ||
+    Object.keys(limits).some(key => !['maxReposPerTenant', 'maxForksPerTenant', 'maxTokenMintsPerTenantPerDay', 'maxActiveChangesPerRepo', 'activeChangeLimits', 'maxLeaseHoldSeconds'].includes(key)) ||
     [limits.maxReposPerTenant, limits.maxForksPerTenant, limits.maxTokenMintsPerTenantPerDay].some(value => value !== undefined && outOfRange(value, 10000)) ||
     (limits.maxActiveChangesPerRepo !== undefined && outOfRange(limits.maxActiveChangesPerRepo, 1000)) ||
+    ((limits as { maxLeaseHoldSeconds?: unknown }).maxLeaseHoldSeconds !== undefined && outOfRange((limits as { maxLeaseHoldSeconds?: unknown }).maxLeaseHoldSeconds, 86400)) ||
     (limits.activeChangeLimits !== undefined && (!limits.activeChangeLimits || typeof limits.activeChangeLimits !== 'object' || Array.isArray(limits.activeChangeLimits) ||
       Object.keys(limits.activeChangeLimits).some(key => !/^[A-Za-z0-9_-]{1,64}$/.test(key)) ||
       Object.values(limits.activeChangeLimits).some(value => outOfRange(value, 1000)))))) throw new Error('TRUSTED_CONFIG_INVALID');

@@ -126,9 +126,14 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
     return created.data.provisioning.state === 'observed';
   });
   const changeId = created.data.changeId;
-  const grant = await a.call('lease_claim', { repoId, changeId, unitKeys: [unit], intentText: 'A edits alpha' });
+  const grant = await a.call('lease_claim', { repoId, changeId, unitKeys: [unit], intentText: 'A edits alpha', ttlSeconds: 600 });
   const lease = grant.data.leases[0];
   expect(lease.fence).toBeGreaterThan(0);
+  expect(lease.expiresAt).toBeGreaterThan(Date.now() + 500_000);
+  const aboveCap = await a.client.callTool({ name: 'lease_claim', arguments: { repoId, changeId,
+    unitKeys: [unit], intentText: 'A edits alpha', ttlSeconds: 14401 } });
+  expect(aboveCap.isError).toBe(true);
+  expect(JSON.stringify(aboveCap.content)).toContain('INVALID_TTL');
   const checkout = await a.call('change_checkout', { repoId, changeId, worktree });
   expect(checkout.remote).toMatch(/^file:\/\//);
   expect(checkout.worktree).toBe(join(worktree, '.concord', 'changes', changeId));

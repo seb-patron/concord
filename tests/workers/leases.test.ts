@@ -533,7 +533,7 @@ describe('RepoCoordinator lease routes', () => {
   it('uses server TTL, monotonic fences, and rejects stale holders after reacquisition', async () => {
     setupPolicy();
     const repo = 'lease_lifetime';
-    const tooLong = await claim(repo, 'local-agent-a', 'too-long', ['symbol:sub_02000100'], 'ttl-invalid', { ttlSeconds: 301 });
+    const tooLong = await claim(repo, 'local-agent-a', 'too-long', ['symbol:sub_02000100'], 'ttl-invalid', { ttlSeconds: 14401 });
     expect(tooLong.status).toBe(422);
     expect((await responseBody(tooLong)).error.code).toBe('INVALID_TTL');
     const grant = await claim(repo, 'local-agent-a', 'first', ['symbol:sub_02000100'], 'lifetime');
@@ -556,6 +556,23 @@ describe('RepoCoordinator lease routes', () => {
     expect((await responseBody(replacement)).data.leases[0].fence).toBeGreaterThan(next.fence);
     expect((await fetchApi(mutation(releasePath, { expectedVersion: 4, fence: next.fence }, 'after-replace', 'local-agent-a'))).status).toBe(409);
     expect((await listing(repo)).items.some((item: { state: string; intentText: string }) => item.state === 'released' && item.intentText === 'Work by local-agent-a')).toBe(true);
+  });
+
+  it('enforces a lower trusted lease hold cap', async () => {
+    setupPolicy();
+    (env as Env).TRUSTED_CONFIG = JSON.stringify({ ...trusted, costLimits: { maxLeaseHoldSeconds: 3600 } });
+    const repo = 'lease_custom_hold';
+    expect((await claim(repo, 'local-agent-a', 'first', ['row:families:alpha'], 'within-cap', { ttlSeconds: 3600 })).status).toBe(201);
+    const denied = await claim(repo, 'local-agent-a', 'second', ['row:families:beta'], 'above-cap', { ttlSeconds: 3601 });
+    expect(denied.status).toBe(422);
+    expect((await responseBody(denied)).error.code).toBe('INVALID_TTL');
+  });
+
+  it('grants a two-hour hold under the default trusted cap', async () => {
+    setupPolicy();
+    const held = await claim('lease_long_hold', 'local-agent-a', 'long-hold', ['row:families:alpha'], 'long-hold', { ttlSeconds: 7200 });
+    expect(held.status).toBe(201);
+    expect((await responseBody(held)).data.leases[0].expiresAt).toBeGreaterThan(Date.now() + 7100000);
   });
 
   it('expires at server time before an alarm and makes alarm replay harmless', async () => {
@@ -630,6 +647,20 @@ describe('RepoCoordinator lease routes', () => {
     expect(releaseAttempt.status).toBe(409);
     const after = await listing(repo);
     expect(after.items.find((entry: { leaseId: string }) => entry.leaseId === item.leaseId).state).toBe('released');
+  });
+
+  it('reserves a file lease for a checker-verified TSV row write', async () => {
+    setupPolicy();
+    const repo = 'lease_covering_row';
+    const grant = await claim(repo, 'local-agent-a', 'row-change', ['file:data/families.tsv'], 'start-file');
+    expect(grant.status).toBe(201);
+    const item = (await responseBody(grant)).data.leases[0];
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const context = contextFor(state, repo, 'agent-a', Date.now);
+      addVerified(state, fakeReadyChange(repo, 'row-change', 'agent-a', ['row:families:alpha']));
+      const result = leases.hooks['leases.reserve']!(context, 'row-change', { [item.unitKey]: item.fence });
+      expect(result).toMatchObject({ status: 'eligible', value: { reservationFences: { [item.unitKey]: item.fence } } });
+    });
   });
 
   it('bounds a queue reservation to 30 minutes even when the alarm is late', async () => {

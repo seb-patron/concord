@@ -7,6 +7,7 @@ import { git, gitBytes, patchId, rejectCanonicalTarget, validateRemote } from '.
 import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
 import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
+import { changeByIntent, leaseCovers } from './start.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
@@ -227,7 +228,7 @@ export async function land(input: LandOptions): Promise<Obj> {
     validateRemote(options.mirrorTo);
     if (new URL(options.mirrorTo).protocol !== 'https:') throw new ConcordError('--mirror-to requires a credential-free HTTPS Git URL', 'usage');
   }
-  const changed = await filesChanged(source, commit, options.base);
+  let changed = await filesChanged(source, commit, options.base);
   const allowed = parseAllowed(await readFile(allowedFile, 'utf8'));
   const outside = changed.files.filter(file => !allowed.has(file));
   if (outside.length) throw new ConcordError(`OUTSIDE_ALLOWED_FILES: ${outside.join(', ')}`, 'usage');
@@ -239,7 +240,7 @@ export async function land(input: LandOptions): Promise<Obj> {
   const inspector = !input.client && process.env.CONCORD_REVIEWER_TOKEN && process.env.CONCORD_REVIEWER_TOKEN !== token
     ? new ConcordClient({ url, token: process.env.CONCORD_REVIEWER_TOKEN }) : client;
   const emit = (event: Obj) => (options.emit ?? ((value: Obj) => { process.stdout.write(`${JSON.stringify(redactOutput(value))}\n`); }))({ repo, intentKey, ...event });
-  const squash = options.base ? await squashRange(source, changed.parent, commit) : null;
+  let squash = options.base ? await squashRange(source, changed.parent, commit) : null;
   if (squash) emit({ state: 'squashed', base: changed.parent, headOid: commit, squashOid: squash.oid });
   try {
   const root = `/repos/${encodeURIComponent(repo)}`;
@@ -249,16 +250,42 @@ export async function land(input: LandOptions): Promise<Obj> {
   const repository = (await api(client, root)).data;
   if (!repository.observedCanonicalOid || !sha.test(repository.observedCanonicalOid)) throw new ConcordError('canonical main is unavailable', 'server');
   const initialSnapshot = (await api(client, `${root}/snapshot`)).data;
-  const policy = (initialSnapshot.projections?.runners?.jobs ?? []).map((job: Obj) => job.unitPolicy)
+  const policy = initialSnapshot.projections?.repos?.unitPolicy ?? (initialSnapshot.projections?.runners?.jobs ?? []).map((job: Obj) => job.unitPolicy)
     .find((item: Obj | undefined) => item?.digest === repository.policyDigest);
-  const units = await unitKeys(source, changed.parent, commit, changed.files, policy);
+  let units = await unitKeys(source, changed.parent, commit, changed.files, policy);
   if (units.length > MAX_NORMALIZED_UNITS) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${unitsOverCapMessage(units.length)}`, 'usage');
   const branch = `refs/heads/land/${hash(intentKey).slice(7, 23)}`;
   const createBody = { intentKey, intentText: intent, baseOid: repository.observedCanonicalOid, branch, unitKeys: units, dependencyChangeIds: options.dependsOn ?? [] };
-  let created = (await api(client, `${root}/changes`, createBody)).data;
+  let started: Obj | undefined;
+  let created: Obj;
+  try { created = (await api(client, `${root}/changes`, createBody)).data; }
+  catch (error) {
+    if (!(error instanceof ConcordError) || (error.payload as Obj)?.error?.code !== 'INTENT_CONFLICT') throw error;
+    started = await changeByIntent(client, root, intentKey);
+    if (!started || started.intentText !== intent || started.branch !== branch ||
+        JSON.stringify([...(started.dependencyChangeIds ?? [])].sort()) !== JSON.stringify([...(options.dependsOn ?? [])].sort())) throw error;
+    created = started;
+  }
+  const startScope: string[] | undefined = created.startUnitKeys;
+  const outsideStartScope = startScope ? units.filter(unit => !startScope.some(scope => leaseCovers(scope, unit, policy))) : [];
+  if (outsideStartScope.length) throw new ConcordError(`START_SCOPE_CONFLICT: ${outsideStartScope.join(', ')} outside the change's original start scope`, 'conflict');
+  if (startScope && changed.parent !== created.baseOid &&
+      await git(['merge-base', '--is-ancestor', created.baseOid, commit], {}, source).then(() => true, () => false)) {
+    const fullRange = await filesChanged(source, commit, created.baseOid);
+    const outsideRange = fullRange.files.filter(file => !allowed.has(file));
+    if (outsideRange.length) throw new ConcordError(`OUTSIDE_ALLOWED_FILES: ${outsideRange.join(', ')}`, 'usage');
+    const fullUnits = await unitKeys(source, fullRange.parent, commit, fullRange.files, policy);
+    if (fullUnits.length > MAX_NORMALIZED_UNITS) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${unitsOverCapMessage(fullUnits.length)}`, 'usage');
+    const outsideFullScope = fullUnits.filter(unit => !startScope.some(scope => leaseCovers(scope, unit, policy)));
+    if (outsideFullScope.length) throw new ConcordError(`START_SCOPE_CONFLICT: ${outsideFullScope.join(', ')} outside the change's original start scope`, 'conflict');
+    changed = fullRange;
+    units = fullUnits;
+    squash = await squashRange(source, changed.parent, commit);
+  }
   while (created.provisioning?.state !== 'observed' && Date.now() < deadline) {
     await pause(1000);
-    created = (await api(client, `${root}/changes`, createBody)).data;
+    created = started ? (await api(client, `${root}/changes/${encodeURIComponent(started.changeId)}`)).data :
+      (await api(client, `${root}/changes`, createBody)).data;
   }
   if (created.provisioning?.state !== 'observed') throw new ConcordError('FORK_TIMEOUT: candidate fork was not provisioned', 'server');
   const changeId = required(created.changeId, 'changeId'); const path = `${root}/changes/${encodeURIComponent(changeId)}`;
@@ -267,7 +294,11 @@ export async function land(input: LandOptions): Promise<Obj> {
   const alreadyQueued = (existingQueue.entries ?? []).some((item: Obj) => item.changeId === changeId &&
     ['admitted', 'reserved', 'checking', 'landed'].includes(item.state));
   let held: Obj[] = [];
-  const refresh = async () => { held = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active' && units.includes(item.unitKey)); };
+  let owned: Obj[] = [];
+  const refresh = async () => {
+    owned = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active');
+    held = owned.filter(item => units.some(unit => leaseCovers(item.unitKey, unit, policy)));
+  };
   const renew = async () => {
     await refresh();
     for (const item of held.filter(value => value.remainingSeconds < 60)) {
@@ -276,15 +307,20 @@ export async function land(input: LandOptions): Promise<Obj> {
     }
   };
   const fences = () => Object.fromEntries(held.map(item => [item.unitKey, item.fence]));
+  let awaitingReview = false;
+  let adoptedLease = false;
+  let firstLeaseRead = true;
+  let refused = false;
   try {
     let attempt = 0;
     while (!alreadyQueued) {
       await refresh();
-      const missing = units.filter(unit => !held.some(item => item.unitKey === unit));
+      if (firstLeaseRead) { adoptedLease = held.length > 0; firstLeaseRead = false; }
+      const missing = units.filter(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy)));
       if (!missing.length) break;
       try {
         const result = (await api(client, `${root}/leases`, { changeId, unitKeys: missing, intentText: intent, ttlSeconds: 300 }, await currentVersion(client, root))).data;
-        held.push(...result.leases); emit({ state: 'leased', unitKeys: result.leases.map((item: Obj) => item.unitKey) });
+        held.push(...result.leases); emit({ state: 'leased', unitKeys: result.leases.map((item: Obj) => item.unitKey), missingUnits: missing });
       } catch (error) {
         if (!(error instanceof ConcordError)) throw error;
         const code = (error.payload as Obj)?.error?.code;
@@ -356,7 +392,7 @@ export async function land(input: LandOptions): Promise<Obj> {
       if (!entry) {
         change = (await api(client, path)).data;
         requirePublishedChange(change);
-        if (!options.reviewEvidence) { emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
+        if (!options.reviewEvidence) { awaitingReview = true; emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
         const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
         const evidence = await reviewEvidence();
@@ -419,9 +455,18 @@ export async function land(input: LandOptions): Promise<Obj> {
       }
       throw new ConcordError('QUEUE_TIMEOUT: landing did not finish', 'server');
     } finally { if (priorWork) await rm(priorWork, { recursive: true, force: true }); await prepared.cleanup(); }
-  } finally {
+  } catch (error) { refused = true; throw error; } finally {
     await refresh().catch(() => {});
-    for (const item of held) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
+    const latest = await api(client, path).then(result => result.data).catch(() => null);
+    const publishedUnits: string[] | null = latest?.headOid ? latest.unitKeys ?? units : null;
+    // A started change (recorded start scope) keeps every live lease on refusal, including one land reclaimed
+    // after the start hold expired, so its author can repair and rerun land.
+    for (const item of refused && startScope ? [] : owned) {
+      const unused = publishedUnits && !publishedUnits.some(unit => leaseCovers(item.unitKey, unit, policy));
+      const abandoned = !started && !adoptedLease && !awaitingReview && held.includes(item);
+      if (unused || abandoned) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`,
+        { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
+    }
   }
   } finally { await squash?.cleanup(); }
 }

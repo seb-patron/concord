@@ -600,6 +600,26 @@ describe('queue with real lease hooks', () => {
 });
 
 describe('queue state machine', () => {
+  it('admits a row write using a live covering file lease fence', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`); await h.seed(`scratch-${h.repoId}`, null);
+    await h.seed(`candidate-${h.repoId}-A`);
+    h.views.set('A', { authorId: 'agent-a', headOid: oid('a'), revision: 1, status: 'ready',
+      unitKeys: ['row:A'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-A`,
+      branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+      scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'covering' });
+    await realLeases(h, [{ id: 'A', unit: 'row:A' }], ['A']);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      context.sql.exec('UPDATE leases_claims SET unit_key = ? WHERE lease_id = ?', 'file:data/queue.tsv', 'lease-A');
+    });
+    const result = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'file:data/queue.tsv': 1 } });
+    expect(result.response.status).toBe(201);
+    expect((await h.state()).entries[0].reservationFences).toEqual({ 'file:data/queue.tsv': 1 });
+  });
   it('fails closed for missing change, review, and lease providers', async () => {
     const h = await setup();
     const absent = await h.fetch('/queue/enqueue', { expectedVersion: 0, changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });

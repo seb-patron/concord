@@ -55,6 +55,275 @@ describe('land input and evidence gates', () => {
     expect(await unitKeys(dir, parent, head, [path], { newFilePrefixes: ['tests/'], units: {} }))
       .toEqual([`file:${path}`]);
   });
+  it('releases fifteen unused started leases after publishing one file without review evidence', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    const files = Array.from({ length: 16 }, (_, index) => `file-${index}.txt`);
+    for (const file of files) await writeFile(join(dir, file), 'original\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, files[0]), 'changed\n');
+    await git(dir, 'add', files[0]); await git(dir, 'commit', '-qm', 'candidate');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const allowedFiles = join(await temp(), 'allowed.txt');
+    await writeFile(allowedFiles, `${files.join('\n')}\n`);
+    const change = { changeId: 'started', provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
+      branch: 'refs/heads/work', authorId: 'agent', baseOid: parent, headOid: commit, revision: 1,
+      unitKeys: [`file:${files[0]}`], status: 'ready' };
+    const active = files.map((file, index) => ({ changeId: 'started', state: 'active', unitKey: `file:${file}`,
+      leaseId: `lease-${index}`, fence: 1, remainingSeconds: 7200 }));
+    const released: string[] = [];
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}` }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'started', revision: 1, jobId: 'pass-job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: active.filter(item => !released.includes(item.leaseId)) }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result')
+        throw new ConcordError('result read denied', 'auth', 403);
+      if (method === 'POST' && path.endsWith('/release')) {
+        released.push(path.split('/')[4]); return { data: {}, version: 1 };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    const result = await land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
+      waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+    expect(result.status).toBe('awaiting-review');
+    expect(released.sort()).toEqual(active.slice(1).map(item => item.leaseId).sort());
+  });
+  it.each(['live', 'expired', 'renew'])('adopts a started TSV change with a %s file lease', async mode => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\told\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\tnew\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'row edit');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const allowedFiles = join(await temp(), 'allowed.txt');
+    await writeFile(allowedFiles, 'families.tsv\n');
+    const policy = { digest: 'digest', units: {}, tables: [{ name: 'families', file: 'families.tsv',
+      header: ['family', 'value'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }] };
+    const change = { changeId: 'started', intentKey: 'task', intentText: 'work', provisioning: { state: 'observed' },
+      candidateStorageName: 'candidate', branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`, authorId: 'agent', baseOid: parent,
+      headOid: commit, revision: 1, status: 'ready' };
+    let leaseActive = mode !== 'expired';
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}`, policyDigest: 'digest' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: policy }, runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'started', revision: 1, jobId: 'pass-job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') throw new ConcordError('INTENT_CONFLICT', 'conflict', 409,
+        { error: { code: 'INTENT_CONFLICT' } });
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: leaseActive ? [{
+        changeId: 'started', state: 'active', unitKey: mode === 'expired' ? 'row:families:alpha' : 'file:families.tsv',
+        leaseId: 'lease', fence: 1, remainingSeconds: mode === 'renew' ? 30 : 7200,
+      }] : [] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases') {
+        leaseActive = true; return { data: { leases: [{ changeId: 'started', state: 'active', unitKey: 'row:families:alpha',
+          leaseId: 'lease', fence: 1, remainingSeconds: 300 }] }, version: 1 };
+      }
+      if (method === 'POST' && path === '/repos/demo/leases/lease/renew') return { data: { lease: {
+        leaseId: 'lease', unitKey: 'file:families.tsv', changeId: 'started', fence: 2, state: 'active',
+        expiresAt: Date.now() + 300000, remainingSeconds: 300 } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result') throw new ConcordError('denied', 'auth', 403);
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    vi.stubEnv('CONCORD_REVIEWER_TOKEN', '');
+    const result = await land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
+      waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+    expect(result).toMatchObject({ status: 'awaiting-review', changeId: 'started' });
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toHaveLength(mode === 'expired' ? 1 : 0);
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path.endsWith('/renew'))).toHaveLength(mode === 'renew' ? 1 : 0);
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/release'))).toBe(false);
+  });
+  it.each(['conflict', 'reuse'])('keeps a lease reclaimed after the start hold expired when land is refused after %s', async mode => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    await writeFile(join(dir, 'a.txt'), 'old\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'a.txt'), 'new\n');
+    await git(dir, 'add', 'a.txt'); await git(dir, 'commit', '-qm', 'edit A');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const candidate = await temp(); await git(candidate, 'init', '-q', '--bare');
+    const allowedFiles = join(await temp(), 'allowed.txt'); await writeFile(allowedFiles, 'a.txt\n');
+    const change = { changeId: 'started', intentKey: 'task', intentText: 'work', provisioning: { state: 'observed' },
+      candidateStorageName: 'candidate', branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`,
+      authorId: 'agent', baseOid: parent, headOid: null, revision: 0, status: 'draft', dependencyChangeIds: [],
+      unitKeys: ['file:a.txt'], startUnitKeys: ['file:a.txt'] };
+    // The `concord start` lease has expired, so land must claim the unit again before publishing.
+    const leaseRows = [{ changeId: 'started', state: 'expired', unitKey: 'file:a.txt', leaseId: 'start-lease', fence: 1, remainingSeconds: 0 }];
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, any> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}` }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        if (mode === 'reuse') return { data: change, version: 1 };
+        throw new ConcordError('INTENT_CONFLICT', 'conflict', 409, { error: { code: 'INTENT_CONFLICT' } });
+      }
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: leaseRows }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases') {
+        const lease = { changeId: 'started', state: 'active', unitKey: 'file:a.txt', leaseId: 'reclaimed', fence: 2, remainingSeconds: 300 };
+        leaseRows.push(lease); return { data: { leases: [{ ...lease }] }, version: 1 };
+      }
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: {
+        remote: options?.body?.storageName === 'canonical' ? `file://${dir}` : `file://${candidate}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes/started/publish')
+        throw new ConcordError('HEAD_MOVED', 'conflict', 409, { error: { code: 'HEAD_MOVED' } });
+      if (method === 'POST' && path.endsWith('/release')) {
+        const lease = leaseRows.find(item => path === `/repos/demo/leases/${item.leaseId}/release`);
+        if (lease) lease.state = 'released';
+        return { data: {}, version: 1 };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    await expect(land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
+      waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} }))
+      .rejects.toMatchObject({ message: expect.stringContaining('HEAD_MOVED') });
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toHaveLength(1);
+    expect(leaseRows.find(item => item.leaseId === 'reclaimed')).toMatchObject({ state: 'active' });
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/release'))).toBe(false);
+  }, 30_000);
+  it.each(['conflict', 'reuse'])('refuses a commit outside the recorded start scope after %s before claiming a lease', async mode => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    await writeFile(join(dir, 'a.txt'), 'old\n'); await writeFile(join(dir, 'b.txt'), 'old\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'b.txt'), 'new\n');
+    await git(dir, 'add', 'b.txt'); await git(dir, 'commit', '-qm', 'edit B');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const allowedFiles = join(await temp(), 'allowed.txt'); await writeFile(allowedFiles, 'b.txt\n');
+    const change = { changeId: 'started', intentKey: 'task', intentText: 'work', baseOid: parent,
+      branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`,
+      dependencyChangeIds: [], headOid: mode === 'reuse' ? commit : null,
+      unitKeys: [mode === 'reuse' ? 'file:b.txt' : 'file:a.txt'], startUnitKeys: ['file:a.txt'] };
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {} };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        if (mode === 'reuse') return { data: change };
+        throw new ConcordError('INTENT_CONFLICT', 'conflict', 409, { error: { code: 'INTENT_CONFLICT' } });
+      }
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    await expect(land({ repo: 'demo', source: dir, commit,
+      intentKey: 'task', intent: 'work', allowedFiles, client: { request } as never, emit: () => {} }))
+      .rejects.toMatchObject({ message: expect.stringContaining('START_SCOPE_CONFLICT: file:b.txt') });
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toBe(false);
+  });
+  it('adopts two different row commits under the original file scope', async () => {
+    const canonical = await temp(); await git(canonical, 'init', '-q');
+    await writeFile(join(canonical, 'families.tsv'), 'family\tvalue\nalpha\told\nbeta\told\n');
+    await git(canonical, 'add', '.'); await git(canonical, 'commit', '-qm', 'base');
+    const parent = await git(canonical, 'rev-parse', 'HEAD');
+    const commits: Array<{ dir: string; oid: string; row: string }> = [];
+    for (const row of ['alpha', 'beta']) {
+      const dir = await temp(); await git(dir, 'clone', '-q', canonical, '.');
+      await writeFile(join(dir, 'families.tsv'), `family\tvalue\nalpha\t${row === 'alpha' ? 'new' : 'old'}\nbeta\t${row === 'beta' ? 'new' : 'old'}\n`);
+      await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', `edit ${row}`);
+      commits.push({ dir, oid: await git(dir, 'rev-parse', 'HEAD'), row });
+    }
+    const allowedFiles = join(await temp(), 'allowed.txt'); await writeFile(allowedFiles, 'families.tsv\n');
+    const policy = { digest: 'digest', units: {}, tables: [{ name: 'families', file: 'families.tsv',
+      header: ['family', 'value'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }] };
+    const change = { changeId: 'started', intentKey: 'task', intentText: 'work', provisioning: { state: 'observed' },
+      candidateStorageName: 'candidate', branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`,
+      authorId: 'agent', baseOid: parent, headOid: commits[0].oid, revision: 1, status: 'ready',
+      startUnitKeys: ['file:families.tsv'], unitKeys: ['row:families:alpha'] };
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${canonical}`, policyDigest: 'digest' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: policy }, runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'started', revision: 1, jobId: 'pass-job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') throw new ConcordError('INTENT_CONFLICT', 'conflict', 409,
+        { error: { code: 'INTENT_CONFLICT' } });
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'started', state: 'active',
+        unitKey: 'file:families.tsv', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${canonical}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result') throw new ConcordError('denied', 'auth', 403);
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    vi.stubEnv('CONCORD_REVIEWER_TOKEN', '');
+    for (const item of commits) {
+      change.headOid = item.oid; change.unitKeys = [`row:families:${item.row}`];
+      const result = await land({ repo: 'demo', source: item.dir, commit: item.oid, intentKey: 'task', intent: 'work',
+        allowedFiles, waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+      expect(result).toMatchObject({ status: 'awaiting-review', changeId: 'started' });
+    }
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toBe(false);
+  });
+  it('publishes the complete tree after successive commits to different rows of a started file', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\told\nbeta\told\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\tnew\nbeta\told\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'edit alpha');
+    const first = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\tnew\nbeta\tnew\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'edit beta');
+    const second = await git(dir, 'rev-parse', 'HEAD');
+    const candidate = await temp(); await git(candidate, 'init', '-q', '--bare');
+    const allowedFiles = join(await temp(), 'allowed.txt'); await writeFile(allowedFiles, 'families.tsv\n');
+    const policy = { digest: 'digest', units: {}, tables: [{ name: 'families', file: 'families.tsv',
+      header: ['family', 'value'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }] };
+    const branch = `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`;
+    const change = { changeId: 'started', intentKey: 'task', intentText: 'work', provisioning: { state: 'observed' },
+      candidateStorageName: 'candidate', branch, authorId: 'agent', baseOid: base,
+      headOid: null as string | null, revision: 0, status: 'draft', startUnitKeys: ['file:families.tsv'], unitKeys: ['file:families.tsv'], dependencyChangeIds: [] };
+    const published: string[][] = [];
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, any> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: base,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}`, policyDigest: 'digest' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: policy }, runners: { jobs: [] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') throw new ConcordError('INTENT_CONFLICT', 'conflict', 409, { error: { code: 'INTENT_CONFLICT' } });
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'started', state: 'active',
+        unitKey: 'file:families.tsv', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: {
+        remote: options?.body?.storageName === 'canonical' ? `file://${dir}` : `file://${candidate}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes/started/publish') {
+        change.headOid = options?.body?.headOid; change.unitKeys = options?.body?.unitKeys;
+        change.revision++; change.status = 'ready'; published.push(change.unitKeys);
+        return { data: change, version: 1 };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    for (const commit of [first, second]) {
+      const result = await land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
+        waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+      expect(result.status).toBe('awaiting-review');
+    }
+    expect(published).toEqual([['row:families:alpha'], ['row:families:alpha', 'row:families:beta']]);
+    expect(await git(candidate, 'show', `${branch}:families.tsv`)).toBe('family\tvalue\nalpha\tnew\nbeta\tnew');
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toBe(false);
+  }, 30_000);
   it.each(['ENV_ERROR', 'FAIL', 'TIMEOUT'])(`fails immediately with the completed %s inspection log`, async (outcome) => {
     const change = { changeId: 'change', revision: 3, status: 'draft' };
     const request = vi.fn(async (_method: string, path: string) => {
@@ -511,11 +780,13 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const profile = { ...profileInput, digest: await digest(profileInput) };
   const profilePath = join(dir, 'profile.json'); await writeFile(profilePath, JSON.stringify(profile));
   const bulkFiles = Array.from({ length: 15 }, (_, index) => `bulk-${index}.txt`);
-  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'shared.txt', 'range-a.txt', 'range-b.txt', ...bulkFiles].map(file => [`file:${file}`, {
+  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'families.tsv', 'shared.txt', 'range-a.txt', 'range-b.txt', ...bulkFiles].map(file => [`file:${file}`, {
     canonicalKey: `file:${file}`, file, resources: [], dependencyKeys: [],
   }]));
   const policyInput = { id: 'generic-land', version: 1, checkerId: 'generic-land', checkerDigest: binary,
-    acceptance: { kind: 'hard-gates', gates: [{ id: 'default', requiredOutcome: 'PASS' }] }, units };
+    acceptance: { kind: 'hard-gates', gates: [{ id: 'default', requiredOutcome: 'PASS' }] }, units,
+    tables: [{ name: 'families', file: 'families.tsv', header: ['family', 'value'], keyColumn: 'family',
+      keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }] };
   const policy = { ...policyInput, digest: await digest(policyInput) };
   const trusted = JSON.stringify({ policies: { 'generic-land': policy }, profiles: { 'generic-land': {
     id: profile.id, digest: profile.digest, toolchainDigest: profile.toolchainDigest,
@@ -563,6 +834,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(join(seed, 'check.sh'), 'exit 0\n');
   await writeFile(join(seed, 'a.txt'), 'a=0\n');
   await writeFile(join(seed, 'b.txt'), 'b=0\n');
+  await writeFile(join(seed, 'families.tsv'), 'family\tvalue\nalpha\told\n');
   for (const file of bulkFiles) await writeFile(join(seed, file), 'before\n');
   await writeFile(join(seed, 'shared.txt'), Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n') + '\n');
   await git(seed, 'add', '.'); await git(seed, 'commit', '-qm', 'seed');
@@ -585,10 +857,15 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
   const authorEnv: NodeJS.ProcessEnv = { ...landEnv };
   delete authorEnv.CONCORD_REVIEWER_TOKEN;
+  const startedRun = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'start', '--repo', 'landdemo',
+    '--intent-key', 'generic-task', '--intent', 'Update a value', '--allowed-files', allowed, '--hold', '2h', '--json'],
+  { cwd: root, env: authorEnv, timeout: 30_000 });
+  const started = JSON.parse(startedRun.stdout);
+  expect(started.leases).toHaveLength(16);
   const first = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs],
     { cwd: root, env: authorEnv, timeout: 155_000 }));
   expect(first.stdout).toContain('"state":"awaiting-review"');
-  expect(first.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.state === 'leased').unitKeys).toHaveLength(16);
+  expect(first.stdout.trim().split('\n').map(line => JSON.parse(line))).not.toContainEqual(expect.objectContaining({ state: 'leased' }));
   const beforeResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
   const wrongEvidence = join(dir, 'wrong-review.txt');
   await writeFile(wrongEvidence, `APPROVED for merge: ${'f'.repeat(40)}\n`);
@@ -602,20 +879,25 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     ...baseArgs, '--review-evidence', evidence], { cwd: root, env: landEnv, timeout: 155_000 }))
     .catch(error => { throw new Error(`land failed after: ${(error as { stdout?: string }).stdout ?? ''}\n${(error as Error).message}`); });
   const afterResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
+  expect(afterResume.changeId).toBe(started.changeId);
   expect(afterResume.changeId).toBe(beforeResume.changeId);
   expect(afterResume.revision).toBe(beforeResume.revision);
   const events = landed.stdout.trim().split('\n').map(line => JSON.parse(line));
   expect([...first.stdout.trim().split('\n').map(line => JSON.parse(line)), ...events].map(item => item.state))
-    .toEqual(expect.arrayContaining(['created', 'leased', 'published', 'reviewed', 'enqueued', 'landed']));
+    .toEqual(expect.arrayContaining(['created', 'published', 'reviewed', 'enqueued', 'landed']));
   expect(events.at(-1).canonicalOid).toBe((await api('')).data.observedCanonicalOid);
   for (const value of ['local-agent-a', 'local-reviewer', secret]) {
     expect(landed.stdout + landed.stderr).not.toContain(value);
   }
   const oldSource = await temp(); await git(oldSource, 'clone', '-q', '-b', 'main', seed, '.');
-  await writeFile(join(oldSource, 'b.txt'), 'b=carried\n');
-  await git(oldSource, 'add', 'b.txt'); await git(oldSource, 'commit', '-qm', 'old-parent update');
+  const carryAllowed = join(dir, 'carry-allowed.txt'); await writeFile(carryAllowed, 'families.tsv\n');
+  const rowStarted = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'start', '--repo', 'landdemo',
+    '--intent-key', 'carry-task', '--intent', 'Carry old-parent update', '--allowed-files', carryAllowed, '--hold', '2h', '--json'],
+  { cwd: root, env: authorEnv, timeout: 30_000 });
+  expect(JSON.parse(rowStarted.stdout).leases).toMatchObject([{ unitKey: 'file:families.tsv' }]);
+  await writeFile(join(oldSource, 'families.tsv'), 'family\tvalue\nalpha\tnew\n');
+  await git(oldSource, 'add', 'families.tsv'); await git(oldSource, 'commit', '-qm', 'old-parent row update');
   const sourceOid = await git(oldSource, 'rev-parse', 'HEAD');
-  const carryAllowed = join(dir, 'carry-allowed.txt'); await writeFile(carryAllowed, 'b.txt\n');
   const carryEvidence = join(dir, 'carry-review.txt');
   await writeFile(carryEvidence, `# ✅ APPROVED FOR MERGE — head ${sourceOid}\nAPPROVED for merge\n`);
   const carryArgs = ['--repo', 'landdemo', '--source', oldSource, '--commit', sourceOid,
@@ -629,6 +911,8 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const carried = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
     '--review-evidence', carryEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
   const carriedEvents = carried.stdout.trim().split('\n').map(line => JSON.parse(line));
+  expect(carriedEvents.some(item => item.state === 'leased')).toBe(false);
+  expect(carriedEvents.at(-1).changeId).toBe(JSON.parse(rowStarted.stdout).changeId);
   const carryEvent = carriedEvents.find(item => item.state === 'review-carried');
   expect(carryEvent).toMatchObject({ sourceOid, publishedOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
   expect(carryEvent.publishedOid).not.toBe(sourceOid);
@@ -777,6 +1061,15 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   expect(refusal?.stderr).toContain(altered.reviewedHead);
   expect(refusal?.stderr).toContain(alteredChange.headOid);
   expect((await api(`/changes/${alteredChange.changeId}/verdicts`)).data.items).toEqual([]);
+  // A refused land keeps the change's leases so its author can repair the refusal. This author abandons the
+  // change instead, as a real agent would, so the later parallel landing can lease b.txt.
+  expect((await api('/leases')).data.items).toContainEqual(expect.objectContaining({
+    changeId: alteredChange.changeId, unitKey: `file:${altered.file}`, state: 'active' }));
+  const abandoned = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'release', '--repo', 'landdemo',
+    '--intent-key', altered.intent, '--json'], { cwd: root, env: authorEnv, timeout: 30_000 });
+  expect(JSON.parse(abandoned.stdout)).toEqual({ changeId: alteredChange.changeId, released: [`file:${altered.file}`] });
+  expect((await api('/leases')).data.items).not.toContainEqual(expect.objectContaining({
+    unitKey: `file:${altered.file}`, state: 'active' }));
   const staleContext = await temp(); await git(staleContext, 'clone', '-q', '-b', 'main', seed, '.');
   const stale = await readFile(join(staleContext, 'shared.txt'), 'utf8');
   await writeFile(join(staleContext, 'shared.txt'), stale.replace('line-7\n', 'line-7-source\n'));
@@ -847,7 +1140,9 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     const snapshot = await api('/snapshot').catch(() => null);
     const changeId = snapshot?.data?.projections?.repos?.changes?.find((change: any) => change.intentKey === 'parallel-1')?.changeId;
     const queue = await api('/queue').catch(() => null);
-    if (changeId && queue?.data?.entries?.some((entry: any) => entry.changeId === changeId && entry.state === 'reserved')) {
+    // Admission bumps the queue, so two seconds later the coalesce alarm may select the entry into its own
+    // stack. A poll stalled past that window sees checking, which still means admitted.
+    if (changeId && queue?.data?.entries?.some((entry: any) => entry.changeId === changeId && ['reserved', 'checking'].includes(entry.state))) {
       secondAdmitted = true;
       break;
     }

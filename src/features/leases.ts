@@ -1,6 +1,6 @@
 import type { Change, FeatureModule, Gate, Lease, ModuleContext, Repo, TrustedPolicy } from '../contracts';
 import { failure, HttpError, json, unavailableGate } from '../http';
-import { eventSequence, sqlState } from '../state';
+import { costLimits, eventSequence, sqlState } from '../state';
 import { covers, normalizeUnits, overlaps, resolveUnit, unitRegistry, type UnitIdentity } from '../leases/units';
 
 const DEFAULT_TTL_SECONDS = 120;
@@ -78,12 +78,12 @@ function expireDue(context: ModuleContext, now: number): void {
   }
 }
 
-function ttl(raw: unknown): number {
-  if (raw === undefined) return DEFAULT_TTL_SECONDS;
-  if (!Number.isSafeInteger(raw) || (raw as number) < 1 || (raw as number) > MAX_TTL_SECONDS) {
-    throw new HttpError(422, 'INVALID_TTL', `ttlSeconds must be 1 to ${MAX_TTL_SECONDS}`);
+function ttl(raw: unknown, maximum = MAX_TTL_SECONDS): number {
+  const value = raw === undefined ? DEFAULT_TTL_SECONDS : raw;
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > maximum) {
+    throw new HttpError(422, 'INVALID_TTL', `ttlSeconds must be 1 to ${maximum}`);
   }
-  return raw as number;
+  return value as number;
 }
 
 function fence(raw: unknown): number {
@@ -117,7 +117,7 @@ function claim(context: ModuleContext, body: unknown): Response {
   }
   const registry = unitRegistry(policy(context));
   const units = normalizeUnits(registry, input.unitKeys);
-  const ttlSeconds = ttl(input.ttlSeconds);
+  const ttlSeconds = ttl(input.ttlSeconds, costLimits(context.trusted).maxLeaseHoldSeconds);
   return context.transaction(() => {
     const now = context.now();
     expireDue(context, now);
@@ -184,7 +184,7 @@ function currentLease(context: ModuleContext, leaseId: string, suppliedFence: un
 
 function renew(context: ModuleContext, leaseId: string, body: unknown): Response {
   const input = body as Record<string, unknown>;
-  const ttlSeconds = ttl(input.ttlSeconds);
+  const ttlSeconds = ttl(input.ttlSeconds, costLimits(context.trusted).maxLeaseHoldSeconds);
   return context.transaction(() => {
     const row = currentLease(context, leaseId, input.fence);
     const now = context.now();

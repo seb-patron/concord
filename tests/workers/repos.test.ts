@@ -80,6 +80,81 @@ function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensur
 }
 
 describe('repository and change lifecycle', () => {
+  it('refuses a started change publishing outside its original file scope while ordinary changes remain unrestricted', async () => {
+    const name = 'start_scope_case';
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].newFilePrefixes = ['docs/'];
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const input = { intentKey: 'started-task', intentText: 'work', baseOid: a, branch: 'refs/heads/work',
+      unitKeys: ['file:docs/a.txt'], dependencyChangeIds: [], startScope: true };
+    const created = await fetchApi(mutation(`/v1/repos/${name}/changes`, input, 'scope-create'));
+    expect(created.status).toBe(201);
+    const createdBody = await responseBody(created);
+    const change = createdBody.data;
+    expect(change.startUnitKeys).toEqual(['file:docs/a.txt']);
+    const publishBody = { expectedVersion: createdBody.version, baseOid: a, headOid: b,
+      branch: input.branch, unitKeys: ['file:docs/b.txt'], leaseFences: { 'file:docs/b.txt': 1 } };
+    const outside = await fetchApi(mutation(`/v1/repos/${name}/changes/${change.changeId}/publish`, publishBody, 'scope-outside'));
+    expect(outside.status).toBe(409);
+    expect((await responseBody(outside)).error.code).toBe('START_SCOPE_CONFLICT');
+    const reread = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes/${change.changeId}`)))).data;
+    expect(reread.startUnitKeys).toEqual(['file:docs/a.txt']);
+    expect(reread.unitKeys).toEqual(['file:docs/a.txt']);
+    const ordinary = await fetchApi(mutation(`/v1/repos/${name}/changes`, { ...input, intentKey: 'ordinary-task', startScope: undefined }, 'ordinary-create'));
+    expect(ordinary.status).toBe(201);
+    const ordinaryBody = await responseBody(ordinary);
+    const ordinaryId = ordinaryBody.data.changeId;
+    const ordinaryPublish = await fetchApi(mutation(`/v1/repos/${name}/changes/${ordinaryId}/publish`,
+      { ...publishBody, expectedVersion: ordinaryBody.version }, 'ordinary-publish'));
+    expect((await responseBody(ordinaryPublish)).error.code).toBe('BRANCH_NOT_REGISTERED');
+  });
+  it('keeps the original file start scope after a successful row publish', async () => {
+    const name = 'start_scope_row_publish';
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].tables = [{ name: 'families', file: 'data/families.tsv', header: ['family', 'value'],
+      keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }];
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const version = async () => (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).version;
+    const input = { intentKey: 'started-row', intentText: 'edit alpha', baseOid: a, branch: 'refs/heads/started-row',
+      unitKeys: ['file:data/families.tsv'], dependencyChangeIds: [], startScope: true };
+    const created = await fetchApi(mutation(`/v1/repos/${name}/changes`, input, 'row-create', 'local-agent-a'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    await fake(name, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: b, treeOid: c, parents: [a] });
+      provider.conditionalUpdateRef(change.candidateStorageName, input.branch, null, b);
+    });
+    const registered = await fetchApi(mutation(`/v1/repos/${name}/branches`, {
+      expectedVersion: await version(), storageName: change.candidateStorageName, ref: input.branch, observedHead: b, ownerId: 'agent-a',
+    }, 'row-register', 'local-agent-a'));
+    expect(registered.status).toBe(201);
+    const scheduleOriginal = runners.hooks['runners.schedule'];
+    runners.hooks['runners.schedule'] = (context, job) => ({ status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } });
+    try {
+      const published = await fetchApi(mutation(`/v1/repos/${name}/changes/${change.changeId}/publish`, {
+        expectedVersion: await version(), baseOid: a, headOid: b, branch: input.branch,
+        unitKeys: ['row:families:alpha'], leaseFences: { 'file:data/families.tsv': 1 },
+      }, 'row-publish', 'local-agent-a'));
+      expect(published.status).toBe(202);
+    } finally {
+      runners.hooks['runners.schedule'] = scheduleOriginal;
+    }
+    const reread = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes/${change.changeId}`)))).data;
+    expect(reread).toMatchObject({ headOid: b, revision: 1, unitKeys: ['row:families:alpha'] });
+    expect(reread.startUnitKeys).toEqual(['file:data/families.tsv']);
+  });
   it('records the creating principal model and returns null for an absent label', async () => {
     const name = 'author_model_case';
     await create(name);
