@@ -245,7 +245,7 @@ export class RepoCoordinator extends DurableObject<Env> {
           core.sql.exec('INSERT INTO concord_requests(principal_id, route, idempotency_key, request_digest, status, body) VALUES(?, ?, ?, ?, ?, ?)',
             principal.principalId, `${request.method} ${url.pathname}`, key, requestDigest, response.status, responseBody);
         }
-        await this.scheduleNextAlarm(principal, repoId);
+        if (mutation) await this.scheduleNextAlarm(principal, repoId);
         return response;
       };
       if (!mutation) return await dispatch();
