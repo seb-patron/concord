@@ -230,7 +230,11 @@ async function repoDetail(context: ModuleContext): Promise<Response> {
     repo.observedCanonicalOid = await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
     context.state.put('repo', repo);
   }
-  return respond(context, repo, repo.status === 'provisioning' ? 202 : 200);
+  const pending = context.state.get<BootstrapPending>('bootstrap');
+  const queue = pending ? context.call('queue.bootstrapStatus') : null;
+  const active = queue?.status === 'eligible' ? queue.value : null;
+  return respond(context, { ...repo, bootstrap: pending ? { ...pending, state: active?.state ?? pending.status,
+    blockedReason: active?.blockedReason ?? null } : null }, repo.status === 'provisioning' ? 202 : 200);
 }
 
 function declaredUnitKeys(raw: unknown, policy: TrustedPolicy, allowUnknown = false): string[] {
@@ -541,7 +545,25 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   const existing = context.state.get<BootstrapPending>('bootstrap');
   if (existing) {
     if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName || Boolean(existing.withHistory) !== Boolean(body.withHistory)) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
-    if (existing.status === 'requested') return respond(context, { jobId: existing.jobId, state: 'requested' }, 202);
+    if (existing.status === 'requested') {
+      const status = context.call('queue.bootstrapStatus');
+      if (status.status === 'blocked') throw new HttpError(409, status.code, status.reason);
+      const pinned = status.value;
+      if (!pinned || pinned.jobId !== existing.jobId) throw new HttpError(409, 'BOOTSTRAP_PENDING', 'Bootstrap handoff is unavailable');
+      if (pinned.policyDigest !== policy.digest || pinned.profileDigest !== profile.digest || pinned.blockedReason === 'INVALID_JOB') {
+        const replacementId = crypto.randomUUID();
+        context.transaction(() => {
+          const gate = context.handoffBootstrap?.({ seedStorageName, seedRef, headOid, canonicalStorageName: repo.canonicalStorageName,
+            scratchStorageName: existing.scratchStorageName!, policyId: policy.id, profileId: profile.id,
+            jobId: replacementId, repin: true });
+          if (!gate) throw new HttpError(501, 'MODULE_UNAVAILABLE', 'Queue bootstrap handoff unavailable');
+          if (gate.status === 'blocked') throw new HttpError(409, gate.code, gate.reason);
+          context.state.put('bootstrap', { ...existing, jobId: replacementId, status: 'requested' } satisfies BootstrapPending);
+        });
+        return respond(context, { jobId: replacementId, state: 'requested' }, 202);
+      }
+      return respond(context, { jobId: existing.jobId, state: 'requested' }, 202);
+    }
   }
   const jobId = existing?.jobId ?? crypto.randomUUID();
   const scratchStorageName = existing?.scratchStorageName ?? `concord-s-${jobId}`;

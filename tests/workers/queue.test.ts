@@ -1411,6 +1411,38 @@ describe('queue state machine', () => {
     expect((await h.state()).promotion).toBeNull();
   });
 
+  it('keeps a failed bootstrap ticket while its promotion claim is live', async () => {
+    const h = harness;
+    await h.fetch('/queue');
+    await h.seed(`canonical-${h.repoId}`, null);
+    await h.seed(`scratch-${h.repoId}`, null);
+    await h.seed(`seed-${h.repoId}`, null);
+    await h.put(`seed-${h.repoId}`, 'refs/heads/seed', oid('a'));
+    const seed: BootstrapHandoff = { seedStorageName: `seed-${h.repoId}`, seedRef: 'refs/heads/seed', headOid: oid('a'),
+      canonicalStorageName: `canonical-${h.repoId}`, scratchStorageName: `scratch-${h.repoId}`,
+      policyId: 'local-demo', profileId: 'local-demo', jobId: 'original-bootstrap' };
+    expect((await h.bootstrap(seed)).status).toBe('eligible');
+    await h.tick();
+    await h.deliver(h.jobs[0], 'PASS');
+    await h.tick();
+    const promotion = h.jobs.find(job => job.kind === 'promote')!;
+    const claim = await worker.fetch(mutation(`/v1/repos/${h.repoId}/runner/poll`, {
+      runnerId: 'claimed-promoter', role: 'promoter', supportedProfileDigests: [promotion.profileDigest],
+    }, 'claimed-promoter-poll', 'local-promoter'), env);
+    expect(claim.status).toBe(200);
+    expect((await responseBody(claim)).data.job.jobId).toBe(promotion.jobId);
+    // A queue result alone does not release the runner's claim.
+    expect((await h.promoteResult(promotion, 'OLD_REF', null)).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'failed', bootstrap: true });
+    const config = localFixtureConfig('local');
+    config.profiles['local-demo'].digest = `sha256:${'b'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    await expect(h.bootstrap({ ...seed, jobId: 'replacement-bootstrap', repin: true }))
+      .rejects.toMatchObject({ code: 'BOOTSTRAP_BUSY' });
+    expect((await h.state()).promotion).toMatchObject({ state: 'failed', jobId: promotion.jobId });
+  });
+
   it('refuses a generic repository contest before looking up unavailable children', async () => {
     const h = await prepareReal([{ id: 'A', unit: 'row:J' }], ['A']);
     const refused = await h.fetch('/contests', { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',

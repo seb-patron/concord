@@ -340,6 +340,8 @@ export interface ServiceHooks {
   'verdicts.evaluateCarry': (context: ModuleContext, result: DeltaResult) => Gate<{ verdictId: Id }>;
   'queue.onResult': (context: ModuleContext, result: StackResult | PromotionResult) => Gate<{ promotionId: Id | null }>;
   'runners.schedule': (context: ModuleContext, job: Job) => Gate<{ jobId: Id }>;
+  'runners.cancelBootstrap': (context: ModuleContext, jobId: Id) => Gate;
+  'queue.bootstrapStatus': (context: ModuleContext) => Gate<{ jobId: Id; state: string; blockedReason: string | null; policyDigest: Digest; profileDigest: Digest } | null>;
 }
 export type HookName = keyof ServiceHooks;
 export type ModuleName = 'repos' | 'leases' | 'queue' | 'runners' | 'findings' | 'verdicts' | 'issues';
@@ -364,6 +366,8 @@ export interface BootstrapHandoff {
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
   /** Reserved by repos so the bootstrap response identifies the scheduled runner job. */
   jobId?: Id;
+  /** Owner-authorized replacement of an existing bootstrap with the same seed. */
+  repin?: true;
 }
 export type BootstrapHandoffProvider = (context: ModuleContext, seed: BootstrapHandoff) => Gate<{ stackId: Id }>;
 export interface Migration { version: number; statements: string[] }
