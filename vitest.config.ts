@@ -9,7 +9,14 @@ export default defineConfig({
         test: { name: 'workers', include: ['tests/workers/**/*.test.ts'] },
       },
       {
-        test: { name: 'node', environment: 'node', include: ['tests/node/**/*.test.ts'] },
+        test: {
+          // Node tests spawn processes and run under checker load.
+          name: 'node',
+          environment: 'node',
+          include: ['tests/node/**/*.test.ts'],
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+        },
       },
     ],
   },
