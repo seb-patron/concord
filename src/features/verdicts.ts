@@ -2,10 +2,11 @@ import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule,
 import { requireRepo, requireRole } from '../auth';
 import { HttpError, json } from '../http';
 import { dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest } from '../verdicts/manifest';
+import { jobPolicy, storedJob, type StoredJob } from '../jobs/policy';
 
 export type { InspectedRevision } from '../contracts';
 interface ActiveEvidence { revision: number; headOid: string; manifestDigest: Digest; profileDigest: Digest; sourceId: Id }
-interface CarryRequest { job: DeltaCheckJob; parentVersion: number; status: 'pending' | 'review-required' | 'carried'; reason: string | null; resultDigest: Digest | null; derivedVerdictId: Id | null }
+interface CarryRequest { job: StoredJob<DeltaCheckJob>; parentVersion: number; status: 'pending' | 'review-required' | 'carried'; reason: string | null; resultDigest: Digest | null; derivedVerdictId: Id | null }
 
 function deltaInputDigest(job: DeltaCheckJob, _parentVersion: number): Digest {
   const { inputDigest: _digest, state: _state, attempt: _attempt, runnerId: _runnerId,
@@ -111,7 +112,10 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
     return { status: 'eligible', version: context.version(), evidenceIds: [pending.derivedVerdictId], value: { verdictId: pending.derivedVerdictId } };
   }
   if (pending.status !== 'pending') return reject(context, 'REVIEW_REQUIRED', pending.reason ?? 'Delta check already decided');
-  const job = pending.job;
+  const policy = jobPolicy(context.trusted, pending.job);
+  if (!policy) return reject(context, 'JOB_POLICY_UNAVAILABLE',
+    `Job ${pending.job.jobId} needs policy ${pending.job.policyId} ${pending.job.policyDigest}, which the trusted config does not contain`);
+  const job = { ...pending.job, unitPolicy: policy } as DeltaCheckJob;
   const parent = storedVerdict(context, job.parentVerdictId);
   if (!parent || parent.decision !== 'approve' || parent.version !== pending.parentVersion || parent.reviewManifestDigest !== job.oldManifestDigest ||
     parent.findingSetVersion !== job.findingSetVersion) return reject(context, 'REVIEW_REQUIRED', 'Parent approval or expected versions changed');
@@ -124,7 +128,7 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
   // The runner owns the live claim fence. It invokes this hook only after checking attempt/fence/inputDigest.
   const fail = (reason: string): Gate<never> => {
     pending.status = 'review-required'; pending.reason = reason; pending.resultDigest = resultDigest;
-    context.state.put(`carry:${job.jobId}`, pending);
+    context.state.put(`carry:${job.jobId}`, { ...pending, job: storedJob(job) });
     const version = context.nextVersion();
     context.appendEvent('verdict.carry-review-required', [parent.verdictId, job.jobId], { reason }, version);
     return reject(context, 'REVIEW_REQUIRED', reason, [parent.verdictId, job.jobId]);
@@ -170,7 +174,7 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
     parentVerdictId: parent.verdictId, deltaResultId: result.jobId, evidenceDigest: resultDigest };
   save(context, derived, job.candidate.headOid, job.profileDigest, result.jobId);
   pending.status = 'carried'; pending.resultDigest = resultDigest; pending.derivedVerdictId = verdictId;
-  context.state.put(`carry:${job.jobId}`, pending);
+  context.state.put(`carry:${job.jobId}`, { ...pending, job: storedJob(job) });
   context.appendEvent('verdict.carried', [verdictId, parent.verdictId, job.jobId], { revision: derived.revision }, version);
   return { status: 'eligible', version, evidenceIds: [verdictId, result.jobId], value: { verdictId } };
 }
@@ -297,7 +301,7 @@ export const verdicts: FeatureModule = {
       const scheduled = context.call('runners.schedule', structuredClone(job));
       if (scheduled.status === 'blocked') throw new HttpError(409, scheduled.code, scheduled.reason);
       if (scheduled.value.jobId !== jobId) throw new HttpError(409, 'SCHEDULE_MISMATCH', 'Runner accepted another job identity');
-      context.state.put(`carry:${jobId}`, { job: structuredClone(job), parentVersion: parent.version, status: 'pending', reason: null, resultDigest: null, derivedVerdictId: null } satisfies CarryRequest);
+      context.state.put(`carry:${jobId}`, { job: storedJob(job), parentVersion: parent.version, status: 'pending', reason: null, resultDigest: null, derivedVerdictId: null } satisfies CarryRequest);
       const committed = context.nextVersion();
       const event = context.appendEvent('verdict.carry-requested', [parent.verdictId, jobId], { newBaseOid: body!.newBaseOid, revision: body!.revision }, committed);
       return json({ jobId, parentVerdictId: parent.verdictId, status: 'pending' }, committed, event.sequence, 202);

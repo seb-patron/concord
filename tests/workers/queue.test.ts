@@ -31,6 +31,8 @@ interface Harness {
   jobs: Job[]; releases: string[]; reserveAllowed: boolean;
   fetch(path: string, body?: Record<string, unknown>, key?: string): Promise<{ response: Response; body: any }>;
   state(): Promise<any>;
+  queueData(): Promise<any>;
+  injectLegacyQueueCopies(): Promise<void>;
   seed(name: string, base?: string | null): Promise<void>;
   put(name: string, ref: string, next: string, old?: string | null, tree?: string): Promise<boolean>;
   tick(flush?: boolean): Promise<void>;
@@ -84,6 +86,12 @@ beforeEach(() => {
       return { response, body: parsed };
     },
     async state() { return (await this.fetch('/queue')).body.data; },
+    async queueData() { return inside(context => sqlState(context.sql).get<any>('module:queue:data')); },
+    async injectLegacyQueueCopies() { return inside(context => {
+      const state = sqlState(context.sql).get<any>('module:queue:data');
+      for (const record of state.jobs) record.job.unitPolicy = localFixtureConfig('local').policies['local-demo'];
+      sqlState(context.sql).put('module:queue:data', state);
+    }); },
     async seed(name, base = main) {
       await inside(async context => {
         const storage = context.storage as FakeStorage;
@@ -1035,13 +1043,27 @@ describe('queue state machine', () => {
     expect(job.canonicalBaseOid).toBe(main);
     expect(job.expectedRefs[`canonical-${h.repoId}`]).toBe(main);
     expect(job.candidates.map(candidate => job.expectedRefs[candidate.storageName])).toEqual(job.candidates.map(candidate => candidate.headOid));
-    expect(job.policyDigest).toBe(job.unitPolicy.digest);
-    expect(job.inputDigest).toBe(await digest(jobInput(job)));
+    expect('unitPolicy' in job).toBe(false);
+    expect(job.inputDigest).toBe(await digest(jobInput({ ...job,
+      unitPolicy: localFixtureConfig('local').policies['local-demo'] })));
+    expect((await h.queueData()).jobs.every((record: any) => !('unitPolicy' in record.job))).toBe(true);
     await deliverChecked(h, job, 'PASS'); await h.tick();
     expect((await h.state()).promotion).toMatchObject({ memberIds: ['A', 'B', 'C'], expectedOldOid: main });
     expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('2'), main)).toBe(true);
     await h.tick();
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['landed', 'landed', 'landed']);
+  });
+
+  it('rewrites legacy queue job copies on its next save', async () => {
+    const h = await setup('A');
+    await h.tick();
+    const job = h.jobs[0];
+    expect(job.kind).toBe('validate-stack');
+    await deliverChecked(h, job, 'PASS');
+    await h.injectLegacyQueueCopies();
+    await h.tick();
+    expect((await h.state()).promotion).toBeTruthy();
+    expect((await h.queueData()).jobs.every((record: any) => !('unitPolicy' in record.job))).toBe(true);
   });
 
   it('bisects a failing generic middle candidate and lands the survivors', async () => {

@@ -2,18 +2,19 @@ import { pendingResultFailure, type FeatureModule, type Gate, type Job, type Job
 import { requireRole } from '../auth';
 import { digest, HttpError, json, stableJson } from '../http';
 import { reserveTokenMint } from './repos';
+import { jobPolicy, storedJob, withJobPolicy, type StoredJob } from '../jobs/policy';
 
 const CLAIM_MS = 60_000;
 // Artifacts and bridge issue Git credentials for at least 60 seconds.
 // Give their claims room for token minting and request latency.
 const providerMinimum = (c: ModuleContext) => c.env?.STORAGE_BACKEND === 'bridge' || c.env?.STORAGE_BACKEND === 'artifacts';
 const claimMs = (c: ModuleContext) => providerMinimum(c) ? 90_000 : CLAIM_MS;
-type Stored = { job: Job; result?: JobResult; dispatch?: Gate<unknown>; completedPrincipalId?: string };
+type Stored = { job: StoredJob; result?: JobResult; dispatch?: Gate<unknown>; completedPrincipalId?: string };
 type RunnerState = { principalId: string; role: 'checker' | 'promoter'; activeJobId: string | null;
   supportedProfileDigests: string[]; lastSeenAt: number };
 const ids = (c: ModuleContext) => c.state.get<string[]>('ids') ?? [];
 const load = (c: ModuleContext, id: string) => c.state.get<Stored>('job:' + id);
-const save = (c: ModuleContext, row: Stored) => c.state.put('job:' + row.job.jobId, row);
+const save = (c: ModuleContext, row: Stored) => c.state.put('job:' + row.job.jobId, { ...row, job: storedJob(row.job as Job) });
 const runner = (c: ModuleContext, id: string) => c.state.get<RunnerState>('runner:' + id);
 const saveRunner = (c: ModuleContext, id: string, value: RunnerState) => c.state.put('runner:' + id, value);
 const conflict = (code: string): never => { throw new HttpError(409, code, code); };
@@ -188,7 +189,7 @@ function schedule(c: ModuleContext, job: Job): Gate<{ jobId: string }> {
   if (!job || typeof job.jobId !== 'string') return { status: 'blocked', version: c.version?.() ?? 0, code: 'MODULE_UNAVAILABLE', reason: 'No job supplied', evidenceIds: [] };
   return c.transaction(() => {
     const prior = load(c, job.jobId);
-    if (prior) return prior.job.inputDigest === job.inputDigest && immutableJob(prior.job) === immutableJob(job) ?
+    if (prior) return prior.job.inputDigest === job.inputDigest && immutableJob(storedJob(prior.job as Job) as Job) === immutableJob(storedJob(job) as Job) ?
       { status: 'eligible', version: prior.job.version, evidenceIds: [job.jobId], value: { jobId: job.jobId } } :
       { status: 'blocked', version: prior.job.version, code: 'JOB_CONFLICT', reason: 'Job identity changed', evidenceIds: [job.jobId] };
     if (!validJob(c, job) || inputHash(stableJson(jobInput(job))) !== job.inputDigest)
@@ -234,8 +235,20 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
     const previous = runner(c, body.runnerId);
     if (previous && (previous.principalId !== c.principal.principalId || previous.role !== body.role)) conflict('RUNNER_ID_CONFLICT');
     if (previous?.activeJobId) conflict('RUNNER_BUSY');
-    const row = ids(c).map(id => load(c, id)).find(item => item?.job.state === 'pending' &&
-      body.supportedProfileDigests.includes(item.job.profileDigest) && (item.job.kind === 'promote') === (body.role === 'promoter'));
+    let row: Stored | undefined;
+    for (const item of ids(c).map(id => load(c, id))) {
+      if (!item || item.job.state !== 'pending' || !body.supportedProfileDigests.includes(item.job.profileDigest) ||
+        (item.job.kind === 'promote') !== (body.role === 'promoter')) continue;
+      if (!jobPolicy(c.trusted, item.job)) {
+        item.job = { ...item.job, state: 'blocked', version: c.nextVersion() } as Job;
+        save(c, item);
+        c.appendEvent('runner.blocked', [item.job.jobId], { reason: 'JOB_POLICY_UNAVAILABLE',
+          policyId: item.job.policyId, policyDigest: item.job.policyDigest }, item.job.version);
+        continue;
+      }
+      row = item;
+      break;
+    }
     saveRunner(c, body.runnerId, { principalId: c.principal.principalId, role: body.role, activeJobId: row?.job.jobId ?? null,
       supportedProfileDigests: body.supportedProfileDigests, lastSeenAt: c.now() });
     if (!previous) c.state.put('runner-ids', [...(c.state.get<string[]>('runner-ids') ?? []), body.runnerId]);
@@ -244,7 +257,7 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
       runnerId: body.runnerId, expiresAt: c.now() + claimMs(c), version: c.nextVersion() };
     save(c, row);
     const event = c.appendEvent('runner.claimed', [row.job.jobId], { attempt: row.job.attempt, fence: row.job.fence }, row.job.version);
-    return json({ job: row.job }, row.job.version, event.sequence);
+    return json({ job: withJobPolicy(c.trusted, row.job) }, row.job.version, event.sequence);
   });
 }
 
@@ -326,7 +339,7 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       stableJson(prior.result) !== stableJson(body.result)) conflict('RESULT_CONFLICT');
     return json({ dispatch: prior.dispatch, resultDigest: body.resultDigest }, prior.job.version);
   }
-  const job = current(c, id, body).job;
+  const job = withJobPolicy(c.trusted, current(c, id, body).job);
   const value = body.result;
   if (!value || value.jobId !== id || value.kind !== job.kind || value.attempt !== job.attempt ||
     value.fence !== job.fence || value.inputDigest !== job.inputDigest || value.resultDigest !== body.resultDigest ||
@@ -472,7 +485,7 @@ export const runners: FeatureModule = {
   ],
   snapshot: c => {
     const runnerIds = c.state.get<string[]>('runner-ids') ?? [];
-    return { status: runnerIds.length ? 'active' : 'unavailable', jobs: ids(c).map(id => load(c, id)?.job).filter(Boolean),
+    return { status: runnerIds.length ? 'active' : 'unavailable', jobs: ids(c).map(id => load(c, id)?.job).filter(Boolean).map(job => storedJob(job as Job)),
       runners: runnerIds.map(id => ({ runnerId: id, ...runner(c, id), state: (() => {
         const record = runner(c, id);
         return !record || c.now() - record.lastSeenAt > CLAIM_MS ? 'offline' : record.activeJobId ? 'claimed' : 'idle';

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Digest, Job, JobResult, ModuleContext, Principal } from '../../src/contracts';
-import { runners } from '../../src/features/runners';
+import { jobInput, runners } from '../../src/features/runners';
 import { artifactsStorage } from '../../src/storage/artifacts';
 import { digest, failure, HttpError } from '../../src/http';
 import { localFixtureConfig } from '../../src/state';
@@ -21,11 +21,12 @@ async function fixture() {
   let now = 1000;
   let version = 0;
   const calls: string[] = [];
+  const events: Array<{ kind: string; related: string[]; payload: unknown }> = [];
   const principal: Principal = { tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
   const context = {
     repoId: 'demo', tenantId: 'local', principal, trusted: localFixtureConfig('local'),
     now: () => now, version: () => version, nextVersion: () => ++version,
-    transaction: (run: () => unknown) => run(), appendEvent: () => ({ sequence: version }),
+    transaction: (run: () => unknown) => run(), appendEvent: (kind: string, related: string[], payload: unknown) => { events.push({ kind, related, payload }); return { sequence: version }; },
     state: { get: (key: string) => data.get(key) ?? null, put: (key: string, value: unknown) => { data.set(key, structuredClone(value)); }, delete: (key: string) => { data.delete(key); } },
     storage: {
       readCommit: async () => ({ oid, treeOid: tree, parents: [] }),
@@ -50,7 +51,7 @@ async function fixture() {
     try { return await entry.handle(context, new Request('https://test' + path, { method: 'POST' }), path.match(entry.pattern)!, body); }
     catch (error) { return failure(error instanceof HttpError ? error : new HttpError(503, 'ERROR', String(error))); }
   };
-  return { context, job: await seal(job), calls, route, advance: (ms: number) => { now += ms; }, now: () => now, principal };
+  return { context, job: await seal(job), calls, events, route, advance: (ms: number) => { now += ms; }, now: () => now, principal };
 }
 
 async function acceptedResult(job: Job): Promise<{ result: JobResult; resultDigest: string; attempt: number; fence: number; inputDigest: string }> {
@@ -80,6 +81,67 @@ async function promotionResult(job: Job) {
 }
 
 describe('durable runner protocol', () => {
+  it('stores jobs without policy copies and fills them in on poll', async () => {
+    const f = await fixture();
+    expect(runners.hooks['runners.schedule']!(f.context, f.job)).toMatchObject({ status: 'eligible' });
+    const stored = f.context.state.get('job:job1') as { job: Job };
+    expect(stored.job).toMatchObject({ policyId: 'local-demo', policyDigest: pin });
+    expect('unitPolicy' in stored.job).toBe(false);
+    expect(runners.hooks['runners.schedule']!(f.context, f.job)).toMatchObject({ status: 'eligible' });
+    expect((runners.snapshot(f.context) as any).jobs.every((job: Job) => !('unitPolicy' in job))).toBe(true);
+    const poll = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    expect(poll.status).toBe(200);
+    const job = (await poll.json() as { data: { job: Job } }).data.job;
+    expect(job.unitPolicy).toEqual(f.context.trusted.policies['local-demo']);
+    expect(await digest(jobInput(job))).toBe(f.job.inputDigest);
+    expect('unitPolicy' in (f.context.state.get('job:job1') as { job: Job }).job).toBe(false);
+    expect((await f.route('jobs/job1/result', await acceptedResult(job))).status).toBe(200);
+    expect('unitPolicy' in (f.context.state.get('job:job1') as { job: Job }).job).toBe(false);
+  });
+
+  it('reads old rows, strips policy copies on writes, blocks stale policy pins, and serves later jobs', async () => {
+    const f = await fixture();
+    const completed = await seal({ ...f.job, jobId: 'job2', state: 'completed' } as Job);
+    f.context.state.put('ids', ['job2', 'job1']);
+    f.context.state.put('job:job2', { job: completed });
+    f.context.state.put('job:job1', { job: f.job });
+    const puts: string[] = [];
+    const originalPut = f.context.state.put.bind(f.context.state);
+    f.context.state.put = (key: string, value: unknown) => { puts.push(key); originalPut(key, value); };
+    expect((runners.snapshot(f.context) as any).jobs.every((job: Job) => !('unitPolicy' in job))).toBe(true);
+    expect(puts).toEqual([]);
+    runners.nextDeadline(f.context);
+    expect(puts).toEqual([]);
+    const poll = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    expect(poll.status).toBe(200);
+    expect((await poll.json() as { data: { job: Job } }).data.job.jobId).toBe('job1');
+    expect(puts).toContain('job:job1');
+    expect('unitPolicy' in (f.context.state.get('job:job1') as { job: Job }).job).toBe(false);
+    expect('unitPolicy' in (f.context.state.get('job:job2') as { job: Job }).job).toBe(true);
+
+    const stale = await fixture();
+    const other = { ...stale.context.trusted.policies['local-demo'], id: 'other', digest: ('sha256:' + '2'.repeat(64)) as Digest };
+    stale.context.trusted.policies.other = other;
+    const second = await seal({ ...stale.job, jobId: 'job2', policyId: 'other', policyDigest: other.digest, unitPolicy: other } as Job);
+    runners.hooks['runners.schedule']!(stale.context, stale.job);
+    runners.hooks['runners.schedule']!(stale.context, second);
+    stale.context.trusted.policies['local-demo'] = { ...stale.context.trusted.policies['local-demo'], digest: ('sha256:' + 'f'.repeat(64)) as Digest };
+    const next = await stale.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    expect(next.status).toBe(200);
+    const served = (await next.json() as { data: { job: Job } }).data.job;
+    expect(served.jobId).toBe('job2');
+    expect((stale.context.state.get('job:job1') as { job: Job }).job.state).toBe('blocked');
+    expect(stale.events.filter(event => event.kind === 'runner.blocked')).toEqual([{
+      kind: 'runner.blocked', related: ['job1'], payload: { reason: 'JOB_POLICY_UNAVAILABLE', policyId: 'local-demo', policyDigest: pin },
+    }]);
+    delete stale.context.trusted.policies.other;
+    const result = await stale.route('jobs/job2/result', await acceptedResult(served));
+    expect(result.status).toBe(409);
+    expect((await result.json() as any).error.code).toBe('JOB_POLICY_UNAVAILABLE');
+    expect((stale.context.state.get('job:job2') as { job: Job }).job.state).toBe('claimed');
+    expect((await stale.route('runner/poll', { runnerId: 'two', role: 'checker', supportedProfileDigests: [pin] })).status).toBe(204);
+  });
+
   it('checks the canonical immutable input digest before scheduling', async () => {
     const f = await fixture();
     expect(runners.hooks['runners.schedule']!(f.context, { ...f.job, inputDigest: pin })).toMatchObject({ status: 'blocked', code: 'INVALID_JOB' });
