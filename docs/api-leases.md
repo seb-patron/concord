@@ -8,6 +8,19 @@ For a managing agent, call `concord start --repo R --intent-key K --intent TEXT 
 
 The installed owner policy controls all unit identities. Its `units` map registers explicit aliases with a `canonicalKey`, `file`, and `resources` footprint. Aliases with the same canonical key resolve to one unit; conflicting metadata is rejected. A `file:<path>` key is available when its path occurs in trusted metadata, a declared table, or an owner-approved new-file prefix. It covers every symbol, declaration, and TSV row in that file. Separate row resources in one TSV can be leased simultaneously. Unknown keys, including undeclared table names, return `422 UNKNOWN_UNIT`. Agents cannot add tables or claim overrides.
 
+An owner may opt exact tracked file paths into Git funcname symbol keys with trusted `symbolRules` metadata (D-SYMBOL-LEASES, D-UNIT-1-EXCLUSIVE):
+
+```json
+"symbolRules": [
+  { "path": "src/example.py", "driver": "python" },
+  { "path": "src/example.ts", "driver": "typescript", "xfuncname": "^[[:space:]]*(export[[:space:]]+)?function[[:space:]]+[[:alnum:]_]+" }
+]
+```
+
+Each path must be normalized, unique, already eligible for its exact `file:<path>` unit, and not a declared TSV table. Built-in Git diff drivers take no `xfuncname`; TypeScript requires a bounded POSIX extended regular expression. The owner must install matching `diff=<driver>` attributes and, for TypeScript, the same `diff.typescript.xfuncname` rule in the canonical tree. The server does not inspect Git to discover whether a symbol name exists. It accepts any syntactically canonical key under an authorized path; the checker verifies the actual writes against the selected Git funcname intervals before reservation (#90).
+
+A symbol key is `symbol:<path>#<encoded-funcname-line>`. The name uses the canonical UTF-8 percent encoding produced by Git's symbol-key rules (uppercase hex escapes; ASCII letters, digits, `.`, `_`, `~`, and `-` remain unescaped). For example, `symbol:src/a.py#def%20alpha%28%29%3A` identifies the selected line `def alpha():`. Malformed, noncanonical, overlong, or unauthorized keys return `422 UNKNOWN_UNIT`. Exact symbol keys conflict with and cover only the same key. Distinct symbols in one file can be held at once; a file claim conflicts with and covers every symbol in that file. All leases remain exclusive. A symbol claim cannot cover a file write, a TSV row, or another symbol. If any requested key conflicts, the whole claim is refused with `409 LEASE_CONFLICT` and holder details; no partial grant is made. Policies without `symbolRules` keep their existing behavior and digest.
+
 An owner can also declare TSV tables in trusted policy metadata:
 
 ```json

@@ -4,6 +4,7 @@ import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { activeChangeLimit, costLimits, eventSequence, sqlState } from '../state';
 import { covers, MAX_NORMALIZED_UNITS, resolveUnit, unitRegistry, unitsOverCapMessage } from '../leases/units';
+import { parseSymbolKey } from '../leases/symbol-keys';
 import { branch, ids, mergeLandedChanges, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 import { isRepoPath } from '../repos/paths';
 import { storedJob, withJobPolicy } from '../jobs/policy';
@@ -333,7 +334,8 @@ async function canonicalRead(context: ModuleContext, request: Request, kind: 'tr
 }
 
 function declaredUnitKeys(raw: unknown, policy: TrustedPolicy, allowUnknown = false): string[] {
-  if (!Array.isArray(raw) || raw.some(key => typeof key !== 'string' || !/^[A-Za-z0-9._:/-]{1,128}$/.test(key)) ||
+  if (!Array.isArray(raw) || raw.some(key => typeof key !== 'string' ||
+      !(/^[A-Za-z0-9._:/-]{1,128}$/.test(key) || parseSymbolKey(key) !== null)) ||
     new Set(raw).size !== raw.length) fail(400, 'INVALID_INPUT', 'unitKeys must contain unique identifiers');
   const rawKeys = raw as string[];
   const registry = unitRegistry(policy);

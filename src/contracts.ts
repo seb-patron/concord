@@ -145,6 +145,8 @@ export interface TrustedPolicy {
   units: Record<string, { canonicalKey: string; file: string; resources: string[]; dependencyKeys: string[] }>;
   /** Owner-approved directories for whole-file units at paths absent from the registry. */
   newFilePrefixes?: string[];
+  /** Owner-approved Git funcname rules for dynamic symbol units on exact tracked paths. */
+  symbolRules?: Array<{ path: string; driver: string; xfuncname?: string }>;
   /** Owner-declared TSV row namespaces. These are never supplied by a change author. */
   tables?: Array<{ name: string; file: string; header: string[]; keyColumn: string;
     keySpec: { charset: 'lower' | 'alnum' | 'alnum-dash-dot' | string[]; minLength: number; maxLength: number } }>;
