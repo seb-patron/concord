@@ -78,10 +78,27 @@ In both examples, the runner invokes the pinned `/bin/sh` directly in the compos
 
 For dispatch-lab, the stored job must carry a trusted `caseId` from the scenario plan. Both J children must use the same base and profile input, pass this exact hard gate, and only then may the queue compare their scores. The queue owns that cross-job decision. Candidate-edited TSV rows never supply expected values.
 
+## Add a runner machine
+
+A new checker machine needs no redeploy and no `AUTH_TOKENS` change: the owner mints a runtime checker principal, scoped to the repositories it may serve.
+
+```sh
+npm run concord -- principals mint --role checker --repo REPO_ID --ttl 24h --name mac-mini
+```
+
+The mint prints the token once on stdout — it is never shown again — and, on stderr, a ready-to-paste runner start command that reads the token from the `CHECKER_TOKEN` environment variable instead of embedding it. The default trusted configuration allows a 24-hour checker token. For longer lifetimes (up to 30 days), first raise `delegatedPrincipals.maxTtlMs` in `TRUSTED_CONFIG`; for example, `"delegatedPrincipals": {"maxTtlMs": 2592000000}` permits `--ttl 30d`. Without that setting, `--ttl 30d` returns `400 INVALID_TTL`. Copy the owner profile file to the machine, load the token without writing it to shell history, and start the runner:
+
+```sh
+read -rs CHECKER_TOKEN && export CHECKER_TOKEN    # paste the token at the prompt
+CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo REPO_ID --role checker --profile "$PROFILE_FILE" --max-jobs 1000 --idle-timeout-seconds 86400
+```
+
+Run this command under a supervisor that restarts it when its 1,000-job or 24-hour bound is reached. `npm run concord -- principals revoke PRINCIPAL_ID` stops the machine's next poll with 401. Token refreshes of the owner credential never affect minted principals, and `promoter` principals are never mintable: they remain `AUTH_TOKENS` identities.
+
 ## Run
 
 ```sh
-CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$REPO_ID" --role checker --profile "$PROFILE_FILE" --once
+CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$REPO_ID" --role checker --profile "$PROFILE_FILE" --max-jobs 1000 --idle-timeout-seconds 86400
 CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$REPO_ID" --role promoter --profile-digest "$PROFILE_DIGEST" --once
 ```
 

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
+import { parseArgs as parseRunnerArgs, runLoop } from '../../runner/main.ts';
 
 const execFile = promisify(execFileCallback);
 const tempDirs: string[] = [];
@@ -123,6 +124,50 @@ describe('Concord agent CLI client', () => {
       const revoked = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'revoke', 'child'], { cwd: process.cwd(), env });
       expect(JSON.parse(revoked.stdout)).toMatchObject({ data: { revokedIds: ['child'] } });
       expect(calls.map(call => `${call.method} ${call.path}`)).toEqual(['POST /v1/principals', 'GET /v1/principals', 'GET /v1/principals?cursor=MjU', 'DELETE /v1/principals/child']);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+  it('prints a checker token once on stdout and a runner command that reads it from an env var', async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const token = `cct_local_${'c'.repeat(64)}`;
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      calls.push({ method: request.method ?? '', path: request.url ?? '', body: body ? JSON.parse(body) : null });
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ data: { id: 'checker-1', token, expiresAt: 4_000_000_000_000, roles: ['checker'], repoIds: ['alpha'] } }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local server');
+    const url = `http://127.0.0.1:${address.port}`;
+    const env = { ...process.env, CONCORD_URL: url, CONCORD_TOKEN: 'owner-token' };
+    const cli = (...args: string[]) => execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', ...args], { cwd: process.cwd(), env });
+    try {
+      const minted = await cli('principals', 'mint', '--role', 'checker', '--repo', 'alpha', '--ttl', '24h', '--name', 'mac-mini');
+      expect(minted.stdout).toBe(`${token}\n`);
+      expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/principals',
+        body: { roles: ['checker'], repoIds: ['alpha'], ttlSeconds: 86400, name: 'mac-mini' } });
+      expect(minted.stderr).toContain('checker-1');
+      expect(minted.stderr).toContain(`CONCORD_URL=${url} CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo alpha --role checker`);
+      expect(minted.stderr).not.toContain(token);
+      const command = minted.stderr.match(/npm run runner -- ([^\n]+)/)?.[1];
+      expect(command).toBeDefined();
+      const options = parseRunnerArgs(command!.trim().split(/\s+/));
+      expect(options).toMatchObject({ repo: 'alpha', role: 'checker', once: false,
+        maxJobs: 1000, idleTimeoutSeconds: 86400 });
+      vi.useFakeTimers();
+      try {
+        let polls = 0;
+        const stopped = expect(runLoop({ ...options, profileDigest: `sha256:${'0'.repeat(64)}` }, async () => {
+          polls++;
+          return polls === 1 ? { status: 204 } : { status: 403, error: { code: 'STOP' } };
+        }, null)).rejects.toThrow('POLL_FAILED:STOP');
+        await vi.advanceTimersByTimeAsync(1000);
+        await stopped;
+        expect(polls).toBe(2);
+      } finally { vi.useRealTimers(); }
+      await expect(cli('principals', 'mint', '--role', 'promoter')).rejects.toMatchObject({ code: 2, stdout: '' });
+      expect(calls).toHaveLength(1);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
   it('drives a complete fake transport lifecycle with JSON envelopes', async () => {

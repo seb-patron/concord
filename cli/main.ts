@@ -21,7 +21,7 @@ Commands and required fields:
   land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
-  principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
+  principals mint --role agent|reviewer|viewer|checker [--repo ID] [--ttl 30d] [--name NAME]
   principals list [--cursor CURSOR]
   principals revoke ID
   repo clone --repo ID --path PATH                 (read-only canonical clone)
@@ -130,14 +130,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     }
     if (verb === 'mint') {
       const role = required(flags, 'role');
-      if (!['agent', 'reviewer', 'viewer'].includes(role)) throw new ConcordError('--role must be agent, reviewer, or viewer', 'usage');
+      if (!['agent', 'reviewer', 'viewer', 'checker'].includes(role)) throw new ConcordError('--role must be agent, reviewer, viewer, or checker', 'usage');
       const payload: Record<string, unknown> = { roles: [role] };
       if (repo) payload.repoIds = [repo];
       if (flags.name !== undefined) payload.name = flags.name;
       if (flags.ttl !== undefined) {
-        const match = /^([1-9][0-9]*)([smh])$/.exec(String(flags.ttl));
-        if (!match) throw new ConcordError('--ttl must use positive seconds, minutes, or hours (for example 2h)', 'usage');
-        const seconds = Number(match[1]) * ({ s: 1, m: 60, h: 3600 } as const)[match[2] as 's' | 'm' | 'h'];
+        const match = /^([1-9][0-9]*)([smhd])$/.exec(String(flags.ttl));
+        if (!match) throw new ConcordError('--ttl must use positive seconds, minutes, hours, or days (for example 30d)', 'usage');
+        const seconds = Number(match[1]) * ({ s: 1, m: 60, h: 3600, d: 86400 } as const)[match[2] as 's' | 'm' | 'h' | 'd'];
         if (!Number.isSafeInteger(seconds)) throw new ConcordError('--ttl is too large', 'usage');
         payload.ttlSeconds = seconds;
       }
@@ -145,7 +145,19 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       if (!result || typeof result !== 'object' || typeof (result as { token?: unknown }).token !== 'string' || !/^cct_[A-Za-z0-9_-]+_[a-f0-9]{64}$/.test((result as { token: string }).token)) {
         throw new ConcordError('Mint response did not include a valid token', 'server');
       }
-      process.stdout.write(`${(result as { token: string }).token}\n`);
+      const minted = result as { token: string; id?: unknown; expiresAt?: unknown };
+      rememberCredential(minted.token);
+      process.stdout.write(`${minted.token}\n`);
+      if (role === 'checker') {
+        const expiry = typeof minted.expiresAt === 'number' && Math.abs(minted.expiresAt) <= 8.64e15
+          ? `, expires ${new Date(minted.expiresAt).toISOString()}` : '';
+        process.stderr.write(
+          `Minted checker principal ${typeof minted.id === 'string' ? minted.id : '(id unknown)'}${expiry}; the token above is shown once.\n` +
+          'On the runner machine, load it without writing it to shell history:\n' +
+          '  read -rs CHECKER_TOKEN && export CHECKER_TOKEN    # paste the token at the prompt\n' +
+          `  CONCORD_URL=${process.env.CONCORD_URL} CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo ${repo || 'REPO_ID'} --role checker --profile "$PROFILE_FILE" --max-jobs 1000 --idle-timeout-seconds 86400\n` +
+          `Revoke it with: npm run concord -- principals revoke ${typeof minted.id === 'string' ? minted.id : 'PRINCIPAL_ID'}\n`);
+      }
       return;
     }
   }
