@@ -53,6 +53,38 @@ export class TenantCatalog extends DurableObject<Env> {
         const found = lookupPrincipal(this.ctx.storage.sql, tokenDigest as string, tenantId, this.now());
         return json(found);
       }
+      if (path === '/internal/repo-directory' && request.method === 'GET') {
+        const repoId = new URL(request.url).searchParams.get('repoId') ?? '';
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(repoId)) throw new HttpError(400, 'INVALID_REPO', 'Repository id required');
+        const directory = sqlState(this.ctx.storage.sql).get<Record<string, string>>('directory:repos') ?? {};
+        const tenantId = Object.hasOwn(directory, repoId) ? directory[repoId] : null;
+        return json({ repoId, tenantId, public: tenantId !== null });
+      }
+      if (path === '/internal/repo-directory' && request.method === 'POST') {
+        const tenantId = request.headers.get('x-concord-tenant');
+        if (!tenantId || !/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new HttpError(401, 'UNAUTHORIZED', 'Directory tenant missing');
+        const body = await readJson(request);
+        if (typeof body.repoId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(body.repoId) || typeof body.public !== 'boolean') {
+          throw new HttpError(400, 'INVALID_REPO', 'Repository id and public flag required');
+        }
+        const state = sqlState(this.ctx.storage.sql);
+        const directory: Record<string, string> = Object.assign(Object.create(null), state.get<Record<string, string>>('directory:repos') ?? {});
+        const holder = Object.hasOwn(directory, body.repoId) ? directory[body.repoId] : null;
+        if (holder && holder !== tenantId) throw new HttpError(409, 'PUBLIC_REPO_NAME_CONFLICT', 'Public repository name belongs to another tenant');
+        if (body.public) directory[body.repoId] = tenantId; else delete directory[body.repoId];
+        state.put('directory:repos', directory);
+        return json({ repoId: body.repoId, tenantId: body.public ? tenantId : null, public: body.public });
+      }
+      if (path === '/internal/public-repo' && request.method === 'GET') {
+        const tenantId = request.headers.get('x-concord-tenant');
+        const identity = sqlState(this.ctx.storage.sql).get<string>('catalog:tenantId');
+        if (!tenantId || tenantId !== identity) throw new HttpError(401, 'UNAUTHORIZED', 'Catalog identity mismatch');
+        const repoId = new URL(request.url).searchParams.get('repoId') ?? '';
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(repoId)) throw new HttpError(400, 'INVALID_REPO', 'Repository id required');
+        const repo = (this.context({ tenantId, principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER })
+          .state.get<Repo[]>('catalog:index') ?? []).find(item => item.repoId === repoId && item.tenantId === tenantId);
+        return json({ public: repo?.public === true });
+      }
       const principal = JSON.parse(request.headers.get('x-concord-principal') ?? 'null') as Principal | null;
       if (!principal) throw new HttpError(401, 'UNAUTHORIZED', 'Identity missing');
       requireTenant(principal, request.headers.get('x-concord-tenant') ?? undefined);
@@ -103,7 +135,9 @@ export class TenantCatalog extends DurableObject<Env> {
       if (path === '/v1/principals' || path.startsWith('/v1/principals/')) return await handlePrincipalRoute(context, request, path);
       if (path !== '/v1/repos') throw new HttpError(404, 'NOT_FOUND', 'Unknown catalog route');
       if (request.method === 'GET') {
-        const repos = (context.state.get<Repo[]>('catalog:index') ?? []).filter(repo => repo.tenantId === principal.tenantId && (principal.repoIds === '*' || principal.repoIds.includes(repo.repoId)));
+        const repos = (context.state.get<Repo[]>('catalog:index') ?? [])
+          .filter(repo => repo.tenantId === principal.tenantId && (principal.repoIds === '*' || principal.repoIds.includes(repo.repoId)))
+          .map(repo => ({ ...repo, public: repo.public === true }));
         const offset = parseCursor(new URL(request.url).searchParams.get('cursor'));
         const items = repos.slice(offset, offset + 100);
         const nextCursor = offset + items.length < repos.length ? encodeCursor(offset + items.length) : null;

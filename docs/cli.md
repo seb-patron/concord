@@ -60,12 +60,16 @@ optional repeated `--exclude GLOB`, `--exclude-file FILE`, `--require-match`, `-
 and `--verbose`. History mode cannot be combined with exclusions.
 
 ```sh
-npm run concord -- repo create --name public-aw --policy-id policy-v1 --profile-id profile-v1
+npm run concord -- repo create --name public-aw --policy-id policy-v1 --profile-id profile-v1 [--public true|false]
 npm run concord -- repo list --json
 npm run concord -- repo clone --repo REPO_ID --path './canonical read-only'
 ```
 
 `repo create` requires `name`, `policyId`, and `profileId`. `repo clone` requires `--repo` and `--path`; it obtains read-scoped access for the canonical storage repository and clones it read-only. Git-token requests retry a `STALE_VERSION` conflict up to five attempts, re-reading the repository version and using a fresh idempotency key each time. Supplying `--expected-version` pins the version and disables these retries. A `409 PROMOTION_IN_PROGRESS` response waits and retries with 1, 2, 4, 8, and increasing-second backoff up to 120 seconds total; each wait prints `waiting for landing in progress (Ns)`. After the deadline, the request fails with the Concord error code. Other Git-token errors include the Concord error code in the printed message (for example, `Git token request failed with HTTP 409 LEASE_CONFLICT`).
+
+### Public repositories
+
+`--public true` marks a repository public; `--public false` requires a credential for reads. Only the owner can change the flag, through `repo create` using the same name, policy, and profile; omitting `--public` leaves it unchanged. While public, anyone can read GET routes under `/v1/repos/:r/` as a viewer scoped to that repository. Anonymous readers see repository status, changes, branches, snapshots, events, issues, leases, findings, verdict summaries, and queue state, with token and credential material, storage names and remotes, and runner/checker configuration omitted. Credentialless reads of private or unknown repositories, mutations, and tenant-wide routes still return `401 UNAUTHORIZED`; invalid credentials are never downgraded to anonymous. The web UI opens a `?repo=<id>` URL in public read-only mode when no session token is stored. Public repository IDs are reserved across tenants. Revocation updates the catalog before directory cleanup, so a failed cleanup cannot preserve anonymous access; retry the same `repo create --public false` request to clean up the directory entry.
 
 ## Changes
 

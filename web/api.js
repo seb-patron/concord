@@ -16,6 +16,12 @@
 
 // Token lives in module memory only. Nothing here touches URL or storage.
 let sessionToken = null;
+let anonymousReadBudget = null;
+
+/** Set a shared request budget for credentialless repository reads. */
+export function setAnonymousReadBudget(available) {
+  anonymousReadBudget = typeof available === 'function' ? available : null;
+}
 
 /** Store the session token in memory. Pass null/'' to forget it. */
 export function setSessionToken(token) {
@@ -88,6 +94,9 @@ export async function apiFetch(path, options = {}, fetchImpl = fetch) {
     throw new ApiError(400, 'INVALID_PATH', 'Refusing non-local request path');
   }
   const { method = 'GET', body, idempotencyKey } = options;
+  if (anonymousReadBudget && method === 'GET' && path.startsWith('/v1/repos/') && !anonymousReadBudget()) {
+    throw new ApiError(429, 'PUBLIC_READ_BUDGET', 'Public read request budget reached');
+  }
   const headers = { accept: 'application/json' };
   if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
   let payload;

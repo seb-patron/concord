@@ -24,7 +24,7 @@ Commands and required fields:
   renew --repo ID --intent-key KEY [--hold 5m] [--every SECONDS [--while-pid PID]] [--json]
   land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
-  repo create --name NAME --policy-id ID --profile-id ID
+  repo create --name NAME --policy-id ID --profile-id ID [--public true|false]
   repo list [--cursor CURSOR]
   principals mint --role agent|reviewer|viewer|checker [--repo ID] [--ttl 30d] [--name NAME]
   principals list [--cursor CURSOR]
@@ -60,7 +60,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid', 'public'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -188,6 +188,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   if (noun === 'repo' && verb === 'list') return print(await send('GET', `/repos${query({ cursor: flags.cursor })}`));
   if (noun === 'repo' && verb === 'create') {
     const payload = body ?? requiredObject(flags, ['name', 'policy-id', 'profile-id'], { name: 'name', policyId: 'policy-id', profileId: 'profile-id' });
+    if (flags.public !== undefined) {
+      if (flags.public !== 'true' && flags.public !== 'false') throw new ConcordError('--public must be true or false', 'usage');
+      (payload as Record<string, unknown>).public = flags.public === 'true';
+    }
+    if (flags.public !== undefined) {
+      if (flags.public !== 'true' && flags.public !== 'false') throw new ConcordError('--public must be true or false', 'usage');
+      (payload as Record<string, unknown>).public = flags.public === 'true';
+    }
     return print(await send('POST', '/repos', payload));
   }
   if (noun === 'repo' && verb === 'clone') {

@@ -1,4 +1,5 @@
 import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, TrustedPolicy, ValidateStackJob } from '../contracts';
+import { PUBLIC_DIRECTORY_NAME } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { activeChangeLimit, costLimits, eventSequence, sqlState } from '../state';
@@ -159,12 +160,25 @@ async function reconcile(context: ModuleContext, intent: ProvisioningIntent, ret
   }
 }
 
+async function syncPublicDirectory(context: ModuleContext, repo: Repo): Promise<void> {
+  // Module-only fixtures omit CONCORD_MODE; actual Worker contexts always supply it.
+  if (!context.env?.CONCORD_MODE || !context.env.TENANT_CATALOG) return;
+  const directory = context.env.TENANT_CATALOG.get(context.env.TENANT_CATALOG.idFromName(PUBLIC_DIRECTORY_NAME));
+  const response = await directory.fetch(new Request('https://concord.internal/internal/repo-directory', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-concord-tenant': context.tenantId },
+    body: JSON.stringify({ repoId: repo.repoId, public: repo.public === true }),
+  }));
+  if (response.status === 409) fail(409, 'PUBLIC_REPO_NAME_CONFLICT', 'Public repository name belongs to another tenant');
+  if (!response.ok) fail(503, 'DIRECTORY_UNAVAILABLE', 'Public repository directory unavailable');
+}
+
 async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Promise<Response> {
   requireRole(context.principal, 'owner');
   const repoId = repoName(body.name);
   const policy = context.trusted.policies[body.policyId];
   const profile = context.trusted.profiles[body.profileId];
   if (!policy || !profile) fail(400, 'UNKNOWN_POLICY_OR_PROFILE', 'Trusted policy and profile are required');
+  if (body.public !== undefined && typeof body.public !== 'boolean') fail(400, 'INVALID_INPUT', 'public must be a boolean');
   let repo = list<Repo>(context, 'catalog:index').find(item => item.repoId === repoId);
   if (repo && (repo.policyId !== policy.id || repo.profileId !== profile.id)) fail(409, 'REPO_NAME_CONFLICT', 'Repository name belongs to another configuration');
   if (!repo) {
@@ -173,7 +187,8 @@ async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Prom
     repo = {
       repoId, tenantId: context.tenantId, displayName: repoId,
       canonicalStorageName, defaultBranch: 'main', observedCanonicalOid: null,
-      policyId: policy.id, policyDigest: policy.digest, profileId: profile.id, status: 'provisioning', version: 0,
+      policyId: policy.id, policyDigest: policy.digest, profileId: profile.id, status: 'provisioning',
+      public: false, version: 0,
     };
     context.transaction(() => {
       const current = list<Repo>(context, 'catalog:index');
@@ -194,6 +209,30 @@ async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Prom
     context.state.put('catalog:index', list<Repo>(context, 'catalog:index').map(item => item.repoId === repoId ? repo! : item));
   });
   if (status === 'blocked') fail(503, 'PROVISIONING_FAILED', 'Canonical repository provisioning failed; retry the same name');
+  if (body.public !== undefined && repo.public !== body.public) {
+    // Reserve before publication; revoke in the catalog before deleting the
+    // directory entry. Anonymous reads verify both records and fail closed.
+    if (body.public) await syncPublicDirectory(context, { ...repo, public: true });
+    const next = body.public;
+    context.transaction(() => {
+      const current = list<Repo>(context, 'catalog:index');
+      const item = current.find(entry => entry.repoId === repoId);
+      if (item) {
+        item.public = next;
+        item.version = versioned(context, 'repo.updated', [repoId], { public: next });
+        context.state.put('catalog:index', current);
+        if (!next) context.state.put(`directory-removal:${repoId}`, true);
+      }
+    });
+    repo = list<Repo>(context, 'catalog:index').find(item => item.repoId === repoId) ?? repo;
+    if (!body.public) {
+      await syncPublicDirectory(context, repo);
+      context.state.delete(`directory-removal:${repoId}`);
+    }
+  } else if (body.public === false && context.state.get<boolean>(`directory-removal:${repoId}`)) {
+    await syncPublicDirectory(context, repo);
+    context.state.delete(`directory-removal:${repoId}`);
+  }
   return respond(context, repo, status === 'ready' ? 201 : 202);
 }
 
@@ -209,6 +248,7 @@ async function catalogRepo(context: ModuleContext): Promise<Repo> {
     const envelope = await response.json() as { data: { items: Repo[]; nextCursor: string | null } };
     const catalog = envelope.data.items.find(item => item.repoId === context.repoId);
     if (catalog) {
+      catalog.public = catalog.public === true;
       const stored = context.state.get<Repo>('repo');
       const repo = stored?.canonicalStorageName === catalog.canonicalStorageName && catalog.observedCanonicalOid === null
         ? { ...catalog, observedCanonicalOid: stored.observedCanonicalOid }
