@@ -530,7 +530,7 @@ describe('RepoCoordinator lease routes', () => {
     expect((await responseBody(unknown)).error.code).toBe('UNKNOWN_UNIT');
   });
 
-  it('uses server TTL, monotonic fences, and rejects stale holders after reacquisition', async () => {
+  it('keeps the fence on renew and advances it on a new grant', async () => {
     setupPolicy();
     const repo = 'lease_lifetime';
     const tooLong = await claim(repo, 'local-agent-a', 'too-long', ['symbol:sub_02000100'], 'ttl-invalid', { ttlSeconds: 14401 });
@@ -547,15 +547,69 @@ describe('RepoCoordinator lease routes', () => {
     const renewed = await fetchApi(mutation(renewPath, { expectedVersion: 1, fence: lease.fence }, 'renew', 'local-agent-a'));
     expect(renewed.status).toBe(200);
     const next = (await responseBody(renewed)).data.lease;
-    expect(next.fence).toBeGreaterThan(lease.fence);
+    expect(next.fence).toBe(lease.fence);
+    expect(next.expiresAt).toBeGreaterThan(lease.expiresAt);
     const releasePath = `${path(repo)}/${lease.leaseId}/release`;
-    expect((await fetchApi(mutation(releasePath, { expectedVersion: 2, fence: lease.fence }, 'old-fence', 'local-agent-a'))).status).toBe(409);
-    expect((await fetchApi(mutation(releasePath, { expectedVersion: 2, fence: next.fence }, 'release', 'local-agent-a'))).status).toBe(200);
+    const staleRelease = await fetchApi(mutation(releasePath, { expectedVersion: 2, fence: lease.fence + 1 }, 'wrong-fence', 'local-agent-a'));
+    expect(staleRelease.status).toBe(409);
+    expect((await responseBody(staleRelease)).error.code).toBe('LEASE_STALE');
+    expect((await fetchApi(mutation(releasePath, { expectedVersion: 2, fence: lease.fence }, 'release', 'local-agent-a'))).status).toBe(200);
     const replacement = await claim(repo, 'local-agent-b', 'second', ['symbol:sub_02000100'], 'replacement');
     expect(replacement.status).toBe(201);
-    expect((await responseBody(replacement)).data.leases[0].fence).toBeGreaterThan(next.fence);
-    expect((await fetchApi(mutation(releasePath, { expectedVersion: 4, fence: next.fence }, 'after-replace', 'local-agent-a'))).status).toBe(409);
+    expect((await responseBody(replacement)).data.leases[0].fence).toBeGreaterThan(lease.fence);
+    const oldHolderRelease = await fetchApi(mutation(releasePath, { expectedVersion: 4, fence: lease.fence }, 'after-replace', 'local-agent-a'));
+    expect(oldHolderRelease.status).toBe(409);
+    expect((await responseBody(oldHolderRelease)).error.code).toBe('LEASE_STALE');
     expect((await listing(repo)).items.some((item: { state: string; intentText: string }) => item.state === 'released' && item.intentText === 'Work by local-agent-a')).toBe(true);
+  });
+
+  it('allows repeated renewals with the original fence and records each renewal event', async () => {
+    setupPolicy();
+    const repo = 'lease_multiple_renewers';
+    const grant = await claim(repo, 'local-agent-a', 'first', ['row:families:alpha'], 'multiple-renewers');
+    expect(grant.status).toBe(201);
+    const lease = (await responseBody(grant)).data.leases[0];
+    const renewPath = `${path(repo)}/${lease.leaseId}/renew`;
+
+    for (const key of ['renew-one', 'renew-two']) {
+      const current = await responseBody(await fetchApi(apiRequest(path(repo))));
+      const renewed = await fetchApi(mutation(renewPath,
+        { expectedVersion: current.version, fence: lease.fence }, key, 'local-agent-a'));
+      expect(renewed.status).toBe(200);
+      expect((await responseBody(renewed)).data.lease.fence).toBe(lease.fence);
+    }
+
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      expect(state.storage.sql.exec<{ fence: number }>(
+        'SELECT fence FROM leases_fences WHERE unit_key = ?', lease.unitKey).toArray()[0].fence).toBe(lease.fence);
+      const events = state.storage.sql.exec<{ kind: string; payload: string }>(
+        "SELECT kind, payload FROM concord_events WHERE kind = 'lease.renewed'").toArray();
+      expect(events).toHaveLength(2);
+      expect(events.map(event => JSON.parse(event.payload).fence)).toEqual([lease.fence, lease.fence]);
+    });
+  });
+
+  it('keeps queue admission fences valid after renewal', async () => {
+    setupPolicy();
+    const repo = 'lease_renewed_reservation';
+    const grant = await claim(repo, 'local-agent-a', 'ready', ['row:families:alpha'], 'renew-before-reserve');
+    expect(grant.status).toBe(201);
+    const lease = (await responseBody(grant)).data.leases[0];
+    const renewed = await fetchApi(mutation(`${path(repo)}/${lease.leaseId}/renew`,
+      { expectedVersion: 1, fence: lease.fence }, 'renew-before-reserve', 'local-agent-a'));
+    expect(renewed.status).toBe(200);
+    expect((await responseBody(renewed)).data.lease.fence).toBe(lease.fence);
+
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const context = contextFor(state, repo, 'agent-a', Date.now);
+      addVerified(state, fakeReadyChange(repo, 'ready', 'agent-a', [lease.unitKey]));
+      const fences = { [lease.unitKey]: lease.fence };
+      const admitted = context.transaction(() => leases.hooks['leases.reserve']!(context, 'ready', fences));
+      expect(admitted).toMatchObject({ status: 'eligible', value: { reservationFences: fences } });
+      expect(state.storage.sql.exec<{ state: string }>(
+        'SELECT state FROM leases_claims WHERE lease_id = ?', lease.leaseId).toArray()[0].state).toBe('reserved');
+      expect(leases.hooks['leases.reservationLive']!(context, 'ready', fences)).toMatchObject({ status: 'eligible' });
+    });
   });
 
   it('lets owners force-release leases with an audited reason and invalidates the old fence', async () => {
