@@ -225,6 +225,36 @@ describe('persistent findings and atomic repair rounds', () => {
     } finally { findings.routes.splice(findings.routes.indexOf(route), 1); }
   });
 
+  it('reads change views only for ledgers with a pending repair round', async () => {
+    const h = await fixture('find_snapshot_reads');
+    const changeIds = Array.from({ length: 30 }, (_, index) => `finding-change-${index + 1}`);
+    await runInDurableObject(h.stub, (instance) => {
+      const coordinator = instance as unknown as { context: (name: 'findings', principal: object, repoId: string) => any };
+      const principal = { tenantId: 'local', principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+      const context = coordinator.context('findings', principal, h.repoId);
+      context.state.put('changes', changeIds);
+      for (let index = 0; index < changeIds.length; index++) {
+        const changeId = changeIds[index];
+        const findingId = `finding-${index + 1}`;
+        context.state.put(`ledger:${changeId}`, { findingIds: [findingId], findingSetVersion: 1, nextRound: 1, pendingRound: null });
+        context.state.put(`finding:${findingId}`, { findingId, changeId, status: 'open' });
+      }
+      let reads = 0;
+      Object.defineProperty(context, 'readChange', { value: () => { reads++; return { status: 'blocked', code: 'CHANGE_NOT_FOUND', reason: 'missing', version: 0, evidenceIds: [] }; } });
+      findings.snapshot!(context);
+      expect(reads).toBe(0);
+
+      const pendingId = changeIds[0];
+      context.state.put(`ledger:${pendingId}`, { findingIds: ['finding-1'], findingSetVersion: 1, nextRound: 2, pendingRound: 1 });
+      context.state.put(`round:${pendingId}:1`, { roundId: 'round-1', number: 1, changeId: pendingId,
+        status: 'pending', revision: 1, headOid: head('a'), findingSetVersion: 1, findingIds: ['finding-1'],
+        dispositions: [], authorId: 'agent', submittedAt: 0, reviewerId: null, reviewEvidenceDigest: null, version: 1 });
+      const snapshot = findings.snapshot!(context) as { rounds: Array<{ roundId: string; status: string }> };
+      expect(reads).toBe(1);
+      expect(snapshot.rounds).toMatchObject([{ roundId: 'round-1', status: 'invalidated' }]);
+    });
+  });
+
   it('blocks a real verdict while findings are open and admits it after independent whole-round acceptance', async () => {
     const config = localFixtureConfig('local');
     config.policies['local-demo'].units['row:alpha'] = {

@@ -3,6 +3,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
 import type { Change } from '../../src/contracts';
+import { issuesFeature } from '../../src/features/issues';
 import { sqlState } from '../../src/state';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
@@ -111,5 +112,49 @@ describe('Concord issues and milestones', () => {
     expect((await post(repo, `/milestones/${milestoneId}/close`, { expectedVersion: created.body.data.version }, 'stale-milestone')).body.error.code).toBe('STALE_VERSION');
     const milestone = (await get(repo, `/milestones/${milestoneId}`)).body.data;
     expect((await post(repo, `/milestones/${milestoneId}/close`, { expectedVersion: milestone.version }, 'close-milestone')).body.data.state).toBe('closed');
+  });
+
+  it('reads the changes and queue blobs once for issue and milestone views', async () => {
+    const repo = 'issue_parse_once'; await setup(repo);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${repo}`));
+    const principal = { tenantId: 'local', principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+    await runInDurableObject(stub, (instance, durable) => {
+      const state = sqlState(durable.storage.sql);
+      state.put('items', Array.from({ length: 50 }, (_, index) => ({ number: index + 1, title: `Issue ${index + 1}`,
+        body: '', labels: [], milestoneId: 'milestone', allowedFiles: null, state: 'open', authorId: 'system', version: 1,
+        reason: null, closedBy: null })));
+      state.put('milestones', [{ milestoneId: 'milestone', title: 'Milestone', description: '', dueDate: null, state: 'open', version: 1 }]);
+      const changes: Change[] = Array.from({ length: 100 }, (_, index) => ({
+        changeId: `change-${index + 1}`, repoId: repo, authorId: 'agent', intentKey: `intent-${index + 1}`, intentText: 'task',
+        candidateStorageName: 'fork', branch: 'main', baseOid: 'base', headOid: 'head', revision: 1, unitKeys: [],
+        dependencyChangeIds: [], status: 'ready', issueNumber: Math.floor(index / 2) + 1, version: 1,
+      }));
+      state.put('module:repos:changes', changes);
+      state.put('module:queue:data', { entries: changes.map(change => ({ changeId: change.changeId, state: 'admitted' })) });
+      const coordinator = instance as unknown as { context: (name: 'issues', principal: object, repoId: string) => any };
+      const counted = (action: (context: any) => unknown) => {
+        const context = coordinator.context('issues', principal, repo);
+        const counts = new Map<string, number>();
+        const sql = context.sql;
+        Object.defineProperty(context, 'sql', { value: new Proxy(sql, { get(target, property) {
+          if (property !== 'exec') return Reflect.get(target, property, target);
+          return (query: string, ...args: unknown[]) => {
+            const key = args[0];
+            if (typeof key === 'string' && ['module:repos:changes', 'module:queue:data'].includes(key)) counts.set(key, (counts.get(key) ?? 0) + 1);
+            return Reflect.apply(Reflect.get(target, property, target), target, [query, ...args]);
+          };
+        } }) });
+        const value = action(context);
+        expect(counts.get('module:repos:changes') ?? 0).toBeLessThanOrEqual(1);
+        expect(counts.get('module:queue:data') ?? 0).toBeLessThanOrEqual(1);
+        return value;
+      };
+      const issuesRoute = issuesFeature.routes.find(route => route.method === 'GET' && route.pattern.source.includes('issues'))!;
+      const milestonesRoute = issuesFeature.routes.find(route => route.method === 'GET' && route.pattern.source.includes('milestones$'))!;
+      for (const [route, url] of [[issuesRoute, `https://concord.test${path(repo)}/issues`], [milestonesRoute, `https://concord.test${path(repo)}/milestones`]] as const) {
+        counted(context => route.handle(context, new Request(url), [] as unknown as RegExpMatchArray, undefined));
+      }
+      counted(context => issuesFeature.snapshot!(context));
+    });
   });
 });

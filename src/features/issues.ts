@@ -13,6 +13,19 @@ const milestones = (c: ModuleContext) => c.state.get<Milestone[]>('milestones') 
 const milestoneSettings = (c: ModuleContext): MilestoneSettings => c.state.get<MilestoneSettings>('milestoneSettings') ?? { create: 'agents', version: 0 };
 const changes = (c: ModuleContext) => sqlState(c.sql).get<Change[]>('module:repos:changes') ?? [];
 const queueEntries = (c: ModuleContext) => sqlState(c.sql).get<{ entries?: Array<{ changeId: string; state: string }> }>('module:queue:data')?.entries ?? [];
+type IssueViews = { changesByIssue: Map<number, Change[]>; lastQueueState: Map<string, string> };
+const issueViews = (c: ModuleContext): IssueViews => {
+  const changesByIssue = new Map<number, Change[]>();
+  for (const change of changes(c)) {
+    if (change.issueNumber === undefined || change.issueNumber === null) continue;
+    const linked = changesByIssue.get(change.issueNumber) ?? [];
+    linked.push(change);
+    changesByIssue.set(change.issueNumber, linked);
+  }
+  const lastQueueState = new Map<string, string>();
+  for (const entry of queueEntries(c)) lastQueueState.set(entry.changeId, entry.state);
+  return { changesByIssue, lastQueueState };
+};
 const response = (c: ModuleContext, data: unknown, status = 200) => json(data, c.version(), eventSequence(c.sql), status);
 const error = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
 const string = (value: unknown, field: string, max: number, empty = false): string => {
@@ -41,17 +54,17 @@ const checkVersion = (body: Record<string, unknown>, current: number) => {
   if (!Number.isSafeInteger(body.expectedVersion)) error(400, 'EXPECTED_VERSION_REQUIRED', 'expectedVersion required');
   if (body.expectedVersion !== current) throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: current });
 };
-const linked = (c: ModuleContext, item: Issue) => changes(c).filter(change => change.issueNumber === item.number).map(change => {
-  const entry = queueEntries(c).filter(candidate => candidate.changeId === change.changeId).at(-1);
-  const status = entry?.state === 'landed' ? 'merged' : entry?.state === 'checking' ? 'checking'
-    : ['admitted', 'reserved'].includes(entry?.state ?? '') ? 'queued'
-      : entry?.state === 'blocked' || entry?.state === 'failed' ? 'blocked' : change.status;
+const linked = (item: Issue, views: IssueViews) => (views.changesByIssue.get(item.number) ?? []).map(change => {
+  const queueState = views.lastQueueState.get(change.changeId);
+  const status = queueState === 'landed' ? 'merged' : queueState === 'checking' ? 'checking'
+    : ['admitted', 'reserved'].includes(queueState ?? '') ? 'queued'
+      : queueState === 'blocked' || queueState === 'failed' ? 'blocked' : change.status;
   return { changeId: change.changeId, status, revision: change.revision };
 });
-const issueView = (c: ModuleContext, item: Issue) => ({ ...item, changes: linked(c, item) });
-const milestoneView = (c: ModuleContext, item: Milestone) => {
+const issueView = (item: Issue, views: IssueViews) => ({ ...item, changes: linked(item, views) });
+const milestoneView = (c: ModuleContext, item: Milestone, views: IssueViews) => {
   const members = issues(c).filter(issue => issue.milestoneId === item.milestoneId);
-  const landed = new Set(members.flatMap(issue => linked(c, issue).filter(change => change.status === 'merged').map(change => change.changeId)));
+  const landed = new Set(members.flatMap(issue => linked(issue, views).filter(change => change.status === 'merged').map(change => change.changeId)));
   return { ...item, progress: { openIssues: members.filter(issue => issue.state === 'open').length,
     closedIssues: members.filter(issue => issue.state === 'closed').length, landedChanges: landed.size } };
 };
@@ -86,15 +99,16 @@ export const issuesFeature: FeatureModule = {
       const number = (c.state.get<number>('nextNumber') ?? 0) + 1;
       const item: Issue = { number, title, body: text, labels, milestoneId, allowedFiles, state: 'open', authorId: c.principal.principalId,
         version: event(c, 'issue.created', [String(number)], { number, title }), reason: null, closedBy: null };
-      c.state.put('nextNumber', number); c.state.put('items', [...issues(c), item]); milestoneAdvanced(c, milestoneId, number); return response(c, issueView(c, item), 201);
+      c.state.put('nextNumber', number); c.state.put('items', [...issues(c), item]); milestoneAdvanced(c, milestoneId, number); return response(c, issueView(item, issueViews(c)), 201);
     } },
     { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/issues$/, handle: (c, request) => {
       const params = new URL(request.url).searchParams;
       const state = params.get('state'); if (state && !['open', 'closed'].includes(state)) error(400, 'INVALID_STATE', 'Invalid issue state');
       const selected = issues(c).filter(item => (!state || item.state === state) && (!params.has('label') || item.labels.includes(params.get('label')!)) && (!params.has('milestoneId') || item.milestoneId === params.get('milestoneId')));
-      return response(c, page(selected.map(item => issueView(c, item)), request));
+      const views = issueViews(c);
+      return response(c, page(selected.map(item => issueView(item, views)), request));
     } },
-    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)$/, handle: (c, _r, match) => response(c, issueView(c, issue(c, numberFrom(match[1])))) },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)$/, handle: (c, _r, match) => response(c, issueView(issue(c, numberFrom(match[1])), issueViews(c))) },
     { method: 'PATCH', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)$/, handle: (c, _r, match, raw) => {
       const body = raw as Record<string, unknown>; const old = issue(c, numberFrom(match[1]));
       canWrite(c); if (old.authorId !== c.principal.principalId && !c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Only author or owner may edit');
@@ -108,7 +122,7 @@ export const issuesFeature: FeatureModule = {
       const item = { ...old, title, body: text, labels, milestoneId, allowedFiles, version: event(c, 'issue.updated', [String(old.number)], { number: old.number }) };
       c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
       if (old.milestoneId !== milestoneId) { milestoneAdvanced(c, old.milestoneId, old.number); milestoneAdvanced(c, milestoneId, old.number); }
-      return response(c, issueView(c, item));
+      return response(c, issueView(item, issueViews(c)));
     } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)\/(close|reopen)$/, handle: (c, _r, match, raw) => {
       const body = raw as Record<string, unknown>; const old = issue(c, numberFrom(match[1]));
@@ -118,7 +132,7 @@ export const issuesFeature: FeatureModule = {
       if (old.state === state) error(409, 'ISSUE_STATE_CONFLICT', 'Issue already in requested state');
       const item: Issue = { ...old, state, reason, closedBy: null, version: event(c, `issue.${state === 'closed' ? 'closed' : 'reopened'}`, [String(old.number)], { number: old.number, reason }) };
       c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
-      milestoneAdvanced(c, old.milestoneId, old.number); return response(c, issueView(c, item));
+      milestoneAdvanced(c, old.milestoneId, old.number); return response(c, issueView(item, issueViews(c)));
     } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, _r, _m, raw) => {
       canWrite(c); if (!c.principal.roles.includes('owner') && milestoneSettings(c).create === 'owners') error(403, 'FORBIDDEN', 'Owner required'); const body = raw as Record<string, unknown>;
@@ -126,18 +140,18 @@ export const issuesFeature: FeatureModule = {
       const dueDate = body.dueDate == null ? null : string(body.dueDate, 'dueDate', 32);
       if (dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || !Number.isFinite(Date.parse(dueDate)) || new Date(dueDate).toISOString().slice(0, 10) !== dueDate)) error(422, 'INVALID_DUE_DATE', 'dueDate must be a calendar date in YYYY-MM-DD');
       const milestoneId = crypto.randomUUID(); const item: Milestone = { milestoneId, title, description, dueDate, state: 'open', version: event(c, 'milestone.created', [milestoneId], { title }) };
-      c.state.put('milestones', [...milestones(c), item]); return response(c, milestoneView(c, item), 201);
+      c.state.put('milestones', [...milestones(c), item]); return response(c, milestoneView(c, item, issueViews(c)), 201);
     } },
-    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, request) => response(c, page(milestones(c).map(item => milestoneView(c, item)), request)) },
-    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)$/, handle: (c, _r, match) => response(c, milestoneView(c, milestone(c, match[1]))) },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, request) => { const views = issueViews(c); return response(c, page(milestones(c).map(item => milestoneView(c, item, views)), request)); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)$/, handle: (c, _r, match) => response(c, milestoneView(c, milestone(c, match[1]), issueViews(c))) },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)\/close$/, handle: (c, _r, match, raw) => {
       if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required'); const old = milestone(c, match[1]); checkVersion(raw as Record<string, unknown>, old.version);
       if (old.state === 'closed') error(409, 'MILESTONE_STATE_CONFLICT', 'Milestone already closed');
       const item: Milestone = { ...old, state: 'closed', version: event(c, 'milestone.closed', [old.milestoneId], {}) };
-      c.state.put('milestones', milestones(c).map(candidate => candidate.milestoneId === old.milestoneId ? item : candidate)); return response(c, milestoneView(c, item));
+      c.state.put('milestones', milestones(c).map(candidate => candidate.milestoneId === old.milestoneId ? item : candidate)); return response(c, milestoneView(c, item, issueViews(c)));
     } },
   ],
-  snapshot: c => ({ status: 'ready', items: issues(c).map(item => issueView(c, item)), milestones: milestones(c).map(item => milestoneView(c, item)), milestoneSettings: milestoneSettings(c) }),
+  snapshot: c => { const views = issueViews(c); return { status: 'ready', items: issues(c).map(item => issueView(item, views)), milestones: milestones(c).map(item => milestoneView(c, item, views)), milestoneSettings: milestoneSettings(c) }; },
   nextDeadline: () => null, onAlarm: () => {},
   hooks: {
     'issues.validate': (c, number): Gate<{ number: number; title: string }> => {

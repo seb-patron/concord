@@ -235,7 +235,7 @@ export const findings: FeatureModule = {
       const current = ledger(context, changeId);
       findingSetVersions[changeId] = current.findingSetVersion;
       items.push(...current.findingIds.map(id => finding(context, id)).filter((item): item is Finding => item !== null));
-      const change = context.readChange?.(changeId);
+      const change = current.pendingRound === null ? undefined : context.readChange?.(changeId);
       const unresolved = openIds(context, current);
       for (let number = 1; number < current.nextRound; number++) {
         const record = round(context, changeId, number);
