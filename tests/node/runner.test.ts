@@ -1200,6 +1200,60 @@ export function attemptBudget(family) {
       });
     });
 
+    it('backs off idle polls exponentially, caps the delay, and logs the cap once', async () => {
+      let fakeNow = 0;
+      let polls = 0;
+      const delays: number[] = [];
+      const lines: string[] = [];
+      const transport: Transport = async () => { polls++; return { status: 204 }; };
+      const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin,
+        '--max-jobs', '1', '--idle-timeout-seconds', '300']);
+      expect(await runLoop(options, transport, null, { sleep: async ms => { delays.push(ms); fakeNow += ms; },
+        random: () => 1, log: line => { lines.push(line); }, now: () => fakeNow })).toBe(0);
+      expect(delays.slice(0, 10)).toEqual([1000, 2000, 4000, 8000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
+      expect(lines.filter(line => line === 'idle: polling every ~30s')).toHaveLength(1);
+      expect(polls).toBeGreaterThan(10);
+    });
+
+    it('honors a configured idle cap and rejects invalid idle delay flags', async () => {
+      let fakeNow = 0;
+      const delays: number[] = [];
+      const transport: Transport = async () => ({ status: 204 });
+      const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin,
+        '--max-jobs', '1', '--idle-timeout-seconds', '30', '--idle-max-delay-seconds', '5']);
+      expect(await runLoop(options, transport, null, { sleep: async ms => { delays.push(ms); fakeNow += ms; },
+        random: () => 1, log: () => {}, now: () => fakeNow })).toBe(0);
+      expect(delays.slice(0, 4)).toEqual([1000, 2000, 4000, 5000]);
+      for (const args of [['--idle-max-delay-seconds', '0'], ['--idle-max-delay-seconds', '301'],
+        ['--idle-min-delay-ms', '0'], ['--idle-min-delay-ms', '6000', '--idle-max-delay-seconds', '5']]) {
+        expect(() => parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin, ...args]))
+          .toThrow('INVALID_BOUND');
+      }
+    });
+
+    it('resets the idle delay after six empty polls and a completed job', async () => {
+      await gitFixture(async ({ candidate, base }) => {
+        const remotes = { candidate: pathToFileURL(candidate).href };
+        const job = inspectJob(remotes, base);
+        let polls = 0;
+        const transport: Transport = async (path, body, key) => {
+          if (path === 'runner/poll') {
+            polls++;
+            if (polls <= 6 || polls === 8) return { status: 204 };
+            if (polls === 7 || polls === 9) return { status: 200, data: { job } };
+          }
+          return jobRoutes(remotes)(path, body, key);
+        };
+        let fakeNow = 0;
+        const delays: number[] = [];
+        const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json',
+          '--max-jobs', '2', '--idle-timeout-seconds', '300']);
+        expect(await runLoop(options, transport, checkerProfile(), { sleep: async ms => { delays.push(ms); fakeNow += ms; },
+          random: () => 1, log: () => {}, now: () => fakeNow })).toBe(2);
+        expect(delays).toEqual([1000, 2000, 4000, 8000, 16_000, 30_000, 1000]);
+      });
+    });
+
     it.each(['timeout', '503'] as const)('excludes a slow %s poll and its retry delay from idle time', async failure => {
       let fakeNow = 0;
       let polls = 0;
@@ -1220,8 +1274,8 @@ export function attemptBudget(family) {
         sleep: async ms => { delays.push(ms); fakeNow += ms; },
         random: () => 0.5, log: () => {}, now: () => fakeNow,
       })).toBe(0);
-      expect(polls).toBe(12);
-      expect(delays).toEqual(Array(11).fill(1000));
+      expect(polls).toBe(6);
+      expect(delays).toEqual([1000, 750, 1500, 3000, 4750]);
       expect(fakeNow).toBe(41_000);
     });
 

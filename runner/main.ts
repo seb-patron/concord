@@ -6,7 +6,7 @@ import { executeJob, type Credential, type CredentialProvider } from './execute'
 import { loadProfile, type LocalProfile } from './profiles';
 
 type Options = { repo: string; role: 'checker' | 'promoter'; profileFile?: string; profileDigest?: string;
-  once: boolean; maxJobs: number; idleTimeoutSeconds: number; runnerId: string };
+  once: boolean; maxJobs: number; idleTimeoutSeconds: number; idleMaxDelaySeconds: number; idleMinDelayMs: number; runnerId: string };
 
 export function parseArgs(args: string[]): Options {
   const values = new Map<string, string>();
@@ -14,7 +14,8 @@ export function parseArgs(args: string[]): Options {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--once') { once = true; continue; }
-    if (!['--repo', '--role', '--profile', '--profile-digest', '--max-jobs', '--idle-timeout-seconds', '--runner-id'].includes(arg) ||
+    if (!['--repo', '--role', '--profile', '--profile-digest', '--max-jobs', '--idle-timeout-seconds',
+      '--idle-max-delay-seconds', '--idle-min-delay-ms', '--runner-id'].includes(arg) ||
       !args[index + 1]) throw new Error('INVALID_ARGUMENT: ' + arg);
     values.set(arg, args[++index]);
   }
@@ -23,15 +24,20 @@ export function parseArgs(args: string[]): Options {
   if (!repo || !/^[A-Za-z0-9_-]{1,64}$/.test(repo) || !['checker', 'promoter'].includes(role ?? '')) throw new Error('REPO_AND_ROLE_REQUIRED');
   const maxJobs = values.has('--max-jobs') ? Number(values.get('--max-jobs')) : values.has('--idle-timeout-seconds') ? 1000 : 1;
   const idleTimeoutSeconds = values.has('--idle-timeout-seconds') ? Number(values.get('--idle-timeout-seconds')) : 0;
+  const idleMaxDelaySeconds = values.has('--idle-max-delay-seconds') ? Number(values.get('--idle-max-delay-seconds')) : 30;
+  const idleMinDelayMs = values.has('--idle-min-delay-ms') ? Number(values.get('--idle-min-delay-ms')) : 1000;
   if (!Number.isSafeInteger(maxJobs) || maxJobs < 1 || maxJobs > 1000 ||
-    !Number.isSafeInteger(idleTimeoutSeconds) || idleTimeoutSeconds < 0 || idleTimeoutSeconds > 86_400) throw new Error('INVALID_BOUND');
+    !Number.isSafeInteger(idleTimeoutSeconds) || idleTimeoutSeconds < 0 || idleTimeoutSeconds > 86_400 ||
+    !Number.isSafeInteger(idleMaxDelaySeconds) || idleMaxDelaySeconds < 1 || idleMaxDelaySeconds > 300 ||
+    !Number.isSafeInteger(idleMinDelayMs) || idleMinDelayMs < 1 || idleMinDelayMs > 300_000 ||
+    idleMinDelayMs > idleMaxDelaySeconds * 1000) throw new Error('INVALID_BOUND');
   if (!once && !values.has('--max-jobs') && !values.has('--idle-timeout-seconds')) once = true;
   if (role === 'checker' && !values.get('--profile')) throw new Error('CHECKER_PROFILE_REQUIRED');
   if (role === 'promoter' && values.get('--profile')) throw new Error('PROMOTER_PROFILE_FORBIDDEN');
   const runnerId = values.get('--runner-id') ?? 'runner-' + randomUUID();
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(runnerId)) throw new Error('INVALID_RUNNER_ID');
   return { repo, role: role as Options['role'], profileFile: values.get('--profile'), profileDigest: values.get('--profile-digest') ?? process.env.CONCORD_PROFILE_DIGEST,
-    once, maxJobs, idleTimeoutSeconds, runnerId };
+    once, maxJobs, idleTimeoutSeconds, idleMaxDelaySeconds, idleMinDelayMs, runnerId };
 }
 
 export type Transport = (path: string, body: unknown, key: string) => Promise<{ status: number; data?: any; error?: { code: string }; retryAfterMs?: number }>;
@@ -172,15 +178,27 @@ export async function runLoop(options: Options, transport: Transport, profile: L
   let count = 0;
   let idleSince = now();
   let retryMs = 0;
+  let consecutiveEmptyPolls = 0;
+  let idleCapLogged = false;
   while (count < options.maxJobs) {
     const answered = await pollWithRetry(transport, { runnerId: options.runnerId, role: options.role,
       supportedProfileDigests: [profileDigest], maxJobs: 1 }, randomUUID(), { sleep, random, log, now, once: options.once });
     retryMs += answered.retryMs;
     const poll = answered.response;
     if (poll.status === 204) {
+      consecutiveEmptyPolls++;
       // Failed poll attempts and their backoff do not count towards idle time.
-      if (options.once || options.idleTimeoutSeconds === 0 || now() - idleSince - retryMs >= options.idleTimeoutSeconds * 1000) break;
-      await sleep(Math.min(1000, options.idleTimeoutSeconds * 1000));
+      const idleElapsed = now() - idleSince - retryMs;
+      if (options.once || options.idleTimeoutSeconds === 0 || idleElapsed >= options.idleTimeoutSeconds * 1000) break;
+      const capMs = options.idleMaxDelaySeconds * 1000;
+      const nominalMs = Math.min(capMs, options.idleMinDelayMs * 2 ** Math.min(consecutiveEmptyPolls - 1, 30));
+      if (nominalMs >= capMs && !idleCapLogged) {
+        log(`idle: polling every ~${options.idleMaxDelaySeconds}s`);
+        idleCapLogged = true;
+      }
+      const jitter = Math.max(0, Math.min(1, random()));
+      const delayMs = Math.min(Math.ceil(nominalMs * (0.5 + jitter * 0.5)), options.idleTimeoutSeconds * 1000 - idleElapsed);
+      await sleep(delayMs);
       continue;
     }
     if (poll.status !== 200 || !poll.data?.job) throw new Error('POLL_FAILED:' + (poll.error?.code ?? poll.status));
@@ -188,6 +206,8 @@ export async function runLoop(options: Options, transport: Transport, profile: L
     if ((job.kind === 'promote') !== (options.role === 'promoter') || job.profileDigest !== profileDigest) throw new Error('JOB_ROLE_OR_PROFILE_MISMATCH');
     idleSince = now();
     retryMs = 0;
+    consecutiveEmptyPolls = 0;
+    idleCapLogged = false;
     let heartbeatFailure: Error | null = null;
     let inFlight: Promise<void> | null = null;
     const fence = { attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest };
@@ -217,6 +237,10 @@ export async function runLoop(options: Options, transport: Transport, profile: L
     if (response.status === 409) throw new Error('STALE_RESULT:' + (response.error?.code ?? 'CONFLICT'));
     if (response.status !== 200) throw new Error('RESULT_FAILED:' + (response.error?.code ?? response.status));
     count++;
+    idleSince = now();
+    retryMs = 0;
+    consecutiveEmptyPolls = 0;
+    idleCapLogged = false;
     if (options.once) break;
     if (options.idleTimeoutSeconds > 0 && now() - started > 86_400_000) break;
   }
