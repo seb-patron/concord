@@ -16,8 +16,8 @@ afterEach(() => { (env as Env).TRUSTED_CONFIG = originalConfig; (env as Env).AUT
 const fetchApi = (request: Request) => worker.fetch(request, env);
 
 describe('cost guards', () => {
-  it('sets the measured CPU ceiling in local and production configs', () => {
-    expect(JSON.parse(productionWrangler).limits.cpu_ms).toBe(100);
+  it('uses the default CPU limit in production and the measured ceiling locally', () => {
+    expect(JSON.parse(productionWrangler).limits.cpu_ms).toBe(30000);
     expect(JSON.parse(localWrangler).limits.cpu_ms).toBe(100);
   });
   it('uses the local rate limit binding for failed auth and leaves authenticated traffic alone', async () => {

@@ -4,13 +4,15 @@ Workers Paid has no hard account spending cap. These limits reduce exposure; an 
 
 | Guard | Default and scope | Response |
 | --- | --- | --- |
-| Worker CPU | `limits.cpu_ms: 100` per invocation in both Wrangler configs | Platform CPU limit |
+| Worker CPU | Production: `limits.cpu_ms: 30000` ms (Cloudflare's default); local: `limits.cpu_ms: 100` ms | Platform CPU limit |
 | Auth failures | 20 failed or missing bearer requests per `cf-connecting-ip` per 60 seconds, using the Cloudflare Rate Limiting binding before any Durable Object call. Valid principals do not consume this quota. | `429 RATE_LIMITED` |
 | Request body | 256 KiB for `/v1/*`, checked from `Content-Length` and the bounded stream before forwarding to a Durable Object. | `413 BODY_TOO_LARGE` |
 | Repos | 100 created repos per tenant, including provisioning and blocked repos. Existing repo retries remain available. | `429 TENANT_REPO_LIMIT` |
 | Artifacts forks | 1,000 fork creation reservations per tenant, retained for the tenant lifetime, including closed or failed changes. The tenant catalog reserves before creating each new fork. Existing change retries do not reserve again. | `429 TENANT_FORK_LIMIT` |
 | Artifacts token mints | 1,000 authorized `/git-token` and runner credential mint attempts per tenant per UTC day, reserved in the tenant catalog before the provider call. Failed provider attempts consume quota. | `429 TENANT_TOKEN_LIMIT` |
 | Alarms | At least 1000 ms after a successful alarm run; failures back off exponentially from 1000 ms to 60 seconds. No pending deadline means no alarm. The floor survives intervening requests. | No API change |
+
+Production uses Cloudflare's default 30-second CPU limit because the 100 ms limit reset `concord-v2` snapshot and runner poll requests (#76). Issue #69 shrinks job records that currently carry full policy copies, reducing the work in each scan.
 
 Only the operator-owned `TRUSTED_CONFIG` secret may override the tenant defaults, with positive safe integers no greater than 10,000:
 
