@@ -196,3 +196,42 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   }
   return config;
 }
+
+type TrustedConfigCacheEntry = { key: readonly unknown[]; value: TrustedConfiguration };
+let trustedConfigCache: TrustedConfigCacheEntry | undefined;
+
+function trustedConfigKey(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFIG' | 'TRUSTED_CONFIG_PARTS'>): readonly unknown[] {
+  const key: unknown[] = [env.CONCORD_MODE, env.TRUSTED_CONFIG, env.TRUSTED_CONFIG_PARTS];
+  const countText = env.TRUSTED_CONFIG_PARTS;
+  if (typeof countText === 'string' && /^[0-9]+$/.test(countText)) {
+    const count = Number(countText);
+    if (Number.isInteger(count) && count >= 1 && count <= 64) {
+      const bindings = env as unknown as Record<string, unknown>;
+      for (let index = 0; index < count; index++) key.push(bindings[`TRUSTED_CONFIG_PART_${index}`]);
+    }
+  }
+  return key;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** Loads and validates trusted configuration once per distinct set of binding text in this isolate. */
+export function trustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFIG' | 'TRUSTED_CONFIG_PARTS'>): TrustedConfiguration {
+  const key = trustedConfigKey(env);
+  if (trustedConfigCache && key.length === trustedConfigCache.key.length &&
+    key.every((value, index) => value === trustedConfigCache!.key[index])) return trustedConfigCache.value;
+  try {
+    const value = deepFreeze(loadTrustedConfig(env));
+    trustedConfigCache = { key, value };
+    return value;
+  } catch (error) {
+    trustedConfigCache = undefined;
+    throw error;
+  }
+}

@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { BootstrapHandoff, FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
 import { clock, requireRepo, requireTenant } from './auth';
 import { digest, encodeCursor, expectVersion, failure, HttpError, json, parseCursor, readJson, requiresExpectedVersion } from './http';
-import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState, unfrozenPromotion } from './state';
+import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, sqlState, trustedConfig, unfrozenPromotion } from './state';
 import { FakeStorage } from './storage/fake';
 import { artifactsStorage } from './storage/artifacts';
 import { bridgeStorage } from './storage/bridge';
@@ -40,7 +40,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     const context: ModuleContext = {
       repoId, tenantId: principal.tenantId, principal, env: this.env,
       storage: selectStorage(this.env, sql, this.now),
-      trusted: loadTrustedConfig(this.env), now: this.now, sql,
+      trusted: trustedConfig(this.env), now: this.now, sql,
       transaction: <T>(run: () => T) => this.ctx.storage.transactionSync(run),
       version: () => base.get<number>('repo:version') ?? 0,
       nextVersion: () => {

@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { HookName, ModuleContext, Principal, Repo, ServiceHooks } from './contracts';
 import { clock, requireRole, requireTenant } from './auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
-import { appendEvent, applyMigrations, catalogVisibility, costLimits, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
+import { appendEvent, applyMigrations, catalogVisibility, costLimits, eventSequence, eventsAfter, initialize, sqlState, trustedConfig } from './state';
 import { selectStorage } from './coordinator';
 import { repos } from './features/repos';
 import { handlePrincipalRoute, initializePrincipals, lookupPrincipal } from './features/principals';
@@ -25,7 +25,7 @@ export class TenantCatalog extends DurableObject<Env> {
     const context: ModuleContext = {
       repoId: '', tenantId: principal.tenantId, principal, env: this.env,
       storage: selectStorage(this.env, sql, this.now),
-      trusted: loadTrustedConfig(this.env), now: this.now, sql,
+      trusted: trustedConfig(this.env), now: this.now, sql,
       transaction: <T>(run: () => T) => this.ctx.storage.transactionSync(run),
       version: () => base.get<number>('catalog:version') ?? 0,
       nextVersion: () => { const next = (base.get<number>('catalog:version') ?? 0) + 1; base.put('catalog:version', next); return next; },
