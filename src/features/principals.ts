@@ -5,6 +5,7 @@ import { catalogVisibility, eventSequence } from '../state';
 
 const idPattern = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+const CHECKER_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_ACTIVE_LIMIT = 100;
 const MAX_TOTAL_LIMIT = 1000;
 const PAGE_SIZE = 25;
@@ -79,10 +80,12 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
     const body = await readJson(request);
     requireTenant(principal, body.tenantId);
     const roles = body.roles;
+    const isOwner = principal.roles.includes('owner');
+    // Owners may delegate checker without holding it; promoter and owner are never mintable.
     if (!Array.isArray(roles) || roles.length === 0 || new Set(roles).size !== roles.length ||
-      roles.some(role => !['agent', 'reviewer', 'viewer'].includes(role)) ||
-      roles.some(role => !principal.roles.includes(role)) ||
-      (principal.roles.includes('agent') && !principal.roles.includes('owner') && roles.some(role => !['agent', 'viewer'].includes(role)))) {
+      roles.some(role => !['agent', 'reviewer', 'viewer'].includes(role) && !(role === 'checker' && isOwner)) ||
+      roles.some(role => role !== 'checker' && !principal.roles.includes(role)) ||
+      (principal.roles.includes('agent') && !isOwner && roles.some(role => !['agent', 'viewer'].includes(role)))) {
       throw new HttpError(403, 'SCOPE_ESCALATION', 'Roles exceed caller scope');
     }
     const repoIds = body.repoIds === undefined ? principal.repoIds : body.repoIds;
@@ -93,8 +96,9 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
       throw new HttpError(403, 'SCOPE_ESCALATION', 'Repositories exceed caller scope');
     }
     const { maxTtlMs, activeLimit, totalLimit } = limits(context.trusted);
-    const ttlSeconds = body.ttlSeconds === undefined ? Math.floor(Math.min(DEFAULT_TTL_MS, maxTtlMs) / 1000) : body.ttlSeconds;
-    if (!Number.isSafeInteger(ttlSeconds) || (ttlSeconds as number) < 1 || (ttlSeconds as number) * 1000 > maxTtlMs) {
+    const maxTtl = roles.includes('checker') ? Math.min(maxTtlMs, CHECKER_MAX_TTL_MS) : maxTtlMs;
+    const ttlSeconds = body.ttlSeconds === undefined ? Math.floor(Math.min(DEFAULT_TTL_MS, maxTtl) / 1000) : body.ttlSeconds;
+    if (!Number.isSafeInteger(ttlSeconds) || (ttlSeconds as number) < 1 || (ttlSeconds as number) * 1000 > maxTtl) {
       throw new HttpError(400, 'INVALID_TTL', 'TTL exceeds trusted maximum');
     }
     const expiresAt = now + (ttlSeconds as number) * 1000;

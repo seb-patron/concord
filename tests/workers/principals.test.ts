@@ -1,9 +1,16 @@
 import { env } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import { authenticate } from '../../src/auth';
+import type { RepoCoordinator } from '../../src/coordinator';
+import type { Job, ModuleContext, Principal } from '../../src/contracts';
+import { jobInput, runners } from '../../src/features/runners';
+import { digest } from '../../src/http';
 import { localFixtureConfig } from '../../src/state';
+import { FakeStorage } from '../../src/storage/fake';
 import { apiRequest, mutation, responseBody } from '../helpers';
+import runnerGuide from '../../docs/runner.md?raw';
 
 const runtime = env as Env;
 const originalConfig = runtime.TRUSTED_CONFIG;
@@ -351,6 +358,117 @@ describe('delegated principals', () => {
     const short = (await responseBody(await mint({ roles: ['agent'], ttlSeconds: 1 }))).data;
     runtime.CONCORD_TEST_NOW = String(short.expiresAt + 1);
     expect((await fetchApi(apiRequest('/v1/repos', short.token))).status).toBe(401);
+  });
+
+  it('lets an owner mint a repo-scoped checker that polls its repo until revoked', async () => {
+    const minted = await mint({ roles: ['checker'], repoIds: ['alpha'], ttlSeconds: 3600, name: 'mac-mini' }, crypto.randomUUID(), 'local-owner');
+    expect(minted.status).toBe(201);
+    const item = (await responseBody(minted)).data;
+    expect(item.token).toMatch(/^cct_local_[a-f0-9]{64}$/);
+    expect(item).toMatchObject({ roles: ['checker'], repoIds: ['alpha'], parentId: 'owner', name: 'mac-mini', revokedAt: null });
+    const pin = `sha256:${'0'.repeat(64)}` as const;
+    const headOid = 'a'.repeat(40);
+    const treeOid = 'b'.repeat(40);
+    const jobId = `checker-${crypto.randomUUID().replaceAll('-', '')}`;
+    const owner: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+    const stub = runtime.REPO_COORDINATOR.get(runtime.REPO_COORDINATOR.idFromName('repo:local:alpha'));
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+      const context = (instance as unknown as { context(name: 'runners', principal: Principal, repoId: string): ModuleContext })
+        .context('runners', owner, 'alpha');
+      const storage = context.storage as FakeStorage;
+      await storage.ensureRepo('delegated-candidate');
+      storage.putCommit('delegated-candidate', { oid: headOid, treeOid, parents: [] });
+      storage.conditionalUpdateRef('delegated-candidate', 'refs/heads/main', null, headOid);
+      const job: Job = {
+        kind: 'inspect-candidate', jobId, repoId: 'alpha', inputDigest: pin, generation: 1,
+        profileDigest: pin, policyId: 'local-demo', policyDigest: pin,
+        unitPolicy: localFixtureConfig('local').policies['local-demo'],
+        expectedRefs: { 'delegated-candidate': headOid }, storageRemotes: { 'delegated-candidate': 'file:///delegated-candidate' },
+        checkerId: 'local-demo', checkerDigest: pin, oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin,
+        timeoutMs: 120_000, maxOutputBytes: 16 * 1024, state: 'pending', attempt: 0,
+        runnerId: null, fence: 0, expiresAt: null, version: 0, changeId: 'change1', revision: 1,
+        candidate: { changeId: 'change1', revision: 1, baseOid: headOid, headOid,
+          storageName: 'delegated-candidate', ref: 'refs/heads/main' },
+      };
+      expect(runners.hooks['runners.schedule']!(context, { ...job, inputDigest: await digest(jobInput(job)) }).status).toBe('eligible');
+    });
+    const poll = (repo: string, profiles: string[] = []) => fetchApi(mutation(`/v1/repos/${repo}/runner/poll`,
+      { runnerId: 'mac-mini', role: 'checker', supportedProfileDigests: profiles }, crypto.randomUUID(), item.token));
+    expect((await poll('alpha')).status).toBe(204);
+    const claimed = await poll('alpha', [pin]);
+    expect(claimed.status).toBe(200);
+    const job = (await responseBody(claimed)).data.job as Job;
+    expect(job).toMatchObject({ jobId, state: 'claimed', runnerId: 'mac-mini' });
+    const reviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
+      oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
+    const unsigned = { jobId, attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest,
+      kind: 'inspect-candidate' as const, checkerDigest: pin, oracleDigest: pin, toolchainDigest: pin,
+      environmentDigest: pin, sourceTreeOid: treeOid, durationMs: 1, log: '', outcome: 'PASS' as const,
+      observedHeadOid: headOid, unitKeys: [], reviewManifestDigest: await digest(reviewManifest), reviewManifest };
+    const resultDigest = await digest(unsigned);
+    const submitted = await fetchApi(mutation(`/v1/repos/alpha/jobs/${jobId}/result`, {
+      attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest,
+      resultDigest, result: { ...unsigned, resultDigest },
+    }, crypto.randomUUID(), item.token));
+    expect(submitted.status).toBe(200);
+    expect((await responseBody(submitted)).data.resultDigest).toBe(resultDigest);
+    expect((await poll('alpha', [pin])).status).toBe(204);
+    expect((await poll('beta')).status).toBe(403);
+    const revoked = await fetchApi(apiRequest(`/v1/principals/${item.id}`, 'local-owner', { method: 'DELETE' }));
+    expect(revoked.status).toBe(200);
+    expect((await poll('alpha')).status).toBe(401);
+  });
+
+  it('refuses checker mints for non-owners and promoter mints entirely', async () => {
+    for (const token of ['local-agent-a', 'local-reviewer', 'local-checker']) {
+      expect((await mint({ roles: ['checker'] }, crypto.randomUUID(), token)).status).toBe(403);
+    }
+    expect((await mint({ roles: ['promoter'] }, crypto.randomUUID(), 'local-owner')).status).toBe(403);
+    expect((await mint({ roles: ['checker', 'promoter'] }, crypto.randomUUID(), 'local-owner')).status).toBe(403);
+    const checker = (await responseBody(await mint({ roles: ['checker'], ttlSeconds: 60 }, crypto.randomUUID(), 'local-owner'))).data;
+    expect((await mint({ roles: ['checker'] }, crypto.randomUUID(), checker.token)).status).toBe(403);
+    expect((await mint({ roles: ['agent'] }, crypto.randomUUID(), checker.token)).status).toBe(403);
+  });
+
+  it('mints the documented checker request under default trusted limits and explains longer TTLs', async () => {
+    runtime.TRUSTED_CONFIG = JSON.stringify(localFixtureConfig('local'));
+    const example = /npm run concord -- principals mint --role checker --repo REPO_ID --ttl ([1-9]\d*)([smhd]) --name mac-mini/.exec(runnerGuide);
+    expect(example).not.toBeNull();
+    expect(`${example![1]}${example![2]}`).toBe('24h');
+    expect(runnerGuide).toContain('delegatedPrincipals.maxTtlMs');
+    expect(runnerGuide).toContain('"delegatedPrincipals": {"maxTtlMs": 2592000000}');
+    expect(runnerGuide).toContain('400 INVALID_TTL');
+
+    const ttlSeconds = Number(example![1]) * ({ s: 1, m: 60, h: 3600, d: 86400 } as const)[example![2] as 's' | 'm' | 'h' | 'd'];
+    const body = { roles: ['checker'], repoIds: ['REPO_ID'], ttlSeconds, name: 'mac-mini' };
+    const accepted = await mint(body, crypto.randomUUID(), 'local-owner');
+    expect(accepted.status).toBe(201);
+    expect((await responseBody(accepted)).data).toMatchObject({ roles: ['checker'], repoIds: ['REPO_ID'], name: 'mac-mini' });
+
+    const rejected = await mint({ ...body, ttlSeconds: 30 * 86400 }, crypto.randomUUID(), 'local-owner');
+    expect(rejected.status).toBe(400);
+    expect((await responseBody(rejected)).error.code).toBe('INVALID_TTL');
+  });
+
+  it('caps checker TTL at the smaller of 30 days and the trusted maximum', async () => {
+    const DAY_MS = 86_400_000;
+    runtime.TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'), delegatedPrincipals: { maxTtlMs: 90 * DAY_MS } });
+    const over = await mint({ roles: ['checker'], ttlSeconds: 30 * 86400 + 1 }, crypto.randomUUID(), 'local-owner');
+    expect(over.status).toBe(400);
+    expect((await responseBody(over)).error.code).toBe('INVALID_TTL');
+    const minted = await mint({ roles: ['checker'], ttlSeconds: 30 * 86400, name: 'runner-30d' }, crypto.randomUUID(), 'local-owner');
+    expect(minted.status).toBe(201);
+    const item = (await responseBody(minted)).data;
+    expect(item.expiresAt).toBeGreaterThan(Date.now() + 29 * DAY_MS);
+    expect(item.expiresAt).toBeLessThanOrEqual(Date.now() + 30 * DAY_MS);
+    const agent = await mint({ roles: ['agent'], ttlSeconds: 45 * 86400 });
+    expect(agent.status).toBe(201);
+    const agentId = (await responseBody(agent)).data.id;
+    await fetchApi(apiRequest(`/v1/principals/${agentId}`, 'local-agent-a', { method: 'DELETE' }));
+
+    runtime.TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'), delegatedPrincipals: { maxTtlMs: DAY_MS } });
+    expect((await mint({ roles: ['checker'], ttlSeconds: 2 * 86400 }, crypto.randomUUID(), 'local-owner')).status).toBe(400);
+    expect((await mint({ roles: ['checker'], ttlSeconds: 86400 }, crypto.randomUUID(), 'local-owner')).status).toBe(201);
   });
 
   it('keeps local fixture credentials invalid in production', async () => {
