@@ -17,11 +17,18 @@ policy.units = {
   'row:families:alpha': { canonicalKey: 'row:families:alpha', file: 'data/families.tsv', resources: ['alpha'], dependencyKeys: [] },
   'row:families:beta': { canonicalKey: 'row:families:beta', file: 'data/families.tsv', resources: ['beta'], dependencyKeys: [] },
 };
+const baselineUnits = structuredClone(policy.units);
 const trusted: TrustedConfiguration = { policies: { 'local-demo': policy }, profiles: localFixtureConfig('local').profiles };
 const previousTrustedConfig = (env as Env).TRUSTED_CONFIG;
 const previousChangeView = repos.changeView;
 
-afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; delete policy.newFilePrefixes; });
+afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView;
+  policy.units = structuredClone(baselineUnits); delete policy.tables; delete policy.newFilePrefixes; delete policy.symbolRules; });
+
+function enablePythonSymbols(): void {
+  policy.units['file:src/a.py'] = { canonicalKey: 'file:src/a.py', file: 'src/a.py', resources: [], dependencyKeys: [] };
+  policy.symbolRules = [{ path: 'src/a.py', driver: 'python' }];
+}
 
 function setupPolicy(): void {
   (env as Env).TRUSTED_CONFIG = JSON.stringify(trusted);
@@ -110,17 +117,101 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('allows distinct canonical symbols to coexist and refuses an identical symbol atomically', async () => {
+    enablePythonSymbols();
+    setupPolicy();
+    const repo = 'lease_symbol_conflict';
+    const alpha = 'symbol:src/a.py#def%20alpha%28%29%3A';
+    const beta = 'symbol:src/a.py#def%20beta%28%29%3A';
+    expect((await claim(repo, 'local-agent-a', 'alpha', [alpha], 'symbol-alpha')).status).toBe(201);
+    expect((await claim(repo, 'local-agent-b', 'beta', [beta], 'symbol-beta')).status).toBe(201);
+    const conflict = await claim(repo, 'local-agent-c', 'duplicate', [beta, alpha], 'symbol-duplicate');
+    expect(conflict.status).toBe(409);
+    expect((await responseBody(conflict)).error).toMatchObject({ code: 'LEASE_CONFLICT', details: { intentText: 'Work by local-agent-a' } });
+    expect((await listing(repo)).items.filter((item: { state: string }) => item.state === 'active')).toHaveLength(2);
+  });
+  it('conflicts file and symbol claims in either order', async () => {
+    enablePythonSymbols();
+    setupPolicy();
+    const symbol = 'symbol:src/a.py#def%20alpha%28%29%3A';
+    for (const [repo, first, second] of [
+      ['lease_file_then_symbol', 'file:src/a.py', symbol],
+      ['lease_symbol_then_file', symbol, 'file:src/a.py'],
+    ]) {
+      const granted = await claim(repo, 'local-agent-a', `${repo}-first`, [first], `${repo}-first`);
+      expect(granted.status).toBe(201);
+      const conflict = await claim(repo, 'local-agent-b', `${repo}-second`, [second], `${repo}-second`);
+      expect(conflict.status).toBe(409);
+      expect((await responseBody(conflict)).error.code).toBe('LEASE_CONFLICT');
+    }
+  });
+  it('validates exact trusted symbol rules and rejects unknown or malformed symbol keys', () => {
+    enablePythonSymbols();
+    const registry = unitRegistry(policy);
+    expect(resolveUnit(registry, 'symbol:src/a.py#def%20alpha%28%29%3A')).toMatchObject({
+      key: 'symbol:src/a.py#def%20alpha%28%29%3A', file: 'src/a.py', wholeFile: false,
+    });
+    for (const key of ['symbol:src/other.py#def%20alpha%28%29%3A', 'symbol:src/a.py#def%20alpha%28%29%3a', 'symbol:src/a.py#bad%']) {
+      expect(() => resolveUnit(registry, key)).toThrow('Unit key is not registered');
+    }
+    for (const symbolRules of [
+      [{ path: 'src/a.py', driver: 'python' }, { path: 'src/a.py', driver: 'python' }],
+      [{ path: 'src/missing.py', driver: 'python' }],
+      [{ path: 'src/a.py', driver: 'unknown' }],
+      [{ path: 'src/a.py', driver: 'typescript', xfuncname: '' }],
+      [{ path: 'src/a.py', driver: 'typescript', xfuncname: '[' }],
+      [{ path: 'src/a.py', driver: 'python', xfuncname: '^def' }],
+    ]) expect(() => unitRegistry({ ...policy, symbolRules })).toThrow('SYMBOL_RULE_POLICY_INVALID');
+    expect(() => unitRegistry({ ...policy, symbolRules: [{ path: 'src/a.py', driver: 'typescript',
+      xfuncname: '^[[:space:]]*(export[[:space:]]+)?function[[:space:]]+[[:alnum:]_]+' }] })).not.toThrow();
+    const withTable = structuredClone(policy);
+    withTable.units['file:data/a.tsv'] = { canonicalKey: 'file:data/a.tsv', file: 'data/a.tsv', resources: [], dependencyKeys: [] };
+    withTable.symbolRules = [{ path: 'data/a.tsv', driver: 'python' }];
+    withTable.tables = [{ name: 'a', file: 'data/a.tsv', header: ['key', 'value'], keyColumn: 'key',
+      keySpec: { charset: 'lower', minLength: 1, maxLength: 32 } }];
+    expect(() => unitRegistry(withTable)).toThrow('SYMBOL_RULE_POLICY_INVALID');
+  });
+  it('keeps the 64 normalized-unit cap for dynamic symbol keys', () => {
+    enablePythonSymbols();
+    const registry = unitRegistry(policy);
+    const keys = Array.from({ length: 65 }, (_, index) => `symbol:src/a.py#def%20item${index}%28%29%3A`);
+    expect(() => normalizeUnits(registry, keys)).toThrow('65 normalized units exceed the cap of 64');
+  });
+  it('reserves symbol writes under a file or identical symbol claim only', async () => {
+    enablePythonSymbols();
+    setupPolicy();
+    const alpha = 'symbol:src/a.py#def%20alpha%28%29%3A';
+    const beta = 'symbol:src/a.py#def%20beta%28%29%3A';
+    for (const [repo, claimKey, writeKey, expected] of [
+      ['reserve_file_symbol', 'file:src/a.py', alpha, 'eligible'],
+      ['reserve_same_symbol', alpha, alpha, 'eligible'],
+      ['reserve_other_symbol', alpha, beta, 'UNLEASED_WRITE'],
+      ['reserve_symbol_file', alpha, 'file:src/a.py', 'UNLEASED_WRITE'],
+    ] as const) {
+      const grant = await claim(repo, 'local-agent-a', 'change', [claimKey], `${repo}-claim`);
+      expect(grant.status).toBe(201);
+      const lease = (await responseBody(grant)).data.leases[0];
+      await runInDurableObject(stubFor(repo), async (_instance, state) => {
+        const change = fakeReadyChange(repo, 'change', 'agent-a', [writeKey]);
+        addVerified(state, change);
+        const result = leases.hooks['leases.reserve']!(contextFor(state, repo, 'agent-a', Date.now), 'change', { [claimKey]: lease.fence });
+        expect(result.status === 'eligible' ? 'eligible' : result.code).toBe(expected);
+      });
+    }
+  });
   it('refuses protected whole-file units and new files under a protected prefix', async () => {
+    enablePythonSymbols();
     policy.newFilePrefixes = ['tests/'];
     setupPolicy();
     const repo = 'lease_protected_paths';
     await runInDurableObject(stubFor(repo), async (_instance, state) => {
       sqlState(state.storage.sql).put('module:settings:record', { version: 1, protectedPaths: [
         { pattern: 'src/code.c', level: 'human-only', note: 'owner edits' },
+        { pattern: 'src/a.py', level: 'human-only', note: 'owner edits symbols' },
         { pattern: 'tests/', level: 'human-only' },
       ] });
     });
-    for (const unit of ['file:src/code.c', 'symbol:sub_02000100', 'file:tests/new.test.ts']) {
+    for (const unit of ['file:src/code.c', 'symbol:sub_02000100', 'symbol:src/a.py#def%20alpha%28%29%3A', 'file:tests/new.test.ts']) {
       const denied = await claim(repo, 'local-agent-a', `change-${unit.replace(/\W/g, '')}`, [unit], crypto.randomUUID());
       expect(denied.status).toBe(409);
       expect((await responseBody(denied)).error.code).toBe('PATH_PROTECTED');
@@ -272,6 +363,28 @@ describe('semantic lease identities', () => {
 });
 
 describe('RepoCoordinator lease routes', () => {
+  it('accepts canonical 512-byte symbol keys on change creation and publication', async () => {
+    enablePythonSymbols();
+    setupPolicy();
+    const repo = 'symbol_change_input';
+    const createdRepo = await fetchApi(mutation('/v1/repos', {
+      name: repo, policyId: 'local-demo', profileId: 'local-demo',
+    }, 'create-symbol-repo'));
+    expect(createdRepo.status).toBe(201);
+    const symbol = 'symbol:src/a.py#def%20alpha%28%29%3A';
+    const base = { intentKey: 'symbol-input', intentText: 'Check symbol input', baseOid: null,
+      branch: 'refs/heads/symbol-input', dependencyChangeIds: [] };
+    const created = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys: [symbol] }, 'create-symbol-change'));
+    expect(created.status).toBe(201);
+    const createdBody = await responseBody(created);
+    expect(createdBody.data.unitKeys).toEqual([symbol]);
+    const published = await fetchApi(mutation(`/v1/repos/${repo}/changes/${createdBody.data.changeId}/publish`, {
+      expectedVersion: createdBody.version, baseOid: null, headOid: 'a'.repeat(40),
+      branch: base.branch, unitKeys: [symbol], leaseFences: { [symbol]: 1 },
+    }, 'publish-symbol-change'));
+    expect((await responseBody(published)).error.code).not.toBe('INVALID_INPUT');
+  });
   it('reports the unit cap for 129 distinct keys on change creation and publication', async () => {
     policy.newFilePrefixes = ['tests/'];
     setupPolicy();

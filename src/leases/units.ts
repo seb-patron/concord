@@ -1,5 +1,6 @@
 import type { TrustedPolicy } from '../contracts';
 import { HttpError } from '../http';
+import { parseSymbolKey } from './symbol-keys';
 
 /** A policy is the only source of unit identity. Paths never become claims by parsing input. */
 export interface UnitIdentity {
@@ -15,6 +16,42 @@ export const unitsOverCapMessage = (count: number): string =>
   `${count} normalized units exceed the cap of ${MAX_NORMALIZED_UNITS}; declare coarser prefix or section units in policy`;
 const tableMetadata = new WeakMap<Map<string, UnitIdentity>, TsvTable[]>();
 const prefixMetadata = new WeakMap<Map<string, UnitIdentity>, string[]>();
+const symbolMetadata = new WeakMap<Map<string, UnitIdentity>, Set<string>>();
+
+const BUILTIN_DIFF_DRIVERS = new Set(['ada', 'bibtex', 'cpp', 'csharp', 'elixir', 'fortran', 'f', 'golang', 'html', 'java', 'matlab', 'objc', 'pascal', 'perl', 'php', 'python', 'ruby', 'rust', 'scheme', 'tex']);
+const POSIX_CLASS_FOR_VALIDATION: Record<string, string> = {
+  alnum: 'A-Za-z0-9', alpha: 'A-Za-z', blank: '\\t ', cntrl: '\\x00-\\x1F\\x7F', digit: '0-9',
+  graph: '\\x21-\\x7E', lower: 'a-z', print: '\\x20-\\x7E', punct: '\\x21-\\x2F\\x3A-\\x40\\x5B-\\x60\\x7B-\\x7E',
+  space: '\\t\\n\\v\\f\\r ', upper: 'A-Z', xdigit: 'A-Fa-f0-9',
+};
+
+function declaredSymbolRules(policy: TrustedPolicy, registry: Map<string, UnitIdentity>): Set<string> {
+  if (policy.symbolRules === undefined) return new Set();
+  const rules = policy.symbolRules;
+  if (!Array.isArray(rules) || rules.length > 256) throw new Error('SYMBOL_RULE_POLICY_INVALID');
+  const paths = new Set<string>();
+  for (const rule of rules) {
+    if (!rule || typeof rule !== 'object' || Object.keys(rule).some(key => !['path', 'driver', 'xfuncname'].includes(key)) ||
+      typeof rule.path !== 'string' || !validPath(rule.path) || paths.has(rule.path) ||
+      !registry.has(`file:${rule.path}`) || typeof rule.driver !== 'string') throw new Error('SYMBOL_RULE_POLICY_INVALID');
+    if (BUILTIN_DIFF_DRIVERS.has(rule.driver)) {
+      if (rule.xfuncname !== undefined) throw new Error('SYMBOL_RULE_POLICY_INVALID');
+    } else if (rule.driver === 'typescript') {
+      const pattern = rule.xfuncname;
+      if (typeof pattern !== 'string' || pattern.length === 0 || pattern.length > 256 ||
+        !/^[\x20-\x7e]+$/.test(pattern) || /\\[1-9]|\\[dDsSwW]|\(\?/.test(pattern)) throw new Error('SYMBOL_RULE_POLICY_INVALID');
+      const validationPattern = pattern.replace(/\[:([a-z]+):\]/g, (match, name: string) => {
+        const chars = POSIX_CLASS_FOR_VALIDATION[name];
+        if (chars === undefined) throw new Error('SYMBOL_RULE_POLICY_INVALID');
+        return chars;
+      });
+      try { new RegExp(validationPattern); } catch { throw new Error('SYMBOL_RULE_POLICY_INVALID'); }
+    } else throw new Error('SYMBOL_RULE_POLICY_INVALID');
+    paths.add(rule.path);
+  }
+  if (rules.some(rule => policy.tables?.some(table => table.file === rule.path))) throw new Error('SYMBOL_RULE_POLICY_INVALID');
+  return paths;
+}
 
 export function matchesTableKey(table: TsvTable, key: string): boolean {
   const spec = table.keySpec;
@@ -178,6 +215,7 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
   }
   tableMetadata.set(registry, tables);
   prefixMetadata.set(registry, prefixes);
+  symbolMetadata.set(registry, declaredSymbolRules(policy, registry));
   return registry;
 }
 
@@ -198,6 +236,12 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
       if (validKey(key) && matchesTableKey(table, key))
         identity = { key: raw, file: table.file, resources: [`${table.file}#${key}`], wholeFile: false };
       break;
+    }
+    if (!identity && raw.startsWith('symbol:')) {
+      const parsed = parseSymbolKey(raw);
+      if (parsed && symbolMetadata.get(registry)?.has(parsed.path)) {
+        identity = { key: raw, file: parsed.path, resources: [raw], wholeFile: false };
+      }
     }
   }
   if (!identity) throw new HttpError(422, 'UNKNOWN_UNIT', 'Unit key is not registered', { key: raw });
