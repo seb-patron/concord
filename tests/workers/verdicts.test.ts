@@ -100,6 +100,29 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
 }
 
 describe('content-bound verdicts', () => {
+  it('stores carry jobs without copies, fills old copies from config, and blocks missing pins', async () => {
+    const makePending = async () => {
+      const h = harness(); const parent = await h.approve(); h.advance(); await h.carry(parent);
+      const key = `carry:${h.jobs[0].jobId}`;
+      return { h, key, result: h.result() };
+    };
+    const fresh = await makePending();
+    expect('unitPolicy' in (fresh.h.state.get(fresh.key) as any).job).toBe(false);
+    expect(fresh.h.evaluate(fresh.result).status).toBe('eligible');
+    expect('unitPolicy' in (fresh.h.state.get(fresh.key) as any).job).toBe(false);
+
+    const legacy = await makePending();
+    const old = legacy.h.state.get(legacy.key) as any;
+    legacy.h.state.set(legacy.key, { ...old, job: { ...old.job, unitPolicy: { ...policy, version: 99 } } });
+    expect(legacy.h.evaluate(legacy.result).status).toBe('eligible');
+    expect('unitPolicy' in (legacy.h.state.get(legacy.key) as any).job).toBe(false);
+
+    const unavailable = await makePending();
+    unavailable.h.context.trusted.policies.demo = { ...policy, digest: d('different-policy') };
+    expect(unavailable.h.evaluate(unavailable.result)).toMatchObject({ status: 'blocked', code: 'JOB_POLICY_UNAVAILABLE' });
+    expect((unavailable.h.state.get(unavailable.key) as any).status).toBe('pending');
+  });
+
   it('uses canonical byte-sensitive sorted manifests and exact trusted dependency closure', async () => {
     const original = manifest('row:gamma');
     const reversed = { ...original, changedUnits: [...original.changedUnits].reverse(), dependencyScope: [...original.dependencyScope].reverse() } as ReviewManifest;

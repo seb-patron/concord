@@ -5,6 +5,7 @@ import { activeChangeLimit, costLimits, eventSequence, sqlState } from '../state
 import { covers, MAX_NORMALIZED_UNITS, resolveUnit, unitRegistry, unitsOverCapMessage } from '../leases/units';
 import { branch, ids, mergeLandedChanges, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 import { isRepoPath } from '../repos/paths';
+import { storedJob, withJobPolicy } from '../jobs/policy';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
 const page = <T>(items: T[], request: Request) => {
@@ -585,8 +586,9 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   if (change.headOid === headOid && change.baseOid === baseOid && JSON.stringify(change.unitKeys) === JSON.stringify(unitKeys)) {
     const pending = context.state.get<InspectionPending>(`inspection:${changeId}`);
     if (pending && !pending.scheduled) {
-      const pendingJob = context.state.get<InspectCandidateJob>(`inspection-job:${changeId}`);
-      if (!pendingJob) return fail(503, 'INSPECTION_JOB_MISSING', 'Inspection job intent missing');
+      const stored = context.state.get<InspectCandidateJob>(`inspection-job:${changeId}`);
+      if (!stored) return fail(503, 'INSPECTION_JOB_MISSING', 'Inspection job intent missing');
+      const pendingJob = withJobPolicy(context.trusted, stored);
       return scheduleInspection(context, change, pendingJob);
     }
     return respond(context, changeResponse(change));
@@ -621,7 +623,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
     change.version = versioned(context, 'change.published', [changeId], { revision, headOid, baseOid });
     storeChange(context, change);
     context.state.put(`inspection:${changeId}`, { changeId, revision, jobId, inputDigest: job.inputDigest, sourceTreeOid: head!.treeOid, headOid, baseOid: baseOid as string, unitKeys, scheduled: false } satisfies InspectionPending);
-    context.state.put(`inspection-job:${changeId}`, job);
+    context.state.put(`inspection-job:${changeId}`, storedJob(job));
     context.state.delete(`review:${changeId}`);
     context.state.delete(`verified:${changeId}`);
     context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);

@@ -7,6 +7,7 @@ import { eventSequence, sqlState } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
 import { jobInput, visibleCommit, visibleRef } from './runners';
+import { jobPolicy, storedJob, withJobPolicy } from '../jobs/policy';
 import { mergeLandedChanges } from '../repos/model';
 import { covers, resolveUnit, unitRegistry } from '../leases/units';
 import {
@@ -65,7 +66,9 @@ const empty = (): QueueState => ({
   coalesceUntil: null, blockedReason: null,
 });
 const read = (context: ModuleContext): QueueState => context.state.get<QueueState>('data') ?? empty();
-const save = (context: ModuleContext, state: QueueState) => context.state.put('data', state);
+const save = (context: ModuleContext, state: QueueState) => context.state.put('data', {
+  ...state, jobs: state.jobs.map(record => ({ ...record, job: storedJob(record.job) })),
+});
 const eligible = <T>(context: ModuleContext, value: T, ids: Id[] = []): Gate<T> => ({ status: 'eligible', version: context.version(), evidenceIds: ids, value });
 const blocked = (context: ModuleContext, code: string, reason: string): Gate<never> => ({ status: 'blocked', version: context.version(), code, reason, evidenceIds: [] });
 function requireGate<T>(gate: Gate<T>): T {
@@ -322,7 +325,7 @@ function schedule(context: ModuleContext, state: QueueState, job: Job, purpose: 
     }
   }
   requireGate(context.call('runners.schedule', job));
-  const record: JobRecord = { job, purpose, memberIds: [...memberIds],
+  const record: JobRecord = { job: storedJob(job) as Job, purpose, memberIds: [...memberIds],
     admissionIds: entries.map(entry => entry!.entryId), contestId, consumed: false };
   state.jobs.push(record);
   if (purpose === 'stack' || purpose === 'diagnostic') state.activeStackJobId = job.jobId;
@@ -641,8 +644,8 @@ async function checkedScratch(context: ModuleContext, record: JobRecord, result:
   const commit = await visibleCommit(context.storage, record.job.scratchStorageName, result.composedOid);
   return commit?.oid === result.composedOid && commit.treeOid === result.composedTreeOid;
 }
-function resultPolicy(_context: ModuleContext, record: JobRecord) {
-  return record.job.unitPolicy.digest === record.job.policyDigest ? record.job.unitPolicy : null;
+function resultPolicy(context: ModuleContext, record: JobRecord) {
+  return jobPolicy(context.trusted, record.job);
 }
 function failRecord(context: ModuleContext, state: QueueState, record: JobRecord, reason: string): void {
   if (record.job.generation !== state.generation || record.purpose === 'promotion') return;
@@ -656,7 +659,7 @@ function failRecord(context: ModuleContext, state: QueueState, record: JobRecord
   state.activeStackJobId = null;
 }
 async function makePromotionJob(context: ModuleContext, state: QueueState, checked: JobRecord, result: StackResult, promotionId: Id): Promise<Job> {
-  const job = checked.job;
+  const job = withJobPolicy(context.trusted, checked.job);
   if (job.kind !== 'validate-stack' || !result.composedOid) throw new HttpError(409, 'INVALID_PROMOTION', 'Checked stack unavailable');
   const canonicalName = job.bootstrap ? state.bootstrap!.input.canonicalStorageName
     : member(state, checked, checked.memberIds[0])!.canonicalStorageName;
@@ -790,7 +793,7 @@ async function processStackResult(context: ModuleContext, state: QueueState, rec
     return;
   }
   const policy = resultPolicy(context, record);
-  if (!policy) { state.blockedReason = 'PROFILE_UNAVAILABLE'; failRecord(context, state, record, 'PROFILE_UNAVAILABLE'); return; }
+  if (!policy) { state.blockedReason = 'JOB_POLICY_UNAVAILABLE'; failRecord(context, state, record, 'JOB_POLICY_UNAVAILABLE'); return; }
   const green = accepted(result, policy.acceptance, record.purpose === 'contest');
   if (green && !await checkedScratch(context, record, result)) {
     state.blockedReason = 'CHECKED_SCRATCH_MISMATCH';
@@ -939,7 +942,7 @@ async function retryAmbiguousPromotion(context: ModuleContext, state: QueueState
     || ticket.reconciliation !== 'AMBIGUOUS_OLD_OID') return;
   const original = state.jobs.find(item => item.job.jobId === ticket.jobId);
   if (!original || original.job.kind !== 'promote') return;
-  const retry: Job = { ...original.job, jobId: crypto.randomUUID(), state: 'pending', attempt: 0,
+  const retry: Job = { ...withJobPolicy(context.trusted, original.job), jobId: crypto.randomUUID(), state: 'pending', attempt: 0,
     runnerId: null, fence: 0, expiresAt: null };
   retry.inputDigest = await digest(jobInput(retry));
   context.transaction(() => {
@@ -980,7 +983,7 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
   }
   if (result.outcome === 'ENV_ERROR' || result.outcome === 'TIMEOUT') {
     if (!record.retryOf && !record.retryIssued) {
-      const retry = { ...record.job, jobId: crypto.randomUUID(), state: 'pending' as const,
+      const retry = { ...withJobPolicy(context.trusted, record.job), jobId: crypto.randomUUID(), state: 'pending' as const,
         attempt: 0, fence: 0, runnerId: null, expiresAt: null } as Job;
       retry.inputDigest = await digest(jobInput(retry));
       context.transaction(() => {

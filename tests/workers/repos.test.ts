@@ -6,7 +6,7 @@ import type { TenantCatalog } from '../../src/catalog';
 import type { RepoCoordinator } from '../../src/coordinator';
 import type { Change, InspectionResult, ModuleContext } from '../../src/contracts';
 import { repos } from '../../src/features/repos';
-import { runners } from '../../src/features/runners';
+import { jobInput, runners } from '../../src/features/runners';
 import { digest as canonicalDigest } from '../../src/http';
 import { ids, pendingInitialToken, type ProvisioningIntent } from '../../src/repos/model';
 import { FakeStorage } from '../../src/storage/fake';
@@ -1118,16 +1118,23 @@ describe('repository and change lifecycle', () => {
     const publish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, publishBody, 'publish-one', 'local-agent-a'));
     expect(publish.status).toBe(409);
     expect((await responseBody(publish)).error.code).toBe('INVALID_JOB');
+    const firstIntent = await runInDurableObject<RepoCoordinator, any>(env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:publish_case')),
+      instance => sqlState((instance as any).ctx.storage.sql).get(`module:repos:inspection-job:${change.changeId}`));
+    expect(firstIntent).toMatchObject({ policyId: 'local-demo' });
+    expect('unitPolicy' in firstIntent).toBe(false);
     const detail = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
     expect((await responseBody(detail)).data).toMatchObject({ revision: 1, headOid: b, status: 'draft' });
     const repeatPublish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-again', 'local-agent-a'));
     expect(repeatPublish.status).toBe(409);
     expect((await responseBody(repeatPublish)).error.code).toBe('INVALID_JOB');
     const scheduleOriginal = runners.hooks['runners.schedule'];
-    runners.hooks['runners.schedule'] = (context, job) => ({ status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } });
+    let scheduledJob!: import('../../src/contracts').Job;
+    runners.hooks['runners.schedule'] = (context, job) => { scheduledJob = job; return { status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } }; };
     try {
       const scheduled = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-scheduled', 'local-agent-a'));
       expect(scheduled.status).toBe(202);
+      expect(scheduledJob.unitPolicy).toEqual(localFixtureConfig('local').policies['local-demo']);
+      expect(await canonicalDigest(jobInput(scheduledJob))).toBe(firstIntent.inputDigest);
       expect((await responseBody(scheduled)).data).toMatchObject({ revision: 1, authorModel: null });
       const identical = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-identical', 'local-agent-a'));
       expect(identical.status).toBe(200);
