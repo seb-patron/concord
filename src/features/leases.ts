@@ -132,7 +132,16 @@ function claim(context: ModuleContext, body: unknown): Response {
     const now = context.now();
     expireDue(context, now);
     const current = activeRows(context, now);
-    const conflicts = current.flatMap(row => {
+    const holderChanges = new Map<string, ReturnType<NonNullable<ModuleContext['readChange']>>>();
+    holderChanges.set(input.changeId as string, change);
+    const conflicts = change.value.headOid !== null ? [] : current.flatMap(row => {
+      if (row.state === 'reserved') return [];
+      let holderChange = holderChanges.get(row.change_id);
+      if (!holderChange) {
+        holderChange = context.readChange!(row.change_id);
+        holderChanges.set(row.change_id, holderChange);
+      }
+      if (holderChange.status === 'eligible' && holderChange.value.headOid !== null) return [];
       const identity = resolveUnit(registry, row.unit_key);
       const keys = units.filter(unit => overlaps(identity, unit)).map(unit => unit.key);
       return keys.length ? [{ holderId: row.holder_id, intentText: row.intent_text, ...issueFor(context, row.change_id),
@@ -146,12 +155,12 @@ function claim(context: ModuleContext, body: unknown): Response {
       const version = context.nextVersion();
       context.appendEvent('lease.refused', [input.changeId as string], {
         intentText: input.intentText as string, keys, conflicts, issueNumber: change.value.issueNumber ?? null,
-        nextAction: "Wait for the holder's lease to expire or be released, then retry the claim.",
+        nextAction: `Wait until ${new Date(Math.max(...conflicts.map(item => item.expiresAt))).toISOString()} or until the holder publishes their change or releases the lease, then retry.`,
       }, version);
       return failure(new HttpError(409, 'LEASE_CONFLICT', 'One or more units are already claimed', {
         holderId: conflicts[0].holderId, intentText: conflicts[0].intentText, issueNumber: conflicts[0].issueNumber, issueTitle: conflicts[0].issueTitle,
         expiresAt: conflicts[0].expiresAt, keys, conflicts,
-        nextAction: `Wait until ${new Date(Math.max(...conflicts.map(item => item.expiresAt))).toISOString()} or ask the holder to release, then retry.`,
+        nextAction: `Wait until ${new Date(Math.max(...conflicts.map(item => item.expiresAt))).toISOString()} or until the holder publishes their change or releases the lease, then retry.`,
       }));
     }
     if (current.length + units.length > MAX_LIVE_LEASES) {
@@ -409,9 +418,6 @@ function reserve(context: ModuleContext, changeId: string, fences: Record<string
         if (!row) return blocked(context, 'LEASE_STALE', 'Parent contest reservation and current fences required');
         inherited[claim.key] = row.fence;
       }
-      if (active.some(row => !parentRows.includes(row) && writes.some(write => overlaps(resolveUnit(registry, row.unit_key), write)))) {
-        return blocked(context, 'LEASE_CONFLICT', 'Contest write overlaps another reservation');
-      }
       return { status: 'eligible', version: context.version(), evidenceIds: parentRows.map(row => row.lease_id), value: { reservationFences: inherited } };
     }
     const selected: LeaseRow[] = [];
@@ -424,11 +430,6 @@ function reserve(context: ModuleContext, changeId: string, fences: Record<string
     }
     if (selected.some(row => row.state !== selected[0].state)) {
       return blocked(context, 'LEASE_STALE', 'Claims must have one consistent reservation state');
-    }
-    for (const row of active) {
-      if (selected.includes(row)) continue;
-      const unit = resolveUnit(registry, row.unit_key);
-      if (writes.some(write => overlaps(unit, write))) return blocked(context, 'LEASE_CONFLICT', 'Verified write overlaps another reservation', [row.lease_id]);
     }
     const reservationFences: Record<string, number> = {};
     if (selected[0].state === 'reserved') {

@@ -96,6 +96,10 @@ function fakeReadyChange(repo: string, changeId: string, authorId: string, unitK
   };
 }
 
+function unpublishedChange(repo: string, changeId: string, authorId: string): Change {
+  return { ...fakeReadyChange(repo, changeId, authorId, []), headOid: null, revision: 0, status: 'draft' };
+}
+
 function seedClaim(state: DurableObjectState, repoId: string, changeId: string, authorId: string): void {
   const store = sqlState(state.storage.sql);
   const repo: Repo = {
@@ -104,7 +108,7 @@ function seedClaim(state: DurableObjectState, repoId: string, changeId: string, 
     policyDigest: policy.digest, profileId: 'local-demo', status: 'ready', version: 1,
   };
   store.put('module:repos:repo', repo);
-  store.put(`module:repos:change:${changeId}`, fakeReadyChange(repoId, changeId, authorId, []));
+  store.put(`module:repos:change:${changeId}`, unpublishedChange(repoId, changeId, authorId));
 }
 
 function addVerified(state: DurableObjectState, change: Change, unitKeys = change.unitKeys): void {
@@ -117,6 +121,45 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('keeps unpublished claims exclusive, then lets published holders overlap without hiding active writers', async () => {
+    setupPolicy();
+    const repo = 'lease_published_overlap';
+    const first = await claim(repo, 'local-agent-a', 'change-a', ['row:families:alpha'], 'claim-a');
+    expect(first.status).toBe(201);
+    const firstLease = (await responseBody(first)).data.leases[0];
+    expect((await claim(repo, 'local-agent-b', 'change-b', ['row:families:alpha'], 'claim-b-before')).status).toBe(409);
+
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      sqlState(state.storage.sql).put('module:repos:change:change-a', fakeReadyChange(repo, 'change-a', 'agent-a', [firstLease.unitKey]));
+    });
+    const second = await claim(repo, 'local-agent-b', 'change-b', ['row:families:alpha'], 'claim-b-after');
+    expect(second.status).toBe(201);
+    const secondLease = (await responseBody(second)).data.leases[0];
+    const active = (await listing(repo)).items.filter((item: { unitKey: string; state: string }) =>
+      item.unitKey === 'row:families:alpha' && item.state === 'active');
+    expect(active).toHaveLength(2);
+    expect(active.map((item: { fence: number }) => item.fence)).toEqual(expect.arrayContaining([firstLease.fence, secondLease.fence]));
+    expect(new Set(active.map((item: { fence: number }) => item.fence)).size).toBe(2);
+    const third = await claim(repo, 'local-agent-c', 'change-c', ['row:families:alpha'], 'claim-c');
+    expect(third.status).toBe(409);
+    expect((await responseBody(third)).error.details.holderId).toBe('agent-b');
+
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const context = contextFor(state, repo, 'agent-a', Date.now);
+      const change = fakeReadyChange(repo, 'change-a', 'agent-a', [firstLease.unitKey]);
+      addVerified(state, change);
+      expect(leases.hooks['leases.reserve']!(context, 'change-a', { [firstLease.unitKey]: firstLease.fence })).toMatchObject({ status: 'eligible' });
+      const store = sqlState(state.storage.sql);
+      seedClaim(state, repo, 'change-c', 'agent-c');
+      store.put('module:repos:change:change-c', fakeReadyChange(repo, 'change-c', 'agent-c', []));
+      const route = leases.routes.find(entry => entry.method === 'POST' && entry.pattern.test(path(repo)))!;
+      const granted = await route.handle(contextFor(state, repo, 'agent-c', Date.now),
+        new Request(`https://concord.test${path(repo)}`), path(repo).match(route.pattern)!,
+        { changeId: 'change-c', intentText: 'Published claimant', unitKeys: [firstLease.unitKey] });
+      expect(granted.status).toBe(201);
+    });
+  });
+
   it('allows distinct canonical symbols to coexist and refuses an identical symbol atomically', async () => {
     enablePythonSymbols();
     setupPolicy();
@@ -1032,7 +1075,8 @@ describe('RepoCoordinator lease routes', () => {
       seedClaim(state, repo, 'ordinary', 'agent-b');
       const bypass = await claimRoute.handle(contextFor(state, repo, 'agent-b', Date.now), new Request(`https://concord.test${path(repo)}`),
         path(repo).match(claimRoute.pattern)!, { changeId: 'ordinary', intentText: 'Ordinary overlap', unitKeys: [item.unitKey], contestId: 'contest-one', override: true });
-      expect(bypass.status).toBe(409);
+      expect(bypass.status).toBe(201);
+      expect((await responseBody(bypass)).data.leases[0]).toMatchObject({ changeId: 'ordinary', state: 'active', unitKey: item.unitKey });
       store.put('module:queue:contest:contest-one', { ...contest, selectedChangeId: 'child-b' });
       expect(reserve(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
       expect(leases.hooks['leases.reservationLive']!(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });

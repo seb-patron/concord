@@ -1590,16 +1590,16 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   }));
   const firstShared = execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...sameFile[0].args,
     '--review-evidence', sameFile[0].review], { cwd: root, env: sameFile[0].env, timeout: 155_000 });
-  await waitFor(async () => (await api('/leases')).data.items.some((item: any) =>
-    item.unitKey === 'file:shared.txt' && item.state === 'active'));
+  await waitFor(async () => (await api('/snapshot')).data.projections.repos.changes.some((change: any) =>
+    change.intentKey === 'shared-0' && change.headOid));
   const secondShared = execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...sameFile[1].args],
     { cwd: root, env: sameFile[1].env, timeout: 155_000 });
   const [firstResult, secondResult] = await drive(Promise.all([firstShared, secondShared]));
   expect(firstResult.stdout).toContain('"state":"landed"');
-  expect(secondResult.stdout).toContain('"state":"LEASE_CONFLICT"');
-  expect(secondResult.stdout).toContain('Edit shared line 1');
   const secondEvents = secondResult.stdout.trim().split('\n').map(line => JSON.parse(line));
+  expect(secondEvents.some(item => item.state === 'LEASE_CONFLICT')).toBe(false);
   const approved = secondEvents.find(item => item.state === 'awaiting-review');
+  expect(approved).toBeDefined();
   expect(approved.headOid).toMatch(/^[a-f0-9]{40}$/);
   await writeFile(sameFile[1].review, `# ✅ APPROVED FOR MERGE — head ${approved.headOid}\nAPPROVED for merge\n`);
   const secondLanded = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
