@@ -643,7 +643,9 @@ function renderDetail() {
   const body=$('detail-body'); body.replaceChildren();
   body.append(node('h3',change.intentText ?? change.intentKey ?? change.changeId));
   const grid=node('div',null,'detail-grid');
-  for(const [label,value] of [['Change',change.changeId],['Agent',change.authorId],['Model',modelFor(change)],['Status',change.status],['Units',list(change.unitKeys).join(', ')],['Revision',change.revision],['Base',change.baseOid],['Head',change.headOid]]) {
+  const rows=[['Change',change.changeId],['Agent',change.authorId],['Model',modelFor(change)],['Status',change.status],['Units',list(change.unitKeys).join(', ')],['Revision',change.revision],['Base',change.baseOid],['Head',change.headOid]];
+  if(change.status==='closed' && change.closeReason) rows.push(['Close reason',change.closeReason]);
+  for(const [label,value] of rows) {
     if (value===null || value===undefined || value==='') continue;
     const p=node('p'); p.append(node('strong',`${label}: `),node('span',value)); grid.append(p);
   }

@@ -295,6 +295,7 @@ describe('Concord agent CLI client', () => {
 
   it('lists own changes across cursor pages and closes with an automatically read version', async () => {
     const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+    let closedChange: Record<string, unknown> | undefined;
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
       let text = ''; for await (const part of request) text += part;
       const path = request.url ?? '';
@@ -321,8 +322,10 @@ describe('Concord agent CLI client', () => {
       ], nextCursor: null });
       if (path === '/v1/repos/repo/changes/mine-draft/close') {
         if ((body as { expectedVersion?: number } | undefined)?.expectedVersion === 3) return respond({ code: 'STALE_VERSION' }, 12, 409);
-        return respond({ changeId: 'mine-draft', status: 'closed' }, 13);
+        closedChange = { changeId: 'mine-draft', status: 'closed', closeReason: (body as { reason?: string }).reason };
+        return respond(closedChange, 13);
       }
+      if (path === '/v1/repos/repo/changes/mine-draft') return respond(closedChange ?? { changeId: 'mine-draft', status: 'draft' }, 13);
       if (path === '/v1/repos/repo/changes/other-draft/close') return respond({ code: 'FORBIDDEN', message: 'denied' }, 403, 403);
       return respond({ code: 'NOT_FOUND' }, 12, 404);
     }));
@@ -339,6 +342,8 @@ describe('Concord agent CLI client', () => {
       expect(calls.find(call => call.path.endsWith('/changes/mine-draft/close'))).toMatchObject({
         method: 'POST', body: { reason: 'superseded', expectedVersion: 12 },
       });
+      const detail = await cli('change', 'get', '--repo', 'repo', '--id', 'mine-draft');
+      expect(JSON.parse(detail.stdout).data).toMatchObject({ closeReason: 'superseded' });
       await expect(cli('change', 'close', '--repo', 'repo', '--id', 'other-draft')).rejects.toMatchObject({ stderr: expect.stringContaining('FORBIDDEN') });
       await expect(cli('change', 'close', '--repo', 'repo', '--id', 'mine-draft', '--expected-version', '3')).rejects.toMatchObject({ stderr: expect.stringContaining('STALE_VERSION') });
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

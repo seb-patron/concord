@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
-  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders } = require('../../web/views.js') as any;
+  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders, changeNextAction } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
 
 const fixture = {
@@ -40,6 +40,10 @@ const fixture = {
 };
 
 describe('Fleet desk derivation', () => {
+  it('includes the stored close reason in the terminal change detail', () => {
+    expect(changeNextAction({ status: 'closed', closeReason: 'dup' }).detail).toContain('dup');
+    expect(changeNextAction({ status: 'closed' }).detail).toBe('Closed without landing.');
+  });
   it('counts distinct current lease holders and keeps every live lease as evidence', () => {
     const now = new Date('2026-10-13T00:02:00Z').valueOf();
     const held = [
