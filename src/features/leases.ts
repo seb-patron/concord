@@ -189,12 +189,10 @@ function renew(context: ModuleContext, leaseId: string, body: unknown): Response
   return context.transaction(() => {
     const row = currentLease(context, leaseId, input.fence);
     const now = context.now();
-    const nextFence = row.fence + 1;
     const version = context.nextVersion();
-    context.sql.exec('UPDATE leases_fences SET fence = ? WHERE unit_key = ?', nextFence, row.unit_key);
-    context.sql.exec('UPDATE leases_claims SET fence = ?, expires_at = ?, version = ?, updated_at = ? WHERE lease_id = ?',
-      nextFence, now + ttlSeconds * 1000, version, now, leaseId);
-    const updated = { ...row, fence: nextFence, expires_at: now + ttlSeconds * 1000, version, updated_at: now };
+    context.sql.exec('UPDATE leases_claims SET expires_at = ?, version = ?, updated_at = ? WHERE lease_id = ?',
+      now + ttlSeconds * 1000, version, now, leaseId);
+    const updated = { ...row, expires_at: now + ttlSeconds * 1000, version, updated_at: now };
     const sequence = makeEvent(context, 'lease.renewed', updated, version);
     return json({ lease: asLease(context, updated), renewAfterSeconds: RENEW_AFTER_SECONDS }, version, sequence);
   });
