@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -125,6 +125,12 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   const bridgeToken = 'mcp-bridge-fixture-secret';
   const env = { ...process.env, TMPDIR: dir, XDG_CONFIG_HOME: dir, CONCORD_RUN_DIR: dir, CONCORD_URL: url, CONCORD_SHOW_DECOMPILED_C: '0' };
   const { trustedConfig } = await prepareLocal(dir);
+  const profileTokenPath = join(dir, 'mcp-token');
+  const profileConfigPath = join(dir, 'profiles.json');
+  await writeFile(profileTokenPath, 'local-agent-a'); await chmod(profileTokenPath, 0o600);
+  await writeFile(profileConfigPath, JSON.stringify({ default: 'agent', profiles: {
+    agent: { url, tokenFile: profileTokenPath },
+  } })); await chmod(profileConfigPath, 0o600);
   const bridge = start(process.execPath, ['--import', 'tsx', 'local/git-bridge.ts'], { ...env, CONCORD_BRIDGE_DATA_DIR: join(dir, 'bridge'), CONCORD_BRIDGE_TOKEN: bridgeToken, CONCORD_BRIDGE_PORT: String(bridgePort) });
   await waitFor(async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`));
   const worker = start(join(cwd, 'node_modules/.bin/wrangler'), ['dev', '--config', 'wrangler.local.jsonc', '--port', String(workerPort), '--persist-to', wranglerStateDir(dir), '--var', 'STORAGE_BACKEND:bridge', '--var', `BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=${bridgeToken}`, '--var', `TRUSTED_CONFIG:${trustedConfig}`], { ...env, WRANGLER_SEND_METRICS: 'false' });
@@ -147,6 +153,13 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
     } };
   }
   const a = await mcp('local-agent-a');
+  const profileTransport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx', 'mcp/server.ts'], cwd,
+    env: { ...env, CONCORD_CONFIG: profileConfigPath, CONCORD_PROFILE: 'agent', CONCORD_TOKEN: '' } as Record<string, string>, stderr: 'pipe' });
+  transports.push(profileTransport);
+  const profileClient = new Client({ name: 'concord-profile-test', version: '1.0.0' });
+  await profileClient.connect(profileTransport);
+  const profileResult = await profileClient.callTool({ name: 'repo_list', arguments: {} });
+  expect(profileResult.isError).not.toBe(true);
   const b = await mcp('local-agent-b');
   const reviewer = await mcp('local-reviewer');
   const listed = await a.client.listTools();

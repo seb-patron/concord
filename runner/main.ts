@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { resolveCredential } from '../cli/profile.ts';
 import type { Job, JobResult } from '../src/contracts';
 import { executeJob, type Credential, type CredentialProvider } from './execute';
 import { loadProfile, type LocalProfile } from './profiles';
@@ -147,7 +148,7 @@ async function pollWithRetry(transport: Transport, body: unknown, key: string,
   }
 }
 
-export function apiTransport(base: string, token: string, repo: string, fetcher: typeof fetch = fetch): Transport {
+export function apiTransport(base: string, token: string, repo: string, fetcher: typeof fetch = fetch, profileName?: string): Transport {
   const endpoint = new URL('/v1/repos/' + repo + '/', base).toString();
   return async (path, body, key) => {
     const response = await fetcher(new URL(path, endpoint), { method: 'POST', headers: {
@@ -161,8 +162,18 @@ export function apiTransport(base: string, token: string, repo: string, fetcher:
     const parsed = await response.json().catch(error => {
       if (response.status >= 400) return {};
       throw error;
-    }) as { data?: unknown; error?: { code: string } };
-    return { status: response.status, data: parsed.data, error: parsed.error,
+    }) as { data?: unknown; error?: { code: string; details?: unknown; principalId?: unknown; expiresAt?: unknown } };
+    let apiError = parsed.error;
+    if (response.status === 401 && profileName && profileName !== 'environment' && profileName !== 'stdin' && apiError &&
+      (apiError.code === 'CREDENTIAL_EXPIRED' || apiError.code === 'UNAUTHORIZED')) {
+      const details = apiError.details && typeof apiError.details === 'object' ? apiError.details as Record<string, unknown> : {};
+      const principalId = apiError.principalId ?? details.principalId;
+      const expiresAt = apiError.expiresAt ?? details.expiresAt;
+      apiError = { code: `credential for profile ${profileName} was rejected (${apiError.code})` +
+        (principalId !== undefined ? ` principalId=${String(principalId)}` : '') +
+        (expiresAt !== undefined ? ` expiresAt=${String(expiresAt)}` : '') };
+    }
+    return { status: response.status, data: parsed.data, error: apiError,
       retryAfterMs: Number.isFinite(retryAfterMs) ? retryAfterMs : undefined };
   };
 }
@@ -249,11 +260,17 @@ export async function runLoop(options: Options, transport: Transport, profile: L
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  const url = process.env.CONCORD_URL;
-  const token = process.env.CONCORD_TOKEN;
-  if (!url || !token) throw new Error('CONCORD_URL_AND_TOKEN_REQUIRED');
+  let connection: Awaited<ReturnType<typeof resolveCredential>>;
+  try { connection = await resolveCredential({}); }
+  catch (error) {
+    if (error instanceof Error && (/^(PROFILE_NOT_FOUND|PROFILE_TOKEN_UNREADABLE|PROFILE_PERMISSIONS):/.test(error.message) ||
+      error.message === 'CONCORD_URL is required'))
+      throw new Error('CONCORD_URL_AND_TOKEN_REQUIRED' + (/^PROFILE_/.test(error.message) ? ' ' + error.message : ''));
+    throw error;
+  }
+  if (!connection.url || !connection.url.trim()) throw new Error('CONCORD_URL_AND_TOKEN_REQUIRED');
   const profile = options.profileFile ? await loadProfile(options.profileFile) : null;
-  const count = await runLoop(options, apiTransport(url, token, options.repo), profile);
+  const count = await runLoop(options, apiTransport(connection.url, connection.token, options.repo, fetch, connection.profileName), profile);
   process.stdout.write('Completed ' + count + ' job(s)\n');
 }
 

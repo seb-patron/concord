@@ -8,13 +8,14 @@ import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, r
 import { importRepo } from './import.ts';
 import { land } from './land.ts';
 import { mintGitToken } from './git-token.ts';
+import { addProfileRejectionContext, resolveCredential } from './profile.ts';
 import { releaseByIntent, renewByIntent, start } from './start.ts';
 
 const HELP = `Concord agent CLI
 
 Usage: npm run concord -- <noun> <verb> [options]
 
-Connection: CONCORD_URL and CONCORD_TOKEN; alternatively --token-stdin reads one token from stdin.
+Connection: CONCORD_URL and CONCORD_TOKEN, or --profile NAME / CONCORD_PROFILE from a private profile file; --token-stdin reads one token from stdin.
 Common: --repo ID --json --idempotency-key KEY --expected-version N
 Mutations generate an idempotency key when omitted. Responses are JSON on stdout; errors are JSON on stderr.
 
@@ -60,7 +61,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid', 'public'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid', 'public', 'profile', 'reviewer-profile'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -83,6 +84,18 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   const [noun, verb, ...args] = parsed.positionals;
   const flags = parsed.values as Flags;
   if (!noun || noun === 'help' || flags.help) { print({ help: HELP }); return; }
+  if (noun === 'whoami' && !verb && !args.length) {
+    let tokenStdin: string | undefined;
+    if (flags['token-stdin'] === true && !process.env.CONCORD_TOKEN) {
+      if (process.stdin.isTTY) throw new ConcordError('--token-stdin requires piped stdin', 'usage');
+      tokenStdin = (await stdinText()).trim();
+    }
+    const credential = await resolveCredential({ profile: typeof flags.profile === 'string' ? flags.profile : undefined, tokenStdin });
+    const client = addProfileRejectionContext(new ConcordClient({ url: credential.url, token: credential.token }), credential.profileName);
+    const me = unwrap(await client.request('GET', '/me')) as Record<string, unknown>;
+    print({ profile: credential.profileName, urlHost: new URL(credential.url).host, principalId: me.principalId, roles: me.roles });
+    return;
+  }
   if (noun === 'start' && !verb && !args.length) return print(await start({
     repo: required(flags, 'repo'), intentKey: required(flags, 'intent-key'), intent: required(flags, 'intent'),
     allowedFiles: required(flags, 'allowed-files'), base: typeof flags.base === 'string' ? flags.base : undefined,
@@ -99,6 +112,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   }));
   if (noun === 'land' && !verb && !args.length) {
     const values = parsed.values;
+    let landTokenStdin: string | undefined;
+    if (flags['token-stdin'] === true && !process.env.CONCORD_TOKEN) {
+      if (process.stdin.isTTY) throw new ConcordError('--token-stdin requires piped stdin', 'usage');
+      landTokenStdin = (await stdinText()).trim();
+    }
     await land({ repo: typeof flags.repo === 'string' ? flags.repo : undefined,
       source: typeof flags.source === 'string' ? flags.source : undefined,
       commit: typeof flags.commit === 'string' ? flags.commit : undefined,
@@ -108,6 +126,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       allowedFiles: typeof flags['allowed-files'] === 'string' ? flags['allowed-files'] : undefined,
       dependsOn: Array.isArray(values['depends-on']) ? values['depends-on'] : undefined,
       reviewEvidence: typeof flags['review-evidence'] === 'string' ? flags['review-evidence'] : undefined,
+      profile: typeof flags.profile === 'string' ? flags.profile : undefined,
+      reviewerProfile: typeof flags['reviewer-profile'] === 'string' ? flags['reviewer-profile'] : undefined,
+      tokenStdin: landTokenStdin,
       mirrorTo: typeof flags['mirror-to'] === 'string' ? flags['mirror-to'] : undefined,
       waitSeconds: flags['wait-seconds'] === undefined ? undefined : numberFlag(flags, 'wait-seconds'),
       expectedVersion: flags['expected-version'] === undefined ? undefined : numberFlag(flags, 'expected-version'),
@@ -341,16 +362,15 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 }
 
 async function clientFor(flags: Flags): Promise<ConcordClient> {
-  const url = process.env.CONCORD_URL;
-  if (!url) throw new ConcordError('CONCORD_URL is required', 'usage');
-  let token = process.env.CONCORD_TOKEN;
+  let tokenStdin: string | undefined;
   if (flags['token-stdin']) {
-    if (process.stdin.isTTY) throw new ConcordError('--token-stdin requires piped stdin', 'usage');
-    token = (await stdinText()).trim();
-    rememberCredential(token);
+    if (!process.env.CONCORD_TOKEN) {
+      if (process.stdin.isTTY) throw new ConcordError('--token-stdin requires piped stdin', 'usage');
+      tokenStdin = (await stdinText()).trim();
+    }
   }
-  if (!token) throw new ConcordError('CONCORD_TOKEN is required (or provide --token-stdin)', 'usage');
-  return new ConcordClient({ url, token });
+  const credential = await resolveCredential({ profile: typeof flags.profile === 'string' ? flags.profile : undefined, tokenStdin });
+  return addProfileRejectionContext(new ConcordClient({ url: credential.url, token: credential.token }), credential.profileName);
 }
 function requestOptions(flags: Flags, body?: unknown, impliedVersion?: number): RequestOptions {
   const methodHasBody = body !== undefined;
