@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
-import { verdicts, type InspectedRevision } from '../../src/features/verdicts';
+import { verdicts, humanApprovalStatus, type InspectedRevision } from '../../src/features/verdicts';
 import { canonicalJson, dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest, trustedDependencyKeys } from '../../src/verdicts/manifest';
 
 const d = (text: string): Digest => hashCanonical(text);
 const oid = (char: string) => char.repeat(40);
+const fileDigest = async (text: string): Promise<Digest> => {
+  const hashed = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  return `sha256:${Array.from(hashed, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+};
 const policy: TrustedPolicy = {
   id: 'demo', digest: d('policy'), version: 3, checkerId: 'table-checker', checkerDigest: d('checker'),
   units: {
@@ -16,9 +20,9 @@ const policy: TrustedPolicy = {
 };
 const profile: TrustedProfile = { id: 'demo', digest: d('profile'), toolchainDigest: d('toolchain'), oracleDigest: d('oracle'), environmentDigest: d('environment'), timeoutMs: 1000, maxOutputBytes: 1024 };
 
-function manifest(unitKey: string, options: { dependency?: Digest; after?: Digest; mode?: string; oracle?: Digest; coverage?: 'unknown' } = {}): ReviewManifest {
+function manifest(unitKey: string, options: { dependency?: Digest; before?: Digest; after?: Digest; mode?: string; oracle?: Digest; coverage?: 'unknown' } = {}): ReviewManifest {
   const common = {
-    changedUnits: [{ unitKey, beforePath: 'families.tsv', afterPath: 'families.tsv', beforeMode: '100644', afterMode: options.mode ?? '100644', beforeDigest: d(`${unitKey}:before`), afterDigest: options.after ?? d(`${unitKey}:after`) }],
+    changedUnits: [{ unitKey, beforePath: 'families.tsv', afterPath: 'families.tsv', beforeMode: '100644', afterMode: options.mode ?? '100644', beforeDigest: options.before ?? d(`${unitKey}:before`), afterDigest: options.after ?? d(`${unitKey}:after`) }],
     policyVersion: policy.version, policyDigest: policy.digest, checkerDigest: policy.checkerDigest,
     oracleDigest: options.oracle ?? profile.oracleDigest, toolchainDigest: profile.toolchainDigest,
   };
@@ -54,6 +58,11 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
     trusted: { policies: { demo: policy }, profiles: { demo: trustedProfile } }, now: () => 100,
     storage: { resolveRef: async () => canonical, info: async (name: string) => ({ name, remote: `https://example.test/${name}`, status: 'ready' }) },
     state: { get: <T>(key: string) => (state.get(key) ?? null) as T | null, put: <T>(key: string, value: T) => { state.set(key, value); }, delete: (key: string) => { state.delete(key); } },
+    sql: { exec: (_query: string, key: string) => ({ toArray: () => {
+      const actual = key?.startsWith('module:verdicts:') ? key.slice('module:verdicts:'.length) : key;
+      const value = state.get(actual);
+      return value === undefined ? [] : [{ value: JSON.stringify(value) }];
+    } }) },
     version: () => version, nextVersion: () => ++version,
     appendEvent: (_kind: string, _ids: string[], _payload: Record<string, unknown>, eventVersion: number) => ({ sequence: eventVersion }),
     readChange: () => ({ status: 'eligible', version, evidenceIds: ['change'], value: { authorId: author, headOid: head, revision, status: 'ready', unitKeys: [unitKey], frozen } }),
@@ -63,7 +72,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
       throw new Error(`Unknown hook ${name}`);
     },
   } as unknown as ModuleContext;
-  async function route(method: 'GET' | 'POST', path: 'verdicts' | 'carry', body: Record<string, unknown> = {}) {
+  async function route(method: 'GET' | 'POST', path: 'verdicts' | 'carry' | 'human-approval', body: Record<string, unknown> = {}) {
     const pathname = `/v1/repos/repo/changes/change/${path}`;
     const selected = verdicts.routes.find(item => item.method === method && item.pattern.test(pathname))!;
     const response = await selected.handle(context, new Request(`https://concord.test${pathname}`, { method }), pathname.match(selected.pattern)!, body);
@@ -100,6 +109,25 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
 }
 
 describe('content-bound verdicts', () => {
+  it('carries a separate owner approval across a clean rebase', async () => {
+    const h = harness();
+    h.state.set('module:settings:record', { version: 1, protectedPaths: [{ pattern: 'families.tsv', level: 'human-approval' }] });
+    const parent = await h.approve();
+    expect(humanApprovalStatus(h.context, 'change', 1).awaitingHumanApproval).toEqual(['families.tsv']);
+    h.context.principal.principalId = 'owner';
+    h.context.principal.roles = ['owner'];
+    const approval = await h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'approve', evidenceDigest: d('owner-evidence') });
+    expect(approval.status).toBe(201);
+    expect(humanApprovalStatus(h.context, 'change', 1).awaitingHumanApproval).toEqual([]);
+    h.context.principal.principalId = 'reviewer';
+    h.context.principal.roles = ['reviewer'];
+    h.advance();
+    expect(humanApprovalStatus(h.context, 'change', 2).awaitingHumanApproval).toEqual(['families.tsv']);
+    expect((await h.carry(parent)).status).toBe(202);
+    expect(h.evaluate(h.result()).status).toBe('eligible');
+    expect(humanApprovalStatus(h.context, 'change', 2).awaitingHumanApproval).toEqual([]);
+  });
   it('stores carry jobs without copies, fills old copies from config, and blocks missing pins', async () => {
     const makePending = async () => {
       const h = harness(); const parent = await h.approve(); h.advance(); await h.carry(parent);

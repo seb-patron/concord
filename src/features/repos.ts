@@ -7,6 +7,7 @@ import { covers, MAX_NORMALIZED_UNITS, resolveUnit, unitRegistry, unitsOverCapMe
 import { branch, ids, mergeLandedChanges, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 import { isRepoPath } from '../repos/paths';
 import { storedJob, withJobPolicy } from '../jobs/policy';
+import { humanApprovalStatus } from './verdicts';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
 const page = <T>(items: T[], request: Request) => {
@@ -885,13 +886,13 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/repair-landed$/, handle: context => repairLandedChanges(context) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match, body) => close(context, match[2], body as Record<string, unknown>) },
   ],
   snapshot: context => ({ repo: context.state.get<Repo>('repo'),
     unitPolicy: context.trusted.policies[context.state.get<Repo>('repo')?.policyId ?? ''],
-    branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(changeResponse),
+    branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(change => ({ ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision) })),
     provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
   nextDeadline: context => Object.values(intents(context)).filter(activeProvisioning).reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
   onAlarm: async context => {

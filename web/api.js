@@ -196,6 +196,23 @@ export function getSnapshot(repoId, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/snapshot`, {}, fetchImpl);
 }
 
+export function getSettings(repoId, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/settings`, {}, fetchImpl);
+}
+
+export function putSettings(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/settings`, { method: 'PUT', body, idempotencyKey }, fetchImpl);
+}
+
+export function submitHumanApproval(repoId, changeId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/human-approval`,
+    { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
+export function getHumanApprovalDiff(repoId, changeId, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/human-approval/diff`, {}, fetchImpl);
+}
+
 export function createMilestone(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/milestones`, { method: 'POST', body, idempotencyKey }, fetchImpl);
 }

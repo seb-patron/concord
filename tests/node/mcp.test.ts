@@ -12,6 +12,15 @@ import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenar
 import type { ConcordClient } from '../../cli/client.ts';
 import { callTool, tools } from '../../mcp/tools.ts';
 
+it('exposes repository protection settings as a read-only MCP tool', async () => {
+  const calls: string[] = [];
+  const client = { request: async (_method: string, path: string) => { calls.push(path); return { data: { protectedPaths: [{ pattern: 'AGENTS.md', level: 'human-only' }] } }; } } as unknown as ConcordClient;
+  expect(tools.find(tool => tool.name === 'repo_settings')).toBeDefined();
+  const result = await callTool(client, 'repo_settings', { repoId: 'repo' });
+  expect(calls).toEqual(['/repos/repo/settings']);
+  expect(result).toMatchObject({ data: { protectedPaths: [{ pattern: 'AGENTS.md' }] } });
+});
+
 it('dispatches repo_metrics as a read with encoded UTC bounds', async () => {
   const calls: Array<{ method: string; path: string }> = [];
   const client = { request: async (method: string, path: string) => {

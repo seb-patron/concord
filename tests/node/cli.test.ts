@@ -266,6 +266,32 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('updates protected paths with the settings version and preserves other rules', async () => {
+    const calls: Array<{ method: string; body: any }> = [];
+    let rules = [{ pattern: 'docs/', level: 'agents' }];
+    let version = 2;
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let input = ''; for await (const chunk of request) input += chunk;
+      const body = input ? JSON.parse(input) : null;
+      calls.push({ method: request.method ?? '', body });
+      if (request.method === 'PUT') { rules = body.protectedPaths; version++; }
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ data: { version, protectedPaths: rules }, version, eventSeq: version }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server unavailable');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'owner-token' };
+    const cli = (...args: string[]) => execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'settings', ...args, '--repo', 'repo'], { cwd: process.cwd(), env });
+    try {
+      await cli('protect', '--pattern', 'AGENTS.md', '--level', 'human-only', '--note', 'owner edits');
+      expect(calls[1]).toMatchObject({ method: 'PUT', body: { expectedVersion: 2,
+        protectedPaths: [{ pattern: 'docs/', level: 'agents' }, { pattern: 'AGENTS.md', level: 'human-only', note: 'owner edits' }] } });
+      await cli('unprotect', '--pattern', 'AGENTS.md');
+      expect(calls[3].body).toEqual({ expectedVersion: 3, protectedPaths: [{ pattern: 'docs/', level: 'agents' }] });
+      await cli('get');
+      expect(calls[4].method).toBe('GET');
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
   it('marks change and lease lists truncated after 50 pages', async () => {
     const { createServer } = await import('node:http');
     const server = createServer((request, response) => {
