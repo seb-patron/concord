@@ -124,6 +124,10 @@ npm run concord -- api GET /repos/REPO_ID/snapshot
 ```
 
 The generic command preserves API success and failure envelopes. It does not grant authorization beyond the configured Concord token.
+
+# Repository metrics
+
+`concord metrics --repo ID --since ISO_UTC --until ISO_UTC` prints the repository's measured flow metrics. See [metrics API](api-metrics.md) for bounds and definitions.
 # Issues and milestones
 
 Use `concord issue create --repo ID --title TITLE --body MARKDOWN` to record a task. `issue list`, `issue get --id NUMBER`, `issue edit --id NUMBER --expected-version N`, `issue close --id NUMBER --reason TEXT --expected-version N`, and `issue reopen` cover the issue lifecycle. `--labels` and `--allowed-files` accept JSON arrays. Link a change with `concord change create ... --issue N`.

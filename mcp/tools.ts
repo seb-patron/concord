@@ -40,6 +40,7 @@ export const tools: Tool[] = [
   tool('queue_enqueue', 'Enqueue an approved change with its live lease fences.', { ...change, verdictId: s, leaseFences: fences, idempotencyKey: s }, ['repoId', 'changeId', 'verdictId', 'leaseFences']),
   tool('queue_status', 'Get queue entries, generation and result status.', repo, ['repoId']),
   tool('events_since', 'Read repository events after a sequence cursor.', { ...repo, after: n, cursor: s }, ['repoId']),
+  tool('repo_metrics', 'Read measured repository flow metrics for a UTC window of at most 31 days.', { ...repo, since: s, until: s }, ['repoId', 'since', 'until']),
 ];
 
 function value(args: Args, key: string): string {
@@ -227,6 +228,7 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
     case 'queue_enqueue': result = await mutation(client, `${r}/queue/enqueue`, { changeId: args.changeId, verdictId: args.verdictId, leaseFences: args.leaseFences }, await currentVersion(client, args), args.idempotencyKey); break;
     case 'queue_status': result = await client.request('GET', `${r}/queue`); break;
     case 'events_since': result = await client.request('GET', `${r}/events${args.after === undefined ? query('cursor', args.cursor) : `?after=${args.after}`}`); break;
+    case 'repo_metrics': result = await client.request('GET', `${r}/metrics?${new URLSearchParams({ since: String(args.since), until: String(args.until) })}`); break;
     default: throw new ConcordError('Unknown MCP tool', 'usage');
   }
   return redactOutput(result);

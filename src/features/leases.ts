@@ -136,7 +136,7 @@ function claim(context: ModuleContext, body: unknown): Response {
         JSON.stringify(units.map(unit => unit.key)), JSON.stringify(conflicts), now);
       const version = context.nextVersion();
       context.appendEvent('lease.refused', [input.changeId as string], {
-        intentText: input.intentText as string, keys, conflicts,
+        intentText: input.intentText as string, keys, conflicts, issueNumber: change.value.issueNumber ?? null,
         nextAction: "Wait for the holder's lease to expire or be released, then retry the claim.",
       }, version);
       return failure(new HttpError(409, 'LEASE_CONFLICT', 'One or more units are already claimed', {

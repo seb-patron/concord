@@ -217,6 +217,11 @@ export function getEvents(repoId, after, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);
 }
 
+export function getMetrics(repoId, since, until, fetchImpl) {
+  const params = new URLSearchParams({ since, until });
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/metrics?${params}`, {}, fetchImpl);
+}
+
 /** Human notes in the friction log use the existing issue store. */
 export function createFrictionIssue(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues`,
