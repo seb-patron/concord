@@ -1,6 +1,6 @@
 # Semantic lease API
 
-Leases are scoped to one `RepoCoordinator` and its trusted policy. Times are server UTC milliseconds. All mutations require a bearer identity, `Idempotency-Key`, and a JSON body. Renew and release also require the coordinator's current `expectedVersion` and the lease's current `fence`.
+Leases are scoped to one `RepoCoordinator` and its trusted policy. Times are server UTC milliseconds. All mutations require a bearer identity, `Idempotency-Key`, and a JSON body. Single-lease renew and release also require the coordinator's current `expectedVersion` and the lease's current `fence`.
 
 For a managing agent, call `concord start --repo R --intent-key K --intent TEXT --allowed-files FILE --hold 2h` before editing. Start opens the change and atomically claims whole-file units for the Allowed-files list. Work inside those units, then call `concord land` with the same intent key; land reuses live leases, or claims again after expiry, and the queue reserves their current fences. `concord release --repo R --intent-key K` releases active leases when abandoning the work. This flow needs no coordinator process to renew a two-hour hold.
 
@@ -67,6 +67,22 @@ A claim requires a ready repository record and a draft or ready change owned by 
 If any requested footprint is occupied, **none** of the request's keys are granted. `409 LEASE_CONFLICT` includes the holder ID, holder intent, expiry, conflicting keys, all conflict records, and a next action. The refusal and its intent remain in event history and in the snapshot's recent refusals. `GET /v1/repos/:repoId/leases` returns at most 100 rows per page, with live leases first, followed by historical rows. Follow the opaque `data.nextCursor` with `?cursor=<value>` until it is `null` to reach every lease that remains live until its page is read, then older history. Pages use the immutable creation time and lease ID as a keyset, so releasing a lease already returned does not skip a later live lease or repeat that released row. Historical rows changed after the first page are omitted from that traversal; start a new traversal for the latest history. Each row includes `remainingSeconds`; the page also includes `serverTime` and renewal guidance. `GET /v1/repos/:repoId/snapshot` includes the first lease page and its cursor. `GET /v1/repos/:repoId/events` retains claim, refusal, renewal, expiry, release, and reservation events.
 
 ## Renew and release
+
+`POST /v1/repos/:repoId/leases/renew-batch` takes `{ "changeId": "change-1", "ttlSeconds": 300 }`. It needs no `expectedVersion` and renews every unexpired active lease for that change held by the caller in one transaction. The trusted `maxLeaseHoldSeconds` cap applies. The expiry becomes the later of its current value and server time plus the requested TTL, so renewal never shortens a hold. Fences are unchanged. Reserved rows held by the caller are returned in `reserved` but are not renewed.
+
+```json
+{
+  "data": {
+    "leases": [{ "leaseId": "lease-1", "changeId": "change-1", "unitKey": "file:src/example.ts", "fence": 7, "expiresAt": 1760000300000, "state": "active" }],
+    "reserved": [],
+    "renewAfterSeconds": 40
+  },
+  "version": 12,
+  "eventSeq": 24
+}
+```
+
+Each moved lease gets a new version and one `lease.renewed` event. An unchanged expiry produces no event. The response includes every matching active lease after the update; a change with no matching leases returns empty arrays.
 
 `POST /v1/repos/:repoId/leases/:leaseId/renew` takes `{ "expectedVersion": 3, "fence": 7, "ttlSeconds": 120 }`. The current holder keeps the same fence; renewal moves only the expiry, computed from server time. Renew near the 40-second guidance. A fence changes only on a new grant (claim) or an owner force-release.
 

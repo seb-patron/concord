@@ -46,6 +46,19 @@ it('exposes owner force-release and sends the audit reason with current version'
   expect(calls[1].options).toMatchObject({ body: { reason: 'holder revoked' }, expectedVersion: 9 });
 });
 
+it('renews all change leases through one MCP call without reading a snapshot', async () => {
+  const calls: Array<{ method: string; path: string; options?: { body?: unknown; expectedVersion?: number } }> = [];
+  const client = { request: async (method: string, path: string, options?: { body?: unknown; expectedVersion?: number }) => {
+    calls.push({ method, path, options }); return { data: { leases: [], reserved: [] }, version: 1 };
+  } } as unknown as ConcordClient;
+  const descriptor = tools.find(item => item.name === 'lease_renew')!;
+  expect(descriptor.inputSchema.required).toEqual(['repoId', 'changeId']);
+  await callTool(client, 'lease_renew', { repoId: 'repo', changeId: 'c' });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ method: 'POST', path: '/repos/repo/leases/renew-batch',
+    options: { body: { changeId: 'c', ttlSeconds: 300 }, expectedVersion: undefined } });
+});
+
 const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
 const children: ChildProcess[] = [];

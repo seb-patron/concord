@@ -5,7 +5,7 @@ The lease workflow below applies only when the repository being edited is regist
 Concord coordinates candidate changes by semantic unit. Read this before editing any Concord managed repository.
 
 1. Get `repo_get` and `repo_context`; use the observed canonical head as the base for `change_create`. Keep one stable `intentKey` for the task.
-2. Call `lease_claim` for every unit you will edit **before editing**. A conflict returns the holder, their intent, expiry and suggested action. Wait or ask the holder to release. Renew expiring leases through the CLI when needed; keep the fence from your claim for each unit. It changes only when you claim again.
+2. Call `lease_claim` for every unit you will edit **before editing**. A conflict returns the holder, their intent, expiry and suggested action. Wait or ask the holder to release. Call `lease_renew` or `concord renew` before a lease's `remainingSeconds` falls under about 100; keep the fence from your claim for each unit.
 3. Fetch the candidate fork using `change_checkout` or the CLI, edit only held units, then commit locally. `change_publish` pushes only to the assigned candidate fork, registers its ref, and starts inspection. Poll `change_status` until ready.
 4. An **independent reviewer** checks the inspected revision and findings, then uses `review_verdict_submit` (or `verdict add` in the CLI) with the trusted review manifest digest. The author cannot review their own change.
 5. The author uses `queue_enqueue` with that verdict and all current lease fences. Poll `queue_status` and `events_since`. If the queue lands the change, finish. If blocked or failed, read `findings_list`, repair under live leases, publish a new revision, obtain a new verdict, and enqueue again. Release unused leases.

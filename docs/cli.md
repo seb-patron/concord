@@ -88,9 +88,13 @@ npm run concord -- lease claim --repo REPO_ID --change-id CHANGE_ID --unit-keys 
 npm run concord -- lease list --repo REPO_ID
 npm run concord -- lease renew --repo REPO_ID --id LEASE_ID --fence 12 --ttl-seconds 120 --expected-version 4
 npm run concord -- lease release --repo REPO_ID --id LEASE_ID --fence 12 --expected-version 4
+npm run concord -- renew --repo REPO_ID --intent-key task-17 --hold 5m
+npm run concord -- renew --repo REPO_ID --intent-key task-17 --every 100 &
 ```
 
 Claim requires `changeId`, `unitKeys`, and `intentText`; `ttlSeconds` defaults to 120. Renew and release require the current `fence`. On a 409 lease refusal, inspect the reported holder, intent, conflicting units, and expiry. Retry after that work is complete, or renew your own current lease; the CLI never takes ownership automatically.
+
+`concord renew` extends every live lease for the change matching the intent key in one request, using a five-minute hold by default. It preserves fences and never shortens a hold. Use `--every SECONDS` as a heartbeat while editing; the example keeps a five-minute start hold alive. It stops when the parent process exits; use `--while-pid PID` to watch another process. Renew before a lease's remaining time falls under about 100 seconds.
 
 ## Queue, findings, repair, review, and events
 

@@ -8,7 +8,7 @@ import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, r
 import { importRepo } from './import.ts';
 import { land } from './land.ts';
 import { mintGitToken } from './git-token.ts';
-import { releaseByIntent, start } from './start.ts';
+import { releaseByIntent, renewByIntent, start } from './start.ts';
 
 const HELP = `Concord agent CLI
 
@@ -21,6 +21,7 @@ Mutations generate an idempotency key when omitted. Responses are JSON on stdout
 Commands and required fields:
   start --repo ID --intent-key KEY --intent TEXT --allowed-files FILE [--base OID] [--hold 2h] [--json]
   release --repo ID --intent-key KEY
+  renew --repo ID --intent-key KEY [--hold 5m] [--every SECONDS [--while-pid PID]] [--json]
   land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   repo create --name NAME --policy-id ID --profile-id ID
@@ -58,7 +59,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -88,6 +89,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     client: await clientFor(flags),
   }));
   if (noun === 'release' && !verb && !args.length) return print(await releaseByIntent(required(flags, 'repo'), required(flags, 'intent-key'), await clientFor(flags)));
+  if (noun === 'renew' && !verb && !args.length) return print(await renewByIntent({
+    repo: required(flags, 'repo'), intentKey: required(flags, 'intent-key'),
+    hold: typeof flags.hold === 'string' ? flags.hold : undefined,
+    every: flags.every === undefined ? undefined : numberFlag(flags, 'every'),
+    whilePid: flags['while-pid'] === undefined ? undefined : numberFlag(flags, 'while-pid'),
+    client: await clientFor(flags),
+  }));
   if (noun === 'land' && !verb && !args.length) {
     const values = parsed.values;
     await land({ repo: typeof flags.repo === 'string' ? flags.repo : undefined,

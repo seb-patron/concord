@@ -9,7 +9,8 @@ import { mintGitToken } from '../../cli/git-token.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
 import { land } from '../../cli/land.ts';
 import { parseArgs as parseRunnerArgs, runLoop } from '../../runner/main.ts';
-import { holdSeconds, releaseByIntent, start } from '../../cli/start.ts';
+import { holdSeconds, releaseByIntent, renewByIntent, start } from '../../cli/start.ts';
+import { runCli } from '../../cli/main.ts';
 
 const execFile = promisify(execFileCallback);
 const tempDirs: string[] = [];
@@ -19,6 +20,136 @@ async function tempDir(label: string): Promise<string> {
   return dir;
 }
 afterEach(async () => { await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+
+it('renews an intent with one versionless batch call and supports an injected heartbeat', async () => {
+  const calls: Array<{ method: string; path: string; options?: { body?: Record<string, unknown>; expectedVersion?: number } }> = [];
+  const change = { changeId: 'change', intentKey: 'task', unitKeys: ['file:a.txt'], startUnitKeys: ['file:a.txt'] };
+  const client = { request: async (method: string, path: string, options?: { body?: Record<string, unknown>; expectedVersion?: number }) => {
+    calls.push({ method, path, options });
+    if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+    if (method === 'POST' && path === '/repos/demo/leases/renew-batch') return { data: {
+      leases: [{ unitKey: 'file:a.txt', expiresAt: 300000, fence: 4 }], reserved: [] } };
+    throw new Error(`unexpected ${method} ${path}`);
+  } } as never;
+  let sleeps = 0; const alive = [true, true, false];
+  const result = await renewByIntent({ repo: 'demo', intentKey: 'task', client, every: 10,
+    sleep: async () => { sleeps++; }, alive: () => alive.shift() ?? false });
+  expect(result).toMatchObject({ changeId: 'change', renewed: ['file:a.txt'], expiry: 300000 });
+  const renewCalls = calls.filter(call => call.path.endsWith('/renew-batch'));
+  expect(renewCalls).toHaveLength(2);
+  expect(renewCalls[0].options).toMatchObject({ body: { changeId: 'change', ttlSeconds: 300 }, expectedVersion: undefined });
+  expect(calls.some(call => call.path.endsWith('/snapshot'))).toBe(false);
+  expect(sleeps).toBe(2);
+});
+
+it('stops a renew heartbeat after a permanent Concord error', async () => {
+  const invalidTtl = new ConcordError('invalid TTL', 'server', 422, { error: { code: 'INVALID_TTL' } });
+  let posts = 0;
+  const client = { request: async (method: string, path: string) => {
+    if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [
+      { changeId: 'change', intentKey: 'task', unitKeys: ['file:a.txt'] }], nextCursor: null } };
+    if (method === 'POST' && path === '/repos/demo/leases/renew-batch') { posts++; throw invalidTtl; }
+    throw new Error(`unexpected ${method} ${path}`);
+  } } as never;
+  await expect(renewByIntent({ repo: 'demo', intentKey: 'task', client, every: 10, alive: () => true,
+    sleep: async () => {} })).rejects.toBe(invalidTtl);
+  expect(posts).toBe(1);
+});
+
+it('retries a transport failure on the next renew heartbeat round', async () => {
+  let posts = 0; const alive = [true, true, false];
+  const client = { request: async (method: string, path: string) => {
+    if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [
+      { changeId: 'change', intentKey: 'task', unitKeys: ['file:a.txt'] }], nextCursor: null } };
+    if (method === 'POST' && path === '/repos/demo/leases/renew-batch') {
+      posts++;
+      if (posts === 1) throw new ConcordError('connection reset', 'transport');
+      return { data: { leases: [{ unitKey: 'file:a.txt', expiresAt: 300000 }], reserved: [] } };
+    }
+    throw new Error(`unexpected ${method} ${path}`);
+  } } as never;
+  await expect(renewByIntent({ repo: 'demo', intentKey: 'task', client, every: 10,
+    alive: () => alive.shift() ?? false, sleep: async () => {} }))
+    .resolves.toMatchObject({ changeId: 'change', renewed: ['file:a.txt'] });
+  expect(posts).toBe(2);
+});
+
+it('returns queued renewals and reports uncovered change units', async () => {
+  const change = { changeId: 'change', intentKey: 'task', unitKeys: ['file:a.txt', 'file:b.txt'],
+    startUnitKeys: ['file:a.txt', 'file:b.txt'] };
+  const clientForRenewal = (leases: unknown[], reserved: unknown[]) => ({ request: async (_method: string, path: string) => {
+    if (path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+    if (path.endsWith('/renew-batch')) return { data: { leases, reserved } };
+    if (path.endsWith('/snapshot')) return { data: { projections: { repos: { unitPolicy: { tables: [], units: {} } } } } };
+    if (path === '/repos/demo/changes/change') return { data: { changeId: 'change', status: 'draft' } };
+    throw new Error(`unexpected ${path}`);
+  } } as never);
+
+  await expect(renewByIntent({ repo: 'demo', intentKey: 'task', client: clientForRenewal([], [
+    { unitKey: 'file:a.txt', expiresAt: 300000 },
+  ]) })).resolves.toMatchObject({ changeId: 'change', renewed: [], status: 'queued' });
+  await expect(renewByIntent({ repo: 'demo', intentKey: 'task', client: clientForRenewal([
+    { unitKey: 'file:a.txt', expiresAt: 300000 },
+  ], []) })).rejects.toMatchObject({ kind: 'conflict', message: expect.stringContaining('LEASE_LOST: file:b.txt') });
+});
+
+it('counts reserved units and policy-backed file leases when checking renewal coverage', async () => {
+  const calls: Array<{ method: string; path: string }> = [];
+  const client = { request: async (method: string, path: string) => {
+    calls.push({ method, path });
+    if (path === '/repos/demo/changes') return { data: { items: [{ changeId: 'change', intentKey: 'task',
+      unitKeys: ['row:families:alpha', 'file:src/other.ts'], startUnitKeys: ['row:families:alpha', 'file:src/other.ts'] }], nextCursor: null } };
+    if (path.endsWith('/renew-batch')) return { data: { leases: [{ unitKey: 'file:data/families.tsv', expiresAt: 400000 }],
+      reserved: [{ unitKey: 'file:src/other.ts', expiresAt: 400000 }] } };
+    if (path.endsWith('/snapshot')) return { data: { projections: { repos: { unitPolicy: {
+      tables: [{ name: 'families', file: 'data/families.tsv' }], units: {},
+    } } } } };
+    throw new Error(`unexpected ${method} ${path}`);
+  } } as never;
+  const result = await renewByIntent({ repo: 'demo', intentKey: 'task', client });
+  expect(result).toMatchObject({ renewed: ['row:families:alpha', 'file:src/other.ts'] });
+  expect(calls.filter(call => call.path.endsWith('/renew-batch'))).toHaveLength(1);
+  expect(calls.filter(call => call.path.endsWith('/snapshot'))).toHaveLength(1);
+});
+
+it('reports terminal intent status instead of treating it as a missing change', async () => {
+  const calls: string[] = [];
+  const client = { request: async (_method: string, path: string) => {
+    calls.push(path);
+    if (path === '/repos/demo/changes') return { data: { items: [{ changeId: 'change', intentKey: 'task', status: 'closed', unitKeys: [] }], nextCursor: null } };
+    if (path.endsWith('/renew-batch')) return { data: { leases: [], reserved: [] } };
+    if (path.endsWith('/changes/change')) return { data: { changeId: 'change', status: 'closed' } };
+    throw new Error(`unexpected ${path}`);
+  } } as never;
+  await expect(renewByIntent({ repo: 'demo', intentKey: 'task', client })).resolves.toMatchObject({ status: 'closed' });
+  expect(calls).toContain('/repos/demo/changes/change');
+});
+
+it('routes concord renew to the versionless batch endpoint', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.CONCORD_URL; const originalToken = process.env.CONCORD_TOKEN;
+  const calls: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input)); const method = init?.method ?? 'GET';
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+    calls.push({ method, path: url.pathname, body });
+    const data = url.pathname.endsWith('/changes') ? { items: [{ changeId: 'change', intentKey: 'task', unitKeys: ['file:a.txt'] }], nextCursor: null }
+      : { leases: [{ unitKey: 'file:a.txt', expiresAt: 300000 }], reserved: [] };
+    return new Response(JSON.stringify({ data, version: 1, eventSeq: 1 }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  process.env.CONCORD_URL = 'https://concord.test'; process.env.CONCORD_TOKEN = 'test-token';
+  try {
+    await runCli(['renew', '--repo', 'demo', '--intent-key', 'task']);
+    expect(calls.map(call => `${call.method} ${call.path}`)).toEqual([
+      'GET /v1/repos/demo/changes', 'POST /v1/repos/demo/leases/renew-batch',
+    ]);
+    expect(calls[1].body).toEqual({ changeId: 'change', ttlSeconds: 300 });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.CONCORD_URL; else process.env.CONCORD_URL = originalUrl;
+    if (originalToken === undefined) delete process.env.CONCORD_TOKEN; else process.env.CONCORD_TOKEN = originalToken;
+  }
+});
 
 async function publicationFixture(label: string) {
   const root = await tempDir(label);
