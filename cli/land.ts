@@ -16,9 +16,15 @@ type Envelope = { data: Obj; version: number };
 export type LandOptions = { repo?: string; source?: string; commit?: string; intentKey?: string; intent?: string;
   allowedFiles?: string; dependsOn?: string[]; reviewEvidence?: string; mirrorTo?: string; waitSeconds?: number;
   base?: string; awRun?: string; expectedVersion?: number; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient;
-  renewEveryMs?: number; profile?: string; reviewerProfile?: string; tokenStdin?: string };
+  renewEveryMs?: number; profile?: string; reviewerProfile?: string; tokenStdin?: string;
+  now?: () => number; sleep?: (ms: number) => Promise<void>; random?: () => number };
 const sha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
+type WaitRuntime = { now: () => number; sleep: (ms: number) => Promise<void>; random: () => number };
+const realWait: WaitRuntime = { now: Date.now, sleep: pause, random: Math.random };
+function nextDelay(delay: number, runtime: WaitRuntime): number {
+  return Math.min(10_000, Math.round(Math.min(delay, 10_000) * (0.8 + runtime.random() * 0.4)));
+}
 const hash = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 function required(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value) throw new ConcordError(`${name} is required`, 'usage');
@@ -33,14 +39,14 @@ async function api(client: ConcordClient, path: string, body?: Obj, expectedVers
         (error.payload as Obj)?.error?.code === 'STALE_VERSION';
       if (stale && attempt < 5) {
         const repo = /^\/repos\/([^/]+)/.exec(path)?.[1];
-        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}/snapshot`)).version; await pause(20 * (attempt + 1)); continue; }
+        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}`)).version; await pause(20 * (attempt + 1)); continue; }
       }
       const promotion = error instanceof ConcordError && body && version !== undefined &&
         (path.endsWith('/verdicts') || path.endsWith('/queue/enqueue')) &&
         (error.payload as Obj)?.error?.code === 'PROMOTION_IN_PROGRESS';
       if (promotion && attempt < 19) {
         const repo = /^\/repos\/([^/]+)/.exec(path)?.[1];
-        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}/snapshot`)).version; await pause(500); continue; }
+        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}`)).version; await pause(500); continue; }
       }
       if (error instanceof ConcordError) error.message = `${error.message} at ${body ? 'POST' : 'GET'} ${path}`;
       throw error;
@@ -60,7 +66,7 @@ async function access(client: ConcordClient, root: string, repository: Obj, scop
   rememberCredential(token);
   return { remote: safeRemote(required(response.remote, 'Git remote'), client), token };
 }
-async function currentVersion(client: ConcordClient, root: string): Promise<number> { return (await api(client, `${root}/snapshot`)).version; }
+export async function currentVersion(client: ConcordClient, root: string): Promise<number> { return (await api(client, root)).version; }
 async function leases(client: ConcordClient, root: string): Promise<Obj[]> {
   const result: Obj[] = []; let cursor: string | null = null;
   do {
@@ -143,14 +149,14 @@ export async function unitKeys(source: string, parent: string, head: string, pat
   }
   return [...new Set(result)].sort();
 }
-async function inspection(client: ConcordClient, root: string, change: Obj): Promise<Obj | null> {
+async function inspection(client: ConcordClient, root: string, change: Obj): Promise<{ result: Obj | null; jobState: string }> {
   const snapshot = (await api(client, `${root}/snapshot`)).data;
   const jobs = snapshot.projections?.runners?.jobs ?? [];
   const job = [...jobs].reverse().find((item: Obj) => item.kind === 'inspect-candidate' && item.changeId === change.changeId && item.revision === change.revision);
-  if (!job || job.state !== 'completed') return null;
-  try { return (await api(client, `${root}/jobs/${encodeURIComponent(job.jobId)}/result`)).data.result; }
+  if (!job || job.state !== 'completed') return { result: null, jobState: job?.state ?? 'missing' };
+  try { return { result: (await api(client, `${root}/jobs/${encodeURIComponent(job.jobId)}/result`)).data.result, jobState: job.state }; }
   catch (error) {
-    if (error instanceof ConcordError && [401, 403, 404].includes(error.status ?? 0)) return null;
+    if (error instanceof ConcordError && [401, 403, 404].includes(error.status ?? 0)) return { result: null, jobState: job.state };
     throw error;
   }
 }
@@ -161,18 +167,38 @@ function failInspection(result: Obj): never {
   throw new ConcordError(`INSPECTION_FAILED: ${outcome}${retry}`, 'server', undefined,
     typeof result.log === 'string' ? { log: redactOutput(result.log) } : undefined);
 }
-export async function waitChange(client: ConcordClient, path: string, deadline: number, emit: (event: Obj) => void, onTick: () => Promise<void>, inspector = client): Promise<Obj> {
-  let last = '';
-  while (Date.now() < deadline) {
+export async function waitChange(client: ConcordClient, path: string, deadline: number, emit: (event: Obj) => void, onTick: () => Promise<void>, inspector = client, runtime: WaitRuntime = realWait): Promise<Obj> {
+  let last = ''; let lastObserved = ''; let delay = 2000;
+  while (runtime.now() < deadline) {
     const change = (await api(client, path)).data;
     if (change.status !== last) { emit({ state: 'change', status: change.status, changeId: change.changeId }); last = change.status; }
-    const result = await inspection(inspector, path.slice(0, path.lastIndexOf('/changes/')), change);
-    if (result && result.outcome !== 'PASS') failInspection(result);
+    const inspected = await inspection(inspector, path.slice(0, path.lastIndexOf('/changes/')), change);
+    if (inspected.result && inspected.result.outcome !== 'PASS') failInspection(inspected.result);
     if (['ready', 'queued', 'checking', 'landed', 'merged', 'blocked', 'failed', 'closed'].includes(change.status)) return change;
+    const observed = `${change.status}/${inspected.jobState}`;
+    if (lastObserved && observed !== lastObserved) delay = 2000;
     await onTick();
-    await pause(1000);
+    await runtime.sleep(Math.min(nextDelay(delay, runtime), Math.max(0, deadline - runtime.now())));
+    delay = Math.min(delay * 2, 10_000);
+    lastObserved = observed;
   }
   throw new ConcordError('INSPECTION_TIMEOUT: checker did not finish', 'server');
+}
+export async function waitQueue(client: ConcordClient, root: string, changeId: string, deadline: number,
+  emit: (state: Obj, entry: Obj | undefined) => void, onTick: () => Promise<void>, untilRenew: () => number,
+  runtime: WaitRuntime = realWait): Promise<{ state: Obj; entry: Obj } | null> {
+  let previous: string | undefined = ''; let delay = 2000;
+  while (runtime.now() < deadline) {
+    const state = (await api(client, `${root}/queue`)).data;
+    const entry = [...(state.entries ?? [])].reverse().find((item: Obj) => item.changeId === changeId);
+    const changed = entry?.state !== previous;
+    if (changed) { emit(state, entry); previous = entry?.state; delay = 2000; }
+    if (['landed', 'blocked', 'failed', 'withdrawn'].includes(entry?.state)) return { state, entry };
+    await onTick();
+    await runtime.sleep(Math.min(nextDelay(delay, runtime), untilRenew(), Math.max(0, deadline - runtime.now())));
+    delay = Math.min(delay * 2, 10_000);
+  }
+  return null;
 }
 async function prepareHead(source: string, commit: string, parent: string, base: string, canonical: { remote: string; token: string }, singleCommitMode: boolean): Promise<{ work: string; head: string; cherryPicked: boolean; cleanup: () => Promise<void> }> {
   if (parent === base) return { work: source, head: commit, cherryPicked: false, cleanup: async () => {} };
@@ -268,7 +294,8 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
   const root = `/repos/${encodeURIComponent(repo)}`;
   const wait = options.waitSeconds ?? 600;
   if (!Number.isSafeInteger(wait) || wait < 0) throw new ConcordError('--wait-seconds must be a nonnegative integer', 'usage');
-  const deadline = Date.now() + wait * 1000;
+  const runtime: WaitRuntime = { now: options.now ?? Date.now, sleep: options.sleep ?? pause, random: options.random ?? Math.random };
+  const deadline = runtime.now() + wait * 1000;
   const repository = (await api(client, root)).data;
   if (!repository.observedCanonicalOid || !sha.test(repository.observedCanonicalOid)) throw new ConcordError('canonical main is unavailable', 'server');
   const initialSnapshot = (await api(client, `${root}/snapshot`)).data;
@@ -304,10 +331,17 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
     units = fullUnits;
     squash = await squashRange(source, changed.parent, commit);
   }
-  while (created.provisioning?.state !== 'observed' && Date.now() < deadline) {
-    await pause(1000);
+  let provisionState = created.provisioning?.state ?? 'missing'; let provisionDelay = 2000;
+  while (provisionState !== 'observed' && runtime.now() < deadline) {
     created = started ? (await api(client, `${root}/changes/${encodeURIComponent(started.changeId)}`)).data :
       (await api(client, `${root}/changes`, createBody)).data;
+    const nextState = created.provisioning?.state ?? 'missing';
+      if (nextState !== 'observed' && runtime.now() < deadline) {
+        if (nextState !== provisionState) provisionDelay = 2000;
+        await runtime.sleep(Math.min(nextDelay(provisionDelay, runtime), Math.max(0, deadline - runtime.now())));
+      provisionDelay = Math.min(provisionDelay * 2, 10_000);
+    }
+    provisionState = nextState;
   }
   if (created.provisioning?.state !== 'observed') throw new ConcordError('FORK_TIMEOUT: candidate fork was not provisioned', 'server');
   const changeId = required(created.changeId, 'changeId'); const path = `${root}/changes/${encodeURIComponent(changeId)}`;
@@ -328,7 +362,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
     renewInFlight = (async () => {
       const previouslyHeld = [...held];
       await refresh();
-      if (!force && !held.some(item => Number(item.remainingSeconds ?? (item.expiresAt - Date.now()) / 1000) < 120)) return;
+      if (!force && !held.some(item => Number(item.remainingSeconds ?? (item.expiresAt - Date.now()) / 1000) <= 120)) return;
       const response = (await api(client, `${root}/leases/renew-batch`, { changeId, ttlSeconds: 300 })).data;
       const renewed: Obj[] = response.leases ?? [];
       const reserved: Obj[] = response.reserved ?? [];
@@ -436,7 +470,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         if (current.headOid !== prepared.head || current.baseOid !== targetBase || current.revision !== publishedRevision)
           throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change head, base, or revision changed during land', 'conflict');
       };
-      change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : keepLeasesAlive, inspector);
+      change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : keepLeasesAlive, inspector, runtime);
       if (!['ready', 'queued', 'checking', 'landed', 'merged'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
       requirePublishedChange(change);
       if (!alreadyQueued) await renew();
@@ -481,13 +515,13 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           if (!carriedFromOid) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
         }
         const inspected = await inspection(reviewer, root, change);
-        if (!inspected || inspected.outcome !== 'PASS' || !inspected.reviewManifestDigest) throw new ConcordError('trusted inspection result is unavailable', 'server');
+        if (!inspected.result || inspected.result.outcome !== 'PASS' || !inspected.result.reviewManifestDigest) throw new ConcordError('trusted inspection result is unavailable', 'server');
         const findings = (await api(reviewer, `${path}/findings`)).data;
         const verdicts = (await api(reviewer, `${path}/verdicts`)).data;
         let verdict = (verdicts.items ?? []).find((item: Obj) => item.revision === change.revision && item.decision === 'approve' && item.evidenceDigest === hash(evidence) &&
           (carriedFromOid ? item.carriedFrom?.sourceOid === carriedFromOid && item.carriedFrom?.method === 'patch-id' : !item.carriedFrom));
         requirePublishedChange((await api(client, path)).data);
-        if (!verdict) verdict = (await api(reviewer, `${path}/verdicts`, { revision: change.revision, reviewManifestDigest: inspected.reviewManifestDigest, findingSetVersion: findings.findingSetVersion, decision: 'approve', evidenceDigest: hash(evidence),
+        if (!verdict) verdict = (await api(reviewer, `${path}/verdicts`, { revision: change.revision, reviewManifestDigest: inspected.result.reviewManifestDigest, findingSetVersion: findings.findingSetVersion, decision: 'approve', evidenceDigest: hash(evidence),
           ...(carriedFromOid ? { carriedFrom: { sourceOid: carriedFromOid, method: 'patch-id' } } : {}) }, await currentVersion(reviewer, root))).data;
         if (carriedFromOid) emit({ state: 'review-carried', sourceOid: carriedFromOid, publishedOid: prepared.head });
         emit({ state: 'reviewed', verdictId: verdict.verdictId, headOid: prepared.head });
@@ -509,11 +543,16 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         }
         emit({ state: 'enqueued', entryId: entry.entryId });
       }
-      let previous = '';
-      while (Date.now() < deadline) {
-        const state = (await api(client, `${root}/queue`)).data;
-        entry = [...(state.entries ?? [])].reverse().find((item: Obj) => item.changeId === changeId);
-        if (entry?.state !== previous) { emit({ state: 'queue', queueState: entry?.state, reason: entry?.blockedReason }); previous = entry?.state; }
+      const completedQueueWait = await waitQueue(client, root, changeId, deadline,
+        (_state, currentEntry) => emit({ state: 'queue', queueState: currentEntry?.state, reason: currentEntry?.blockedReason }),
+        () => renew(), () => {
+          const remaining = held.map(item => Number(item.remainingSeconds ?? (item.expiresAt - runtime.now()) / 1000))
+            .filter(Number.isFinite).reduce((minimum, seconds) => Math.min(minimum, seconds), Infinity);
+          return Math.max(0, (remaining - 120) * 1000);
+        }, runtime);
+      if (completedQueueWait) {
+        const { state } = completedQueueWait;
+        entry = completedQueueWait.entry;
         if (entry?.state === 'landed') {
           const readback = (await api(client, root)).data;
           const landed = state.finalCanonicalOid;
@@ -538,7 +577,6 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           return await landAttempt(input, staleBaseRounds + 1);
         }
         if (['blocked', 'failed', 'withdrawn'].includes(entry?.state)) throw new ConcordError(`QUEUE_${entry.state.toUpperCase()}: ${entry.blockedReason ?? state.blockedReason ?? 'diagnostic failure'}`, 'server');
-        await renew(); await pause(1000);
       }
       throw new ConcordError('QUEUE_TIMEOUT: landing did not finish', 'server');
     } finally { if (priorWork) await rm(priorWork, { recursive: true, force: true }); await prepared.cleanup(); }
