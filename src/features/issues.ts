@@ -7,8 +7,10 @@ type Issue = { number: number; title: string; body: string; labels: string[]; mi
   reason: string | null; closedBy: { changeId: string; canonicalOid: string } | null };
 type Milestone = { milestoneId: string; title: string; description: string; dueDate: string | null;
   state: 'open' | 'closed'; version: number };
+type MilestoneSettings = { create: 'agents' | 'owners'; version: number };
 const issues = (c: ModuleContext) => c.state.get<Issue[]>('items') ?? [];
 const milestones = (c: ModuleContext) => c.state.get<Milestone[]>('milestones') ?? [];
+const milestoneSettings = (c: ModuleContext): MilestoneSettings => c.state.get<MilestoneSettings>('milestoneSettings') ?? { create: 'agents', version: 0 };
 const changes = (c: ModuleContext) => sqlState(c.sql).get<Change[]>('module:repos:changes') ?? [];
 const queueEntries = (c: ModuleContext) => sqlState(c.sql).get<{ entries?: Array<{ changeId: string; state: string }> }>('module:queue:data')?.entries ?? [];
 const response = (c: ModuleContext, data: unknown, status = 200) => json(data, c.version(), eventSequence(c.sql), status);
@@ -64,6 +66,16 @@ const page = <T>(items: T[], request: Request) => {
 export const issuesFeature: FeatureModule = {
   name: 'issues', migrations: [],
   routes: [
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestone-settings$/, handle: c => response(c, milestoneSettings(c)) },
+    { method: 'PATCH', pattern: /^\/v1\/repos\/[^/]+\/milestone-settings$/, handle: (c, _r, _m, raw) => {
+      if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required');
+      const body = raw as Record<string, unknown>;
+      if (body.create !== 'agents' && body.create !== 'owners') error(422, 'INVALID_CREATE', 'create must be agents or owners');
+      const create = body.create as 'agents' | 'owners';
+      const old = milestoneSettings(c); checkVersion(body, old.version);
+      const setting: MilestoneSettings = { create, version: event(c, 'milestone.settings_updated', [], { create }) };
+      c.state.put('milestoneSettings', setting); return response(c, setting);
+    } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/issues$/, handle: (c, _r, _m, raw) => {
       canWrite(c); const body = raw as Record<string, unknown>;
       const title = string(body.title, 'title', 256); const text = string(body.body ?? '', 'body', 65536, true);
@@ -109,7 +121,7 @@ export const issuesFeature: FeatureModule = {
       milestoneAdvanced(c, old.milestoneId, old.number); return response(c, issueView(c, item));
     } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, _r, _m, raw) => {
-      if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required'); const body = raw as Record<string, unknown>;
+      canWrite(c); if (!c.principal.roles.includes('owner') && milestoneSettings(c).create === 'owners') error(403, 'FORBIDDEN', 'Owner required'); const body = raw as Record<string, unknown>;
       const title = string(body.title, 'title', 256); const description = string(body.description ?? '', 'description', 65536, true);
       const dueDate = body.dueDate == null ? null : string(body.dueDate, 'dueDate', 32);
       if (dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || !Number.isFinite(Date.parse(dueDate)) || new Date(dueDate).toISOString().slice(0, 10) !== dueDate)) error(422, 'INVALID_DUE_DATE', 'dueDate must be a calendar date in YYYY-MM-DD');
@@ -125,7 +137,7 @@ export const issuesFeature: FeatureModule = {
       c.state.put('milestones', milestones(c).map(candidate => candidate.milestoneId === old.milestoneId ? item : candidate)); return response(c, milestoneView(c, item));
     } },
   ],
-  snapshot: c => ({ status: 'ready', items: issues(c).map(item => issueView(c, item)), milestones: milestones(c).map(item => milestoneView(c, item)) }),
+  snapshot: c => ({ status: 'ready', items: issues(c).map(item => issueView(c, item)), milestones: milestones(c).map(item => milestoneView(c, item)), milestoneSettings: milestoneSettings(c) }),
   nextDeadline: () => null, onAlarm: () => {},
   hooks: {
     'issues.validate': (c, number): Gate<{ number: number; title: string }> => {

@@ -30,6 +30,31 @@ async function create(name: string, configuration = 'local-demo') {
   return (await responseBody(response)).data;
 }
 
+it('keeps the observed canonical OID and repo version through catalog refreshes', async () => {
+  const name = 'catalog_oid_stability_case';
+  const repo = await create(name);
+  await fetchApi(apiRequest(`/v1/repos/${name}`));
+  await fake(name, provider => {
+    provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+    provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+  });
+  const detail = await fetchApi(apiRequest(`/v1/repos/${name}`));
+  const original = await responseBody(detail);
+  expect(original.data.observedCanonicalOid).toBe(a);
+  await fetchApi(apiRequest(`/v1/repos/${name}/branches`));
+  await fetchApi(apiRequest(`/v1/repos/${name}/changes`));
+  const patched = await fetchApi(apiRequest(`/v1/repos/${name}/milestone-settings`, 'local-owner', {
+    method: 'PATCH', headers: { 'content-type': 'application/json', 'idempotency-key': 'catalog-oid-settings' },
+    body: JSON.stringify({ create: 'owners', expectedVersion: 0 }),
+  }));
+  expect(patched.status).toBe(200);
+  const snapshot = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)));
+  expect(snapshot.data.projections.repos.repo.observedCanonicalOid).toBe(a);
+  const after = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+  expect(after.data.observedCanonicalOid).toBe(a);
+  expect(after.data.version).toBe(original.data.version);
+});
+
 async function fake(name: string, action: (provider: FakeStorage) => void) {
   const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
   await runInDurableObject(stub, (_instance, state) => action(new FakeStorage(sqlState(state.storage.sql))));

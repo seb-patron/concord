@@ -22,13 +22,15 @@ it('dispatches issue and milestone MCP tools with issue links', async () => {
   await callTool(client, 'issue_list', { repoId: 'repo', state: 'open' });
   await callTool(client, 'issue_close', { repoId: 'repo', issueNumber: 3, reason: 'Done', expectedVersion: 7 });
   await callTool(client, 'milestone_list', { repoId: 'repo' });
+  await callTool(client, 'milestone_create', { repoId: 'repo', title: 'Release', description: 'Ship it', dueDate: '2026-12-01', idempotencyKey: 'milestone-key' });
   await callTool(client, 'change_create', { repoId: 'repo', intentKey: 'task', intentText: 'Task', baseOid: 'a', branch: 'task', unitKeys: [], issueNumber: 3 });
   expect(calls.map(call => `${call.method} ${call.path}`)).toEqual([
     'POST /repos/repo/issues', 'GET /repos/repo/issues/3', 'GET /repos/repo/issues?state=open',
-    'POST /repos/repo/issues/3/close', 'GET /repos/repo/milestones', 'POST /repos/repo/changes',
+    'POST /repos/repo/issues/3/close', 'GET /repos/repo/milestones', 'POST /repos/repo/milestones', 'POST /repos/repo/changes',
   ]);
   expect((calls[3].options as { body: object; expectedVersion: number }).expectedVersion).toBe(7);
-  expect((calls[5].options as { body: { issueNumber: number } }).body.issueNumber).toBe(3);
+  expect((calls[6].options as { body: { issueNumber: number } }).body.issueNumber).toBe(3);
+  expect(calls[5].options).toMatchObject({ body: { title: 'Release', description: 'Ship it', dueDate: '2026-12-01' }, idempotencyKey: 'milestone-key' });
 });
 
 it('exposes owner force-release and sends the audit reason with current version', async () => {

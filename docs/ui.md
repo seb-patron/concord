@@ -26,6 +26,8 @@ When `/health` reports `accessSignIn: true`, signed-out visitors also see a “S
 
 After sign-in, choose a repository in the header. The desk shows live counts, a work board, agents, leases, and the merge queue. Select a change for its head, units, actions, and approval history. The change details also show findings and repair state, runner health, history availability, and related event evidence; the Fleet column carries a compact Runners line. An Inbox decision preserves its title, reason, evidence, and approval history beside its actions, and opens the same change details. The Inbox groups isolated bisection culprits, lease refusals, and published changes awaiting a verdict. Other diagnoses keep their honest labels: interaction set, dependency group, red baseline, or inconclusive. The UI shows a model only when the API supplies `authorModel` or `model` (`web/app.js`).
 
+The Milestones screen lists each milestone's title, state, due date, plain-text description, and issue and landed-change progress. It shows 50 at first and offers the remaining milestones on demand. Owners and agents can create milestones by default; owners can restrict creation to owners with the permission control. The form is hidden from viewers and users without creation permission.
+
 | Fleet desk area | Evidence shown now | Honest fallback |
 | --- | --- | --- |
 | Summary and Work | Snapshot changes and leases; landings and red events from observed event pages | Empty work guidance and unknown main state when no evidence exists |

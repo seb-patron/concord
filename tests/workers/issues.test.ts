@@ -25,6 +25,33 @@ async function get(repo: string, suffix: string, token = 'local-viewer') {
 }
 
 describe('Concord issues and milestones', () => {
+  it('lets agents create milestones by default and lets owners lock creation with versioned settings', async () => {
+    const repo = 'milestone_settings_case'; await setup(repo);
+    expect((await get(repo, '/milestone-settings')).body.data).toEqual({ create: 'agents', version: 0 });
+    expect((await get(repo, '/snapshot')).body.data.projections.issues.milestoneSettings).toEqual({ create: 'agents', version: 0 });
+    expect((await post(repo, '/milestones', { title: 'Agent release' }, 'agent-default', 'local-agent-a')).status).toBe(201);
+    const invalidSetting = await patch(repo, '/milestone-settings', { create: 'invalid' }, 'invalid-setting');
+    expect(invalidSetting.status).toBe(422);
+    expect(invalidSetting.body.error.code).toBe('INVALID_CREATE');
+    expect((await patch(repo, '/milestone-settings', { create: 'owners', expectedVersion: 0 }, 'agent-setting', 'local-agent-a')).status).toBe(403);
+    const locked = await patch(repo, '/milestone-settings', { create: 'owners', expectedVersion: 0 }, 'owner-setting');
+    expect(locked.status).toBe(200);
+    expect(locked.body.data).toMatchObject({ create: 'owners', version: expect.any(Number) });
+    expect((await get(repo, '/snapshot')).body.data.projections.issues.milestoneSettings).toEqual(locked.body.data);
+    expect((await get(repo, '/events')).body.data.items.map((event: { kind: string }) => event.kind)).toContain('milestone.settings_updated');
+    expect((await post(repo, '/milestone-settings', {}, 'post-settings')).status).toBe(404);
+    const missingVersion = await patch(repo, '/milestone-settings', { create: 'agents' }, 'missing-setting-version');
+    expect(missingVersion.body.error.code).toBe('EXPECTED_VERSION_REQUIRED');
+    expect((await patch(repo, '/milestone-settings', { create: 'agents', expectedVersion: 0 }, 'stale-setting')).body.error.code).toBe('STALE_VERSION');
+    expect((await post(repo, '/milestones', { title: 'Agent denied' }, 'agent-locked', 'local-agent-a')).body.error).toMatchObject({ code: 'FORBIDDEN', message: 'Owner required' });
+    const ownerMilestone = await post(repo, '/milestones', { title: 'Owner release' }, 'owner-locked');
+    expect(ownerMilestone.status).toBe(201);
+    expect((await post(repo, '/milestones', { title: 'Reviewer denied' }, 'reviewer-milestone', 'local-reviewer')).status).toBe(403);
+    expect((await post(repo, `/milestones/${ownerMilestone.body.data.milestoneId}/close`, { expectedVersion: ownerMilestone.body.data.version }, 'agent-close-milestone', 'local-agent-a')).status).toBe(403);
+    const issue = await post(repo, '/issues', { title: 'Close check' }, 'milestone-close-issue', 'local-agent-a');
+    expect((await post(repo, `/issues/${issue.body.data.number}/close`, { expectedVersion: issue.body.data.version, reason: 'Done' }, 'agent-close-issue', 'local-agent-a')).status).toBe(200);
+  });
+
   it('creates sequential issues, filters and pages, and rejects stale edits', async () => {
     const repo = 'issue_crud_case'; await setup(repo);
     const first = await post(repo, '/issues', { title: 'First task', body: '## Spec', labels: ['needs-review'] }, 'i1', 'local-agent-a');
