@@ -6,6 +6,7 @@ import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCred
 import { git, gitBytes, patchId, rejectCanonicalTarget, validateRemote } from './git.ts';
 import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
+import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
@@ -251,7 +252,7 @@ export async function land(input: LandOptions): Promise<Obj> {
   const policy = (initialSnapshot.projections?.runners?.jobs ?? []).map((job: Obj) => job.unitPolicy)
     .find((item: Obj | undefined) => item?.digest === repository.policyDigest);
   const units = await unitKeys(source, changed.parent, commit, changed.files, policy);
-  if (units.length > 16) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${units.length} units > 16; split the change`, 'usage');
+  if (units.length > MAX_NORMALIZED_UNITS) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${unitsOverCapMessage(units.length)}`, 'usage');
   const branch = `refs/heads/land/${hash(intentKey).slice(7, 23)}`;
   const createBody = { intentKey, intentText: intent, baseOid: repository.observedCanonicalOid, branch, unitKeys: units, dependencyChangeIds: options.dependsOn ?? [] };
   let created = (await api(client, `${root}/changes`, createBody)).data;

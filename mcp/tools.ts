@@ -9,6 +9,7 @@ type Shape = Record<string, Record<string, unknown>>;
 const s = { type: 'string' };
 const n = { type: 'integer', minimum: 0 };
 const strings = { type: 'array', items: s };
+const unitKeys = { ...strings, maxItems: 128 };
 const fences = { type: 'object', additionalProperties: { type: 'integer', minimum: 1 } };
 function tool(name: string, description: string, properties: Shape, required: string[] = []): Tool {
   return { name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false } };
@@ -19,7 +20,7 @@ export const tools: Tool[] = [
   tool('repo_list', 'List authorized repositories.', { cursor: s }),
   tool('repo_get', 'Get repository detail and canonical head.', repo, ['repoId']),
   tool('repo_context', 'Get repository snapshot, policy state, changes, leases, queue and findings.', repo, ['repoId']),
-  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys: strings, dependencyChangeIds: strings, attempt: n, issueNumber: { type: 'integer', minimum: 1 }, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
+  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys, dependencyChangeIds: strings, attempt: n, issueNumber: { type: 'integer', minimum: 1 }, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
   tool('issue_create', 'Create an issue in the repository inbox.', { ...repo, title: s, body: s, labels: strings, milestoneId: s, allowedFiles: strings, idempotencyKey: s }, ['repoId', 'title', 'body']),
   tool('issue_get', 'Get an issue and its linked changes.', { ...repo, issueNumber: { type: 'integer', minimum: 1 } }, ['repoId', 'issueNumber']),
   tool('issue_list', 'List issues with optional state, label, milestone and cursor.', { ...repo, state: { type: 'string', enum: ['open', 'closed'] }, label: s, milestoneId: s, cursor: s }, ['repoId']),

@@ -223,13 +223,13 @@ describe('semantic lease identities', () => {
     expect(changedUnitsForFile(registry, 'data/families.tsv', 'alpha\tone\nalpha\ttwo\n', 'alpha\tnew\n')
       .map(unit => unit.key)).toEqual(['file:data/families.tsv']);
     const many = structuredClone(policy);
-    many.units = Object.fromEntries(Array.from({ length: 17 }, (_, index) => [
+    many.units = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [
       `row:many:${index}`, { canonicalKey: `row:many:${index}`, file: 'data/many.tsv', resources: [`${index}`], dependencyKeys: [] },
     ]));
     const manyRegistry = unitRegistry(many);
     const keys = Object.keys(many.units);
-    expect(normalizeUnits(manyRegistry, keys.slice(0, 16))).toHaveLength(16);
-    expect(() => normalizeUnits(manyRegistry, keys)).toThrow();
+    expect(normalizeUnits(manyRegistry, keys.slice(0, 64))).toHaveLength(64);
+    expect(() => normalizeUnits(manyRegistry, keys)).toThrow('65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy');
     const ambiguous = structuredClone(policy);
     ambiguous.units['row:other:alpha'] = { canonicalKey: 'row:other:alpha', file: 'data/families.tsv', resources: ['other-alpha'], dependencyKeys: [] };
     expect(() => unitRegistry(ambiguous)).toThrow('UNIT_REGISTRY_INVALID');
@@ -237,6 +237,121 @@ describe('semantic lease identities', () => {
 });
 
 describe('RepoCoordinator lease routes', () => {
+  it('reports the unit cap for 129 distinct keys on change creation and publication', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'unit_cap_129';
+    const createdRepo = await fetchApi(mutation('/v1/repos', {
+      name: repo, policyId: 'local-demo', profileId: 'local-demo',
+    }, 'create-unit-cap-repo'));
+    expect(createdRepo.status).toBe(201);
+    const unitKeys = Array.from({ length: 129 }, (_, index) => `file:tests/unit-${index}.ts`);
+    const base = { intentKey: 'unit-cap', intentText: 'Check unit cap', baseOid: null,
+      branch: 'refs/heads/unit-cap', dependencyChangeIds: [] };
+    const overCapCreate = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys }, 'create-over-cap'));
+    expect(overCapCreate.status).toBe(422);
+    expect((await responseBody(overCapCreate)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '129 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+
+    const draft = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys: [] }, 'create-draft'));
+    expect(draft.status).toBe(201);
+    const draftBody = await responseBody(draft);
+    const changeId = draftBody.data.changeId as string;
+    const overCapPublish = await fetchApi(mutation(`/v1/repos/${repo}/changes/${changeId}/publish`, {
+      expectedVersion: draftBody.version, baseOid: null, headOid: 'a'.repeat(40),
+      branch: base.branch, unitKeys, leaseFences: {},
+    }, 'publish-over-cap'));
+    expect(overCapPublish.status).toBe(422);
+    expect((await responseBody(overCapPublish)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '129 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+  });
+
+  it('counts canonical units on change creation and publication', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'change_normalized_cap';
+    const createdRepo = await fetchApi(mutation('/v1/repos', {
+      name: repo, policyId: 'local-demo', profileId: 'local-demo',
+    }, 'create-normalized-cap-repo'));
+    expect(createdRepo.status).toBe(201);
+    const otherKeys = Array.from({ length: 63 }, (_, index) => `file:tests/change-${index}.ts`);
+    const unitKeys = ['declaration:old_callee_alpha', 'declaration:callee_alpha', ...otherKeys];
+    const canonicalKeys = ['declaration:callee_alpha', ...otherKeys].sort();
+    const base = { intentKey: 'normalized-cap', intentText: 'Check normalized cap', baseOid: null,
+      branch: 'refs/heads/normalized-cap', dependencyChangeIds: [] };
+    const created = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys }, 'create-normalized-cap'));
+    expect(created.status).toBe(201);
+    const createdBody = await responseBody(created);
+    expect(createdBody.data.unitKeys).toEqual(canonicalKeys);
+
+    const overCapKeys = [...canonicalKeys, 'file:tests/change-extra.ts'];
+    const overCapCreate = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, intentKey: 'over-normalized-cap', unitKeys: overCapKeys }, 'create-over-normalized-cap'));
+    expect(overCapCreate.status).toBe(422);
+    expect((await responseBody(overCapCreate)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+
+    const changeId = createdBody.data.changeId as string;
+    const publishBody = { expectedVersion: createdBody.version, baseOid: null, headOid: 'a'.repeat(40),
+      branch: base.branch, unitKeys, leaseFences: Object.fromEntries(canonicalKeys.map(key => [key, 1])) };
+    const acceptedPublish = await fetchApi(mutation(`/v1/repos/${repo}/changes/${changeId}/publish`,
+      publishBody, 'publish-normalized-cap'));
+    expect(acceptedPublish.status).toBe(409);
+    expect((await responseBody(acceptedPublish)).error.code).toBe('SEED_REQUIRES_BOOTSTRAP');
+
+    const overCapPublish = await fetchApi(mutation(`/v1/repos/${repo}/changes/${changeId}/publish`,
+      { ...publishBody, unitKeys: overCapKeys }, 'publish-over-normalized-cap'));
+    expect(overCapPublish.status).toBe(422);
+    expect((await responseBody(overCapPublish)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+  });
+
+  it('accepts 65 raw claim keys when a duplicate leaves 64 normalized units', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const keys = Array.from({ length: 64 }, (_, index) => `file:tests/claim-${index}.ts`);
+    const response = await claim('lease_raw_duplicate', 'local-agent-a', 'draft', [...keys, keys[0]], 'claim-duplicate');
+    expect(response.status).toBe(201);
+    expect((await responseBody(response)).data.leases).toHaveLength(64);
+  });
+
+  it('claims 64 units, detects a shared unit in another 64-unit request, and keeps the 128-live-lease cap', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'lease_cap_64';
+    const keys = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `file:tests/${prefix}-${index}.ts`);
+    const firstKeys = keys('first', 64);
+    const first = await claim(repo, 'local-agent-a', 'first', firstKeys, 'claim-first');
+    expect(first.status).toBe(201);
+    expect((await responseBody(first)).data.leases).toHaveLength(64);
+
+    const shared = await claim(repo, 'local-agent-b', 'rival', [firstKeys[63], ...keys('rival', 63)], 'claim-rival');
+    expect(shared.status).toBe(409);
+    expect((await responseBody(shared)).error).toMatchObject({ code: 'LEASE_CONFLICT', details: { keys: [firstKeys[63]] } });
+
+    const overCap = await claim(repo, 'local-agent-b', 'over', keys('over', 65), 'claim-over');
+    expect(overCap.status).toBe(422);
+    expect((await responseBody(overCap)).error).toMatchObject({ code: 'INVALID_UNITS', message: '65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy' });
+
+    const second = await claim(repo, 'local-agent-b', 'second', keys('second', 64), 'claim-second');
+    expect(second.status).toBe(201);
+    expect((await responseBody(second)).data.leases).toHaveLength(64);
+    const capacity = await claim(repo, 'local-agent-c', 'capacity', keys('extra', 1), 'claim-capacity');
+    expect(capacity.status).toBe(429);
+    expect((await responseBody(capacity)).error.code).toBe('LEASE_CAPACITY');
+  });
+
   it('refuses claims without a repository record or a registered change view', async () => {
     setupPolicy();
     const repo = 'lease_missing_repo';

@@ -58,7 +58,7 @@ Refresh writes a JSON envelope with `status: "unchanged"` and exits zero when th
 }
 ```
 
-`ttlSeconds` defaults to 120 and must be an integer from 1 through 300. Aliases are canonicalized, duplicates removed, and the final set sorted. At most 16 normalized, pairwise nonoverlapping keys are accepted. The response is `201` with `data.leases` and `data.renewAfterSeconds: 40`. Every lease carries `leaseId`, canonical `unitKey`, `holderId`, `changeId`, `intentText`, `fence`, `expiresAt`, `state`, and `version`. Keep the returned fence; it changes on renewal and reacquisition.
+`ttlSeconds` defaults to 120 and must be an integer from 1 through 300. Aliases are canonicalized, duplicates removed, and the final set sorted. At most 64 normalized, pairwise nonoverlapping keys are accepted per claim or change. An over-cap error reports the count and cap and suggests declaring coarser prefix or section units in policy. The repository-wide limit remains 128 live leases. The response is `201` with `data.leases` and `data.renewAfterSeconds: 40`. Every lease carries `leaseId`, canonical `unitKey`, `holderId`, `changeId`, `intentText`, `fence`, `expiresAt`, `state`, and `version`. Keep the returned fence; it changes on renewal and reacquisition.
 
 A claim requires a ready repository record and a draft or ready change owned by the caller, as reported by the repos change view. A missing repository returns `404 REPO_NOT_FOUND`; a missing change or one the caller cannot claim returns `403 CHANGE_NOT_OWNED`.
 
