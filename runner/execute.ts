@@ -9,29 +9,42 @@ import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalP
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
 const tailLog = (value: string, cap: number): string => {
-  let tail = Buffer.from(value).subarray(Math.max(0, Buffer.byteLength(value) - cap)).toString('utf8');
-  while (Buffer.byteLength(tail) > cap) tail = tail.slice(1);
+  const limit = Math.max(0, cap);
+  let tail = Buffer.from(value).subarray(Math.max(0, Buffer.byteLength(value) - limit)).toString('utf8');
+  while (Buffer.byteLength(tail) > limit) tail = tail.slice(1);
   return tail;
 };
 
-function cappedChecks(cap: number, commandProfile: boolean) {
+export function cappedChecks(cap: number, commandProfile: boolean) {
   let body = '';
+  let firstHost = '';
+  let lastHost = '';
   const markers: string[] = [];
   let markerBytes = 0;
   return {
     append(log: string, label = '') {
+      const header = commandProfile ? /^host=[^\n]+\n/.exec(log)?.[0] : undefined;
+      if (header) {
+        if (!firstHost) firstHost = header;
+        log = log.slice(header.length);
+      }
       const exit = commandProfile ? /^exit=-?\d+(?: timeout)?\n/.exec(log)?.[0] : undefined;
       if (commandProfile && !exit) throw new Error('COMMAND_EXIT_MARKER_MISSING');
       if (exit) {
-        const marker = tailLog(label, cap - Buffer.byteLength(exit)) + exit;
+        const change = markers.length && header !== lastHost ? header ?? '' : '';
+        const marker = change + tailLog(label, cap - Buffer.byteLength(firstHost) - Buffer.byteLength(change) - Buffer.byteLength(exit)) + exit;
         markerBytes += Buffer.byteLength(marker);
-        if (markerBytes > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
+        if (markerBytes + Buffer.byteLength(firstHost) > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
         markers.push(marker);
+        if (header) lastHost = header;
       }
-      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes);
+      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes - Buffer.byteLength(firstHost));
+    },
+    failure(message: string) {
+      body = tailLog(body + message + '\n', cap - markerBytes - Buffer.byteLength(firstHost));
     },
     value() {
-      return body + markers.join('');
+      return firstHost + body + markers.join('');
     },
   };
 }
@@ -95,7 +108,14 @@ async function runGates(profile: LocalProfile, job: Job, directory: string): Pro
   const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   let score: StackResult['score'] = null;
   for (const gate of job.unitPolicy.acceptance.gates) {
-    const checked = await pinnedCheck(profile, job, directory, gate.id);
+    let checked: Awaited<ReturnType<typeof pinnedCheck>>;
+    try { checked = await pinnedCheck(profile, job, directory, gate.id); }
+    catch (error) {
+      if (profile.kind !== 'command') throw error;
+      gates.push({ gateId: gate.id, outcome: 'ENV_ERROR' });
+      log.failure(error instanceof Error ? error.message : 'ENV_ERROR: checker');
+      return { outcome: 'ENV_ERROR', gates, log: log.value(), score: null };
+    }
     gates.push({ gateId: gate.id, outcome: checked.outcome });
     log.append(checked.log);
     score = job.contest === true ? checked.score : null;
@@ -109,8 +129,12 @@ async function runAffected(profile: LocalProfile, job: Job, directory: string, u
   if (!targets.length) return { outcome: 'UNVERIFIED_TARGET', log: 'No affected units identified' };
   const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   if (profile.kind === 'command') {
-    const checked = await pinnedCheck(profile, job, directory);
-    const marker = /^exit=-?\d+(?: timeout)?\n/.exec(checked.log)?.[0];
+    let checked: Awaited<ReturnType<typeof pinnedCheck>>;
+    try { checked = await pinnedCheck(profile, job, directory); }
+    catch (error) {
+      return { outcome: 'ENV_ERROR', log: error instanceof Error ? error.message : 'ENV_ERROR: checker' };
+    }
+    const marker = /^(?:host=[^\n]+\n)?(exit=-?\d+(?: timeout)?\n)/.exec(checked.log)?.[1];
     if (!marker) throw new Error('COMMAND_EXIT_MARKER_MISSING');
     for (const [index, unit] of targets.entries())
       log.append(index === 0 ? checked.log : marker,
@@ -248,7 +272,8 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
   return { ...common, kind: 'promote', outcome, observedCanonicalOid, sourceTreeOid: await treeOid(directory, job.checkedNewOid) };
 }
 
-export async function executeJob(job: Job, profile: LocalProfile | null, provide: CredentialProvider): Promise<JobResult> {
+export async function executeJob(job: Job, profile: LocalProfile | null, provide: CredentialProvider,
+  reloadProfile: typeof loadProfile = loadProfile): Promise<JobResult> {
   const began = Date.now();
   const secrets = new Set<string>();
   const tracked: CredentialProvider = async operation => {
@@ -261,7 +286,16 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
     if (job.kind === 'promote' && profile) throw new Error('PROMOTER_PROFILE_FORBIDDEN');
     if (job.kind !== 'promote') {
       if (!profile) throw new Error('PROFILE_REQUIRED');
-      if (profile.sourcePath) profile = await loadProfile(profile.sourcePath);
+      if (profile.sourcePath) {
+        await verifyLocalProfile(profile);
+        const baseline = profile;
+        const reloaded = await reloadProfile(profile.sourcePath);
+        if (baseline.sourceSnapshot && baseline.resolvedExecutable) {
+          Object.defineProperty(reloaded, 'sourceSnapshot', { value: baseline.sourceSnapshot, enumerable: false, configurable: true });
+          Object.defineProperty(reloaded, 'resolvedExecutable', { value: baseline.resolvedExecutable, enumerable: false, configurable: true });
+        }
+        profile = reloaded;
+      }
       checkProfile(job, profile);
       if (profile.sourcePath) await verifyLocalProfile(profile);
     }

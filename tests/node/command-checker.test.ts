@@ -1,28 +1,29 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, symlink, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
 import { childEnvironment, command, git, temporaryWork } from '../../runner/git';
-import { executeJob } from '../../runner/execute';
-import { loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
+import { cappedChecks, executeJob } from '../../runner/execute';
+import { createCommandProfile, loadProfile, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
 
 const executable = '/bin/sh';
 const commandSettings = { executable, argv: ['scripts/validate.sh'], cwd: 'repo' as const,
   timeoutSeconds: 2, env: ['PATH', 'TMPDIR', 'LANG'], outputCap: 4096 };
 const filePin = (bytes: Buffer | string) => ('sha256:' + createHash('sha256').update(bytes).digest('hex')) as Digest;
+const hostPrefix = `host=${process.platform}/${process.arch} node=${process.version} exe_sha256=sha256:`;
 const commitEnv = childEnvironment({ GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
   GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' });
 
 async function profileIn(dir: string, changes: Record<string, unknown> = {}, maxOutputBytes = 4096) {
-  const binaryPin = filePin(await readFile(executable));
   const settings = { ...commandSettings, ...changes };
+  const pin = await digest(settings);
   const content = { id: 'command-demo', kind: 'command', checkerId: 'command-demo',
-    checkerDigest: binaryPin, toolchainDigest: binaryPin, oracleDigest: await digest(settings),
-    environmentDigest: await digest(localEnvironment()), timeoutMs: 5_000, maxOutputBytes,
-    toolchainFile: executable, ...settings };
+    checkerDigest: pin, toolchainDigest: pin, oracleDigest: pin,
+    environmentDigest: pin, timeoutMs: 5_000, maxOutputBytes,
+    toolchainFile: settings.executable, ...settings };
   const path = join(dir, 'profile.json');
   await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
   return path;
@@ -44,10 +45,27 @@ function jobFor(profile: Awaited<ReturnType<typeof loadProfile>>, remotes: Recor
 }
 
 describe('pinned command checker', () => {
+  it('preserves distinct host evidence from two checks within the cap', () => {
+    const log = cappedChecks(4096, true);
+    const first = 'host=darwin/arm64 node=v22 exe_sha256=sha256:' + 'a'.repeat(64) + '\n';
+    const second = 'host=linux/x64 node=v24 exe_sha256=sha256:' + 'b'.repeat(64) + '\n';
+    log.append(first + 'exit=0\nfirst');
+    log.append(second + 'exit=0\nsecond');
+    expect(log.value().startsWith(first)).toBe(true);
+    expect(log.value()).toContain(second);
+    expect(log.value().match(/exit=0\n/g)).toHaveLength(2);
+    expect(Buffer.byteLength(log.value())).toBeLessThanOrEqual(4096);
+  });
   it('rejects caps below 4096 bytes and accepts the minimum', async () => {
     await temporaryWork(async dir => {
       await expect(loadProfile(await profileIn(dir, { outputCap: 4095 }))).rejects.toThrow('INVALID_COMMAND_PROFILE');
       expect((await loadProfile(await profileIn(dir, { outputCap: 4096 }))).outputCap).toBe(4096);
+      const path = await profileIn(dir);
+      const content = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      content.timeoutMs = 35 * 60_000 + 1;
+      delete content.digest;
+      await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE: timeoutMs');
     });
   });
 
@@ -73,6 +91,7 @@ describe('pinned command checker', () => {
       job.unitPolicy.acceptance.gates = Array.from({ length: 5 }, (_, index) =>
         ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
       const passing = await executeJob(job, profile, credentials);
+      expect(passing.log.startsWith(hostPrefix)).toBe(true);
       expect(passing).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
       expect(passing.log.match(/exit=0\n/g)).toHaveLength(5);
       expect(Buffer.byteLength(passing.log)).toBeLessThanOrEqual(4096);
@@ -132,7 +151,7 @@ describe('pinned command checker', () => {
         process.env.SystemRoot = 'synthetic-supervisor-secret';
         const checked = await pinnedCheck(profile, job, dir);
         expect(checked.outcome).toBe('PASS');
-        expect(checked.log).toBe('exit=0\n');
+        expect(checked.log).toMatch(/^host=[^\n]+ exe_sha256=sha256:[a-f0-9]{64}\nexit=0\n$/);
         expect(checked.log).not.toContain('synthetic-supervisor-secret');
       } finally {
         if (previous === undefined) delete process.env.SystemRoot;
@@ -309,16 +328,252 @@ describe('pinned command checker', () => {
     await temporaryWork(async dir => {
       for (const changes of [
         { executable: 'sh' },
-        { executable: '/bin/false' },
         { argv: ['{unit}'] },
         { env: ['PATH', 'CONCORD_TOKEN'] },
       ]) await expect(loadProfile(await profileIn(dir, changes))).rejects.toThrow('INVALID_COMMAND_PROFILE');
+      const missing = join(dir, 'missing');
+      await expect(loadProfile(await profileIn(dir, { executable: missing }))).rejects.toThrow('ENV_ERROR');
+      const nonExecutable = join(dir, 'not-executable');
+      await writeFile(nonExecutable, 'echo no');
+      await chmod(nonExecutable, 0o644);
+      await expect(loadProfile(await profileIn(dir, { executable: nonExecutable }))).rejects.toThrow('ENV_ERROR');
       const path = await profileIn(dir);
       const content = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      const tampered: Record<string, unknown> = { ...content, argv: ['different.sh'] };
+      delete tampered.digest;
+      await writeFile(path, JSON.stringify({ ...tampered, digest: await digest(tampered) }));
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
+      const changedEnv: Record<string, unknown> = { ...content, env: ['PATH', 'LANG'] };
+      delete changedEnv.digest;
+      await writeFile(path, JSON.stringify({ ...changedEnv, digest: await digest(changedEnv) }));
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
       delete content.digest;
       content.checkerDigest = content.toolchainDigest = filePin('wrong binary');
       await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
-      await expect(loadProfile(path)).rejects.toThrow('UNPINNED_EXECUTABLE');
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
+    });
+  });
+
+  it('rejects an outside symlink to a candidate checker even after the script changes', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const checker = join(repo, 'checker.sh');
+      await writeFile(checker, '#!/bin/sh\nexit 0\n');
+      await chmod(checker, 0o755);
+      const outside = join(dir, 'outside-checker');
+      await symlink(checker, outside);
+      const profile = await createCommandProfile({ id: 'linked', checkerId: 'linked', timeoutMs: 5000,
+        maxOutputBytes: 4096, ...commandSettings, executable: outside, argv: [] });
+      const path = join(dir, 'profile.json');
+      await writeFile(path, JSON.stringify(profile));
+      const loaded = await loadProfile(path);
+      await writeFile(checker, '#!/bin/sh\nprintf replaced\nexit 0\n');
+      expect((await loadProfile(path)).digest).toBe(profile.digest);
+      await expect(pinnedCheck(loaded, jobFor(loaded, {}, 'a'.repeat(40)), repo))
+        .rejects.toThrow('CHECKER_IN_CANDIDATE');
+    });
+  });
+
+  it('rejects a symlink hop through the candidate even when its final target is on the host', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const bridge = join(repo, 'bridge');
+      const outside = join(dir, 'outside-checker');
+      await symlink(executable, bridge);
+      await symlink(bridge, outside);
+      const profile = await loadProfile(await profileIn(dir, { executable: outside }));
+      await expect(pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo))
+        .rejects.toThrow('CHECKER_IN_CANDIDATE');
+    });
+  });
+
+  it('fails closed when the executable is atomically replaced while it runs', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'shell');
+      const replacement = join(dir, 'replacement');
+      const marker = join(repo, 'started');
+      await writeFile(binary, `#!/bin/sh\nprintf ready > "${marker}"\nsleep 1\n`);
+      await writeFile(replacement, `#!/bin/sh\nprintf ready > "${marker}"\nsleep 1\n# version B\n`);
+      await chmod(binary, 0o755);
+      await chmod(replacement, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary,
+        argv: [] }));
+      const checking = pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo);
+      const observed = checking.then(value => ({ value }), error => ({ error: String(error) }));
+      let started = false;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        try { started = (await readFile(marker, 'utf8')) === 'ready'; } catch { /* child has not started */ }
+        if (started) break;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(started, JSON.stringify(started ? {} : await observed)).toBe(true);
+      await rename(replacement, binary);
+      await expect(checking).rejects.toThrow('ENV_ERROR: executable');
+    });
+  }, 5000);
+
+  it('rechecks source mode, bytes, and existence before every gate', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'checker');
+      await writeFile(binary, '#!/bin/sh\nexit 0\n');
+      await chmod(binary, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary, argv: [] }));
+      const job = jobFor(profile, {}, 'a'.repeat(40));
+      expect((await pinnedCheck(profile, job, repo)).outcome).toBe('PASS');
+      const checked = await pinnedCheck(profile, job, repo);
+      expect(checked.log.startsWith(`host=${process.platform}/${process.arch} node=${process.version} exe_sha256=${filePin(await readFile(binary))}\n`)).toBe(true);
+      await chmod(binary, 0o644);
+      await expect(pinnedCheck(profile, job, repo)).rejects.toThrow('ENV_ERROR: executable');
+      await chmod(binary, 0o700);
+      await expect(pinnedCheck(profile, job, repo)).rejects.toThrow('ENV_ERROR: executable mode');
+      await chmod(binary, 0o755);
+      await writeFile(binary, '#!/bin/sh\nexit 1\n');
+      await expect(pinnedCheck(profile, job, repo)).rejects.toThrow('ENV_ERROR: executable sha256');
+      await rename(binary, join(dir, 'removed'));
+      await expect(pinnedCheck(profile, job, repo)).rejects.toThrow('ENV_ERROR');
+      await mkdir(binary);
+      await expect(pinnedCheck(profile, job, repo)).rejects.toThrow('ENV_ERROR: executable type');
+    });
+  });
+
+  it('rejects source metadata drift even when the bytes are unchanged', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'checker');
+      await writeFile(binary, '#!/bin/sh\nexit 0\n');
+      await chmod(binary, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary, argv: [] }));
+      await utimes(binary, new Date(0), new Date(0));
+      await expect(pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo))
+        .rejects.toThrow('ENV_ERROR: executable mtimeNs');
+    });
+  });
+
+  it('keeps the initially loaded executable snapshot across the executeJob profile reload', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'checker');
+      await writeFile(binary, '#!/bin/sh\nexit 0\n');
+      await chmod(binary, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary, argv: [] }));
+      const job = jobFor(profile, {}, 'a'.repeat(40));
+      const result = await executeJob(job, profile, async () => [], async filename => {
+        await writeFile(binary, '#!/bin/sh\nexit 7\n');
+        return loadProfile(filename);
+      });
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'ENV_ERROR' });
+      expect(result.log).toContain('ENV_ERROR: executable sha256');
+    });
+  });
+
+  it('detects modification of the private executable copy after launch', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'checker');
+      await writeFile(binary, '#!/bin/sh\nchmod 700 "$0"\nprintf altered >> "$0"\nexit 0\n');
+      await chmod(binary, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary, argv: [] }));
+      await expect(pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo))
+        .rejects.toThrow('ENV_ERROR: COMMAND_SWAPPED');
+    });
+  });
+
+  it('rejects a copy swapped after its hash but before spawn', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'checker');
+      const marker = join(repo, 'executed');
+      await writeFile(binary, '#!/bin/sh\nexit 0\n');
+      await chmod(binary, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary, argv: [] }));
+      await expect(pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo, 'all', async copy => {
+        await chmod(copy, 0o700);
+        await writeFile(copy, `#!/bin/sh\nprintf altered > ${JSON.stringify(marker)}\nexit 0\n`);
+        await chmod(copy, 0o500);
+      })).rejects.toThrow('ENV_ERROR: COMMAND_SWAPPED');
+      expect(await readFile(marker, 'utf8')).toBe('altered');
+    });
+  });
+
+  it('runs the private bytes whose hash is logged if the host source is swapped and restored before spawn', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'checker');
+      const replacement = join(dir, 'replacement');
+      const originalBytes = '#!/bin/sh\nprintf original\n';
+      await writeFile(binary, originalBytes);
+      await writeFile(replacement, '#!/bin/sh\nprintf altered\n');
+      await chmod(binary, 0o755);
+      await chmod(replacement, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary, argv: [] }));
+      const checked = await pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo, 'all', async () => {
+        const displaced = join(dir, 'displaced');
+        await rename(binary, displaced);
+        await rename(replacement, binary);
+        await rename(binary, replacement);
+        await rename(displaced, binary);
+      });
+      expect(checked.outcome).toBe('PASS');
+      expect(checked.log).toContain(`exe_sha256=${filePin(originalBytes)}`);
+      expect(checked.log).toContain('original');
+      expect(checked.log).not.toContain('altered');
+    });
+  });
+
+  it('generates a loadable command profile from a config file', async () => {
+    await temporaryWork(async dir => {
+      const config = join(dir, 'config.json');
+      const output = join(dir, 'generated.json');
+      await writeFile(config, JSON.stringify({ id: 'command-demo', checkerId: 'command-demo',
+        timeoutMs: 5000, maxOutputBytes: 4096, ...commandSettings }));
+      const result = await command(process.execPath, ['--import', 'tsx', 'runner/main.ts', 'profile',
+        '--command-config', config, '--out', output], process.cwd(), 10_000, childEnvironment());
+      expect(result.code).toBe(0);
+      const profile = await loadProfile(output);
+      expect(result.stdout.trim()).toBe(profile.digest);
+      expect(profile.checkerDigest).toBe(await digest(commandSettings));
+    });
+  });
+
+  it('keeps config and job pins across different executable bytes and simulated hosts', async () => {
+    await temporaryWork(async dir => {
+      const binary = join(dir, 'shell');
+      const original = await readFile(executable);
+      await writeFile(binary, Buffer.concat([original, Buffer.from('host-one')]));
+      await chmod(binary, 0o755);
+      const path = await profileIn(dir, { executable: binary });
+      const first = await loadProfile(path);
+      const firstJob = jobFor(first, {}, 'a'.repeat(40));
+      await writeFile(binary, Buffer.concat([original, Buffer.from('host-two')]));
+      await chmod(binary, 0o755);
+      const arch = Object.getOwnPropertyDescriptor(process, 'arch')!;
+      const version = Object.getOwnPropertyDescriptor(process, 'version')!;
+      try {
+        Object.defineProperty(process, 'arch', { configurable: true, value: 'simulated-arch' });
+        Object.defineProperty(process, 'version', { configurable: true, value: 'v99.0.0' });
+        const second = await loadProfile(path);
+        await verifyLocalProfile(second);
+        const secondJob = jobFor(second, {}, 'a'.repeat(40));
+        expect(second.digest).toBe(first.digest);
+        expect(secondJob.profileDigest).toBe(firstJob.profileDigest);
+        expect(secondJob.inputDigest).toBe(firstJob.inputDigest);
+        expect(secondJob.checkerDigest).toBe(firstJob.checkerDigest);
+        expect(secondJob.environmentDigest).toBe(firstJob.environmentDigest);
+      } finally {
+        Object.defineProperty(process, 'arch', arch);
+        Object.defineProperty(process, 'version', version);
+      }
     });
   });
 });

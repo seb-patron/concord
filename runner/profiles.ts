@@ -1,7 +1,8 @@
-import { lstat, readFile } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readlink, realpath, rm, stat } from 'node:fs/promises';
+import { constants, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { isAbsolute, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Job, CheckOutcome } from '../src/contracts';
 import { digest, stableJson } from '../src/http';
@@ -17,12 +18,15 @@ export type LocalProfile = {
   cases?: Record<string, { rows: Record<string, ExpectedRow>; epsilonChoices?: ExpectedRow[] }>;
   /** Added by the loader; never included in the content digest. */
   sourcePath?: string;
+  /** Host-local baseline, deliberately excluded from the serialized profile digest. */
+  sourceSnapshot?: ExecutableSnapshot;
+  resolvedExecutable?: string;
 };
 const sha = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 /** Only noncredential runner settings may be forwarded to repository code. */
 export const commandEnvNames = ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
   'UV_CACHE_DIR', 'UV_PYTHON', 'UV_PROJECT_ENVIRONMENT', 'XDG_CACHE_HOME'] as const;
-const commandConfig = (profile: LocalProfile) => ({ executable: profile.executable, argv: profile.argv,
+export const commandConfig = (profile: LocalProfile) => ({ executable: profile.executable, argv: profile.argv,
   cwd: profile.cwd, timeoutSeconds: profile.timeoutSeconds, env: profile.env, outputCap: profile.outputCap });
 const fileDigest = async (path: string) => {
   const hash = createHash('sha256');
@@ -30,6 +34,127 @@ const fileDigest = async (path: string) => {
   return 'sha256:' + hash.digest('hex');
 };
 export const localEnvironment = () => ({ platform: process.platform, arch: process.arch, node: process.version });
+export async function commandHostLine(profile: LocalProfile, executableDigest?: string): Promise<string> {
+  return `host=${process.platform}/${process.arch} node=${process.version} exe_sha256=${executableDigest ?? await fileDigest(profile.executable!)}\n`;
+}
+const inside = (path: string, root: string) => path === root || path.startsWith(root + sep);
+
+/** Check every symlink destination, including hops that leave the candidate again. */
+async function commandExecutableTarget(executable: string, repo: string): Promise<string> {
+  const roots = [resolve(repo), await realpath(repo)];
+  let path = resolve(executable);
+  for (let hops = 0; hops < 40; hops++) {
+    const { root } = parse(path);
+    let current = root;
+    let followed = false;
+    const parts = path.slice(root.length).split(sep).filter(Boolean);
+    for (let index = 0; index < parts.length; index++) {
+      current = join(current, parts[index]);
+      if (roots.some(candidate => inside(current, candidate))) throw new Error('CHECKER_IN_CANDIDATE');
+      if ((await lstat(current)).isSymbolicLink()) {
+        path = resolve(dirname(current), await readlink(current), ...parts.slice(index + 1));
+        if (roots.some(candidate => inside(path, candidate))) throw new Error('CHECKER_IN_CANDIDATE');
+        followed = true;
+        break;
+      }
+    }
+    if (!followed) {
+      const target = await realpath(path);
+      if (roots.some(candidate => inside(target, candidate))) throw new Error('CHECKER_IN_CANDIDATE');
+      return target;
+    }
+  }
+  throw new Error('ENV_ERROR: executable symlink chain');
+}
+
+type ExecutableSnapshot = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; mode: bigint; sha256: string };
+const sameExecutable = (a: ExecutableSnapshot, b: ExecutableSnapshot) =>
+  a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.mode === b.mode && a.sha256 === b.sha256;
+
+async function executableSnapshot(path: string): Promise<ExecutableSnapshot> {
+  const handle = await open(path, 'r');
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new Error('ENV_ERROR: executable');
+    const hash = createHash('sha256');
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk);
+    const after = await handle.stat({ bigint: true });
+    const named = await stat(path, { bigint: true });
+    const snapshot = (value: typeof before): ExecutableSnapshot => ({ dev: value.dev, ino: value.ino,
+      size: value.size, mtimeNs: value.mtimeNs, mode: value.mode, sha256: '' });
+    if (!sameExecutable(snapshot(before), snapshot(after)) || !sameExecutable(snapshot(after), snapshot(named)))
+      throw new Error('ENV_ERROR: executable changed');
+    return { ...snapshot(after), sha256: 'sha256:' + hash.digest('hex') };
+  } finally { await handle.close(); }
+}
+async function commandExecutableAvailable(profile: LocalProfile): Promise<void> {
+  let source;
+  try { source = await stat(profile.executable!); }
+  catch { throw new Error('ENV_ERROR: executable missing'); }
+  if (!source.isFile()) throw new Error('ENV_ERROR: executable type');
+  try { await access(profile.executable!, constants.X_OK); }
+  catch { throw new Error('ENV_ERROR: executable execute permission'); }
+}
+async function recordCommandSource(profile: LocalProfile): Promise<void> {
+  await commandExecutableAvailable(profile);
+  const target = await realpath(profile.executable!);
+  const snapshot = await executableSnapshot(target);
+  Object.defineProperty(profile, 'resolvedExecutable', { value: target, enumerable: false, configurable: true });
+  Object.defineProperty(profile, 'sourceSnapshot', { value: snapshot, enumerable: false, configurable: true });
+}
+
+async function verifyCommandSource(profile: LocalProfile, repo?: string): Promise<string> {
+  let target: string;
+  try { target = repo ? await commandExecutableTarget(profile.executable!, repo) : await realpath(profile.executable!); }
+  catch (error) {
+    if (error instanceof Error && error.message === 'CHECKER_IN_CANDIDATE') throw error;
+    throw new Error('ENV_ERROR: executable path');
+  }
+  // Directly supplied trusted profiles acquire their host baseline on first use.
+  if (!profile.sourceSnapshot || !profile.resolvedExecutable) await recordCommandSource(profile);
+  if (target !== profile.resolvedExecutable) throw new Error('ENV_ERROR: executable path');
+  let current: ExecutableSnapshot;
+  await commandExecutableAvailable(profile);
+  try { current = await executableSnapshot(target); }
+  catch { throw new Error('ENV_ERROR: executable snapshot'); }
+  const pinned = profile.sourceSnapshot!;
+  for (const field of ['mode', 'sha256', 'size', 'mtimeNs', 'dev', 'ino'] as const)
+    if (current[field] !== pinned[field]) throw new Error('ENV_ERROR: executable ' + field);
+  return target;
+}
+function validateCommandProfile(profile: LocalProfile): void {
+  const invalid = (field: string): never => { throw new Error('INVALID_COMMAND_PROFILE: ' + field); };
+  if (profile.checkerId === 'dispatch-lab') invalid('checkerId');
+  if (!profile.executable || !isAbsolute(profile.executable)) invalid('executable');
+  if (profile.toolchainFile !== profile.executable) invalid('toolchainFile');
+  if (profile.cwd !== 'repo') invalid('cwd');
+  if (!Array.isArray(profile.argv) || profile.argv.some(arg => typeof arg !== 'string' || /\{[^}]*\}/.test(arg))) invalid('argv');
+  if (!Number.isSafeInteger(profile.timeoutSeconds) || !profile.timeoutSeconds || profile.timeoutSeconds < 1 ||
+    profile.timeoutSeconds * 1000 > profile.timeoutMs) invalid('timeoutSeconds');
+  if (!Number.isSafeInteger(profile.outputCap) || !profile.outputCap || profile.outputCap < 4096 ||
+    profile.outputCap > profile.maxOutputBytes) invalid('outputCap');
+  if (!Array.isArray(profile.env) || profile.env.some(name => typeof name !== 'string' ||
+    !commandEnvNames.includes(name as typeof commandEnvNames[number])) || new Set(profile.env).size !== profile.env.length) invalid('env');
+  for (const field of ['checkerFile', 'oracleFile', 'successOutcome', 'cases'] as const)
+    if (profile[field] !== undefined) invalid(field);
+}
+export async function createCommandProfile(input: Record<string, unknown>): Promise<LocalProfile> {
+  const allowed = ['id', 'checkerId', 'timeoutMs', 'maxOutputBytes', 'executable', 'argv', 'cwd', 'timeoutSeconds', 'env', 'outputCap'];
+  for (const field of Object.keys(input)) if (!allowed.includes(field)) throw new Error('INVALID_PROFILE: ' + field);
+  const config = input as Pick<LocalProfile, 'id' | 'checkerId' | 'timeoutMs' | 'maxOutputBytes' | 'executable' | 'argv' | 'cwd' | 'timeoutSeconds' | 'env' | 'outputCap'>;
+  if (typeof config.id !== 'string') throw new Error('INVALID_PROFILE: id');
+  if (typeof config.checkerId !== 'string') throw new Error('INVALID_PROFILE: checkerId');
+  if (!Number.isSafeInteger(config.timeoutMs) || config.timeoutMs < 1 || config.timeoutMs > 35 * 60_000) throw new Error('INVALID_PROFILE: timeoutMs');
+  if (!Number.isSafeInteger(config.maxOutputBytes) || config.maxOutputBytes < 1 || config.maxOutputBytes > OUTPUT_CAP) throw new Error('INVALID_PROFILE: maxOutputBytes');
+  const profile = { ...config, kind: 'command' as const, toolchainFile: config.executable } as LocalProfile;
+  validateCommandProfile(profile);
+  await commandExecutableAvailable(profile);
+  const pin = await digest(commandConfig(profile));
+  const content = { ...profile, checkerDigest: pin, toolchainDigest: pin, oracleDigest: pin, environmentDigest: pin };
+  const created = { ...content, digest: await digest(content) };
+  await recordCommandSource(created);
+  return created;
+}
 const validRow = (value: unknown): value is ExpectedRow => !!value && typeof value === 'object' &&
   Number.isSafeInteger((value as ExpectedRow).retry_limit) && (value as ExpectedRow).retry_limit >= 1 && (value as ExpectedRow).retry_limit <= 5 &&
   Number.isSafeInteger((value as ExpectedRow).timeout_ms) && (value as ExpectedRow).timeout_ms >= 250 && (value as ExpectedRow).timeout_ms <= 2000 &&
@@ -87,30 +212,31 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
   if (!isAbsolute(filename)) throw new Error('PROFILE_ABSOLUTE_PATH_REQUIRED');
   const path = resolve(filename);
   const profile = JSON.parse(await readFile(path, 'utf8')) as LocalProfile;
-  if (!profile || Object.hasOwn(profile, 'sourcePath') || typeof profile.id !== 'string' || typeof profile.checkerId !== 'string' ||
-    ![profile.digest, profile.checkerDigest, profile.oracleDigest, profile.toolchainDigest, profile.environmentDigest].every(sha) ||
-    !Number.isSafeInteger(profile.timeoutMs) || profile.timeoutMs < 1 || profile.timeoutMs > 35 * 60_000 ||
-    !Number.isSafeInteger(profile.maxOutputBytes) || profile.maxOutputBytes < 1 || profile.maxOutputBytes > OUTPUT_CAP) throw new Error('INVALID_PROFILE');
+  if (!profile || typeof profile !== 'object') throw new Error('INVALID_PROFILE: object');
+  if (Object.hasOwn(profile, 'sourcePath')) throw new Error('INVALID_PROFILE: sourcePath');
+  if (typeof profile.id !== 'string') throw new Error('INVALID_PROFILE: id');
+  if (typeof profile.checkerId !== 'string') throw new Error('INVALID_PROFILE: checkerId');
+  for (const field of ['digest', 'checkerDigest', 'oracleDigest', 'toolchainDigest', 'environmentDigest'] as const)
+    if (!sha(profile[field])) throw new Error('INVALID_PROFILE: ' + field);
+  if (!Number.isSafeInteger(profile.timeoutMs) || profile.timeoutMs < 1 || profile.timeoutMs > 35 * 60_000)
+    throw new Error('INVALID_PROFILE: timeoutMs');
+  if (!Number.isSafeInteger(profile.maxOutputBytes) || profile.maxOutputBytes < 1 || profile.maxOutputBytes > OUTPUT_CAP)
+    throw new Error('INVALID_PROFILE: maxOutputBytes');
   if (profile.kind === 'command') {
-    if (profile.checkerId === 'dispatch-lab' || !profile.executable || !isAbsolute(profile.executable) ||
-      profile.toolchainFile !== profile.executable || profile.cwd !== 'repo' ||
-      !Array.isArray(profile.argv) || profile.argv.some(arg => typeof arg !== 'string' || /\{[^}]*\}/.test(arg)) ||
-      !Number.isSafeInteger(profile.timeoutSeconds) || !profile.timeoutSeconds || profile.timeoutSeconds < 1 ||
-      profile.timeoutSeconds * 1000 > profile.timeoutMs ||
-      !Number.isSafeInteger(profile.outputCap) || !profile.outputCap || profile.outputCap < 4096 ||
-      profile.outputCap > profile.maxOutputBytes ||
-      !Array.isArray(profile.env) || profile.env.some(name => typeof name !== 'string' ||
-        !commandEnvNames.includes(name as typeof commandEnvNames[number])) ||
-      new Set(profile.env).size !== profile.env.length || profile.checkerFile !== undefined ||
-      profile.oracleFile !== undefined || profile.successOutcome !== undefined || profile.cases !== undefined ||
-      profile.checkerDigest !== profile.toolchainDigest ||
-      profile.oracleDigest !== await digest(commandConfig(profile))) throw new Error('INVALID_COMMAND_PROFILE');
-  } else if (profile.kind !== undefined) throw new Error('INVALID_PROFILE');
-  if (profile.kind !== 'command' && profile.checkerId !== 'dispatch-lab' && (!profile.executable || !isAbsolute(profile.executable) ||
-    !Array.isArray(profile.argv) || profile.argv.some(arg => typeof arg !== 'string') ||
-    !profile.checkerFile || !isAbsolute(profile.checkerFile) || !profile.oracleFile || !isAbsolute(profile.oracleFile) ||
-    profile.successOutcome !== undefined && !['PASS', 'MATCH'].includes(profile.successOutcome))) throw new Error('INVALID_PROFILE');
-  if (!profile.toolchainFile || !isAbsolute(profile.toolchainFile)) throw new Error('INVALID_PROFILE');
+    validateCommandProfile(profile);
+    const pin = await digest(commandConfig(profile));
+    for (const field of ['checkerDigest', 'toolchainDigest', 'oracleDigest', 'environmentDigest'] as const)
+      if (profile[field] !== pin) throw new Error('INVALID_COMMAND_PROFILE: ' + field);
+  } else if (profile.kind !== undefined) throw new Error('INVALID_PROFILE: kind');
+  if (profile.kind !== 'command' && profile.checkerId !== 'dispatch-lab') {
+    if (!profile.executable || !isAbsolute(profile.executable)) throw new Error('INVALID_PROFILE: executable');
+    if (!Array.isArray(profile.argv) || profile.argv.some(arg => typeof arg !== 'string')) throw new Error('INVALID_PROFILE: argv');
+    if (!profile.checkerFile || !isAbsolute(profile.checkerFile)) throw new Error('INVALID_PROFILE: checkerFile');
+    if (!profile.oracleFile || !isAbsolute(profile.oracleFile)) throw new Error('INVALID_PROFILE: oracleFile');
+    if (profile.successOutcome !== undefined && !['PASS', 'MATCH'].includes(profile.successOutcome))
+      throw new Error('INVALID_PROFILE: successOutcome');
+  }
+  if (!profile.toolchainFile || !isAbsolute(profile.toolchainFile)) throw new Error('INVALID_PROFILE: toolchainFile');
   if (profile.kind !== 'command' && profile.checkerId !== 'dispatch-lab' && profile.executable && profile.checkerFile &&
     (![profile.toolchainFile, profile.checkerFile].map(value => resolve(value!)).includes(resolve(profile.executable)) ||
       resolve(profile.executable) !== resolve(profile.checkerFile) && !profile.argv!.includes(profile.checkerFile))) throw new Error('UNPINNED_EXECUTABLE');
@@ -118,7 +244,7 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
     profile.checkerFile !== undefined && !isAbsolute(profile.checkerFile) ||
     JSON.stringify(profile.argv) !== JSON.stringify(dispatchArgv))) throw new Error('INVALID_PROFILE_ARGV');
   if (profile.checkerId === 'dispatch-lab') {
-    if (!profile.cases || !Object.keys(profile.cases).length) throw new Error('INVALID_PROFILE');
+    if (!profile.cases || !Object.keys(profile.cases).length) throw new Error('INVALID_PROFILE: cases');
     for (const [caseId, required] of Object.entries(requiredDispatchCases)) {
       if (stableJson(profile.cases[caseId]) !== stableJson(required)) throw new Error('INVALID_PROFILE_CASE');
     }
@@ -135,23 +261,23 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
   }
   const { digest: declared, ...input } = profile;
   if (await digest(input) !== declared) throw new Error('PROFILE_DIGEST_MISMATCH');
-  if (profile.kind === 'command' && await fileDigest(profile.executable!) !== profile.checkerDigest)
-    throw new Error('UNPINNED_EXECUTABLE');
+  if (profile.kind === 'command') await recordCommandSource(profile);
   Object.defineProperty(profile, 'sourcePath', { value: path, enumerable: false });
   return profile;
 }
 
-/** Rechecked for every claimed job so a missing or changed local binary is reported as ENV_ERROR. */
+/** Rechecked for every claimed job; command profiles require an executable, not matching host bytes. */
 export async function verifyLocalProfile(profile: LocalProfile): Promise<void> {
   if (!profile.toolchainFile) throw new Error('TOOLCHAIN_FILE_MISSING');
+  if (profile.kind === 'command') {
+    await verifyCommandSource(profile);
+    return;
+  }
   if (await digest(localEnvironment()) !== profile.environmentDigest) throw new Error('ENVIRONMENT_DIGEST_MISMATCH');
   if (profile.checkerId === 'dispatch-lab' && resolve(profile.toolchainFile) !== resolve(process.execPath)) throw new Error('TOOLCHAIN_PATH_MISMATCH');
   if (await fileDigest(profile.toolchainFile) !== profile.toolchainDigest) throw new Error('TOOLCHAIN_DIGEST_MISMATCH');
   if (profile.checkerId === 'dispatch-lab') {
     if (await fileDigest(profile.checkerFile ?? fileURLToPath(import.meta.url)) !== profile.checkerDigest) throw new Error('CHECKER_DIGEST_MISMATCH');
-  } else if (profile.kind === 'command') {
-    if (await fileDigest(profile.executable!) !== profile.checkerDigest ||
-      await digest(commandConfig(profile)) !== profile.oracleDigest) throw new Error('LOCAL_PIN_MISMATCH');
   } else if (await fileDigest(profile.checkerFile!) !== profile.checkerDigest ||
     await fileDigest(profile.oracleFile!) !== profile.oracleDigest) throw new Error('LOCAL_PIN_MISMATCH');
   if (profile.checkerId === 'dispatch-lab' && (!profile.cases ||
@@ -193,22 +319,50 @@ process.stdout.write(JSON.stringify(values));`;
 /** Exported so the owner fixture can pin the exact child argv in its profile. */
 export const dispatchArgv = ['--input-type=module', '-e', candidateCode, '{repo}/dispatch.mjs'];
 
-export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string, unit = 'all'): Promise<{ outcome: CheckOutcome; log: string; score: { matched: number; total: number } | null }> {
+export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string, unit = 'all',
+  beforeSpawnCopy?: (copy: string) => Promise<void>): Promise<{ outcome: CheckOutcome; log: string; score: { matched: number; total: number } | null }> {
   checkProfile(job, profile);
   if (profile.kind === 'command') {
-    if (resolve(profile.executable!).startsWith(resolve(repo) + sep)) throw new Error('CHECKER_IN_CANDIDATE');
+    const executable = await verifyCommandSource(profile, repo);
     const env: NodeJS.ProcessEnv = {};
     for (const name of profile.env!) if (process.env[name] !== undefined) env[name] = process.env[name];
     const values = [...new Set(profile.env!.map(name => process.env[name]).filter((value): value is string => !!value))]
       .sort((a, b) => b.length - a.length);
-    const result = await command(profile.executable!, profile.argv!, repo, profile.timeoutSeconds! * 1000,
-      env, { outputCap: profile.outputCap!, tail: true, redact: values });
-    const output = result.outputTail ?? '';
-    const prefix = `exit=${result.code}${result.timedOut ? ' timeout' : ''}\n`;
-    const remaining = profile.outputCap! - Buffer.byteLength(prefix);
-    const bytes = Buffer.from(output);
-    return { outcome: result.timedOut || result.code !== 0 ? 'FAIL' : 'PASS',
-      log: prefix + bytes.subarray(Math.max(0, bytes.length - remaining)).toString('utf8'), score: null };
+    const privateDir = await mkdtemp(join(tmpdir(), 'concord-checker-'));
+    try {
+      const copy = join(privateDir, 'checker');
+      await copyFile(executable, copy);
+      if ((await executableSnapshot(copy)).sha256 !== profile.sourceSnapshot!.sha256)
+        throw new Error('ENV_ERROR: executable sha256');
+      // macOS rejects relocated platform binaries unless the copy has its own signature.
+      if (process.platform === 'darwin') {
+        const handle = await open(copy, 'r');
+        const magic = Buffer.alloc(4);
+        try { await handle.read(magic, 0, 4, 0); } finally { await handle.close(); }
+        if (['feedface', 'feedfacf', 'cefaedfe', 'cffaedfe', 'cafebabe', 'bebafeca'].includes(magic.toString('hex'))) {
+          const signed = await command('/usr/bin/codesign', ['--force', '--sign', '-', copy], privateDir, 30_000);
+          if (signed.code !== 0 || signed.timedOut) throw new Error('ENV_ERROR: executable signing');
+        }
+      }
+      await chmod(copy, 0o500);
+      const before = await executableSnapshot(copy);
+      await verifyCommandSource(profile, repo);
+      const hostLine = await commandHostLine(profile, before.sha256);
+      if (beforeSpawnCopy) await beforeSpawnCopy(copy);
+      const result = await command(copy, profile.argv!, repo, profile.timeoutSeconds! * 1000,
+        env, { outputCap: profile.outputCap!, tail: true, redact: values });
+      let after: ExecutableSnapshot;
+      try { after = await executableSnapshot(copy); }
+      catch { throw new Error('ENV_ERROR: COMMAND_SWAPPED'); }
+      if (!sameExecutable(before, after)) throw new Error('ENV_ERROR: COMMAND_SWAPPED');
+      await verifyCommandSource(profile, repo);
+      const output = result.outputTail ?? '';
+      const prefix = `${hostLine}exit=${result.code}${result.timedOut ? ' timeout' : ''}\n`;
+      const remaining = profile.outputCap! - Buffer.byteLength(prefix);
+      const bytes = Buffer.from(output);
+      return { outcome: result.timedOut || result.code !== 0 ? 'FAIL' : 'PASS',
+        log: prefix + bytes.subarray(Math.max(0, bytes.length - remaining)).toString('utf8'), score: null };
+    } finally { await rm(privateDir, { recursive: true, force: true }); }
   }
   if (profile.checkerId === 'dispatch-lab') {
     const caseId = (job as Job & { caseId?: string }).caseId;
