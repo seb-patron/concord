@@ -427,47 +427,53 @@ describe('repository and change lifecycle', () => {
     expect(ids(['file:dispatch.mjs', 'row:families:gamma'], 'unitKeys')).toEqual(['file:dispatch.mjs', 'row:families:gamma']);
   });
 
-  it('enforces the owner-configured active-change limit and reports the effective limit', async () => {
-    const makeReady = async (name: string) => {
-      const repo = await create(name);
-      await fetchApi(apiRequest(`/v1/repos/${name}`));
-      await fake(name, provider => {
-        provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
-        provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
-      });
-    };
-    const createChange = (name: string, index: number) => fetchApi(mutation(`/v1/repos/${name}/changes`, {
-      intentKey: `task-${index}`, intentText: `task ${index}`, baseOid: a,
-      branch: `refs/heads/task-${index}`, unitKeys: [], dependencyChangeIds: [],
-    }, `${name}-change-${index}`));
+  const makeReady = async (name: string) => {
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+  };
+  const createChange = (name: string, index: number) => fetchApi(mutation(`/v1/repos/${name}/changes`, {
+    intentKey: `task-${index}`, intentText: `task ${index}`, baseOid: a,
+    branch: `refs/heads/task-${index}`, unitKeys: [], dependencyChangeIds: [],
+  }, `${name}-change-${index}`));
 
-    const plain = 'limit_default_case';
-    await makeReady(plain);
-    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${plain}`)))).data.activeChangeLimit).toBe(32);
-    for (let index = 0; index < 32; index++) expect((await createChange(plain, index)).status).toBe(201);
-    const denied = await createChange(plain, 32);
+  it('enforces the default active-change limit of 32', async () => {
+    const name = 'limit_default_case';
+    await makeReady(name);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data.activeChangeLimit).toBe(32);
+    for (let index = 0; index < 32; index++) expect((await createChange(name, index)).status).toBe(201);
+    const denied = await createChange(name, 32);
     expect(denied.status).toBe(429);
     const deniedBody = await responseBody(denied);
     expect(deniedBody.error.code).toBe('CHANGE_LIMIT');
     expect(deniedBody.error.details).toEqual({ limit: 32, active: 32 });
+  });
 
+  it('enforces an installed maxActiveChangesPerRepo above the default', async () => {
     (env as Env).TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'),
-      costLimits: { maxActiveChangesPerRepo: 40, activeChangeLimits: { limit_override_case: 2 } } });
-    const install = 'limit_install_case';
-    await makeReady(install);
-    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${install}`)))).data.activeChangeLimit).toBe(40);
-    for (let index = 0; index < 40; index++) expect((await createChange(install, index)).status).toBe(201);
-    const capped = await createChange(install, 40);
+      costLimits: { maxActiveChangesPerRepo: 34 } });
+    const name = 'limit_install_case';
+    await makeReady(name);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data.activeChangeLimit).toBe(34);
+    for (let index = 0; index < 34; index++) expect((await createChange(name, index)).status).toBe(201);
+    const capped = await createChange(name, 34);
     expect(capped.status).toBe(429);
     const cappedBody = await responseBody(capped);
     expect(cappedBody.error.code).toBe('CHANGE_LIMIT');
-    expect(cappedBody.error.details).toEqual({ limit: 40, active: 40 });
+    expect(cappedBody.error.details).toEqual({ limit: 34, active: 34 });
+  });
 
-    const override = 'limit_override_case';
-    await makeReady(override);
-    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${override}`)))).data.activeChangeLimit).toBe(2);
-    for (let index = 0; index < 2; index++) expect((await createChange(override, index)).status).toBe(201);
-    const refused = await createChange(override, 2);
+  it('enforces a per-repo activeChangeLimits override', async () => {
+    (env as Env).TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'),
+      costLimits: { activeChangeLimits: { limit_override_case: 2 } } });
+    const name = 'limit_override_case';
+    await makeReady(name);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data.activeChangeLimit).toBe(2);
+    for (let index = 0; index < 2; index++) expect((await createChange(name, index)).status).toBe(201);
+    const refused = await createChange(name, 2);
     expect(refused.status).toBe(429);
     const refusedBody = await responseBody(refused);
     expect(refusedBody.error.code).toBe('CHANGE_LIMIT');
