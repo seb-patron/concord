@@ -1,13 +1,13 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { parseReplayJsonl } from './schema.ts';
-import { buildReplayReport, renderHtml, unavailableReport } from './report.ts';
+import { buildReplayReport, buildGithubBaseline, renderGithubBaselineTable, renderHtml, unavailableReport } from './report.ts';
 import { runAbReport } from './ab-report.ts';
 import { ManifestError, parseManifest } from './manifest.ts';
 import { replaySerial } from './serial.ts';
 
 function usage(): never {
-  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH | replay serial --manifest PATH --repo PATH --out PATH [--validation-timeout SECONDS] [--keep] | replay ab-report --serial S.json [--serial ...] --swarm L.jsonl [--swarm ...] --metrics M.json [--metrics ...] [--manifest manifest.json] [--monday monday.json] --out card.html|card.json');
+  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH | replay baseline --input PATH | replay serial --manifest PATH --repo PATH --out PATH [--validation-timeout SECONDS] [--keep] | replay ab-report --serial S.json [--serial ...] --swarm L.jsonl [--swarm ...] --metrics M.json [--metrics ...] [--manifest manifest.json] [--monday monday.json] --out card.html|card.json');
 }
 function args(argv: string[]): { command: string; values: Map<string, string | true> } {
   const command = argv[0];
@@ -62,6 +62,12 @@ async function main(): Promise<void> {
     const data = parseReplayJsonl(await readFile(required(values, '--input'), 'utf8'));
     console.log(`Valid provenance-bearing historical export: ${data.header.exportId} (${data.events.length} events, ${data.header.selected.taskIds.length} selected tasks)`);
     console.log('Owner release reference is attested provenance; the underlying private source was not independently verified.');
+    return;
+  }
+  if (command === 'baseline') {
+    const data = parseReplayJsonl(await readFile(required(values, '--input'), 'utf8'));
+    if (data.header.sourceType !== 'pr_history') throw new Error(`replay baseline requires a pr_history export; this file has sourceType ${data.header.sourceType}`);
+    console.log(renderGithubBaselineTable(buildGithubBaseline(data), { cohortId: data.header.selected.cohortId, window: data.header.selected.window }));
     return;
   }
   if (command !== 'compare') usage();

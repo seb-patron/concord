@@ -18,6 +18,7 @@
     "git-bridge": "tsx local/git-bridge.ts",
     "aw-mock": "tsx adapters/aw-mock.ts",
     "replay": "tsx replay/main.ts",
+    "replay:export-github": "tsx replay/github-export.ts",
     "demo": "tsx demo/main.ts",
     "mirror": "tsx deploy/mirror.ts",
     "deploy:check": "tsx deploy/preflight.ts",
