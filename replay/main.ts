@@ -2,9 +2,10 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { parseReplayJsonl } from './schema.ts';
 import { buildReplayReport, renderHtml, unavailableReport } from './report.ts';
+import { runAbReport } from './ab-report.ts';
 
 function usage(): never {
-  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH');
+  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH | replay ab-report --serial S.json [--serial ...] --swarm L.jsonl [--swarm ...] --metrics M.json [--metrics ...] [--manifest manifest.json] [--monday monday.json] --out card.html|card.json');
 }
 function args(argv: string[]): { command: string; values: Map<string, string | true> } {
   const command = argv[0];
@@ -37,6 +38,7 @@ async function writeReport(path: string, report: ReturnType<typeof unavailableRe
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'ab-report') return runAbReport(process.argv.slice(3));
   const { command, values } = args(process.argv.slice(2));
   if (command === 'validate') {
     const data = parseReplayJsonl(await readFile(required(values, '--input'), 'utf8'));
