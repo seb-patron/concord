@@ -1,15 +1,14 @@
 import { createFrictionIssue, newIdempotencyKey, redactError, updateIssue } from './api.js';
-import { liveLeaseHolders } from './views.js';
+import { liveLeaseHolders, trackerLaneForIssue, trackerLaneNames } from './views.js';
 
-const lanes = [
+const laneHints = new Map([
   ['Ready to claim', 'Open issues whose units are free. `concord next` hands these out.'],
-  ['Awaiting claim', 'A draft change exists, but no live lease is held.'],
   ['Claimed', 'An agent holds the units. Nobody else can edit them.'],
-  ['Checking & review', 'Inspection or independent review is in progress. Ready means inspected and awaiting review.'],
-  ['Queued', 'Approved and waiting for Concord to check or land it. A changed main blocks stale entries.'],
-  ['Blocked', 'This attempt needs repair before it can continue.'],
+  ['Checking & review', 'Inspection or independent review is in progress.'],
+  ['Queued', 'Approved and waiting for Concord to check or land it.'],
   ['Landed', 'On main. Issue closed by the land.'],
-];
+]);
+const lanes = trackerLaneNames.map(name => [name, laneHints.get(name)]);
 const arr = value => Array.isArray(value) ? value : [];
 const el = (tag, value, className) => {
   const item = document.createElement(tag);
@@ -97,13 +96,11 @@ export function trackerModel(snapshot, events = [], identity = null, milestoneId
     const holder = holders.join(', ') || null;
     const agent = active?.authorId ?? linked[0]?.authorId ?? null;
     const landed = issue.state === 'closed' && !!issue.closedBy;
-    const stage = landed || queue?.state === 'landed' || current?.status === 'merged' ? 'Landed' :
-      ['blocked', 'failed'].includes(queue?.state) || active?.status === 'blocked' ? 'Blocked' :
-      queue?.state === 'checking' || active?.status === 'checking' ? 'Checking & review' :
-        ['admitted', 'reserved'].includes(queue?.state) || active?.status === 'queued' ? 'Queued' :
-          active?.status === 'ready' ? 'Checking & review' :
-            leases.length ? 'Claimed' :
-              active ? 'Awaiting claim' : 'Ready to claim';
+    const queueState = queue?.blockedReason === 'STALE_MAIN' ? 'stale' : queue?.state;
+    const lane = trackerLaneForIssue({ status: active?.status ?? current?.status, queueState,
+      hasLease: leases.length > 0, landed: landed || current?.status === 'merged' || queue?.state === 'landed', issueState: issue.state });
+    const stage = lane.lane;
+    const statusBadge = lane.badge ?? (active && !leases.length && active.status === 'draft' ? 'awaiting-claim' : null);
     const units = leases.length ? leases.map(item => item.unitKey) : arr(active?.unitKeys).length ? active.unitKeys : arr(issue.allowedFiles);
     const unitOwners = leases.map(item => ({ unitKey: item.unitKey, holderId: item.holderId }));
     const expiry = leases.length ? Math.min(...leases.map(item => item.expiresAt)) : null;
@@ -119,12 +116,12 @@ export function trackerModel(snapshot, events = [], identity = null, milestoneId
           timestamp: verdict.timestamp ?? null, actorId: verdict.reviewerId, verdict });
     }
     const principal = arr(principals).find(item => item.id === (holders[0] ?? agent) || item.principalId === (holders[0] ?? agent));
-    return { issue, stage, holder, holders, agent, harness: principal?.name ?? active?.authorModel ?? active?.model ?? '', units,
+    return { issue, stage, statusBadge, holder, holders, agent, harness: principal?.name ?? active?.authorModel ?? active?.model ?? '', units,
       expiry, meta: landed ? time(timeline.findLast(e => e.kind === 'issue.closed')?.timestamp) :
-        stage === 'Blocked' ? queue?.blockedReason ?? active?.code ?? 'repair required' :
+        ['blocked', 'failed', 'stale', 'needs-decision'].includes(statusBadge) ? queue?.blockedReason ?? statusBadge :
           stage === 'Queued' && carried ? 'carried approval' :
       stage === 'Claimed' && expiry ? leaseTimeLeft(expiry, now) :
-        stage === 'Ready to claim' ? 'free' : stage === 'Checking & review' ? 'review' : '',
+        stage === 'Ready to claim' ? 'free' : stage === 'Checking & review' ? 'review' : statusBadge ?? '',
       timeline, leases, unitOwners, queue, change: current, changeIds: linkedIds };
   });
   const todayEvents = events.filter(event => today(event.timestamp, now));
@@ -260,6 +257,7 @@ export function createTracker(root, callbacks) {
         const item = keyed(button('', () => { selected = card.issue.number; editing = false; issueOpen = false; render(context); }, 'tracker-card'), `card-${card.issue.number}`);
         item.setAttribute('aria-pressed', String(selected === card.issue.number));
         item.append(el('strong', `#${card.issue.number} ${card.issue.title}`));
+        if (card.statusBadge) item.append(el('span', card.statusBadge, 'tracker-status-badge'));
         const chips = el('span', null, 'tracker-chips'); for (const [index, unit] of card.units.entries()) {
           const owner = card.holders.length > 1 ? card.unitOwners[index]?.holderId : null;
           chips.append(el('code', owner ? `${unit} · ${owner}` : unit));

@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
-const { canRender, deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
+const { canRender, deriveInbox, normalizeDiagnosis, pickTheme, trackerLaneForIssue, trackerLaneNames, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders, changeNextAction } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
 
@@ -15,6 +15,29 @@ describe('view access', () => {
     expect(canRender({ identity: { authMethod: 'access' } })).toBe(true);
     expect(canRender({ publicRead: true })).toBe(true);
     expect(canRender({})).toBe(false);
+  });
+});
+
+describe('Work UI theme and tracker lanes', () => {
+  it('uses light for missing or invalid theme preferences and defines both token sets', () => {
+    for (const value of [null, '', 'garbage', 'light', 'DARK']) expect(pickTheme(value)).toBe('light');
+    expect(pickTheme('dark')).toBe('dark');
+    const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+    for (const selector of [':root{', ':root[data-theme="dark"]{']) {
+      const start = css.indexOf(selector);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = css.indexOf('}', start);
+      const block = css.slice(start, end);
+      for (const token of ['--page:', '--text:', '--card:', '--border:', '--header:']) expect(block).toContain(token);
+    }
+    const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+    for (const label of ['Code', 'Tracker', 'Milestones', 'In flight']) expect(html).toContain(`>${label}</button>`);
+    expect(html).toMatch(/id="theme-toggle"[^>]*aria-label="[^"]+"/);
+  });
+  it('keeps five ordered lanes and badges exceptional states in their work lane', () => {
+    expect(trackerLaneNames).toEqual(['Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed']);
+    expect(trackerLaneForIssue({ status: 'blocked', hasLease: true })).toEqual({ lane: 'Claimed', badge: 'blocked' });
+    expect(trackerLaneForIssue({ status: 'stale', queueState: 'queued' })).toEqual({ lane: 'Queued', badge: 'stale' });
   });
 });
 
@@ -205,13 +228,16 @@ describe('Fleet desk DOM', () => {
           expect((doc.getElementById('access-logout') as HTMLAnchorElement).href).toBe('https://example.cloudflareaccess.com/cdn-cgi/access/logout');
           expect(requests.every(request => request.authorization === null)).toBe(true);
           expect(doc.getElementById('tracker-view')!.hidden).toBe(false);
-          for (const view of ['code', 'tracker', 'milestones', 'desk', 'inbox']) {
+          for (const view of ['code', 'tracker', 'milestones', 'desk']) {
             (doc.querySelector(`[data-main-view="${view}"]`) as HTMLButtonElement).click();
             expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe(view);
             expect(doc.querySelector(`[data-main-view="${view}"]`)!.getAttribute('aria-current')).toBe('true');
             const visibleSection = view === 'desk' ? 'desk-view' : `${view}-view`;
             expect(doc.getElementById(visibleSection)!.hidden).toBe(false);
           }
+          (doc.getElementById('inbox-alert') as HTMLButtonElement).click();
+          expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe('inbox');
+          expect(doc.getElementById('inbox-view')!.hidden).toBe(false);
         }
       } finally {
         Object.assign(globalThis, previous);
@@ -401,7 +427,7 @@ describe('Fleet desk DOM', () => {
       expect(byId('tracker-view').hidden).toBe(false);
       expect(byId('tracker-view').textContent).toContain('#1 <task>');
       expect(byId('tracker-view').querySelector('task')).toBeNull();
-      expect([...doc.querySelectorAll('[data-main-view]')].map((button: any) => button.textContent)).toEqual(['Code', 'Tracker', 'Milestones', 'Fleet desk', 'Inbox']);
+      expect([...doc.querySelectorAll('[data-main-view]')].map((button: any) => button.textContent)).toEqual(['Code', 'Tracker', 'Milestones', 'In flight']);
       expect(byId('inbox-alert').hidden).toBe(false);
       (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
       expect(byId('desk-view').hidden).toBe(false);
@@ -645,7 +671,7 @@ describe('Fleet desk DOM', () => {
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
 
-      (doc.querySelector('[data-main-view="inbox"]') as HTMLButtonElement).click();
+      (byId('inbox-alert') as HTMLButtonElement).click();
       (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
       (byId('repo-select') as HTMLSelectElement).value = 'second';
       byId('repo-select').dispatchEvent(new dom.window.Event('change', { bubbles: true }));

@@ -165,7 +165,7 @@ describe('Repository tracker', () => {
     }
     expect(observed.length).toBeLessThanOrEqual(500);
     expect(stats[0][2][0].expiresAt).toBeGreaterThan(midnight);
-    expect(model.cards.find((card: any) => card.issue.number === 7)?.stage).toBe('Awaiting claim');
+    expect(model.cards.find((card: any) => card.issue.number === 7)?.stage).toBe('Ready to claim');
     expect(model.friction.some((row: any) => row.event?.kind === 'runner.result')).toBe(false);
     expect(trackerModel(snapshot, records, null, 'm', midnight).friction.some((row: any) => row.event?.kind === 'runner.result')).toBe(true);
   });
@@ -177,15 +177,15 @@ describe('Repository tracker', () => {
       { changeId: 'new', issueNumber: 7, status: 'draft', revision: 2 });
     snapshot.data.projections.queue.entries.push({ changeId: 'old', admittedRevision: 1, state: 'blocked', blockedReason: 'STALE_MAIN' });
     let card = trackerModel(snapshot, [], null, 'm', now).cards.find((item: any) => item.issue.number === 7);
-    expect(card.stage).toBe('Awaiting claim');
+    expect(card.stage).toBe('Ready to claim');
     expect(card.meta).not.toBe('STALE_MAIN');
     snapshot.data.projections.queue.entries.push({ changeId: 'new', admittedRevision: 1, state: 'blocked', blockedReason: 'OLD_REVISION' });
     card = trackerModel(snapshot, [], null, 'm', now).cards.find((item: any) => item.issue.number === 7);
-    expect(card.stage).toBe('Awaiting claim');
+    expect(card.stage).toBe('Ready to claim');
     snapshot.data.projections.queue.entries.push({ changeId: 'new', admittedRevision: 2, state: 'blocked', blockedReason: 'CHECK_FAILED' });
     snapshot.data.projections.repos.changes.at(-1).status = 'ready';
     card = trackerModel(snapshot, [], null, 'm', now).cards.find((item: any) => item.issue.number === 7);
-    expect(card).toMatchObject({ stage: 'Blocked', meta: 'CHECK_FAILED' });
+    expect(card).toMatchObject({ stage: 'Checking & review', statusBadge: 'blocked', meta: 'CHECK_FAILED' });
   });
   it('uses the newest terminal change when an older withdrawn attempt has a blocked entry', () => {
     const snapshot = structuredClone(data) as any;
@@ -200,12 +200,12 @@ describe('Repository tracker', () => {
   it('classifies lane rules by current revision and state priority', () => {
     const cases = [
       ['reserved ready', 'ready', 'reserved', 2, 'Queued'],
-      ['blocked entry before ready', 'ready', 'blocked', 2, 'Blocked'],
+      ['blocked entry before ready', 'ready', 'blocked', 2, 'Checking & review'],
       ['landed entry before merged status', 'ready', 'landed', 2, 'Landed'],
       ['ready after inspection', 'ready', undefined, 2, 'Checking & review'],
       ['checking entry', 'checking', 'checking', 2, 'Checking & review'],
       ['queued change', 'queued', undefined, 2, 'Queued'],
-      ['draft awaits lease', 'draft', undefined, 2, 'Awaiting claim'],
+      ['draft awaits lease', 'draft', undefined, 2, 'Ready to claim'],
     ] as const;
     for (const [label, status, queueState, revision, expected] of cases) {
       const snapshot = structuredClone(data) as any;
@@ -214,6 +214,8 @@ describe('Repository tracker', () => {
       if (queueState) snapshot.data.projections.queue.entries.push({ changeId: 'case', revision, state: queueState, blockedReason: 'CHECK_FAILED' });
       const card = trackerModel(snapshot, [], null, 'm', now).cards.find((item: any) => item.issue.number === 7);
       expect(card.stage, label).toBe(expected);
+      if (label === 'blocked entry before ready') expect(card.statusBadge).toBe('blocked');
+      if (label === 'draft awaits lease') expect(card.statusBadge).toBe('draft');
     }
     const manuallyClosed = structuredClone(data) as any;
     manuallyClosed.data.projections.issues.items.push({ number: 9, state: 'closed', closedBy: null, labels: [] });

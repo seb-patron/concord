@@ -4,7 +4,7 @@ import {
   putSettings, redactError, redactText, setSessionToken, setAnonymousReadBudget, submitHumanApproval, submitVerdict, withdrawChange,
 } from './api.js';
 import {
-  boardStage, canRender, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
+  boardStage, canRender, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence, pickTheme,
   liveLeaseHolders, normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
 import { createRepoPage } from './repo.js';
@@ -13,6 +13,9 @@ import { createVerdictLoader } from './verdicts.js';
 import { renderMilestones } from './milestones.js';
 
 const $ = id => document.getElementById(id);
+let initialTheme = 'light';
+try { initialTheme = pickTheme(window.localStorage.getItem('concord-theme')); } catch { initialTheme = 'light'; }
+document.documentElement.dataset.theme = initialTheme;
 const repoPage = createRepoPage($('code-view'));
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
@@ -100,6 +103,7 @@ function showSession() {
   $('signed-out').hidden = signedIn;
   $('desk').hidden = !signedIn;
   $('repo-picker').hidden = !signedIn;
+  $('repo-separator').hidden = !signedIn;
   $('principal').hidden = !signedIn;
   $('token-clear').hidden = !signedIn || access || publicMode;
   $('access-logout').hidden = !signedIn || !access;
@@ -737,6 +741,8 @@ function render() {
     showSession();
     if (!canRender({ token: hasToken(), identity: state.identity, publicRead: state.publicRead }) || !state.identity) return;
     $('desk').dataset.mainViewActive = state.view;
+    const mainOid = projections().repos?.repo?.observedCanonicalOid;
+    $('env-badge').textContent = `${state.connected ? 'Live' : 'Offline'} · main ${mainOid ? String(mainOid).slice(0, 7) : '—'}`;
     const sections = { code: $('code-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
     for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
     $('stat-strip').hidden = state.view !== 'desk';
@@ -872,6 +878,17 @@ function boot() {
   $('demo-open').addEventListener('click',()=>{if(demo) void signIn(demo,window.CONCORD_DEMO_REPO_ID);});
   $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value;if(!token)return;const invalid=token.search(/[^\x21-\x7E]/);if(invalid!==-1){sessionError(`The pasted token has a space, line break or non-ASCII character at position ${invalid+1}; copy it again.`);return;}void signIn(token);});
   $('token-clear').addEventListener('click',()=>signOut());
+  const themeToggle = $('theme-toggle');
+  themeToggle.textContent = initialTheme === 'dark' ? 'Light mode' : 'Dark mode';
+  themeToggle.setAttribute('aria-label', initialTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+  themeToggle.addEventListener('click',()=>{
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { window.localStorage.setItem('concord-theme', next); }
+    catch { document.documentElement.dataset.theme = 'light'; themeToggle.textContent = 'Dark mode'; themeToggle.setAttribute('aria-label', 'Switch to dark mode'); return; }
+    document.documentElement.dataset.theme = next;
+    themeToggle.textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
+    themeToggle.setAttribute('aria-label', next === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+  });
   $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; state.view='tracker'; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
@@ -900,7 +917,7 @@ function boot() {
     if (body?.data?.authMethod === 'access' && !hasToken()) void signIn(null, null, body.data);
     else tryPublicRead();
   }).catch(tryPublicRead);
-  void getHealth().then(body=>{state.accessSignIn=body?.data?.accessSignIn===true;showSession();const info=environmentBadge(body?.data,false);$('env-badge').textContent=info.label==='live Artifacts'?'Live · Cloudflare Artifacts':info.label;}).catch(()=>{$('env-badge').textContent='Backend unavailable';});
+  void getHealth().then(body=>{state.accessSignIn=body?.data?.accessSignIn===true;showSession();render();}).catch(()=>{$('env-badge').textContent='Backend unavailable';});
   render();
 }
 boot();

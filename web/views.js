@@ -14,6 +14,29 @@ export function safeText(value) {
   return String(value);
 }
 
+/** Only an explicit dark preference selects dark mode. */
+export function pickTheme(stored) {
+  return stored === 'dark' ? 'dark' : 'light';
+}
+
+export const trackerLaneNames = Object.freeze([
+  'Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed',
+]);
+
+/** Keep exceptional states visible as badges while placing every issue in a board lane. */
+export function trackerLaneForIssue({ status, queueState, hasLease = false, landed = false, issueState } = {}) {
+  const exceptional = ['blocked', 'failed', 'stale', 'needs-decision', 'needs_decision', 'awaiting-claim', 'draft'];
+  const states = [queueState, status, issueState].filter(value => typeof value === 'string');
+  const known = ['open', 'closed', 'checking', 'ready', 'queued', 'admitted', 'reserved', 'landed', 'merged', 'superseded', 'withdrawn', ...exceptional];
+  const badgeState = states.find(value => exceptional.includes(value)) ?? states.find(value => !known.includes(value));
+  let lane = 'Ready to claim';
+  if (landed || issueState === 'closed' || status === 'merged' || queueState === 'landed') lane = 'Landed';
+  else if (['admitted', 'reserved', 'queued', 'stale'].includes(queueState) || status === 'queued') lane = 'Queued';
+  else if (['checking', 'ready'].includes(status) || queueState === 'checking') lane = 'Checking & review';
+  else if (hasLease) lane = 'Claimed';
+  return { lane, badge: badgeState ? String(badgeState).replaceAll('_', '-') : null };
+}
+
 /** Whether the current browser session may render repository views. */
 export function canRender({ token, identity, publicRead }) {
   return !!token || identity?.authMethod === 'access' || !!publicRead;

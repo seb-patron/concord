@@ -34,6 +34,9 @@ export function renderMilestones(ctx) {
   root.replaceChildren();
 
   const milestones = Array.isArray(snapshot.milestones) ? [...snapshot.milestones] : [];
+  const issues = Array.isArray(snapshot.items) ? snapshot.items : [];
+  const leaseProjection = ctx.snapshot?.data?.projections?.leases;
+  const heldLeases = Array.isArray(leaseProjection?.heldItems) ? leaseProjection.heldItems : [];
   milestones.sort((a, b) => Number(b.state === 'open') - Number(a.state === 'open') || a.title.localeCompare(b.title));
   const canCreate = ctx.roles.includes('owner') || (ctx.roles.includes('agent') && settings.create === 'agents');
   if (ctx.roles.includes('owner')) {
@@ -117,7 +120,29 @@ export function renderMilestones(ctx) {
     if (item.dueDate) card.append(element('p', `Due ${item.dueDate}`));
     card.append(element('p', item.description ?? '', 'milestone-description'));
     const progress = item.progress ?? {};
-    card.append(element('p', `${progress.openIssues ?? 0} open issues · ${progress.closedIssues ?? 0} closed issues · ${progress.landedChanges ?? 0} landed changes`, 'milestone-progress'));
+    const milestoneIssues = issues.filter(issue => issue.milestoneId === item.milestoneId);
+    const hasIssueRows = milestoneIssues.length > 0;
+    const linkedLanded = milestoneIssues.filter(issue => !!issue.closedBy || issue.changes?.some(change => ['merged', 'landed'].includes(change.status))).length;
+    const landedChanges = Number.isFinite(progress.landedChanges) ? progress.landedChanges : linkedLanded;
+    const landed = hasIssueRows ? linkedLanded : landedChanges;
+    const claimed = milestoneIssues.filter(issue => issue.state === 'open' && heldLeases.some(lease => lease.issueNumber === issue.number)).length;
+    const review = milestoneIssues.filter(issue => issue.state === 'open' &&
+      !heldLeases.some(lease => lease.issueNumber === issue.number) && issue.changes?.some(change => ['checking', 'ready', 'queued'].includes(change.status))).length;
+    const openIssues = milestoneIssues.filter(issue => issue.state === 'open' &&
+      !heldLeases.some(lease => lease.issueNumber === issue.number) &&
+      !issue.changes?.some(change => ['checking', 'ready', 'queued', 'merged', 'landed'].includes(change.status))).length;
+    const open = hasIssueRows ? openIssues : Number(progress.openIssues ?? 0);
+    const total = landed + claimed + review + open;
+    const bar = element('div', undefined, 'milestone-progress-bar');
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', `${landed} landed, ${review} in review, ${claimed} claimed, ${open} open`);
+    for (const [count, color, label] of [[landed, 'landed', 'Landed'], [review, 'review', 'In review'], [claimed, 'claimed', 'Claimed']]) {
+      const segment = element('span', undefined, `milestone-progress-segment ${color}`);
+      segment.style.width = total ? `${Math.round(100 * count / total)}%` : '0%';
+      segment.setAttribute('aria-label', `${label} ${count}`);
+      bar.append(segment);
+    }
+    card.append(bar, element('p', `Landed ${landed} · ${landedChanges} landed changes · In review ${review} · Claimed ${claimed} · Open ${open} · ${landed} / ${total} total`, 'milestone-progress'));
     list.append(card);
   }
   root.append(list);
