@@ -10,6 +10,7 @@
     "typecheck": "sh scripts/validate.sh --test-count && tsc --noEmit",
     "test": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
     "test:target": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
+    "decisions": "node --import tsx scripts/decision-status.ts",
     "dev": "wrangler dev --config wrangler.local.jsonc",
     "concord": "tsx cli/main.ts",
     "mcp": "node --import tsx mcp/server.ts",
