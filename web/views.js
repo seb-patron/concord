@@ -14,6 +14,11 @@ export function safeText(value) {
   return String(value);
 }
 
+/** Whether the current browser session may render repository views. */
+export function canRender({ token, identity, publicRead }) {
+  return !!token || identity?.authMethod === 'access' || !!publicRead;
+}
+
 /** True when text contains markup-looking content (rendered literally, never parsed). */
 export function looksLikeMarkup(value) {
   return /[<>&]/.test(safeText(value));

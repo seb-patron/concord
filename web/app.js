@@ -4,7 +4,7 @@ import {
   putSettings, redactError, redactText, setSessionToken, setAnonymousReadBudget, submitHumanApproval, submitVerdict, withdrawChange,
 } from './api.js';
 import {
-  boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
+  boardStage, canRender, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   liveLeaseHolders, normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
 import { createRepoPage } from './repo.js';
@@ -95,7 +95,7 @@ function preserve(render) {
 function sessionError(message) { $('session-error').textContent = message ?? ''; $('session-error').hidden = !message; }
 function showSession() {
   const publicMode = state.publicRead && !!state.identity && !!state.repoId;
-  const signedIn = ((hasToken() || state.identity?.authMethod === 'access') && !!state.identity) || publicMode;
+  const signedIn = canRender({ token: hasToken(), identity: state.identity, publicRead: publicMode }) && !!state.identity;
   const access = state.identity?.authMethod === 'access';
   $('signed-out').hidden = signedIn;
   $('desk').hidden = !signedIn;
@@ -735,7 +735,7 @@ function renderTabs() {
 function render() {
   preserve(()=>{
     showSession();
-    if ((!hasToken() && !state.publicRead) || !state.identity) return;
+    if (!canRender({ token: hasToken(), identity: state.identity, publicRead: state.publicRead }) || !state.identity) return;
     $('desk').dataset.mainViewActive = state.view;
     const sections = { code: $('code-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
     for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
@@ -888,7 +888,7 @@ function boot() {
     selectChange(next.dataset.changeId);$(next.id)?.focus();
   });
   window.setInterval(()=>{
-    if (!(hasToken() || state.identity?.authMethod === 'access' || state.publicRead) || !state.repoId) return;
+    if (!canRender({ token: hasToken(), identity: state.identity, publicRead: state.publicRead }) || !state.repoId) return;
     if (state.publicRead && Date.now() - state.publicPollAt < 60_000) return;
     void poll();
   },1000);

@@ -5,9 +5,18 @@ import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
-const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
+const { canRender, deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders, changeNextAction } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
+
+describe('view access', () => {
+  it('allows token, Access and public sessions, but not anonymous private views', () => {
+    expect(canRender({ token: true })).toBe(true);
+    expect(canRender({ identity: { authMethod: 'access' } })).toBe(true);
+    expect(canRender({ publicRead: true })).toBe(true);
+    expect(canRender({})).toBe(false);
+  });
+});
 
 it('sends versioned settings and owner decisions to same-origin routes', async () => {
   const seen: Array<{ path: string; method: string; body: any }> = [];
@@ -167,7 +176,11 @@ describe('Fleet desk DOM', () => {
           logoutUrl: 'https://example.cloudflareaccess.com/cdn-cgi/access/logout' } } :
           { error: { code: 'UNAUTHORIZED' } }), { status: access ? 200 : 401 });
         if (url === '/v1/me') return Response.json({ data: { principalId: 'phone-owner', roles: ['owner'], repoIds: '*' } });
-        if (url === '/v1/repos') return Response.json({ data: { items: [] } });
+        if (url === '/v1/repos') return Response.json({ data: { items: access ? [{ repoId: 'access-repo' }] : [] } });
+        if (url === '/v1/repos/access-repo/snapshot') return Response.json({ data: { projections: {} }, version: 0, eventSeq: 0 });
+        if (url.startsWith('/v1/repos/access-repo/events')) return Response.json({ data: { items: [] }, version: 0, eventSeq: 0 });
+        if (url.startsWith('/v1/repos/access-repo/metrics')) return new Response('', { status: 404 });
+        if (url === '/v1/principals') return Response.json({ data: { items: [] } });
         return Response.json({ data: { mode: 'production', storageBackend: 'artifacts' } });
       }) as any;
       try {
@@ -191,6 +204,14 @@ describe('Fleet desk DOM', () => {
           expect(doc.getElementById('principal')!.textContent).toBe('Signed in as phone-owner via Cloudflare Access');
           expect((doc.getElementById('access-logout') as HTMLAnchorElement).href).toBe('https://example.cloudflareaccess.com/cdn-cgi/access/logout');
           expect(requests.every(request => request.authorization === null)).toBe(true);
+          expect(doc.getElementById('tracker-view')!.hidden).toBe(false);
+          for (const view of ['code', 'tracker', 'milestones', 'desk', 'inbox']) {
+            (doc.querySelector(`[data-main-view="${view}"]`) as HTMLButtonElement).click();
+            expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe(view);
+            expect(doc.querySelector(`[data-main-view="${view}"]`)!.getAttribute('aria-current')).toBe('true');
+            const visibleSection = view === 'desk' ? 'desk-view' : `${view}-view`;
+            expect(doc.getElementById(visibleSection)!.hidden).toBe(false);
+          }
         }
       } finally {
         Object.assign(globalThis, previous);
