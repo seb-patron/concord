@@ -480,9 +480,9 @@ describe('Concord agent CLI client', () => {
         change = { ...options?.body, changeId: 'change', status: 'draft' }; return { data: change };
       }
       if (method === 'POST' && path === '/repos/demo/leases') {
-        expect(options?.body).toMatchObject({ unitKeys: ['file:families.tsv'], ttlSeconds: 7200 });
+        expect(options?.body).toMatchObject({ unitKeys: ['file:families.tsv'], ttlSeconds: 300 });
         lease = { changeId: 'change', leaseId: 'lease', unitKey: 'file:families.tsv', fence: 1,
-          expiresAt: Date.now() + 7200000, state: 'active' }; return { data: { leases: [lease] } };
+          expiresAt: Date.now() + 300000, state: 'active' }; return { data: { leases: [lease] } };
       }
       if (method === 'POST' && path === '/repos/demo/leases/lease/release') {
         lease = { ...lease, state: 'released' }; return { data: { lease } };
@@ -495,6 +495,7 @@ describe('Concord agent CLI client', () => {
     expect(await start(input)).toMatchObject({ changeId: 'change', leases: [{ fence: 1 }] });
     expect(calls.filter(call => call === 'POST /repos/demo/changes')).toHaveLength(2);
     expect(calls.filter(call => call === 'POST /repos/demo/leases')).toHaveLength(1);
+    expect(holdSeconds()).toBe(300);
     expect(await releaseByIntent('demo', 'task', client)).toEqual({ changeId: 'change', released: ['file:families.tsv'] });
     expect(holdSeconds('2h')).toBe(7200);
   });
@@ -559,9 +560,9 @@ describe('Concord agent CLI client', () => {
       }
       if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: {
         tables: [{ name: 'families', file: 'families.tsv' }], units: {} } } } }, version: 1 };
-      if (method === 'POST' && path === '/repos/demo/leases/lease/renew') {
-        lease = { ...lease, fence: 2, expiresAt: Date.now() + 7200_000 };
-        return { data: { lease } };
+      if (method === 'POST' && path === '/repos/demo/leases/renew-batch') {
+        lease = { ...lease, expiresAt: Date.now() + 300_000 };
+        return { data: { leases: [lease], reserved: [] } };
       }
       if (method === 'POST' && path === '/repos/demo/leases/lease/release') {
         lease = { ...lease, state: 'released' };
@@ -570,7 +571,7 @@ describe('Concord agent CLI client', () => {
       throw new Error(`unexpected ${method} ${path}: ${JSON.stringify(options?.body)}`);
     });
     const result = await start({ repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles, client: { request } as never });
-    expect(result).toMatchObject({ changeId: 'change', leases: [{ unitKey: 'file:families.tsv', fence: 2 }] });
+    expect(result).toMatchObject({ changeId: 'change', leases: [{ unitKey: 'file:families.tsv', fence: 1 }] });
     expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path === '/repos/demo/changes')).toHaveLength(1);
     expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toBe(false);
     expect(await releaseByIntent('demo', 'task', { request } as never)).toEqual({ changeId: 'change', released: ['file:families.tsv'] });
@@ -653,17 +654,18 @@ describe('Concord agent CLI client', () => {
       if (method === 'POST' && path === '/repos/demo/changes') return { data: change };
       if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [lease], nextCursor: null } };
       if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {}, version: 1 };
-      if (method === 'POST' && path === '/repos/demo/leases/lease/renew') {
-        expect(options?.body).toMatchObject({ fence: 1, ttlSeconds: 30 });
-        lease = { ...lease, fence: 2, expiresAt: Date.now() + 30_000 };
-        return { data: { lease } };
+      if (method === 'POST' && path === '/repos/demo/leases/renew-batch') {
+        expect(options?.body).toEqual({ changeId: 'change', ttlSeconds: 30 });
+        lease = { ...lease, expiresAt: Date.now() + 30_000 };
+        return { data: { leases: [lease], reserved: [] } };
       }
       throw new Error(`unexpected ${method} ${path}`);
     });
     const result = await start({ repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles,
       hold: '30s', client: { request } as never });
-    expect(result).toMatchObject({ changeId: 'change', leases: [{ fence: 2 }] });
-    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path.endsWith('/renew'))).toHaveLength(1);
+    expect(result).toMatchObject({ changeId: 'change', leases: [{ fence: 1 }] });
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path.endsWith('/renew-batch'))).toHaveLength(1);
+    expect(request.mock.calls.some(([method, path]) => method === 'GET' && path.endsWith('/snapshot'))).toBe(false);
   });
   it('reports a start conflict without retrying a partial claim', async () => {
     const dir = await tempDir('start-conflict'); const allowedFiles = join(dir, 'allowed.txt');

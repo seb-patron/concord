@@ -31,9 +31,9 @@ async function post(client: ConcordClient, path: string, body: Obj, version?: nu
     }
   }
 }
-export function holdSeconds(value = '2h'): number {
+export function holdSeconds(value = '5m'): number {
   const match = /^([1-9][0-9]*)([smh])$/.exec(value);
-  if (!match) throw new ConcordError('--hold must be a positive duration such as 2h', 'usage');
+  if (!match) throw new ConcordError('--hold must be a positive duration such as 5m or 30m', 'usage');
   const seconds = Number(match[1]) * ({ s: 1, m: 60, h: 3600 }[match[2]] ?? 1);
   if (!Number.isSafeInteger(seconds)) throw new ConcordError('--hold is too large', 'usage');
   return seconds;
@@ -108,12 +108,14 @@ export async function start(input: StartOptions): Promise<Obj> {
   }
   if (needed.some(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy))))
     throw new ConcordError('claim response did not cover every required unit', 'server');
-  for (const item of held) {
-    if (item.expiresAt > Date.now() + Math.max(ttlSeconds / 2, ttlSeconds - 60) * 1000) continue;
-    const version = (await get(client, `${root}/snapshot`)).version;
-    const renewed = (await post(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/renew`,
-      { fence: item.fence, ttlSeconds }, version)).data.lease;
-    Object.assign(item, renewed);
+  const needsRenewal = held.some(item => item.expiresAt <= Date.now() + Math.max(ttlSeconds / 2, ttlSeconds - 60) * 1000);
+  if (needsRenewal) {
+    const renewed = (await post(client, `${root}/leases/renew-batch`,
+      { changeId: change.changeId, ttlSeconds })).data.leases ?? [];
+    for (const item of renewed) {
+      const adopted = held.find(value => value.leaseId === item.leaseId || value.unitKey === item.unitKey);
+      if (adopted) Object.assign(adopted, item);
+    }
   }
   return { changeId: change.changeId, base: change.baseOid, leases: held, expiry: Math.min(...held.map(item => item.expiresAt)) };
 }

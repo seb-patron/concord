@@ -2,7 +2,7 @@
 
 Leases are scoped to one `RepoCoordinator` and its trusted policy. Times are server UTC milliseconds. All mutations require a bearer identity, `Idempotency-Key`, and a JSON body. Single-lease renew and release also require the coordinator's current `expectedVersion` and the lease's current `fence`.
 
-For a managing agent, call `concord start --repo R --intent-key K --intent TEXT --allowed-files FILE --hold 2h` before editing. Start opens the change and atomically claims whole-file units for the Allowed-files list. Work inside those units, then call `concord land` with the same intent key; land reuses live leases, or claims again after expiry, and the queue reserves their current fences. `concord release --repo R --intent-key K` releases active leases when abandoning the work. This flow needs no coordinator process to renew a two-hour hold.
+For a managing agent, call `concord start --repo R --intent-key K --intent TEXT --allowed-files FILE` before editing; the default hold is five minutes. Use `--hold` to request a longer hold up to the trusted server cap. Start opens the change and atomically claims whole-file units for the Allowed-files list. While editing, keep the hold alive with `concord renew --every 100` or MCP `lease_renew`. Then call `concord land` with the same intent key; land reuses live leases, renews all active leases in one batch every 100 seconds, or claims again after expiry, and the queue reserves their current fences. `concord release --repo R --intent-key K` releases active leases when abandoning the work.
 
 ## Unit identity
 
