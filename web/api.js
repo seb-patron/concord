@@ -17,6 +17,7 @@
 // Token lives in module memory only. Nothing here touches URL or storage.
 let sessionToken = null;
 let anonymousReadBudget = null;
+const snapshotCache = new Map();
 
 /** Set a shared request budget for credentialless repository reads. */
 export function setAnonymousReadBudget(available) {
@@ -25,12 +26,15 @@ export function setAnonymousReadBudget(available) {
 
 /** Store the session token in memory. Pass null/'' to forget it. */
 export function setSessionToken(token) {
-  sessionToken = typeof token === 'string' && token.length > 0 ? token : null;
+  const next = typeof token === 'string' && token.length > 0 ? token : null;
+  if (sessionToken !== next) snapshotCache.clear();
+  sessionToken = next;
 }
 
 /** Forget the session token. */
 export function clearSessionToken() {
   sessionToken = null;
+  snapshotCache.clear();
 }
 
 /** True when a session token is present in memory. */
@@ -94,12 +98,13 @@ export async function apiFetch(path, options = {}, fetchImpl = fetch) {
   if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || path.includes('\\') || !/^\/(?:v1(?:\/|\?|$)|health(?:\?|$))/.test(path)) {
     throw new ApiError(400, 'INVALID_PATH', 'Refusing non-local request path');
   }
-  const { method = 'GET', body, idempotencyKey } = options;
+  const { method = 'GET', body, idempotencyKey, ifNoneMatch, allowNotModified = false, onResponse } = options;
   if (anonymousReadBudget && method === 'GET' && path.startsWith('/v1/repos/') && !anonymousReadBudget()) {
     throw new ApiError(429, 'PUBLIC_READ_BUDGET', 'Public read request budget reached');
   }
   const headers = { accept: 'application/json' };
   if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
+  if (typeof ifNoneMatch === 'string' && ifNoneMatch) headers['if-none-match'] = ifNoneMatch;
   let payload;
   if (body !== undefined) {
     headers['content-type'] = 'application/json';
@@ -116,12 +121,14 @@ export async function apiFetch(path, options = {}, fetchImpl = fetch) {
     const message = error instanceof Error ? error.message : String(error);
     throw new ApiError(0, 'NETWORK_UNREACHABLE', `Network request failed: ${message}`, null, true);
   }
+  if (typeof onResponse === 'function') onResponse(response);
   let parsed = null;
   try {
     parsed = await response.json();
   } catch {
     parsed = null;
   }
+  if (allowNotModified && response.status === 304) return { notModified: true };
   if (!response.ok) {
     const failure = parsed && typeof parsed === 'object' ? parsed.error : null;
     const code = failure && typeof failure.code === 'string' ? failure.code : `HTTP_${response.status}`;
@@ -196,7 +203,15 @@ export function getVerdicts(repoId, changeId, cursor = null, fetchImpl) {
 }
 
 export function getSnapshot(repoId, fetchImpl) {
-  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/snapshot`, {}, fetchImpl);
+  const key = encodeURIComponent(repoId);
+  const cached = snapshotCache.get(key);
+  let etag = null;
+  return apiFetch(`/v1/repos/${key}/snapshot`, { ifNoneMatch: cached?.etag, allowNotModified: true,
+    onResponse: response => { etag = response.headers.get('etag'); } }, fetchImpl).then(result => {
+    if (result?.notModified) return cached?.body ?? apiFetch(`/v1/repos/${key}/snapshot`, {}, fetchImpl);
+    if (result && typeof result === 'object' && etag) snapshotCache.set(key, { etag, body: result });
+    return result;
+  });
 }
 
 export function getSettings(repoId, fetchImpl) {
