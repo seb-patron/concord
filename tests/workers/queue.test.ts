@@ -600,6 +600,59 @@ describe('queue with real lease hooks', () => {
 });
 
 describe('queue state machine', () => {
+  it('re-stacks a checking entry with a newly admitted change and lands both', async () => {
+    const h = await setup('A');
+    await h.tick();
+    const first = h.jobs[0];
+    if (first.kind !== 'validate-stack') throw new Error('expected stack job');
+    expect(first.candidates.map(candidate => candidate.changeId)).toEqual(['A']);
+    expect((await h.state()).entries[0].state).toBe('checking');
+
+    expect((await addChange(h, 'B')).response.status).toBe(201);
+    let state = await h.state();
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.stackMember]))
+      .toEqual([['A', 'reserved', false], ['B', 'reserved', false]]);
+    expect(state.activeStackJobId).toBeNull();
+
+    await h.tick();
+    const next = h.jobs[1];
+    if (next.kind !== 'validate-stack') throw new Error('expected re-stacked job');
+    expect(next.candidates.map(candidate => candidate.changeId)).toEqual(['A', 'B']);
+    expect((await h.deliver(first, 'PASS', { composed: oid('d') })))
+      .toMatchObject({ status: 'blocked', code: 'STALE_GENERATION' });
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['checking', 'checking']);
+    expect((await h.deliver(next, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A', 'B'] });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    await h.tick();
+    state = await h.state();
+    expect(state.entries.map((entry: any) => [entry.state, entry.blockedReason]))
+      .toEqual([['landed', null], ['landed', null]]);
+  });
+
+  it('withdrawing one stack member re-stacks the other', async () => {
+    const h = await setup('A', 'B');
+    await h.tick();
+    const first = h.jobs[0];
+    if (first.kind !== 'validate-stack') throw new Error('expected stack job');
+    expect(first.candidates.map(candidate => candidate.changeId)).toEqual(['A', 'B']);
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['checking', 'checking']);
+
+    const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'B', reason: 'cancel' });
+    expect(withdrawn.response.status).toBe(200);
+    expect((await h.state()).entries.map((entry: any) => [entry.changeId, entry.state]))
+      .toEqual([['A', 'reserved'], ['B', 'withdrawn']]);
+    await h.tick();
+    const next = h.jobs[1];
+    if (next.kind !== 'validate-stack') throw new Error('expected re-stacked job');
+    expect(next.candidates.map(candidate => candidate.changeId)).toEqual(['A']);
+    expect((await h.deliver(next, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A'] });
+  });
+
   it('merges 33 sequential landings, frees the active slot, and repairs an older landing', async () => {
     const h = harness;
     const unit = 'row:landed';

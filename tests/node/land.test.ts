@@ -1155,38 +1155,17 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   expect(secondAdmitted, `second queue entry was not admitted within 45s\nstderr tail:\n${stderrTails[1]}`).toBe(true);
   const attemptsWork = drive(Promise.all([firstAttempt, secondAttempt]));
   void attemptsWork.catch(() => {});
-  let staleMainBlocked = false;
-  const blockedDeadline = Date.now() + 150_000;
-  while (Date.now() < blockedDeadline) {
-    const queue = await api('/queue').catch(() => null);
-    if (queue?.data?.entries?.some((entry: any) => entry.state === 'blocked' && entry.blockedReason === 'STALE_MAIN') ||
-      stderrTails.some(output => output.includes('QUEUE_BLOCKED: STALE_MAIN'))) {
-      staleMainBlocked = true;
-      break;
-    }
-    const earlyExit = attemptOutcomes.find((attempt): attempt is { error: Error & { stdout?: string; stderr?: string } } =>
-      attempt !== undefined && 'error' in attempt);
-    if (earlyExit) {
-      const stderrTail = stderrTails[attemptOutcomes.indexOf(earlyExit)] || (earlyExit.error.stderr ?? '').slice(-6000);
-      throw new Error(`land child exited before queue showed STALE_MAIN: ${earlyExit.error.message}\nstderr tail:\n${stderrTail}`);
-    }
-    await new Promise(done => setTimeout(done, 150));
-  }
-  expect(staleMainBlocked, `queue did not become observably blocked with STALE_MAIN within 150s\nstderr tails:\n${stderrTails.join('\n--- child ---\n')}`).toBe(true);
   const attempts = await attemptsWork;
-  const merged = [];
   for (const [index, attempt] of attempts.entries()) {
-    if ('result' in attempt) { merged.push(attempt.result); continue; }
-    // execFile settles only after the child exits (or its 155s timeout); inspect both streams
-    // because the CLI diagnostic and Node warnings may be written to different streams.
-    const output = withoutNodeDeprecationWarnings([attempt.error.stdout, attempt.error.stderr].filter(Boolean).join('\n'));
-    expect(output, attempt.error.message).toContain('QUEUE_BLOCKED: STALE_MAIN');
-    const item = parallel[index];
-    const retryArgs = [...item.args]; retryArgs[retryArgs.indexOf('--intent-key') + 1] += '-retry';
-    merged.push(await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
-      ...retryArgs, '--review-evidence', item.review], { cwd: root, env: item.env, timeout: 155_000 })));
+    expect(attempt, `parallel land child ${index} failed`).toHaveProperty('result');
+    if (!('result' in attempt)) continue;
+    expect(attempt.result.stdout).toContain('"state":"landed"');
+    expect(attempt.result.stdout.toString() + attempt.result.stderr.toString()).not.toContain('STALE_MAIN');
   }
-  for (const item of merged) expect(item.stdout).toContain('"state":"landed"');
+  const parallelIds = (await api('/snapshot')).data.projections.repos.changes
+    .filter((change: any) => ['parallel-0', 'parallel-1'].includes(change.intentKey)).map((change: any) => change.changeId);
+  expect((await api('/queue')).data.entries.filter((entry: any) => parallelIds.includes(entry.changeId))
+    .map((entry: any) => entry.state)).toEqual(['landed', 'landed']);
   expect((await api('')).data.observedCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
   const sameFile = await Promise.all([1, 18].map(async (line, index) => {
     const checkout = await temp(); await git(checkout, 'clone', '-q', '-b', 'main', canonical, '.');
