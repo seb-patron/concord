@@ -1,5 +1,13 @@
 # Fleet desk
 
+## Repository Code page
+
+Choose a repository, then select **Code** in the repository navigation. **For humans** shows a directory browser pinned to the observed canonical `main` commit, a safely rendered subset of root `README.md`, live claim badges, latest recorded landing, About counts, and agents with active claims. Directory names open their children and file names preview bounded text. Missing main, README, and permission or read errors have explicit messages. Claims and work state are read-only here.
+
+**For agents** shows the `repo_context` JSON envelope (`GET /v1/repos/:r/snapshot`) with credential-shaped strings shown as `[REDACTED]`, matching the MCP output filter's fixed patterns, and the root `AGENTS.md` plus immediate `agents/*.md` files when present. Token counts are estimates, based on text length. Agent documents can be opened on this screen. Human README and docs are kept out of this panel. The displayed clone command uses the existing read-only `repo clone` CLI route. Both audiences use the same light cards and remain usable on a phone.
+
+The browser reads `GET /v1/repos/:r/tree`, `file`, and `readme`. Those routes accept an optional commit `oid`, reject unsafe paths, and return text only within 64 KiB. When the snapshot has no observed OID yet, the page resolves current canonical `main` through the content routes; later reads stay pinned to the returned OID while the snapshot continues to refresh for live state.
+
 For a local preview, run `npm ci --no-audit --no-fund`, then `npm run dev -- --persist-to .wrangler/state/local-ui`. Open `http://127.0.0.1:8787/`.
 
 Open the deployed `web/` page. With no token, Concord explains leases, exact-head checks, and bisection, then offers a password-type token field. The token stays in this tab's JavaScript memory. Sign out clears it. A read-only demo button appears only if the host explicitly sets `window.CONCORD_DEMO_VIEWER_TOKEN` (and optionally `window.CONCORD_DEMO_REPO_ID`) before `app.js` loads; there is no bundled demo token.

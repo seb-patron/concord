@@ -80,6 +80,82 @@ function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensur
 }
 
 describe('repository and change lifecycle', () => {
+  it('reads canonical directories, files and README at a pinned commit with bounded text', async () => {
+    const name = 'canonical_browse_case';
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] }, {
+        'README.md': new TextEncoder().encode('# Human <script>\n'),
+        'agents/rules.md': new TextEncoder().encode('agent rules'),
+        'line\nbreak.md': new TextEncoder().encode('newline'),
+        'foo..bar.md': new TextEncoder().encode('dots'),
+        'a:b': new TextEncoder().encode('colon'),
+        'a\\b': new TextEncoder().encode('backslash'),
+        'binary.bin': new Uint8Array([0, 1]),
+        'invalid-utf8.bin': new Uint8Array([0xff]),
+        'c1-control.txt': new TextEncoder().encode('\u0085'),
+        'control.bin': new Uint8Array([1, 2, 3]),
+        'boundary.txt': new Uint8Array(65_536).fill(65),
+        'large.txt': new Uint8Array(65_537),
+      });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const base = `/v1/repos/${name}`;
+    const root = await responseBody(await fetchApi(apiRequest(`${base}/tree`)));
+    expect(root.data.oid).toBe(a);
+    expect(root.data.entries).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'agents', type: 'tree' })]));
+    expect(root.data.entries.every((entry: { oid: string }) => /^[a-f0-9]{40}$/.test(entry.oid))).toBe(true);
+    expect(root.data).toMatchObject({ unitFiles: {}, rowTables: {} });
+    const rootByClient = await responseBody(await fetchApi(apiRequest(`${base}/tree?${new URLSearchParams({ path: '' })}`)));
+    expect(rootByClient.data).toEqual(root.data);
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/tree?path=agents`)))).data.entries).toEqual([expect.objectContaining({ name: 'rules.md' })]);
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/readme?oid=${a}`)))).data.content).toBe('# Human <script>\n');
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/file?path=agents%2Frules.md`)))).data.content).toBe('agent rules');
+    for (const path of ['line\nbreak.md', 'foo..bar.md', 'a:b', 'a\\b']) {
+      expect(root.data.entries).toContainEqual(expect.objectContaining({ name: path }));
+      expect((await responseBody(await fetchApi(apiRequest(`${base}/file?${new URLSearchParams({ path })}`)))).data.content).toBe(path === 'line\nbreak.md' ? 'newline' : path === 'foo..bar.md' ? 'dots' : path === 'a:b' ? 'colon' : 'backslash');
+    }
+    const maxPath = 'p'.repeat(4096);
+    const overByteLimit = 'é'.repeat(2049);
+    expect((await fetchApi(apiRequest(`${base}/tree?${new URLSearchParams({ path: maxPath })}`))).status).toBe(404);
+    expect((await fetchApi(apiRequest(`${base}/tree?${new URLSearchParams({ path: `${maxPath}p` })}`))).status).toBe(400);
+    expect(overByteLimit.length).toBeLessThanOrEqual(4096);
+    expect(new TextEncoder().encode(overByteLimit).byteLength).toBeGreaterThan(4096);
+    expect((await fetchApi(apiRequest(`${base}/tree?${new URLSearchParams({ path: overByteLimit })}`))).status).toBe(400);
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/file?path=boundary.txt`)))).data.size).toBe(65_536);
+    for (const [path, status] of [['file?path=../secret', 400], ['file?path=/x', 400], ['file?path=a%2F%2Fb', 400], ['file?path=%00', 400], ['file?path=', 400], ['tree?path=missing', 404], ['file?path=binary.bin', 415], ['file?path=control.bin', 415], ['file?path=invalid-utf8.bin', 415], ['file?path=c1-control.txt', 415], ['file?path=large.txt', 413], ['readme?oid=bad', 400], ['tree?oid=', 400], ['file?path=README.md&oid=', 400], ['readme?oid=', 400]]) {
+      expect((await fetchApi(apiRequest(`${base}/${path}`))).status).toBe(status);
+    }
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/tree?oid=`)))).error.code).toBe('INVALID_OID');
+    expect((await fetchApi(apiRequest(`${base}/changes?cursor=`))).status).toBe(400);
+    expect((await fetchApi(apiRequest(`${base}/tree`, 'invalid-token'))).status).toBe(401);
+  });
+  it('distinguishes absent main from explicit commit reads before resolving main', async () => {
+    const name = 'canonical_no_main_case';
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] }, { 'README.md': new TextEncoder().encode('stored') }));
+    const base = `/v1/repos/${name}`;
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/tree`)))).error.code).toBe('MAIN_NOT_FOUND');
+    const empty = await responseBody(await fetchApi(apiRequest(`${base}/tree?oid=`)));
+    expect(empty.error.code).toBe('INVALID_OID');
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/readme?oid=${a}`)))).data.content).toBe('stored');
+    expect((await fetchApi(apiRequest(`${base}/readme?oid=${'f'.repeat(40)}`))).status).toBe(404);
+  });
+  it('bounds canonical tree responses at one thousand entries', async () => {
+    const name = 'canonical_tree_limit_case';
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    const files = Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`file-${String(i).padStart(4, '0')}.txt`, new TextEncoder().encode('x')]));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] }, files);
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const listing = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/tree`)))).data;
+    expect(listing.entries).toHaveLength(1000);
+    expect(listing.truncated).toBe(true);
+  });
   it('refuses a started change publishing outside its original file scope while ordinary changes remain unrestricted', async () => {
     const name = 'start_scope_case';
     const config = localFixtureConfig('local');

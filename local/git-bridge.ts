@@ -1,14 +1,58 @@
 import { createServer, type Server } from 'node:http';
 import { timingSafeEqual, randomBytes, createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { assertRepoPath } from '../src/repos/paths';
 
 const namePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const oidPattern = /^[a-f0-9]{40}$/;
 const MAX_REPO_BYTES = 10 * 1024 * 1024;
-const MAX_FILE_BYTES = 256 * 1024;
+const MAX_FILE_BYTES = MAX_REPO_BYTES;
+const MAX_TREE_ROWS = 1001;
+const MAX_TREE_OUTPUT_BYTES = MAX_TREE_ROWS * (4096 + 128);
+
+/** Parse NUL-delimited ls-tree records without splitting or decoding the full listing. */
+export function createTreeRowParser(maxRows = MAX_TREE_ROWS) {
+  let pending = Buffer.alloc(0);
+  let rowsParsed = 0;
+  let consumedBytes = 0;
+  const entries: { name: string; type: 'tree' | 'blob' | 'exec' | 'symlink' | 'gitlink'; oid: string }[] = [];
+  const addRow = (row: Buffer) => {
+    const tab = row.indexOf(9);
+    const meta = tab === -1 ? [] : row.subarray(0, tab).toString('ascii').split(' ');
+    const [mode, kind, hash] = meta;
+    const entryName = tab === -1 ? '' : row.subarray(tab + 1).toString('utf8');
+    if (meta.length !== 3 || !/^[0-7]+$/.test(mode) || !['blob', 'tree', 'commit'].includes(kind) || !/^[a-f0-9]{40}$/.test(hash) || !entryName) {
+      throw new Error('INVALID_TREE_ENTRY');
+    }
+    const type = kind === 'tree' ? 'tree' : kind === 'commit' ? 'gitlink' : mode === '120000' ? 'symlink' : mode === '100755' ? 'exec' : 'blob';
+    entries.push({ name: entryName, type, oid: hash });
+  };
+  return {
+    push(chunk: Uint8Array): boolean {
+      if (rowsParsed >= maxRows) return true;
+      const incoming = Buffer.from(chunk);
+      const data = pending.length ? Buffer.concat([pending, incoming]) : incoming;
+      let start = 0;
+      while (rowsParsed < maxRows) {
+        const end = data.indexOf(0, start);
+        if (end === -1) break;
+        addRow(data.subarray(start, end));
+        rowsParsed++;
+        consumedBytes += end + 1 - start;
+        start = end + 1;
+      }
+      pending = rowsParsed >= maxRows ? Buffer.alloc(0) : data.subarray(start);
+      return rowsParsed >= maxRows;
+    },
+    finish() { if (pending.length) throw new Error('INVALID_TREE_ENTRY'); },
+    get entries() { return entries; },
+    get rowsParsed() { return rowsParsed; },
+    get consumedBytes() { return consumedBytes; },
+  };
+}
 
 export interface GitBridge { server: Server; url: string; close(): Promise<void> }
 
@@ -58,6 +102,42 @@ export async function startGitBridge(dataDirectory: string, token: string, port 
   };
   const gitRepo = (storageName: unknown, args: string[], maxBuffer?: number) => git(['--git-dir', repoPath(storageName), ...args], maxBuffer);
   const missing = (error: unknown): boolean => typeof error === 'object' && error !== null && 'status' in error && error.status === 128;
+  const streamedTree = (storageName: unknown, object: string): Promise<ReturnType<typeof createTreeRowParser>['entries']> => new Promise((resolveTree, rejectTree) => {
+    const child = spawn('git', ['--git-dir', repoPath(storageName), 'ls-tree', '-z', object], {
+      env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const parser = createTreeRowParser();
+    let receivedBytes = 0;
+    let stderr = '';
+    let stoppedEarly = false;
+    let settled = false;
+    const timer = setTimeout(() => { child.kill('SIGTERM'); settle(new Error('GIT_COMMAND_TIMEOUT')); }, 10_000);
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) rejectTree(error); else resolveTree(parser.entries);
+    };
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled || stoppedEarly) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_TREE_OUTPUT_BYTES) {
+        child.kill('SIGTERM'); settle(new Error('TREE_OUTPUT_TOO_LARGE')); return;
+      }
+      try {
+        if (parser.push(chunk)) { stoppedEarly = true; child.kill('SIGTERM'); }
+      } catch (error) { child.kill('SIGTERM'); settle(error instanceof Error ? error : new Error('INVALID_TREE_ENTRY')); }
+    });
+    child.stderr.on('data', (chunk: Buffer) => { if (stderr.length < 4096) stderr += chunk.toString('utf8').slice(0, 4096 - stderr.length); });
+    child.once('error', error => settle(error));
+    child.once('close', code => {
+      if (settled) return;
+      if (stoppedEarly) { settle(); return; }
+      if (code !== 0) { settle(Object.assign(new Error(stderr.trim() || 'GIT_COMMAND_FAILED'), { status: code })); return; }
+      try { parser.finish(); settle(); } catch (error) { settle(error instanceof Error ? error : new Error('INVALID_TREE_ENTRY')); }
+    });
+  });
 
   async function dispatch(body: Record<string, unknown>): Promise<unknown> {
     switch (body.operation) {
@@ -99,12 +179,27 @@ export async function startGitBridge(dataDirectory: string, token: string, port 
         remote(body.name);
         const oid = validOid(body.oid);
         const path = body.path;
-        if (typeof path !== 'string' || !path || path.startsWith('/') || path.includes('..') || path.includes(':') || path.includes('\\')) throw new Error('INVALID_PATH');
+        assertRepoPath(path);
+        if (body.maxBytes !== undefined && (!Number.isInteger(body.maxBytes) || Number(body.maxBytes) < 0)) throw new Error('INVALID_MAX_BYTES');
+        const maxBytes = body.maxBytes === undefined ? null : Number(body.maxBytes);
         try {
           if (gitRepo(body.name, ['cat-file', '-t', `${oid}:${path}`]).toString().trim() !== 'blob') return null;
+          if (maxBytes !== null && Number(gitRepo(body.name, ['cat-file', '-s', `${oid}:${path}`]).toString().trim()) > maxBytes) throw new Error('FILE_TOO_LARGE');
           return { bytes: Array.from(gitRepo(body.name, ['show', `${oid}:${path}`], MAX_FILE_BYTES)) };
         }
         catch (error) { if (missing(error)) return null; throw error; }
+      }
+      case 'listTree': {
+        remote(body.name);
+        const oid = validOid(body.oid);
+        const path = body.path;
+        assertRepoPath(path, true);
+        try {
+          if (gitRepo(body.name, ['cat-file', '-t', oid]).toString().trim() !== 'commit') return null;
+          const object = path ? `${oid}:${path}` : `${oid}^{tree}`;
+          if (gitRepo(body.name, ['cat-file', '-t', object]).toString().trim() !== 'tree') return null;
+          return await streamedTree(body.name, object);
+        } catch (error) { if (missing(error)) return null; throw error; }
       }
       case 'mintToken': {
         remote(body.name);
