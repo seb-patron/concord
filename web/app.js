@@ -1,6 +1,6 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe, getSession,
-  getSnapshot, getVerdicts, hasToken, isForbidden, listPrincipals, listRepos, newIdempotencyKey,
+  getSnapshot, getMetrics, getVerdicts, hasToken, isForbidden, listPrincipals, listRepos, newIdempotencyKey,
   redactError, redactText, setSessionToken, submitVerdict, withdrawChange,
 } from './api.js';
 import {
@@ -17,7 +17,7 @@ const repoPage = createRepoPage($('code-view'));
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
-  awaitingFreshSnapshot: false, accessSignIn: false };
+  awaitingFreshSnapshot: false, accessSignIn: false, metrics: null, metricsFetchedAt: 0 };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
 const node = (tag, value, className) => {
@@ -104,6 +104,7 @@ function signOut(message) {
   repoPage.hide();
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = []; state.principals = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
+  state.metrics = null; state.metricsFetchedAt = 0;
   verdictLoader.reset();
   state.observedVersions.clear();
   state.awaitingFreshSnapshot = false;
@@ -171,6 +172,7 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
     state.snapshot = null; state.verdicts = {}; state.verdictErrors = {}; state.events = [];
     verdictLoader.reset();
     state.seq = 0; state.version = 0;
+    state.metrics = null; state.metricsFetchedAt = 0;
   }
   state.deskMessage = null;
   if (resetSelection) { state.selected = null; state.inboxSelected = null; }
@@ -244,6 +246,22 @@ async function poll(gen = state.generation) {
       if (gen !== state.generation || !acceptSnapshot(body, repoId)) return;
       await refreshVerdicts(gen);
     }
+    if (Date.now() - state.metricsFetchedAt >= 60_000) {
+      const day = new Date().toISOString().slice(0, 10);
+      const since = `${day}T00:00:00.000Z`;
+      const until = new Date(Date.parse(since) + 86_400_000).toISOString();
+      try {
+        const metrics = await getMetrics(state.repoId, since, until);
+        if (gen !== state.generation) return;
+        state.metrics = metrics.data?.changesLanded && metrics.data?.publishToLand &&
+          metrics.data?.leaseClaimsRefused && metrics.data?.automaticRebases &&
+          metrics.data?.approvalsCarriedByPatchId ? metrics.data : null;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        state.metrics = null;
+      }
+      state.metricsFetchedAt = Date.now();
+    }
     state.connected = true; render();
   } catch (error) {
     if (gen !== state.generation) return;
@@ -265,6 +283,7 @@ function renderStats() {
   const queued = entries().filter(e => ['admitted','reserved','checking','waiting'].includes(e.state));
   const today = new Date().toDateString();
   const landed = observedDailyCount(state.events, 'Landed today');
+  const landedToday = state.metrics?.changesLanded?.value ?? landed;
   const main = projections().queue?.observedMain ?? projections().queue?.finalCanonicalOid ??
     projections().repos?.repo?.observedCanonicalOid ?? null;
   const diagnosis = normalizeDiagnosis(projections().queue?.diagnosis);
@@ -275,13 +294,19 @@ function renderStats() {
     stat('Agents working', working.count, 'live lease holders'),
     stat('Leases held', live.evidence.length, live.evidence.length ? `shortest ${leaseCountdown(live.evidence.reduce((a,b) => a.expiresAt < b.expiresAt ? a : b), Date.now()).text}` : 'no active leases'),
     stat('In queue', queued.length, 'ordered for checking'),
-    stat('Landed today', landed, 'from observed events'),
+    stat('Landed today', landedToday, state.metrics ? 'from repo metrics' : 'from observed events'),
+    ...(state.metrics ? [
+      stat('Median lead time', state.metrics.publishToLand.n ? `${Math.round(state.metrics.publishToLand.medianMs / 60000)}m` : '0m', `${state.metrics.publishToLand.n} landed changes`),
+      stat('Claims refused', state.metrics.leaseClaimsRefused.value, 'conflicts caught before edit'),
+      stat('Auto rebases', state.metrics.automaticRebases.value, 'recorded rebase events'),
+      stat('Approvals carried', state.metrics.approvalsCarriedByPatchId.value, 'patch-id evidence'),
+    ] : []),
     stat('Main', !state.repoId ? '0' : mainState, main ? `tip ${String(main).slice(0,9)}` : 'tip unavailable'),
   );
   const red = state.events.filter(e => e.kind === 'queue.diagnosis' && e.payload?.reason === 'BASE_RED' && new Date(e.timestamp).toDateString() === today).length;
   $('main-footer').replaceChildren(node('strong','main'), document.createTextNode(!state.repoId
     ? 'No repositories yet. Create one to see main branch activity.'
-    : `${landed} landings today · ${red} red events · tip ${main ? String(main).slice(0,9) : 'unavailable'}`));
+    : `${landedToday} landings today · ${red} red events · tip ${main ? String(main).slice(0,9) : 'unavailable'}`));
 }
 function statusFor(change) {
   const diag = normalizeDiagnosis(projections().queue?.diagnosis);

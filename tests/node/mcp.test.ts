@@ -12,6 +12,16 @@ import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenar
 import type { ConcordClient } from '../../cli/client.ts';
 import { callTool, tools } from '../../mcp/tools.ts';
 
+it('dispatches repo_metrics as a read with encoded UTC bounds', async () => {
+  const calls: Array<{ method: string; path: string }> = [];
+  const client = { request: async (method: string, path: string) => {
+    calls.push({ method, path }); return { data: { changesLanded: { value: 1, n: 1, eventKinds: ['queue.promotion_applied'] } } };
+  } } as unknown as ConcordClient;
+  const result = await callTool(client, 'repo_metrics', { repoId: 'repo', since: '2026-10-01T00:00:00.000Z', until: '2026-10-02T00:00:00.000Z' });
+  expect(result).toMatchObject({ data: { changesLanded: { value: 1 } } });
+  expect(calls).toEqual([{ method: 'GET', path: '/repos/repo/metrics?since=2026-10-01T00%3A00%3A00.000Z&until=2026-10-02T00%3A00%3A00.000Z' }]);
+});
+
 it('dispatches issue and milestone MCP tools with issue links', async () => {
   const calls: Array<{ method: string; path: string; options: unknown }> = [];
   const client = { request: async (method: string, path: string, options?: unknown) => {

@@ -13,6 +13,7 @@ import { runners } from './features/runners';
 import { findings } from './features/findings';
 import { verdicts } from './features/verdicts';
 import { issuesFeature } from './features/issues';
+import { measureSqlMetrics, metricsWindow, type RepoMetrics } from './features/metrics';
 
 /** The six modules are registered once. Each supplies migrations, routes, alarms and projections. */
 export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature];
@@ -26,6 +27,7 @@ export function selectStorage(env: Env, sql: SqlStorage, now: () => number): Rep
 
 export class RepoCoordinator extends DurableObject<Env> {
   private readonly now: () => number;
+  private readonly metricsCache = new Map<string, { expiresAt: number; data: RepoMetrics }>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.now = clock(env);
@@ -117,6 +119,21 @@ export class RepoCoordinator extends DurableObject<Env> {
       if (!identity) identityStore.put('repo:identity', { tenantId: principal.tenantId, repoId });
       const core = this.context('repos', principal, repoId);
       const version = core.version();
+      if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/metrics`) {
+        const { since, until, sinceIso, untilIso } = metricsWindow(url.searchParams);
+        const key = `${sinceIso}/${untilIso}`;
+        let cached = this.metricsCache.get(key);
+        if (!cached || cached.expiresAt <= this.now()) {
+          cached = { expiresAt: this.now() + 60_000,
+            data: measureSqlMetrics(core.sql, since, until) };
+          const now = this.now();
+          for (const [oldKey, entry] of this.metricsCache) if (entry.expiresAt <= now) this.metricsCache.delete(oldKey);
+          this.metricsCache.delete(key);
+          while (this.metricsCache.size >= 16) this.metricsCache.delete(this.metricsCache.keys().next().value!);
+          this.metricsCache.set(key, cached);
+        }
+        return json(cached.data, version, eventSequence(core.sql));
+      }
       if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/snapshot`) {
         const projections = Object.fromEntries(modules.map(module => [module.name, module.snapshot(this.context(module.name, principal, repoId))]));
         return json({ repoId, projections }, version, eventSequence(core.sql));

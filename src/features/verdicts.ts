@@ -241,7 +241,8 @@ export const verdicts: FeatureModule = {
         decision: body!.decision as 'approve' | 'reject', evidenceDigest: body!.evidenceDigest as Digest, parentVerdictId: null,
         ...(carriedFrom === undefined ? {} : { carriedFrom: carriedFrom as Verdict['carriedFrom'] }) };
       save(context, verdict, change.value.headOid!, current.value.profile.digest, changeId);
-      const event = context.appendEvent('verdict.created', [verdictId, changeId], { decision: verdict.decision, revision: verdict.revision }, version);
+      const event = context.appendEvent('verdict.created', [verdictId, changeId], { decision: verdict.decision, revision: verdict.revision,
+        carriedFrom: verdict.carriedFrom ?? null }, version);
       return json(verdict, version, event.sequence, 201);
     } },
     { method: 'POST', pattern: carryPath, handle: async (context, _request, match, raw) => {
