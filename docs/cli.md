@@ -90,11 +90,16 @@ npm run concord -- repo clone --repo REPO_ID --path './canonical read-only'
 
 ```sh
 npm run concord -- change create --repo REPO_ID --intent-key task-17 --intent-text 'Tune gamma safely' --base-oid FULL_OID --branch agent/task-17 --unit-keys '["row:families:gamma"]' --dependency-change-ids '[]'
+npm run concord -- change list --repo REPO_ID --mine --status draft,ready --all
 npm run concord -- change get --repo REPO_ID --id CHANGE_ID
 npm run concord -- change checkout --repo REPO_ID --id CHANGE_ID --worktree './agent worktree'
 npm run concord -- change publish --repo REPO_ID --id CHANGE_ID --worktree './agent worktree' --lease-fences '{"row:families:gamma":12}'
-npm run concord -- change close --repo REPO_ID --id CHANGE_ID --expected-version 4 --reason 'superseded'
+npm run concord -- change close --repo REPO_ID --id CHANGE_ID --reason 'superseded'
 ```
+
+`change list` prints change IDs, intent keys, status, author, update time and age in seconds, head OID, and live lease count. `--mine` resolves the caller through `GET /v1/me` and filters by `authorId`. `--status` accepts a comma-separated list of statuses. `--cursor` selects one API page; `--all` follows cursors for at most 50 pages. Status and mine filtering happen on the pages returned by the API. Each listed change includes a `liveLeaseCount` from active, unexpired lease records. If the change page limit is reached, the JSON result includes `truncated: true` and `nextCursor`; if the lease page limit is reached, it includes `liveLeaseCountTruncated: true` to show that lease counts may be incomplete.
+
+`change close` reads the current repository version and supplies it automatically when `--expected-version` is omitted. An explicit version is sent as supplied. `--reason TEXT` is optional and included in the close request. Closing is limited to the change author or an owner, and the server releases that change's leases. Server-side reason storage and display are delivered separately.
 
 Creation requires `intentKey`, stable `intentText`, `baseOid` (literal JSON `null` only for seed drafts), `branch`, `unitKeys`, and `dependencyChangeIds` (defaults to `[]`). A changed observed base never changes the task's `intentKey`.
 

@@ -266,6 +266,84 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('marks change and lease lists truncated after 50 pages', async () => {
+    const { createServer } = await import('node:http');
+    const server = createServer((request, response) => {
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      const cursor = url.searchParams.get('cursor');
+      const page = cursor ? Number(cursor.slice(1)) : 1;
+      response.setHeader('content-type', 'application/json');
+      const data = url.pathname.endsWith('/changes')
+        ? { items: [{ changeId: `change-${page}`, authorId: 'agent', status: 'draft' }], nextCursor: `c${page + 1}` }
+        : { items: [{ changeId: 'change-1', state: 'active', expiresAt: Date.now() + 60_000 }], nextCursor: `l${page + 1}` };
+      response.end(JSON.stringify({ data, version: 1 }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server unavailable');
+    try {
+      const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'change', 'list', '--repo', 'repo', '--all'], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'test-agent-token' }, timeout: 30_000,
+      });
+      const output = JSON.parse(result.stdout) as { items: Array<{ changeId: string; liveLeaseCount: number }>; truncated: boolean; nextCursor: string; liveLeaseCountTruncated: boolean };
+      expect(output.items).toHaveLength(50);
+      expect(output.truncated).toBe(true);
+      expect(output.nextCursor).toBe('c51');
+      expect(output.liveLeaseCountTruncated).toBe(true);
+      expect(output.items[0].liveLeaseCount).toBe(50);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('lists own changes across cursor pages and closes with an automatically read version', async () => {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let text = ''; for await (const part of request) text += part;
+      const path = request.url ?? '';
+      const body = text ? JSON.parse(text) : undefined;
+      calls.push({ method: request.method ?? '', path, body });
+      response.setHeader('content-type', 'application/json');
+      const respond = (data: unknown, version = 12, status = 200) => {
+        response.statusCode = status;
+        response.end(JSON.stringify(status >= 400 ? { error: data } : { data, version }));
+      };
+      if (path === '/v1/me') return respond({ principalId: 'agent-a' });
+      if (path === '/v1/repos/repo') return respond({ repoId: 'repo' }, 12);
+      if (path === '/v1/repos/repo/changes') return respond({ items: [
+        { changeId: 'mine-draft', intentKey: 'one', status: 'draft', authorId: 'agent-a', updatedAt: '2026-10-14T12:00:00Z', headOid: 'abc' },
+        { changeId: 'other-draft', intentKey: 'two', status: 'draft', authorId: 'agent-b' },
+      ], nextCursor: 'page-two' });
+      if (path === '/v1/repos/repo/changes?cursor=page-two') return respond({ items: [
+        { changeId: 'mine-ready', intentKey: 'three', status: 'ready', authorId: 'agent-a' },
+        { changeId: 'mine-closed', intentKey: 'four', status: 'closed', authorId: 'agent-a' },
+      ], nextCursor: null });
+      if (path === '/v1/repos/repo/leases') return respond({ items: [
+        { changeId: 'mine-draft', state: 'active', expiresAt: Date.now() + 60_000 },
+        { changeId: 'mine-ready', state: 'reserved', expiresAt: Date.now() + 60_000 },
+      ], nextCursor: null });
+      if (path === '/v1/repos/repo/changes/mine-draft/close') {
+        if ((body as { expectedVersion?: number } | undefined)?.expectedVersion === 3) return respond({ code: 'STALE_VERSION' }, 12, 409);
+        return respond({ changeId: 'mine-draft', status: 'closed' }, 13);
+      }
+      if (path === '/v1/repos/repo/changes/other-draft/close') return respond({ code: 'FORBIDDEN', message: 'denied' }, 403, 403);
+      return respond({ code: 'NOT_FOUND' }, 12, 404);
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server unavailable');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'test-agent-token' };
+    const cli = (...args: string[]) => execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', ...args], { cwd: process.cwd(), env });
+    try {
+      const listed = await cli('change', 'list', '--repo', 'repo', '--mine', '--status', 'draft,ready', '--all');
+      const changes = JSON.parse(listed.stdout) as Array<{ changeId: string; liveLeaseCount: number }>;
+      expect(changes.map(change => change.changeId)).toEqual(['mine-draft', 'mine-ready']);
+      expect(changes.map(change => change.liveLeaseCount)).toEqual([1, 1]);
+      await cli('change', 'close', '--repo', 'repo', '--id', 'mine-draft', '--reason', 'superseded');
+      expect(calls.find(call => call.path.endsWith('/changes/mine-draft/close'))).toMatchObject({
+        method: 'POST', body: { reason: 'superseded', expectedVersion: 12 },
+      });
+      await expect(cli('change', 'close', '--repo', 'repo', '--id', 'other-draft')).rejects.toMatchObject({ stderr: expect.stringContaining('FORBIDDEN') });
+      await expect(cli('change', 'close', '--repo', 'repo', '--id', 'mine-draft', '--expected-version', '3')).rejects.toMatchObject({ stderr: expect.stringContaining('STALE_VERSION') });
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it('shows the endpoint landing total in both tracker locations with a UTC day window', async () => {
     const app = await readFile(new URL('../../web/app.js', import.meta.url), 'utf8');
     expect(app).toContain('const landedToday = state.metrics?.changesLanded?.value ?? landed;');

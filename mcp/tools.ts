@@ -28,6 +28,8 @@ export const tools: Tool[] = [
   tool('milestone_list', 'List milestones with issue and landed change progress.', { ...repo, cursor: s }, ['repoId']),
   tool('milestone_create', 'Create a milestone in the repository.', { ...repo, title: s, description: s, dueDate: s, idempotencyKey: s }, ['repoId', 'title']),
   tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
+  tool('change_list', 'List changes with optional caller and status filters.', { ...repo, mine: { type: 'boolean' }, status: s, cursor: s }, ['repoId']),
+  tool('change_close', 'Close your change and release its leases using the current repository version. An optional reason is forwarded to the API.', { ...change, reason: s, idempotencyKey: s }, ['repoId', 'changeId']),
   tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result. TTL is bounded by trusted maxLeaseHoldSeconds (default 14400).', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 86400 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
   tool('lease_renew', 'Renew every live lease of a change in one call. Fences stay the same and holds are never shortened; renew before remainingSeconds drops below about 100.', { ...change, ttlSeconds: { type: 'integer', minimum: 1, maximum: 86400 }, idempotencyKey: s }, ['repoId', 'changeId']),
@@ -146,6 +148,22 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
     case 'milestone_list': result = await client.request('GET', `${r}/milestones${query('cursor', args.cursor)}`); break;
     case 'milestone_create': result = await mutation(client, `${r}/milestones`, { title: args.title, ...(args.description !== undefined ? { description: args.description } : {}), ...(args.dueDate !== undefined ? { dueDate: args.dueDate } : {}) }, undefined, args.idempotencyKey); break;
     case 'change_status': result = await client.request('GET', p()); break;
+    case 'change_list': {
+      const params = new URLSearchParams();
+      if (typeof args.cursor === 'string' && args.cursor) params.set('cursor', args.cursor);
+      const response = data(await client.request('GET', `${r}/changes${params.size ? `?${params}` : ''}`));
+      if (!Array.isArray(response.items)) throw new ConcordError('Concord returned an invalid changes page', 'server');
+      const principalId = args.mine === true ? field(data(await client.request('GET', '/me')), 'principalId') : undefined;
+      const statuses = typeof args.status === 'string' ? new Set(args.status.split(',').map(status => status.trim()).filter(Boolean)) : undefined;
+      result = { ...response, items: (response.items as Record<string, unknown>[]).filter(item =>
+        (principalId === undefined || item.authorId === principalId) && (!statuses?.size || (typeof item.status === 'string' && statuses.has(item.status)))) };
+      break;
+    }
+    case 'change_close': {
+      const body = args.reason === undefined ? {} : { reason: args.reason as string };
+      result = await mutation(client, `${p()}/close`, body, await currentVersion(client, args), args.idempotencyKey);
+      break;
+    }
     case 'lease_claim': {
       const body = { changeId: args.changeId, unitKeys: args.unitKeys, intentText: args.intentText, ttlSeconds: args.ttlSeconds ?? 120 };
       try { result = await mutation(client, `${r}/leases`, body, await currentVersion(client, args), args.idempotencyKey); }
