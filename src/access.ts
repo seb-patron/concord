@@ -100,5 +100,5 @@ export async function authenticateAccess(request: Request, env: Env, nowMs: numb
   const human = humans.find(entry => entry.email.toLowerCase() === (jwt.email as string).toLowerCase());
   if (!human) throw new HttpError(403, 'HUMAN_NOT_MAPPED', 'Human identity is not mapped');
   return { tenantId: human.tenantId, principalId: human.principalId, roles: human.roles,
-    repoIds: human.repoIds, expiresAt: jwt.exp * 1000, authMethod: 'access' };
+    repoIds: human.repoIds, expiresAt: jwt.exp * 1000, authMethod: 'access', avatarUrl: human.avatarUrl };
 }

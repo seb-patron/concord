@@ -182,8 +182,9 @@ export default {
           ...(principal.authMethod === 'access' ? { logoutUrl: '/v1/session/signout' } : {}) });
       }
       if (request.method === 'GET' && url.pathname === '/v1/me') {
-        const { principalId, tenantId, roles, repoIds } = principal;
-        return json({ principalId, tenantId, roles, repoIds, expiresAt: credentialExpiresAt, model: principal.model ?? null });
+        const { principalId, tenantId, roles, repoIds, avatarUrl } = principal;
+        return json({ principalId, tenantId, roles, repoIds, expiresAt: credentialExpiresAt, model: principal.model ?? null,
+          ...(avatarUrl ? { avatarUrl } : {}) });
       }
       const repoMatch = repoPath.exec(url.pathname);
       if (repoMatch) requireRepo(principal, repoMatch[1]);

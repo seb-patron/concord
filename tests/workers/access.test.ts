@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import { authenticateWithExpiry } from '../../src/auth';
-import { localFixtureConfig } from '../../src/state';
+import { loadTrustedConfig, localFixtureConfig } from '../../src/state';
 
 const team = 'concord-test.cloudflareaccess.com';
 const aud = 'test-access-audience';
@@ -10,7 +10,8 @@ const now = 1_800_000_000_000;
 const url = 'https://concord.test/v1/session';
 const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 const baseConfig = { ...localFixtureConfig('local'), humans: [
-  { email: 'Human@Example.com', tenantId: 'local', principalId: 'phone-owner', roles: ['owner'], repoIds: ['alpha'] },
+  { email: 'Human@Example.com', tenantId: 'local', principalId: 'phone-owner', roles: ['owner'], repoIds: ['alpha'],
+    avatarUrl: 'https://avatars.example.com/human.png' },
 ] };
 const configured = (teamDomain = team) => ({ ...env, ACCESS_TEAM_DOMAIN: teamDomain, ACCESS_AUD: aud,
   TRUSTED_CONFIG: JSON.stringify(baseConfig) } as Env);
@@ -49,8 +50,21 @@ describe('Cloudflare Access human authentication', () => {
     expect((await session.json() as { data: unknown }).data).toMatchObject({ principalId: 'phone-owner',
       roles: ['owner'], authMethod: 'access', expiresAt: (currentSeconds + 300) * 1000,
       logoutUrl: '/v1/session/signout' });
+    const me = await worker.fetch(new Request('https://concord.test/v1/me', {
+      headers: { 'Cf-Access-Jwt-Assertion': live },
+    }), configured());
+    expect((await me.json() as { data: unknown }).data).toMatchObject({ principalId: 'phone-owner',
+      avatarUrl: 'https://avatars.example.com/human.png' });
     const cookie = new Request(url, { headers: { cookie: `CF_Authorization=${assertion}` } });
     expect((await authenticateWithExpiry(cookie, configured(), () => now)).principal.authMethod).toBe('access');
+  });
+
+  it('accepts only bounded HTTPS avatar URLs in trusted human mappings', () => {
+    expect(loadTrustedConfig(configured()).humans?.[0].avatarUrl).toBe('https://avatars.example.com/human.png');
+    for (const avatarUrl of ['http://avatars.example.com/a.png', 'not a URL', `https://${'a'.repeat(510)}`]) {
+      const invalid = { ...baseConfig, humans: [{ ...baseConfig.humans[0], avatarUrl }] };
+      expect(() => loadTrustedConfig({ ...configured(), TRUSTED_CONFIG: JSON.stringify(invalid) })).toThrow('TRUSTED_CONFIG_INVALID');
+    }
   });
 
   it('rejects invalid claims, signatures, unknown keys, and unmapped humans', async () => {

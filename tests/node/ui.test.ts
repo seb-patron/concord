@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
-const { canRender, deriveInbox, normalizeDiagnosis, pickTheme, trackerLaneForIssue, trackerLaneNames, projectionItems, snapshotCollections, mutationEvidence,
+const { avatarInitials, canRender, deriveInbox, inboxCount, normalizeDiagnosis, pickTheme, signOutTarget, trackerLaneForIssue, trackerLaneNames, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders, changeNextAction } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
 
@@ -38,6 +38,23 @@ describe('Work UI theme and tracker lanes', () => {
     expect(trackerLaneNames).toEqual(['Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed']);
     expect(trackerLaneForIssue({ status: 'blocked', hasLease: true })).toEqual({ lane: 'Claimed', badge: 'blocked' });
     expect(trackerLaneForIssue({ status: 'stale', queueState: 'queued' })).toEqual({ lane: 'Queued', badge: 'stale' });
+  });
+});
+
+describe('profile and inbox helpers', () => {
+  it('counts actionable inbox items and adds exposed planning problems', () => {
+    expect(inboxCount(fixture)).toBe(3);
+    const blocked = { data: { projections: { queue: { blockedReason: 'PROMOTION_FAILED', contests: [
+      { contestId: 'contest-1', intentKey: 'same-file', unitKey: 'file:a', state: 'blocked' },
+    ] } } } };
+    expect(inboxCount(blocked)).toBe(2);
+  });
+  it('uses initials without an avatar and selects the Access logout route only for Access identities', () => {
+    expect(avatarInitials('Seb Patron Soto')).toBe('SS');
+    expect(avatarInitials('  Ada  ')).toBe('AD');
+    expect(avatarInitials('')).toBe('?');
+    expect(signOutTarget({ authMethod: 'access', logoutUrl: '/v1/session/signout' })).toBe('/v1/session/signout');
+    expect(signOutTarget({ principalId: 'token-user' })).toBeNull();
   });
 });
 
@@ -196,9 +213,10 @@ describe('Fleet desk DOM', () => {
         if (url === '/health') return Response.json({ data: { accessSignIn: enabled } });
         if (url === '/v1/session') return new Response(JSON.stringify(access ? { data: { principalId: 'phone-owner',
           roles: ['owner'], authMethod: 'access', expiresAt: Date.now() + 60_000,
-          logoutUrl: 'https://example.cloudflareaccess.com/cdn-cgi/access/logout' } } :
+          logoutUrl: '/v1/session/signout' } } :
           { error: { code: 'UNAUTHORIZED' } }), { status: access ? 200 : 401 });
-        if (url === '/v1/me') return Response.json({ data: { principalId: 'phone-owner', roles: ['owner'], repoIds: '*' } });
+        if (url === '/v1/me') return Response.json({ data: { principalId: 'phone-owner', roles: ['owner'], repoIds: '*',
+          avatarUrl: 'https://avatars.example.com/phone-owner.png' } });
         if (url === '/v1/repos') return Response.json({ data: { items: access ? [{ repoId: 'access-repo' }] : [] } });
         if (url === '/v1/repos/access-repo/snapshot') return Response.json({ data: { projections: {} }, version: 0, eventSeq: 0 });
         if (url.startsWith('/v1/repos/access-repo/events')) return Response.json({ data: { items: [] }, version: 0, eventSeq: 0 });
@@ -225,7 +243,18 @@ describe('Fleet desk DOM', () => {
         expect((doc.getElementById('access-signin') as HTMLAnchorElement).hidden).toBe(access || !enabled);
         if (access) {
           expect(doc.getElementById('principal')!.textContent).toBe('Signed in as phone-owner via Cloudflare Access');
-          expect((doc.getElementById('access-logout') as HTMLAnchorElement).href).toBe('https://example.cloudflareaccess.com/cdn-cgi/access/logout');
+          expect((doc.getElementById('access-logout') as HTMLAnchorElement).href).toBe('http://localhost/v1/session/signout');
+          expect((doc.getElementById('profile-avatar') as HTMLImageElement).alt).toBe('phone-owner');
+          expect((doc.getElementById('profile-avatar') as HTMLImageElement).getAttribute('referrerpolicy')).toBe('no-referrer');
+          expect(doc.getElementById('inbox-button')!.hidden).toBe(false);
+          expect(doc.getElementById('inbox-badge')!.hidden).toBe(true);
+          (doc.getElementById('profile-toggle') as HTMLButtonElement).click();
+          expect(doc.getElementById('profile-menu')!.hidden).toBe(false);
+          doc.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          expect(doc.getElementById('profile-menu')!.hidden).toBe(true);
+          (doc.getElementById('inbox-button') as HTMLButtonElement).click();
+          expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe('inbox');
+          (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
           expect(requests.every(request => request.authorization === null)).toBe(true);
           expect(doc.getElementById('tracker-view')!.hidden).toBe(false);
           for (const view of ['code', 'tracker', 'milestones', 'desk']) {

@@ -24,10 +24,11 @@ export interface Principal {
   agentStartedAt?: number;
   agentName?: string | null;
   authMethod?: 'access';
+  avatarUrl?: string;
 }
 
 export interface HumanIdentity {
-  email: string; tenantId: Id; principalId: Id; roles: Role[]; repoIds: Id[] | '*';
+  email: string; tenantId: Id; principalId: Id; roles: Role[]; repoIds: Id[] | '*'; avatarUrl?: string;
 }
 
 /** Public metadata for a runtime delegated identity. The token digest is never returned. */
