@@ -42,6 +42,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
   let base = oid('0');
   let canonical = oid('0');
   let frozen = false;
+  let settingsReads = 0;
   let activeManifest = initial;
   let trustedProfile = profile;
   const jobs: DeltaCheckJob[] = [];
@@ -59,6 +60,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
     storage: { resolveRef: async () => canonical, info: async (name: string) => ({ name, remote: `https://example.test/${name}`, status: 'ready' }) },
     state: { get: <T>(key: string) => (state.get(key) ?? null) as T | null, put: <T>(key: string, value: T) => { state.set(key, value); }, delete: (key: string) => { state.delete(key); } },
     sql: { exec: (_query: string, key: string) => ({ toArray: () => {
+      if (key === 'module:settings:record') settingsReads++;
       const actual = key?.startsWith('module:verdicts:') ? key.slice('module:verdicts:'.length) : key;
       const value = state.get(actual);
       return value === undefined ? [] : [{ value: JSON.stringify(value) }];
@@ -97,7 +99,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
     };
     return { ...preimage, resultDigest: hashCanonical(preimage) };
   };
-  return { context, state, jobs, route, approve, advance, carry, result, installInspection,
+  return { context, state, jobs, route, approve, advance, carry, result, installInspection, settingsReads: () => settingsReads,
     gate: () => verdicts.hooks['verdicts.gate']!(context, 'change', revision),
     evaluate: (value: DeltaResult) => verdicts.hooks['verdicts.evaluateCarry']!(context, value),
     setAuthor: (value: string) => { author = value; },
@@ -109,6 +111,21 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
 }
 
 describe('content-bound verdicts', () => {
+  it('reads protected path settings once for a multi-unit approval status', () => {
+    const h = harness();
+    h.state.set('module:settings:record', { version: 1, protectedPaths: [
+      { pattern: 'families.tsv', level: 'human-approval' },
+    ] });
+    const inspected = h.state.get('inspection:change') as InspectedRevision;
+    const unit = inspected.reviewManifest.changedUnits[0];
+    h.state.set('inspection:change', { ...inspected, reviewManifest: {
+      ...inspected.reviewManifest, changedUnits: Array.from({ length: 10 }, () => ({ ...unit })),
+    } });
+
+    expect(humanApprovalStatus(h.context, 'change', 1).awaitingHumanApproval).toEqual(['families.tsv']);
+    expect(h.settingsReads()).toBe(1);
+  });
+
   it('carries a separate owner approval across a clean rebase', async () => {
     const h = harness();
     h.state.set('module:settings:record', { version: 1, protectedPaths: [{ pattern: 'families.tsv', level: 'human-approval' }] });

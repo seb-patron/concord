@@ -2,7 +2,7 @@ import type { CandidateInput, ChangedUnitEvidence, DeltaCheckJob, DeltaResult, D
 import { requireRepo, requireRole } from '../auth';
 import { HttpError, json } from '../http';
 import { dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest } from '../verdicts/manifest';
-import { matchingProtections, protectionFor } from './settings';
+import { matchingProtections, protectionFor, repoSettings } from './settings';
 import { sqlState } from '../state';
 import { jobPolicy, storedJob, type StoredJob } from '../jobs/policy';
 
@@ -29,16 +29,17 @@ interface HumanApproval { revision: number; headOid: string; manifestDigest: Dig
 export function humanApprovalStatus(context: ModuleContext, changeId: Id, revision: number) {
   const record = sqlState(context.sql).get<InspectedRevision>(`module:verdicts:inspection:${changeId}`);
   if (!record || record.revision !== revision) return { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null };
-  const rules = matchingProtections(context, record.reviewManifest, 'human-approval');
-  const humanOnlyPatterns = matchingProtections(context, record.reviewManifest, 'human-only').map(rule => rule.pattern);
+  const settings = repoSettings(context);
+  const rules = matchingProtections(context, record.reviewManifest, 'human-approval', settings);
+  const humanOnlyPatterns = matchingProtections(context, record.reviewManifest, 'human-only', settings).map(rule => rule.pattern);
   const paths = record.reviewManifest.changedUnits.flatMap(unit => [unit.beforePath, unit.afterPath])
-    .filter((path): path is string => !!path && protectionFor(context, path)?.level === 'human-approval');
+    .filter((path): path is string => !!path && protectionFor(context, path, settings)?.level === 'human-approval');
   const approval = sqlState(context.sql).get<HumanApproval>(`module:verdicts:human:${changeId}`);
   const valid = approval?.decision === 'approve' && approval.revision === revision &&
     approval.headOid === record.candidate.headOid && approval.manifestDigest === record.reviewManifestDigest &&
     JSON.stringify(approval.patterns) === JSON.stringify(rules.map(rule => rule.pattern));
   const protectedDiffSummary = record.reviewManifest.changedUnits.filter(unit =>
-    [unit.beforePath, unit.afterPath].some(path => !!path && protectionFor(context, path)?.level === 'human-approval'))
+    [unit.beforePath, unit.afterPath].some(path => !!path && protectionFor(context, path, settings)?.level === 'human-approval'))
     .map(unit => ({ beforePath: unit.beforePath, afterPath: unit.afterPath, beforeMode: unit.beforeMode, afterMode: unit.afterMode,
       beforeDigest: unit.beforeDigest, afterDigest: unit.afterDigest }));
   return { awaitingHumanApproval: valid ? [] : rules.map(rule => rule.pattern), protectedFiles: [...new Set(paths)].sort(),
