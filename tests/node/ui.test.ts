@@ -125,6 +125,7 @@ describe('Fleet desk DOM', () => {
     let eventVersion = 7;
     let releaseSnapshot8: (() => void) | undefined;
     let releaseSnapshot10: (() => void) | undefined;
+    let releaseSecondSnapshot: (() => void) | undefined;
     let delayNextSnapshot8 = true;
     let delayNextSnapshot10 = true;
     let mutationVersion = 7;
@@ -148,9 +149,12 @@ describe('Fleet desk DOM', () => {
         if (token === 'Bearer bad') { status = 401; body = { error: { code: 'UNAUTHORIZED', message: 'bad token' } }; }
         else if (token === 'Bearer local-agent-a') { status = 404; body = { error: { code: 'NOT_FOUND' } }; }
         else if (token === 'Bearer empty') body = { data: { principalId: 'owner', roles: ['owner'], repoIds: '*', model: null } };
-        else body = { data: { principalId: 'reviewer', roles: ['reviewer'], repoIds: ['demo'], model: null } };
-      } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
+        else body = { data: { principalId: 'reviewer', roles: ['reviewer'], repoIds: ['demo', 'second'], model: null } };
+      } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }, { repoId: 'second', displayName: 'Second' }] } };
       else if (url.endsWith('/snapshot')) {
+        if (url === '/v1/repos/second/snapshot') return await new Promise<Response>(resolve => {
+          releaseSecondSnapshot = () => resolve(new Response(JSON.stringify(fixture)));
+        });
         if (token === 'Bearer restricted') { status = 403; body = { error: { code: 'FORBIDDEN', message: 'no scope' } }; }
         else if (snapshotVersion === 10 && delayNextSnapshot10) return await new Promise<Response>(resolve => {
           delayNextSnapshot10 = false;
@@ -427,16 +431,43 @@ describe('Fleet desk DOM', () => {
       expect(byId('action-panel').querySelectorAll('form')).toHaveLength(0);
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
+
+      (doc.querySelector('[data-main-view="inbox"]') as HTMLButtonElement).click();
+      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      (byId('repo-select') as HTMLSelectElement).value = 'second';
+      byId('repo-select').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+      expect(byId('inbox-alert').hidden).toBe(true);
+      expect(byId('alert-count').textContent).toContain('0 decisions');
+      releaseSecondSnapshot?.(); await flush(); await flush();
     } finally {
       releaseSnapshot10?.();
+      releaseSecondSnapshot?.();
       clearSessionToken();
       Object.assign(globalThis, previous);
       dom.window.close();
     }
-  });
+  }, 20_000);
 });
 
 describe('layout and token contract', () => {
+  it('keeps the dashboard HTML balanced and all views inside the signed-in shell', () => {
+    const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+    const stack: string[] = [];
+    const voidElements = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+    for (const match of html.matchAll(/<!--[\s\S]*?-->|<![^>]*>|<\/?([a-z][\w:-]*)\b[^>]*>/gi)) {
+      const token = match[0];
+      const tag = match[1]?.toLowerCase();
+      if (!tag || token.startsWith('<!')) continue;
+      if (token.startsWith('</')) expect(stack.pop()).toBe(tag);
+      else if (!voidElements.has(tag) && !/\/\s*>$/.test(token)) stack.push(tag);
+    }
+    expect(stack).toEqual([]);
+    const dom = new JSDOM(html);
+    const desk = dom.window.document.getElementById('desk')!;
+    for (const id of ['desk-view', 'inbox-view', 'code-view']) {
+      expect(desk.contains(dom.window.document.getElementById(id))).toBe(true);
+    }
+  });
   it('documents the restored lease, queue, and action freshness fields', () => {
     const guide = readFileSync(new URL('../../docs/ui.md', import.meta.url), 'utf8');
     expect(guide).toContain('Active leases retain unit, change ID, state, holder');

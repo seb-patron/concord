@@ -1,4 +1,4 @@
-import type { Oid, RepoStorage, StorageCommit, StorageRepo, StorageToken } from '../contracts';
+import type { Oid, RepoStorage, StorageCommit, StorageRepo, StorageToken, StorageTreeEntry } from '../contracts';
 import type { StateStore } from '../state';
 
 interface FakeRepo {
@@ -7,6 +7,17 @@ interface FakeRepo {
   commits: Record<Oid, StorageCommit>;
   files: Record<Oid, Record<string, number[]>>;
   tokens: Record<string, { scope: 'read' | 'write'; expiresAt: number }>;
+}
+
+const encoder = new TextEncoder();
+const hex = (bytes: Uint8Array): Oid => [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+const unhex = (oid: Oid): Uint8Array => new Uint8Array(oid.match(/../g)!.map(pair => parseInt(pair, 16)));
+/** Real Git object identity so fake trees and blobs advertise usable 40-hex OIDs. */
+async function objectOid(kind: 'blob' | 'tree', body: Uint8Array): Promise<Oid> {
+  const header = encoder.encode(`${kind} ${body.byteLength}\0`);
+  const payload = new Uint8Array(header.byteLength + body.byteLength);
+  payload.set(header); payload.set(body, header.byteLength);
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-1', payload)));
 }
 
 /** Test provider. Its remotes are identifiers, never smart HTTP Git endpoints. */
@@ -55,10 +66,60 @@ export class FakeStorage implements RepoStorage {
     return this.repo(name)?.commits[oid] ?? null;
   }
 
-  async readFile(name: string, oid: Oid, path: string): Promise<Uint8Array | null> {
+  async readFile(name: string, oid: Oid, path: string, maxBytes?: number): Promise<Uint8Array | null> {
     this.fault('readFile');
     const bytes = this.repo(name)?.files[oid]?.[path];
-    return bytes ? new Uint8Array(bytes) : null;
+    if (!bytes) return null;
+    if (maxBytes !== undefined && bytes.length > maxBytes) throw new Error('FILE_TOO_LARGE');
+    return new Uint8Array(bytes);
+  }
+
+  /** The Git tree OID of a directory inside the flat per-commit file map. */
+  private async treeOid(files: Record<string, number[]>, prefix: string): Promise<Oid> {
+    const base = prefix ? `${prefix}/` : '';
+    const children = new Map<string, 'blob' | 'tree'>();
+    for (const file of Object.keys(files)) {
+      if (prefix && !file.startsWith(base)) continue;
+      const [segment, ...rest] = file.slice(base.length).split('/');
+      if (segment) children.set(segment, rest.length ? 'tree' : 'blob');
+    }
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    // Git sorts tree entries by name with an implicit trailing slash on subtrees.
+    const ordered = [...children.keys()].sort((a, b) => {
+      const left = children.get(a) === 'tree' ? `${a}/` : a;
+      const right = children.get(b) === 'tree' ? `${b}/` : b;
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
+    for (const child of ordered) {
+      const kind = children.get(child)!;
+      const childOid = kind === 'tree' ? await this.treeOid(files, `${base}${child}`) : await objectOid('blob', new Uint8Array(files[`${base}${child}`]));
+      const head = encoder.encode(`${kind === 'tree' ? '40000' : '100644'} ${child}\0`);
+      parts.push(head, unhex(childOid));
+      length += head.byteLength + 20;
+    }
+    const body = new Uint8Array(length);
+    let at = 0;
+    for (const part of parts) { body.set(part, at); at += part.byteLength; }
+    return objectOid('tree', body);
+  }
+
+  async listTree(name: string, oid: Oid, path: string): Promise<StorageTreeEntry[] | null> {
+    this.fault('listTree');
+    const files = this.repo(name)?.files[oid];
+    if (!files || (path && !Object.keys(files).some(file => file.startsWith(`${path}/`)))) return null;
+    const entries = new Map<string, StorageTreeEntry>();
+    for (const file of Object.keys(files)) {
+      if (path && !file.startsWith(`${path}/`)) continue;
+      const remainder = path ? file.slice(path.length + 1) : file;
+      const [segment, ...rest] = remainder.split('/');
+      if (!segment) continue;
+      const entryPath = path ? `${path}/${segment}` : segment;
+      entries.set(segment, rest.length
+        ? { name: segment, type: 'tree', oid: await this.treeOid(files, entryPath) }
+        : { name: segment, type: 'blob', oid: await objectOid('blob', new Uint8Array(files[file])) });
+    }
+    return [...entries.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).slice(0, 1001);
   }
 
   async mintToken(name: string, scope: 'read' | 'write', ttlSeconds: number): Promise<StorageToken> {

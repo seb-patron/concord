@@ -348,3 +348,21 @@ export function restoreScroll(el, saved) {
   el.scrollLeft = saved.left;
   return true;
 }
+/** Conservative token estimate for document previews; never a model tokenizer. */
+export const approximateTokens = value => Math.ceil(String(value ?? '').length / 4);
+
+/** Display-only credential redaction mirroring the MCP output filter's fixed patterns. */
+const CREDENTIAL_PATTERNS = [
+  /Bearer(?:\s+|%20)\S+/i,
+  /(https?:\/\/)[^\s"'@/]+:[^\s"'@/]+@/i,
+  /[?&](?:access_token|token|api_key|secret|password)=[^&\s"']+/i,
+  /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{12,})\b/,
+  /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/,
+];
+const redactString = value => CREDENTIAL_PATTERNS.some(pattern => pattern.test(value)) ? '[REDACTED]' : value;
+export function redactForDisplay(value) {
+  if (typeof value === 'string') return redactString(value);
+  if (Array.isArray(value)) return value.map(redactForDisplay);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactString(key), redactForDisplay(item)]));
+  return value;
+}

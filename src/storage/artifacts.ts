@@ -124,10 +124,25 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
       const commit = await repo.readCommit(oid);
       return commit ? { oid: commit.hash, treeOid: commit.treeHash, parents: commit.parents } : null;
     },
-    async readFile(name, oid, path) {
+    async listTree(name, oid, path) {
+      using repo = await binding.get(name);
+      const commit = await repo.readCommit(oid);
+      if (!commit) return null;
+      let treeOid = commit.treeHash;
+      for (const segment of path ? path.split('/') : []) {
+        const entries = await repo.readTree(treeOid);
+        const child = entries?.find(entry => entry.name === segment && entry.type === 'tree');
+        if (!child) return null;
+        treeOid = child.hash;
+      }
+      return (await repo.readTree(treeOid))?.slice(0, 1001).map(entry => ({ name: entry.name, type: entry.type, oid: entry.hash })) ?? null;
+    },
+    async readFile(name, oid, path, maxBytes) {
       using repo = await binding.get(name);
       const file = await repo.readFile({ ref: oid, path });
-      return file ? new Uint8Array(await file.arrayBuffer()) : null;
+      if (!file) return null;
+      if (maxBytes !== undefined && file.size > maxBytes) throw new Error('FILE_TOO_LARGE');
+      return new Uint8Array(await file.arrayBuffer());
     },
     async mintToken(name, scope, ttlSeconds) {
       if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 600) throw new Error('INVALID_TOKEN_TTL');

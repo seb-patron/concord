@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { startGitBridge, type GitBridge } from '../../local/git-bridge';
+import { createTreeRowParser, startGitBridge, type GitBridge } from '../../local/git-bridge';
 import { bridgeStorage } from '../../src/storage/bridge';
 
 const temporary: string[] = [];
@@ -47,6 +47,11 @@ describe('authenticated loopback Git bridge', () => {
     expect(git(['--git-dir', new URL(canonical.remote).pathname, 'cat-file', '-t', blobOid]).trim()).toBe('blob');
     expect(await storage.readCommit('canonical', blobOid)).toBeNull();
     expect(new TextDecoder().decode(await storage.readFile('canonical', oid, 'README.md') ?? new Uint8Array())).toBe('first seed\n');
+    // The bridge checks the blob size before shipping bytes back.
+    await expect(storage.readFile('canonical', oid, 'README.md', 5)).rejects.toThrow('FILE_TOO_LARGE');
+    expect(new TextDecoder().decode(await storage.readFile('canonical', oid, 'README.md', 64 * 1024) ?? new Uint8Array())).toBe('first seed\n');
+    expect(await storage.listTree('canonical', oid, '')).toEqual([expect.objectContaining({ name: 'README.md', type: 'blob' })]);
+    expect(await storage.listTree('canonical', oid, 'missing')).toBeNull();
     const fork = await storage.fork('canonical', 'candidate');
     expect(fork.remote).toMatch(/^file:\/\//);
     expect(await storage.resolveRef('candidate', 'refs/heads/main')).toBe(oid);
@@ -64,7 +69,61 @@ describe('authenticated loopback Git bridge', () => {
     const restartedStorage = bridgeStorage(restarted.url);
     expect(await restartedStorage.resolveRef('candidate', 'refs/heads/main')).toBe(oid);
     expect(await restartedStorage.revokeToken('candidate', persistentToken.secret)).toBe(true);
-  });
+  }, 20_000);
+
+  it('lists tree entries whose names contain newlines', async () => {
+    const directory = temp();
+    const bridge = await startGitBridge(directory, 'newline-bridge-token-1234');
+    openBridges.push(bridge);
+    const storage = bridgeStorage(bridge.url);
+    const canonical = await storage.ensureRepo('canonical');
+    const work = join(directory, 'working');
+    git(['init', work]);
+    const newlineName = 'line\nbreak.md';
+    for (const file of [newlineName, 'foo..bar.md', 'a:b', 'a\\b']) writeFileSync(join(work, file), 'seed\n');
+    writeFileSync(join(work, 'boundary.bin'), Buffer.alloc(65_536));
+    writeFileSync(join(work, 'over.bin'), Buffer.alloc(65_537));
+    git(['-C', work, 'add', '-A']);
+    git(['-C', work, 'commit', '-m', 'seed']);
+    const oid = git(['-C', work, 'rev-parse', 'HEAD']).trim();
+    git(['-C', work, 'push', canonical.remote, 'HEAD:refs/heads/main']);
+    const entries = await storage.listTree('canonical', oid, '');
+    for (const file of [newlineName, 'foo..bar.md', 'a:b', 'a\\b']) expect(entries).toContainEqual(expect.objectContaining({ name: file, type: 'blob' }));
+    for (const file of [newlineName, 'foo..bar.md', 'a:b', 'a\\b']) expect(await storage.readFile('canonical', oid, file, 64 * 1024)).toHaveLength(5);
+    await expect(storage.readFile('canonical', oid, 'boundary.bin', 65_536)).resolves.toHaveLength(65_536);
+    await expect(storage.readFile('canonical', oid, 'over.bin', 65_536)).rejects.toThrow('FILE_TOO_LARGE');
+    for (const path of ['..', '/x', 'a//b', 'a/../b', 'x\0y']) {
+      await expect(storage.listTree('canonical', oid, path)).rejects.toThrow('INVALID_PATH');
+      await expect(storage.readFile('canonical', oid, path, 64 * 1024)).rejects.toThrow('INVALID_PATH');
+    }
+  }, 20_000);
+
+  it('stops parsing a large tree after the 1,001st row', async () => {
+    const rows = Array.from({ length: 5000 }, (_, index) => Buffer.from(`100644 blob ${'a'.repeat(40)}\tfile-${String(index).padStart(4, '0')}\0`));
+    const listing = Buffer.concat(rows);
+    const parser = createTreeRowParser();
+    expect(parser.push(listing)).toBe(true);
+    expect(parser.entries).toHaveLength(1001);
+    expect(parser.rowsParsed).toBe(1001);
+    expect(parser.consumedBytes).toBeLessThan(listing.byteLength);
+
+    const directory = temp();
+    const bridge = await startGitBridge(directory, 'large-tree-bridge-token-123');
+    openBridges.push(bridge);
+    const storage = bridgeStorage(bridge.url);
+    const canonical = await storage.ensureRepo('canonical');
+    const work = join(directory, 'many-files');
+    git(['init', work]);
+    for (let index = 0; index < 5000; index++) writeFileSync(join(work, `file-${String(index).padStart(4, '0')}`), 'x');
+    git(['-C', work, 'add', '-A']);
+    git(['-C', work, 'commit', '-m', 'large tree']);
+    const oid = git(['-C', work, 'rev-parse', 'HEAD']).trim();
+    git(['-C', work, 'push', canonical.remote, 'HEAD:refs/heads/main']);
+    const entries = await storage.listTree('canonical', oid, '');
+    expect(entries).toHaveLength(1001);
+    expect(entries?.[0].name).toBe('file-0000');
+    expect(entries?.[1000].name).toBe('file-1000');
+  }, 30_000);
 
   it('rejects unauthenticated calls, traversal, unknown names and unsafe refs', async () => {
     const bridge = await startGitBridge(temp(), 'another-bridge-token-12345');
@@ -81,5 +140,6 @@ describe('authenticated loopback Git bridge', () => {
     await storage.ensureRepo('safe');
     await expect(storage.resolveRef('safe', 'refs/heads/../main')).rejects.toThrow('INVALID_REF');
     await expect(storage.readFile('safe', 'a'.repeat(40), '../secret')).rejects.toThrow('INVALID_PATH');
+    await expect(storage.listTree('safe', 'a'.repeat(40), '../secret')).rejects.toThrow('INVALID_PATH');
   });
 });

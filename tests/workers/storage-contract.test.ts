@@ -14,6 +14,41 @@ describe('fake RepoStorage and module state', () => {
     expect(() => artifactsStorage({})).toThrow('ARTIFACTS_ADAPTER_UNAVAILABLE');
     expect(() => bridgeStorage('http://127.0.0.1:9999')).toThrow('BRIDGE_ADAPTER_UNAVAILABLE');
   });
+  it('lists canonical trees through the Artifacts adapter', async () => {
+    const trees: Record<string, { name: string; type: string; hash: string }[]> = {
+      'tree-root': [{ name: 'docs', type: 'tree', hash: 'tree-docs' }, { name: 'README.md', type: 'blob', hash: 'blob-readme' }],
+      'tree-docs': [{ name: 'guide.md', type: 'blob', hash: 'blob-guide' }],
+    };
+    const binding = {
+      get: vi.fn(async () => ({
+        [Symbol.dispose]: () => {},
+        readCommit: async (oid: string) => oid === 'a'.repeat(40) ? { hash: oid, treeHash: 'tree-root', parents: [] } : null,
+        readTree: async (treeOid: string) => trees[treeOid] ?? null,
+      })),
+      create: vi.fn(),
+    };
+    const storage = artifactsStorage(binding as unknown as Artifacts);
+    expect(await storage.listTree('repo', 'a'.repeat(40), '')).toEqual([
+      { name: 'docs', type: 'tree', oid: 'tree-docs' },
+      { name: 'README.md', type: 'blob', oid: 'blob-readme' },
+    ]);
+    expect(await storage.listTree('repo', 'a'.repeat(40), 'docs')).toEqual([{ name: 'guide.md', type: 'blob', oid: 'blob-guide' }]);
+    expect(await storage.listTree('repo', 'a'.repeat(40), 'missing')).toBeNull();
+    expect(await storage.listTree('repo', 'b'.repeat(40), '')).toBeNull();
+  });
+  it('checks the Artifacts blob size before materializing a bounded readFile', async () => {
+    const arrayBuffer = vi.fn(async () => new Uint8Array(4).buffer);
+    const binding = {
+      get: vi.fn(async () => ({
+        [Symbol.dispose]: () => {},
+        readFile: async () => ({ size: 70 * 1024, arrayBuffer }),
+      })),
+      create: vi.fn(),
+    };
+    const storage = artifactsStorage(binding as unknown as Artifacts);
+    await expect(storage.readFile('repo', 'a'.repeat(40), 'big.bin', 64 * 1024)).rejects.toThrow('FILE_TOO_LARGE');
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
   it('does not follow a bridge redirect with its bearer credential', async () => {
     const requested = vi.fn(async (_url: string, init: RequestInit) => {
       expect(init.redirect).toBe('manual');
@@ -45,6 +80,11 @@ describe('fake RepoStorage and module state', () => {
       expect(await second.resolveRef('source', 'refs/heads/main')).toBe('a');
       expect(await second.readCommit('candidate', 'a')).toMatchObject({ treeOid: 'tree-a' });
       expect(new TextDecoder().decode(await second.readFile('candidate', 'a', 'a.txt') ?? new Uint8Array())).toBe('hello');
+      // Entries advertise the real Git object OID, stable across provider instances: sha1('blob 5\0hello').
+      expect(await second.listTree('candidate', 'a', '')).toEqual([{ name: 'a.txt', type: 'blob', oid: 'b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0' }]);
+      expect(await second.listTree('candidate', 'a', 'missing')).toBeNull();
+      await expect(second.readFile('candidate', 'a', 'a.txt', 4)).rejects.toThrow('FILE_TOO_LARGE');
+      await expect(second.readFile('candidate', 'a', 'a.txt', 5)).resolves.toHaveLength(5);
       await expect(second.mintToken('candidate', 'read', 60)).resolves.toMatchObject({ expiresAt: 61000 });
       const token = await second.mintToken('candidate', 'write', 1);
       expect(await second.revokeToken('candidate', token.secret)).toBe(true);
