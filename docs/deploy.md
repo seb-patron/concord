@@ -30,7 +30,13 @@ npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-
 npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 ```
 
-The owner supplies `CLOUDFLARE_ACCOUNT_ID` (32 hex characters), `CLOUDFLARE_API_TOKEN` with Workers and Artifacts permissions, and an existing `concord-demo` namespace. Keep credentials in the operator environment or a secret manager. Never commit them or pass them in URLs. Set `AUTH_TOKENS_FILE` and `TRUSTED_CONFIG_FILE` to operator-owned files **outside this clone**. For a configuration too large for one secret, also set `TRUSTED_PARTS_FILE` to a new path outside the clone where `deploy:trusted-parts` writes its bulk file (it refuses to overwrite an existing file, so remove the previous one or pick a new path before each regeneration); see [Large trusted configurations](#large-trusted-configurations). `AUTH_TOKENS` is the production JSON map from SHA-256 bearer token digests to scoped principal records; `TRUSTED_CONFIG` contains only owner-approved policy and profile records. Do not put local fixture identities in either file. See [auth and trust](ARCHITECTURE.md#auth-and-trust).
+The owner supplies `CLOUDFLARE_ACCOUNT_ID` (32 hex characters), `CLOUDFLARE_API_TOKEN` with Workers and Artifacts permissions, and an existing `concord-demo` namespace. Keep credentials in the operator environment or a secret manager. Never commit them or pass them in URLs. Set `AUTH_TOKENS_FILE` and `TRUSTED_CONFIG_FILE` to operator-owned files **outside this clone**. For a configuration too large for one secret, also set `TRUSTED_PARTS_FILE` to a new path outside the clone where `deploy:trusted-parts` writes its bulk file (it refuses to overwrite an existing file, so remove the previous one or pick a new path before each regeneration); see [Large trusted configurations](#large-trusted-configurations). `AUTH_TOKENS` is the production JSON map from SHA-256 bearer token digests to scoped principal records; `TRUSTED_CONFIG` contains only owner-approved policy, profile, and cost-limit records. Do not put local fixture identities in either file. See [auth and trust](ARCHITECTURE.md#auth-and-trust).
+
+`TRUSTED_CONFIG` may carry an owner-installed `costLimits` object. `maxActiveChangesPerRepo` is the install-wide ceiling on non-terminal changes per repo (integer 1–1000, default 32); `activeChangeLimits` maps individual repoIds to overrides in the same range for swarm repositories. Unknown keys and out-of-range or non-integer values fail closed as `TRUSTED_CONFIG_INVALID`, and there is no API or CLI path for agents to set either key. Mother Base and every repo keep the default of 32:
+
+```json
+{ "policies": {}, "profiles": {}, "costLimits": { "maxActiveChangesPerRepo": 32, "activeChangeLimits": { "swarm_repo": 128 } } }
+```
 
 ```sh
 export CLOUDFLARE_ACCOUNT_ID='<owner account ID>'

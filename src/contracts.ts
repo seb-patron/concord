@@ -139,6 +139,13 @@ export interface TrustedConfiguration {
   policies: Record<string, TrustedPolicy>;
   profiles: Record<string, TrustedProfile>;
   delegatedPrincipals?: { maxTtlMs?: number; activeLimit?: number; totalLimit?: number };
+  costLimits?: {
+    maxReposPerTenant?: number; maxForksPerTenant?: number; maxTokenMintsPerTenantPerDay?: number;
+    /** Install-wide ceiling on non-terminal changes per repo (default 32); agents cannot change it. */
+    maxActiveChangesPerRepo?: number;
+    /** Per-repo overrides of maxActiveChangesPerRepo, keyed by repoId. */
+    activeChangeLimits?: Record<Id, number>;
+  };
 }
 
 export interface ApiSuccess<T> { data: T; version: number; eventSeq: number }
