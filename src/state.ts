@@ -185,7 +185,9 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
         !validId(human.tenantId) || !validId(human.principalId) ||
         !Array.isArray(human.roles) || human.roles.length === 0 || human.roles.some(role => !roles.has(role)) ||
         (human.repoIds !== '*' && (!Array.isArray(human.repoIds) || human.repoIds.some(id => !validId(id)))) ||
-        Object.keys(human).some(key => !['email', 'tenantId', 'principalId', 'roles', 'repoIds'].includes(key))) ||
+        (human.avatarUrl !== undefined && (typeof human.avatarUrl !== 'string' || human.avatarUrl.length > 512 ||
+          !/^https:\/\//i.test(human.avatarUrl) || (() => { try { return new URL(human.avatarUrl).protocol !== 'https:'; } catch { return true; } })())) ||
+        Object.keys(human).some(key => !['email', 'tenantId', 'principalId', 'roles', 'repoIds', 'avatarUrl'].includes(key))) ||
       new Set(config.humans.map(human => human.email.toLowerCase())).size !== config.humans.length) throw new Error('TRUSTED_CONFIG_INVALID');
   }
   const limits = config.costLimits;

@@ -4,7 +4,7 @@ import {
   putSettings, redactError, redactText, setSessionToken, setAnonymousReadBudget, submitHumanApproval, submitVerdict, withdrawChange,
 } from './api.js';
 import {
-  boardStage, canRender, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence, pickTheme,
+  avatarInitials, boardStage, canRender, deriveInbox, environmentBadge, inboxCount, leaseCountdown, mutationEvidence, pickTheme, signOutTarget,
   liveLeaseHolders, normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
 import { createRepoPage } from './repo.js';
@@ -96,6 +96,11 @@ function preserve(render) {
   if (window.scrollY !== y) window.scrollTo?.(0, y);
 }
 function sessionError(message) { $('session-error').textContent = message ?? ''; $('session-error').hidden = !message; }
+function setProfileMenuOpen(open) {
+  $('profile-menu').hidden = !open;
+  $('profile-toggle').setAttribute('aria-expanded', String(open));
+}
+function closeProfileMenu() { setProfileMenuOpen(false); }
 function showSession() {
   const publicMode = state.publicRead && !!state.identity && !!state.repoId;
   const signedIn = canRender({ token: hasToken(), identity: state.identity, publicRead: publicMode }) && !!state.identity;
@@ -105,6 +110,8 @@ function showSession() {
   $('repo-picker').hidden = !signedIn;
   $('repo-separator').hidden = !signedIn;
   $('principal').hidden = !signedIn;
+  $('profile').hidden = !signedIn || publicMode;
+  $('inbox-button').hidden = !signedIn || publicMode;
   $('token-clear').hidden = !signedIn || access || publicMode;
   $('access-logout').hidden = !signedIn || !access;
   $('access-signin').hidden = signedIn || !state.accessSignIn;
@@ -112,11 +119,40 @@ function showSession() {
   $('refresh-status').hidden = !signedIn || !state.repoId;
   if (access) {
     $('principal').textContent = `Signed in as ${state.identity.principalId} via Cloudflare Access`;
-    $('access-logout').href = state.identity.logoutUrl;
+    $('profile-auth').textContent = 'Signed in via Cloudflare Access';
+    $('access-logout').href = signOutTarget(state.identity);
   } else if (publicMode) $('principal').textContent = 'Public, read-only';
-  else if (signedIn) $('principal').textContent = state.identity.principalId
+  else if (signedIn) {
+    $('principal').textContent = state.identity.principalId
     ? `Signed in as ${state.identity.principalId} · ${roles().join(', ') || 'role unverified'}${state.identity.model ? ` · ${state.identity.model}` : ''} · token in memory`
     : `Signed in · ${roles().join(', ') || 'role unverified'} · token in memory`;
+    $('profile-auth').textContent = 'Signed in via token';
+  }
+  const name = state.identity?.name ?? state.identity?.principalId ?? 'Concord user';
+  $('profile-name').textContent = name;
+  const avatar = $('profile-avatar');
+  avatar.alt = name;
+  $('profile-initials').textContent = avatarInitials(name);
+  if (state.identity?.avatarUrl) {
+    avatar.src = state.identity.avatarUrl;
+    avatar.hidden = false;
+    $('profile-initials').hidden = true;
+    avatar.onerror = () => { avatar.hidden = true; $('profile-initials').hidden = false; };
+  } else {
+    avatar.removeAttribute('src'); avatar.hidden = true;
+    $('profile-initials').hidden = false;
+  }
+  const repoList = $('profile-repos'); repoList.replaceChildren();
+  for (const repo of state.repos) {
+    const button = node('button', repo.displayName ?? repo.repoId, 'profile-menu-item');
+    button.type = 'button'; button.setAttribute('role', 'menuitem');
+    button.setAttribute('aria-current', String(repo.repoId === state.repoId));
+    button.addEventListener('click', () => {
+      state.repoId = repo.repoId; $('repo-select').value = repo.repoId; state.view = 'tracker';
+      closeProfileMenu(); ++state.generation; void loadRepo();
+    });
+    repoList.append(button);
+  }
 }
 function signOut(message) {
   ++state.generation; clearSessionToken();
@@ -709,6 +745,9 @@ function renderInbox() {
   $('alert-count').textContent=`${items.length} decision${items.length===1?'':'s'} need you`;
   $('alert-preview').textContent=items.slice(0,3).map(i=>i.kind).join(' · ');
   $('inbox-count').textContent=`${items.length} decisions · ${state.repos.find(r=>r.repoId===state.repoId)?.displayName ?? state.repoId ?? ''}`;
+  $('inbox-badge').hidden = items.length === 0;
+  $('inbox-badge').textContent = items.length > 99 ? '99+' : String(items.length);
+  $('inbox-button').setAttribute('aria-label', `Inbox, ${items.length} ${items.length === 1 ? 'item' : 'items'} need attention`);
   if (!items.some(i=>i.id===state.inboxSelected)) state.inboxSelected=items[0]?.id ?? null;
   const nav=$('inbox-list'); nav.replaceChildren();
   for(const item of items) {
@@ -760,7 +799,7 @@ function render() {
     const sections = { code: $('code-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
     for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
     $('stat-strip').hidden = state.view !== 'desk';
-    $('inbox-alert').hidden = state.view === 'inbox' || deriveInbox(state.snapshot).length === 0;
+    $('inbox-alert').hidden = state.view === 'inbox' || inboxCount(state.snapshot) === 0;
     for (const button of document.querySelectorAll('[data-main-view]')) button.setAttribute('aria-current', String(button.dataset.mainView === state.view));
     if (state.view !== 'code') repoPage.hide();
     views[state.view]?.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
@@ -882,9 +921,6 @@ function boot() {
     state.view = tab.dataset.mainView;
     render();
   });
-  const logout = node('a', 'Sign out', 'quiet');
-  logout.id = 'access-logout'; logout.hidden = true;
-  $('token-clear').after(logout);
   const accessSignin = node('a', 'Sign in with Cloudflare Access', 'primary');
   accessSignin.id = 'access-signin'; accessSignin.href = '/v1/session/signin'; accessSignin.hidden = true;
   $('token-form').before(accessSignin);
@@ -892,6 +928,26 @@ function boot() {
   $('demo-open').addEventListener('click',()=>{if(demo) void signIn(demo,window.CONCORD_DEMO_REPO_ID);});
   $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value;if(!token)return;const invalid=token.search(/[^\x21-\x7E]/);if(invalid!==-1){sessionError(`The pasted token has a space, line break or non-ASCII character at position ${invalid+1}; copy it again.`);return;}void signIn(token);});
   $('token-clear').addEventListener('click',()=>signOut());
+  $('access-logout').addEventListener('click', event => {
+    event.preventDefault();
+    const target = signOutTarget(state.identity);
+    signOut();
+    if (target) window.location.assign(target);
+  });
+  $('profile-toggle').addEventListener('click', () => {
+    const open = $('profile-menu').hidden;
+    setProfileMenuOpen(open);
+    if (open) $('profile-menu').querySelector('[role="menuitem"]:not(:disabled)')?.focus();
+  });
+  $('inbox-button').addEventListener('click', () => { state.view = 'inbox'; render(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !$('profile-menu').hidden) {
+      closeProfileMenu(); $('profile-toggle').focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (!$('profile-menu').hidden && !event.target.closest('#profile')) closeProfileMenu();
+  });
   const themeToggle = $('theme-toggle');
   themeToggle.textContent = initialTheme === 'dark' ? 'Light mode' : 'Dark mode';
   themeToggle.setAttribute('aria-label', initialTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');

@@ -19,6 +19,17 @@ export function pickTheme(stored) {
   return stored === 'dark' ? 'dark' : 'light';
 }
 
+/** Initials used when a profile has no usable avatar image. */
+export function avatarInitials(name) {
+  const parts = safeText(name).trim().split(/\s+/).filter(Boolean);
+  return (parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : parts[0]?.slice(0, 2) ?? '?').toLocaleUpperCase();
+}
+
+/** Access sign-out passes through Concord to clear its cookie before redirecting. */
+export function signOutTarget(identity) {
+  return identity?.authMethod === 'access' ? identity.logoutUrl ?? '/v1/session/signout' : null;
+}
+
 export const trackerLaneNames = Object.freeze([
   'Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed',
 ]);
@@ -150,7 +161,35 @@ export function deriveInbox(snapshot) {
       why: 'The published revision is ready for independent review or enqueue with an approved verdict ID.',
       evidence: `Head: ${change.headOid}\nRevision: ${change.revision}\nUnits: ${(change.unitKeys ?? []).join(', ') || 'none'}` });
   }
+  if (typeof queue.blockedReason === 'string' && queue.blockedReason.trim()) {
+    items.push({ id: 'planning:queue', kind: 'Planning problem', tone: 'red',
+      title: 'Queue planning needs attention', why: 'The queue reports a blocked planning or landing operation.',
+      evidence: `Reason: ${queue.blockedReason}` });
+  }
+  if (['failed', 'reconcile'].includes(queue.promotion?.state)) {
+    items.push({ id: `landing:${queue.promotion.state}`, kind: 'Landing problem', tone: 'red',
+      title: queue.promotion.state === 'failed' ? 'Landing failed' : 'Landing needs reconciliation',
+      why: 'The latest promotion could not be confirmed as a clean landing.',
+      evidence: `Promotion: ${queue.promotion.promotionId ?? 'unknown'}\nState: ${queue.promotion.state}` });
+  }
+  if (typeof queue.bootstrap?.blockedReason === 'string' && queue.bootstrap.blockedReason.trim()) {
+    items.push({ id: 'planning:bootstrap', kind: 'Planning problem', tone: 'red',
+      title: 'Repository bootstrap needs attention', why: 'The initial repository handoff is blocked.',
+      evidence: `Reason: ${queue.bootstrap.blockedReason}` });
+  }
+  for (const contest of Array.isArray(queue.contests) ? queue.contests : []) {
+    if (contest?.state !== 'blocked') continue;
+    items.push({ id: `planning:contest:${contest.contestId}`, kind: 'Planning problem', tone: 'red',
+      title: `Change contest needs a decision: ${contest.intentKey ?? contest.contestId}`,
+      why: 'A conflicting change contest is blocked and needs a human decision.',
+      evidence: `Contest: ${contest.contestId}\nUnit: ${contest.unitKey ?? 'unknown'}` });
+  }
   return items;
+}
+
+/** Number of human-actionable items currently derived from a repository snapshot. */
+export function inboxCount(snapshot) {
+  return deriveInbox(snapshot).length;
 }
 
 export function mutationEvidence(change, leases, findingSetVersion, requireFences = true) {
