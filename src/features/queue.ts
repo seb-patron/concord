@@ -194,6 +194,13 @@ function admissionStillValid(context: ModuleContext, entry: Entry): boolean {
   } catch { return false; }
 }
 function bump(context: ModuleContext, state: QueueState, reason: string, ids: Id[]): void {
+  const promotionMembers = new Set(state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)
+    ? state.ticket.admissionIds : []);
+  for (const entry of state.entries) {
+    if (entry.state === 'checking' && !promotionMembers.has(entry.entryId)) {
+      transition(context, state, entry, 'reserved');
+    }
+  }
   state.generation++;
   state.activeStackJobId = null;
   state.diagnosis = null;
@@ -330,7 +337,6 @@ function emit(context: ModuleContext, kind: string, ids: Id[], payload: Record<s
   return context.appendEvent(kind, ids, payload, version).sequence;
 }
 function invalidate(context: ModuleContext, state: QueueState, reason: string, ids: Id[]): void {
-  for (const entry of state.entries) if (entry.state === 'checking') transition(context, state, entry, 'reserved');
   bump(context, state, reason, ids);
 }
 function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, reason: string): void {
