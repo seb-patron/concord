@@ -256,6 +256,56 @@ describe('repository and change lifecycle', () => {
     expect(reread).toMatchObject({ headOid: b, revision: 1, unitKeys: ['row:families:alpha'] });
     expect(reread.startUnitKeys).toEqual(['file:data/families.tsv']);
   });
+  it('lets reviewers and owners read a live candidate fork while writes remain author-only', async () => {
+    const name = 'reviewer_candidate_token_case';
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const input = { intentKey: 'review-token', intentText: 'review candidate', baseOid: a,
+      branch: 'refs/heads/review-token', unitKeys: [], dependencyChangeIds: [] };
+    const created = await fetchApi(mutation(`/v1/repos/${name}/changes`, input, 'review-token-create', 'local-agent-a'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    await fake(name, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: b, treeOid: c, parents: [a] });
+      provider.conditionalUpdateRef(change.candidateStorageName, input.branch, null, b);
+    });
+    const snapshotVersion = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).version;
+    const registered = await fetchApi(mutation(`/v1/repos/${name}/branches`, {
+      expectedVersion: snapshotVersion, storageName: change.candidateStorageName, ref: input.branch, observedHead: b, ownerId: 'agent-a',
+    }, 'review-token-register', 'local-agent-a'));
+    expect(registered.status).toBe(201);
+    const repoVersion = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).version;
+    const scheduleOriginal = runners.hooks['runners.schedule'];
+    runners.hooks['runners.schedule'] = (context, job) => ({ status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } });
+    try {
+      const published = await fetchApi(mutation(`/v1/repos/${name}/changes/${change.changeId}/publish`, {
+        expectedVersion: repoVersion, baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {},
+      }, 'review-token-publish', 'local-agent-a'));
+      const publishedBody = await responseBody(published);
+      expect(published.status, JSON.stringify(publishedBody)).toBe(202);
+      Object.assign(change, { version: publishedBody.version });
+    } finally { runners.hooks['runners.schedule'] = scheduleOriginal; }
+
+    const tokenRequest = (scope: 'read' | 'write', key: string, principal: string, storageName = change.candidateStorageName) =>
+      fetchApi(mutation(`/v1/repos/${name}/git-token`, { expectedVersion: change.version, storageName, scope, ttlSeconds: 300 }, key, principal));
+    const reviewerCanonicalRead = await tokenRequest('read', 'review-token-reviewer-canonical-read', 'local-reviewer', repo.canonicalStorageName);
+    expect(reviewerCanonicalRead.status).toBe(403);
+    expect((await responseBody(reviewerCanonicalRead)).error.code).toBe('FORK_NOT_OWNED');
+    const reviewerRead = await tokenRequest('read', 'review-token-reviewer-read', 'local-reviewer');
+    expect(reviewerRead.status).toBe(200);
+    expect((await responseBody(reviewerRead)).data.scope).toBe('read');
+    const reviewerWrite = await tokenRequest('write', 'review-token-reviewer-write', 'local-reviewer');
+    expect(reviewerWrite.status).toBe(403);
+    expect((await responseBody(reviewerWrite)).error.code).toBe('FORK_NOT_OWNED');
+    const otherAgentRead = await tokenRequest('read', 'review-token-agent-read', 'local-agent-b');
+    expect(otherAgentRead.status).toBe(403);
+    expect((await responseBody(otherAgentRead)).error.code).toBe('FORK_NOT_OWNED');
+    expect((await tokenRequest('read', 'review-token-owner-read', 'local-owner')).status).toBe(200);
+  });
   it('records the creating principal model and returns null for an absent label', async () => {
     const name = 'author_model_case';
     await create(name);

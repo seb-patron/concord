@@ -573,10 +573,16 @@ async function gitToken(context: ModuleContext, body: Record<string, unknown>): 
   const ttlSeconds = body.ttlSeconds;
   if (scope !== 'read' && scope !== 'write') fail(400, 'INVALID_SCOPE', 'Scope must be read or write');
   if (!Number.isInteger(ttlSeconds) || Number(ttlSeconds) < 60 || Number(ttlSeconds) > 600) fail(400, 'INVALID_TTL', 'Token TTL must be 60 to 600 seconds');
-  const own = list<Change>(context, 'changes').some(item => item.candidateStorageName === storageName && item.authorId === context.principal.principalId && !terminal(item));
+  const change = list<Change>(context, 'changes').find(item => item.candidateStorageName === storageName && !terminal(item));
+  const own = change?.authorId === context.principal.principalId;
   if (storageName === repo.canonicalStorageName) {
     if (scope !== 'read') fail(403, 'CANONICAL_WRITE_FORBIDDEN', 'Canonical write tokens are reserved for the promoter');
-  } else if (!own) fail(403, 'FORK_NOT_OWNED', 'The caller does not own this candidate fork');
+    if (!context.principal.roles.some(role => role === 'agent' || role === 'owner')) {
+      fail(403, 'FORK_NOT_OWNED', 'The caller does not own this candidate fork');
+    }
+  } else if (!own && !(scope === 'read' && change && context.principal.roles.some(role => role === 'reviewer' || role === 'owner'))) {
+    fail(403, 'FORK_NOT_OWNED', 'The caller does not own this candidate fork');
+  }
   const storageRepo = await context.storage.info(storageName);
   if (storageRepo?.status !== 'ready') fail(409, 'STORAGE_NOT_READY', 'Storage is not ready');
   const mintKey = `mint-token:${storageName}`;

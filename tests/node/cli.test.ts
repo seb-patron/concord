@@ -381,6 +381,61 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
+  it('checks out a published OID from a full branch ref with one fetch refspec', async () => {
+    const root = await tempDir('checkout-published-oid');
+    const bare = join(root, 'candidate.git');
+    const source = join(root, 'source');
+    const worktree = join(root, 'checkout');
+    const shimDir = join(root, 'bin');
+    await mkdir(source); await mkdir(worktree); await mkdir(shimDir);
+    await git(['init', worktree]);
+    await git(['init', '--bare', bare]);
+    await git(['init', '-b', 'main', source]);
+    await writeFile(join(source, 'reviewed.txt'), 'published commit\n');
+    await git(['add', '--', 'reviewed.txt'], {}, source);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'published'], {}, source);
+    const headOid = await resolveHead(source);
+    await git(['push', bare, `${headOid}:refs/heads/land/x`], {}, source);
+    const realGit = (await execFile('which', ['git'])).stdout.trim();
+    const fetchLog = join(root, 'fetch-args.txt');
+    const shim = join(shimDir, 'git');
+    await writeFile(shim, '#!/bin/sh\nif [ "$1" = "fetch" ]; then\n  printf "%s\\n" "$@" > "$CONCORD_TEST_FETCH_LOG"\n  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0\n  "$CONCORD_TEST_REAL_GIT" -c protocol.file.allow=always fetch --no-tags -- "$CONCORD_TEST_BARE" "$5" 2> "$CONCORD_TEST_FETCH_ERROR"\n  result=$?\n  if [ "$result" -ne 0 ]; then cat "$CONCORD_TEST_FETCH_ERROR" >&2; fi\n  exit "$result"\nfi\nexec "$CONCORD_TEST_REAL_GIT" "$@"\n');
+    await chmod(shim, 0o755);
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      const path = request.url ?? '';
+      response.setHeader('content-type', 'application/json');
+      if (request.method === 'GET' && path === '/v1/repos/r/changes/c') response.end(JSON.stringify({ data: {
+        changeId: 'c', candidateStorageName: 'fork', branch: 'refs/heads/land/x', headOid,
+      }, version: 1 }));
+      else if (request.method === 'GET' && path === '/v1/repos/r') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical' }, version: 1 }));
+      else if (request.method === 'POST' && path === '/v1/repos/r/git-token') response.end(JSON.stringify({ data: {
+        remote: 'https://git.invalid/fork.git', token: 'short-lived-secret', scope: 'read',
+      }, version: 1 }));
+      else { response.statusCode = 404; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      let result;
+      try {
+        result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'change', 'checkout', '--repo', 'r', '--id', 'c', '--worktree', worktree], {
+          cwd: process.cwd(), env: { ...process.env, PATH: `${shimDir}:${process.env.PATH ?? ''}`, CONCORD_URL: `http://127.0.0.1:${address.port}`,
+            CONCORD_TOKEN: 'api-token', CONCORD_TEST_REAL_GIT: realGit, CONCORD_TEST_BARE: bare, CONCORD_TEST_FETCH_LOG: fetchLog,
+            CONCORD_TEST_FETCH_ERROR: join(root, 'fetch-error.txt') },
+        });
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : error}\nfetch args: ${await readFile(fetchLog, 'utf8').catch(() => '(missing)')}\nfetch error: ${await readFile(join(root, 'fetch-error.txt'), 'utf8').catch(() => '(missing)')}`);
+      }
+      const args = (await readFile(fetchLog, 'utf8')).trim().split(/\r?\n/);
+      expect(args).toEqual(['fetch', '--no-tags', '--', 'https://git.invalid/fork.git', `${headOid}:refs/remotes/concord/land/x`]);
+      expect(await git(['rev-parse', 'refs/remotes/concord/land/x'], {}, worktree)).toBe(headOid);
+      expect(JSON.parse(result.stdout)).toMatchObject({ fetched: true, changeId: 'c', worktree, branch: 'refs/heads/land/x', headOid,
+        remote: 'https://git.invalid/fork.git' });
+      expect(result.stdout + result.stderr).not.toContain('short-lived-secret');
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it('routes forced lease release with its audit reason', async () => {
     const calls: Array<{ method: string; path: string; body: any; expectedVersion?: number }> = [];
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {

@@ -35,7 +35,7 @@ Commands and required fields:
   issue create|list|get|edit|close|reopen --repo ID [--id NUMBER] [--title TEXT] [--body TEXT] [--labels JSON_ARRAY] [--milestone-id ID] [--reason TEXT]
   milestone create|list|get|close --repo ID [--id ID] [--title TEXT] [--description TEXT] [--due-date YYYY-MM-DD]
   change get --repo ID --id ID
-  change checkout --repo ID --id ID --worktree PATH
+  change checkout --repo ID --id ID --worktree PATH [--oid OID]
   change publish --repo ID --id ID --worktree PATH --lease-fences JSON_OBJECT
   change close --repo ID --id ID --expected-version N [--reason TEXT]
   lease claim --repo ID --change-id ID --unit-keys JSON_ARRAY --intent-text TEXT --expected-version N [--ttl-seconds N]
@@ -60,7 +60,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid', 'public'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid', 'public'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -257,11 +257,12 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const repository = unwrap(await send('GET', `/repos/${rid}`)) as Record<string, unknown>;
     const storageName = stringField(change, 'candidateStorageName');
     const branch = stringField(change, 'branch');
+    const headOid = typeof flags.oid === 'string' ? flags.oid : typeof change.headOid === 'string' ? change.headOid : undefined;
     const access = unwrap(await mintGitToken(client, { repoPath: root, storageName, scope: 'read',
       ...(flags['expected-version'] !== undefined ? { expectedVersion: numberFlag(flags, 'expected-version') } : {}) })) as Record<string, unknown>;
     const remote = stringField(access, 'remote', true);
-    await fetchFork(worktree, remote, branch, tokenField(access));
-    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, remote: redactRemote(remote) });
+    await fetchFork(worktree, remote, branch, tokenField(access), headOid);
+    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, headOid: headOid ?? null, remote: redactRemote(remote) });
   }
   if (noun === 'change' && verb === 'publish') {
     const id = encodeURIComponent(required(flags, 'id'));

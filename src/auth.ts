@@ -141,5 +141,6 @@ export function requireRouteRole(principal: Principal, method: string, path: str
   if (path === '/v1/repos' || /\/bootstrap$|\/(?:intent-)?contests$/.test(path)) return requireRole(principal, 'owner');
   if (/\/runner\/|\/jobs\//.test(path)) return requireRole(principal, 'checker', 'promoter');
   if (/\/findings$|\/verdicts$|\/carry$|\/repairs\/[^/]+\/review$/.test(path)) return requireRole(principal, 'reviewer');
+  if (method === 'POST' && /\/v1\/repos\/[^/]+\/git-token$/.test(path)) return requireRole(principal, 'agent', 'owner', 'reviewer');
   return requireRole(principal, 'agent', 'owner');
 }

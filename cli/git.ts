@@ -88,17 +88,20 @@ export async function cloneRepo(remote: string, destination: string, token?: str
   await git(['clone', '--', remote, destination], { token });
 }
 
-export async function fetchFork(worktree: string, remote: string, branch: string, token?: string): Promise<void> {
+export async function fetchFork(worktree: string, remote: string, branch: string, token?: string, headOid?: string): Promise<void> {
   validateRemote(remote);
   validateBranch(branch);
-  await git(['fetch', '--no-tags', '--', remote, `refs/heads/${branch}:refs/remotes/concord/${branch}`], { token }, worktree);
+  const name = branch.replace(/^refs\/heads\//, '');
+  const source = headOid ?? `refs/heads/${name}`;
+  if (headOid !== undefined && !/^[0-9a-f]{40,64}$/i.test(headOid)) throw new ConcordError('Server supplied an invalid candidate head OID', 'server');
+  await git(['fetch', '--no-tags', '--', remote, `${source}:refs/remotes/concord/${name}`], { token }, worktree);
 }
 
 export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string, headOid = 'HEAD', alternateObjectDirectory?: string, noLazyFetch = false): Promise<void> {
   validateRemote(remote);
   validateBranch(branch);
   if (!/^(?:HEAD|[0-9a-f]{40,64})$/i.test(headOid)) throw new ConcordError('Candidate head OID is malformed', 'usage');
-  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch}`], { token, alternateObjectDirectory, noLazyFetch }, worktree);
+  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch.replace(/^refs\/heads\//, '')}`], { token, alternateObjectDirectory, noLazyFetch }, worktree);
 }
 
 export function rejectCanonicalTarget(candidateStorageName: string, canonicalStorageName: unknown, candidateRemote: string, canonicalRemote?: unknown): void {
@@ -118,7 +121,8 @@ export function validateRemote(remote: string): void {
 function normalizeRemote(value: string): string { return value.replace(/\/$/, '').toLowerCase(); }
 
 function validateBranch(branch: string): void {
-  if (!branch || branch === 'main' || branch === 'refs/heads/main' || branch.startsWith('-') || branch.includes('..') || branch.includes('@{') || branch.startsWith('/') || branch.endsWith('/') || branch.endsWith('.')) {
+  const name = branch.replace(/^refs\/heads\//, '');
+  if (!name || name === 'main' || name.startsWith('-') || name.includes('..') || name.includes('@{') || name.startsWith('/') || name.endsWith('/') || name.endsWith('.') || branch.startsWith('refs/heads/refs/')) {
     throw new ConcordError('Server supplied an invalid candidate branch', 'server');
   }
 }
