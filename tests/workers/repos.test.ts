@@ -273,6 +273,57 @@ describe('repository and change lifecycle', () => {
     expect(closed.status).toBe(200);
     expect((await responseBody(closed)).data).toMatchObject({ status: 'closed', authorModel: null });
   });
+  it('releases active and reserved leases when closing a change, leaving other changes untouched', async () => {
+    const name = 'close_releases_leases';
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].units = Object.fromEntries(['alpha', 'beta', 'gamma'].map(key => [`row:families:${key}`, {
+      canonicalKey: `row:families:${key}`, file: 'data/families.tsv', resources: [key], dependencyKeys: [],
+    }]));
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const createChange = async (actor: string, task: string) => {
+      const response = await fetchApi(mutation(`/v1/repos/${name}/changes`, {
+        intentKey: task, intentText: task, baseOid: a, branch: `refs/heads/${task}`, unitKeys: [], dependencyChangeIds: [],
+      }, `create-${task}`, actor));
+      expect(response.status).toBe(201);
+      return responseBody(response);
+    };
+    const first = await createChange('local-agent-a', 'close-holder');
+    const second = await createChange('local-agent-b', 'other-holder');
+    const claim = async (changeId: string, keys: string[], actor: string, key: string) => {
+      const response = await fetchApi(mutation(`/v1/repos/${name}/leases`, {
+        changeId, unitKeys: keys, intentText: key,
+      }, key, actor));
+      expect(response.status).toBe(201);
+      return (await responseBody(response)).data.leases;
+    };
+    const released = await claim(first.data.changeId, ['row:families:alpha', 'row:families:beta'], 'local-agent-a', 'close-claims');
+    const retained = await claim(second.data.changeId, ['row:families:gamma'], 'local-agent-b', 'other-claim');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE leases_claims SET state = 'reserved' WHERE lease_id = ?", released[1].leaseId);
+    });
+    const latest = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes/${first.data.changeId}`)));
+    const closed = await fetchApi(mutation(`/v1/repos/${name}/changes/${first.data.changeId}/close`,
+      { expectedVersion: latest.version }, 'close-holder', 'local-agent-a'));
+    expect(closed.status).toBe(200);
+    expect((await responseBody(closed)).data).toMatchObject({ changeId: first.data.changeId, status: 'closed' });
+    const listing = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/leases`)))).data.items;
+    expect(listing.find((lease: { leaseId: string }) => lease.leaseId === released[0].leaseId).state).toBe('released');
+    expect(listing.find((lease: { leaseId: string }) => lease.leaseId === released[1].leaseId).state).toBe('released');
+    expect(listing.find((lease: { leaseId: string }) => lease.leaseId === retained[0].leaseId).state).toBe('active');
+    const reclaimed = await claim(second.data.changeId, ['row:families:alpha'], 'local-agent-b', 'reclaim-alpha');
+    expect(reclaimed).toHaveLength(1);
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/events`)))).data.items;
+    for (const lease of released) {
+      expect(events).toContainEqual(expect.objectContaining({ kind: 'lease.released', relatedIds: expect.arrayContaining([lease.leaseId]), payload: expect.objectContaining({ reason: 'change-closed' }) }));
+    }
+  });
   it('keeps ordinary intent keys owned, including contest-shaped tasks and fixture authors', async () => {
     const repo = await create('intent_ownership_case');
     await fetchApi(apiRequest('/v1/repos/intent_ownership_case'));

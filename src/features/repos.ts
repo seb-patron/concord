@@ -707,6 +707,12 @@ function close(context: ModuleContext, changeId: string): Response {
   if (context.state.get<BootstrapPending>('bootstrap')?.changeId === changeId) fail(409, 'BOOTSTRAP_FROZEN', 'Seed draft has a pending bootstrap request');
   if (!['draft', 'ready'].includes(change.status)) fail(409, 'CHANGE_FROZEN', 'Only unfrozen draft or ready changes can close');
   context.transaction(() => {
+    try {
+      const release = (context.call as (name: string, id: string) => ReturnType<ModuleContext['call']>)('leases.releaseForChange', changeId);
+      if (release.status === 'blocked' && release.code !== 'MODULE_UNAVAILABLE') fail(409, release.code, release.reason);
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.code !== 'MODULE_UNAVAILABLE') throw error;
+    }
     change.status = 'closed';
     change.version = versioned(context, 'change.closed', [changeId], {});
     storeChange(context, change);

@@ -63,10 +63,11 @@ function activeRows(context: ModuleContext, now: number): LeaseRow[] {
   return rows(context, "SELECT * FROM leases_claims WHERE state IN ('active','reserved') AND expires_at > ? ORDER BY unit_key", now);
 }
 
-function makeEvent(context: ModuleContext, kind: string, row: LeaseRow, version: number): number {
+function makeEvent(context: ModuleContext, kind: string, row: LeaseRow, version: number, extra: Record<string, unknown> = {}): number {
   return context.appendEvent(kind, [row.lease_id, row.change_id], {
     unitKey: row.unit_key, holderId: row.holder_id, changeId: row.change_id,
     intentText: row.intent_text, fence: row.fence, expiresAt: row.expires_at,
+    ...extra,
   }, version).sequence;
 }
 
@@ -411,6 +412,18 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
   });
 }
 
+function releaseForChange(context: ModuleContext, changeId: string): Gate {
+  if (!context?.sql || !validId(changeId)) return unavailableGate();
+  const now = context.now();
+  const selected = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND state IN ('active','reserved') ORDER BY lease_id", changeId);
+  for (const row of selected) {
+    const version = context.nextVersion();
+    context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, now, row.lease_id);
+    makeEvent(context, 'lease.released', row, version, { reason: 'change-closed' });
+  }
+  return { status: 'eligible', version: context.version(), evidenceIds: selected.map(row => row.lease_id), value: undefined };
+}
+
 function reservationLive(context: ModuleContext, changeId: string, fences: Record<string, number>): Gate {
   if (!context?.sql || !validId(changeId) || !fences || typeof fences !== 'object' || Array.isArray(fences)) return unavailableGate();
   const { child, contest } = contestForChild(context, changeId);
@@ -448,5 +461,6 @@ export const leases: FeatureModule = {
   snapshot: context => ({ ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row)) }),
   nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,
   onAlarm: context => context.transaction(() => expireDue(context, context.now())),
-  hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation },
+  hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation,
+    'leases.releaseForChange': releaseForChange } as FeatureModule['hooks'],
 };
