@@ -207,8 +207,12 @@ async function catalogRepo(context: ModuleContext): Promise<Repo> {
     } }));
     if (!response.ok) fail(503, 'CATALOG_UNAVAILABLE', 'Repository catalog unavailable');
     const envelope = await response.json() as { data: { items: Repo[]; nextCursor: string | null } };
-    const repo = envelope.data.items.find(item => item.repoId === context.repoId);
-    if (repo) {
+    const catalog = envelope.data.items.find(item => item.repoId === context.repoId);
+    if (catalog) {
+      const stored = context.state.get<Repo>('repo');
+      const repo = stored?.canonicalStorageName === catalog.canonicalStorageName && catalog.observedCanonicalOid === null
+        ? { ...catalog, observedCanonicalOid: stored.observedCanonicalOid }
+        : catalog;
       context.state.put('repo', repo);
       // The local in-process fake stores objects in each DO's SQLite state.
       // Reconcile its deterministic empty canonical name in the coordinator.

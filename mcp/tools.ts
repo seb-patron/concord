@@ -26,6 +26,7 @@ export const tools: Tool[] = [
   tool('issue_list', 'List issues with optional state, label, milestone and cursor.', { ...repo, state: { type: 'string', enum: ['open', 'closed'] }, label: s, milestoneId: s, cursor: s }, ['repoId']),
   tool('issue_close', 'Close an issue with a reason and current issue version.', { ...repo, issueNumber: { type: 'integer', minimum: 1 }, reason: s, expectedVersion: n, idempotencyKey: s }, ['repoId', 'issueNumber', 'reason', 'expectedVersion']),
   tool('milestone_list', 'List milestones with issue and landed change progress.', { ...repo, cursor: s }, ['repoId']),
+  tool('milestone_create', 'Create a milestone in the repository.', { ...repo, title: s, description: s, dueDate: s, idempotencyKey: s }, ['repoId', 'title']),
   tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
   tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result. TTL is bounded by trusted maxLeaseHoldSeconds (default 14400).', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 86400 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
@@ -142,6 +143,7 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
     case 'issue_list': { const params = new URLSearchParams(); for (const key of ['state', 'label', 'milestoneId', 'cursor']) if (typeof args[key] === 'string') params.set(key, args[key] as string); result = await client.request('GET', `${r}/issues${params.size ? '?' + params : ''}`); break; }
     case 'issue_close': result = await mutation(client, `${r}/issues/${args.issueNumber}/close`, { reason: args.reason }, args.expectedVersion as number, args.idempotencyKey); break;
     case 'milestone_list': result = await client.request('GET', `${r}/milestones${query('cursor', args.cursor)}`); break;
+    case 'milestone_create': result = await mutation(client, `${r}/milestones`, { title: args.title, ...(args.description !== undefined ? { description: args.description } : {}), ...(args.dueDate !== undefined ? { dueDate: args.dueDate } : {}) }, undefined, args.idempotencyKey); break;
     case 'change_status': result = await client.request('GET', p()); break;
     case 'lease_claim': {
       const body = { changeId: args.changeId, unitKeys: args.unitKeys, intentText: args.intentText, ttlSeconds: args.ttlSeconds ?? 120 };

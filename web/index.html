@@ -21,7 +21,7 @@
 <nav class="main-nav" aria-label="Repository"><button type="button" data-main-view="code">Code</button><button type="button" data-main-view="tracker">Tracker</button><button type="button" data-main-view="milestones">Milestones</button><button type="button" data-main-view="desk">Fleet desk</button><button type="button" data-main-view="inbox">Inbox</button></nav>
 <section id="code-view" class="repo-page" aria-label="Repository code" hidden></section>
 <section id="tracker-view" class="tracker-view" aria-label="Repository tracker" hidden></section>
-<section id="milestones-view" class="empty-view" hidden><h1>Milestones</h1><p>Milestone planning is not available in this view yet.</p></section>
+<section id="milestones-view" class="milestones-view" aria-labelledby="milestones-heading" hidden><h1 id="milestones-heading">Milestones</h1><div id="milestones-content"></div></section>
 <p id="desk-message" class="desk-message" role="status" hidden></p>
 <button id="inbox-alert" class="inbox-alert" type="button"><span class="alert-dot" aria-hidden="true"></span><strong id="alert-count">0 decisions need you</strong><span id="alert-preview"></span><span aria-hidden="true">→</span></button>
 <section id="desk-view" hidden><section id="stat-strip" class="stat-strip" aria-label="Fleet summary"></section><nav class="mobile-tabs" aria-label="Views"><button type="button" data-tab="work">Work</button><button type="button" data-tab="fleet">Fleet</button><button type="button" data-tab="leases">Leases</button><button type="button" data-tab="queue">Queue</button></nav>

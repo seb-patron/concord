@@ -24,8 +24,10 @@ When promotion lands a linked change, Concord closes its issue with `closedBy: {
 | Method | Path | Body or query | Result |
 | --- | --- | --- | --- |
 | `POST` | `/milestones` | `title`, optional `description`, `dueDate` (`YYYY-MM-DD`) | Creates a milestone. |
+| `GET` | `/milestone-settings` | — | Returns `{ create: "agents" | "owners", version }`; available to repository readers. |
+| `PATCH` | `/milestone-settings` | `create`, `expectedVersion` | Owner-only compare-and-set for milestone creation permissions. |
 | `GET` | `/milestones` | Optional `cursor`, `limit` | Page of milestones. |
 | `GET` | `/milestones/:id` | — | Milestone with progress. |
 | `POST` | `/milestones/:id/close` | `expectedVersion` | Closes a milestone. |
 
-Milestone creation and closure require an owner. Progress contains `openIssues`, `closedIssues`, and `landedChanges`; it is derived from current issues and the queue. Creation, closure, and issue progress emit `milestone.created`, `milestone.closed`, and `milestone.updated` events. A milestone can be closed while issues remain open.
+Milestone creation is available to owners and agents by default. Owners can set `create` to `owners` to restrict creation; changing it requires the current settings `version`. Reviewers and viewers cannot create milestones. Closing a milestone remains owner-only. Invalid setting values return `422 INVALID_CREATE`, stale settings versions return `409 STALE_VERSION`, and non-owner updates return `403 FORBIDDEN`. Settings updates emit `milestone.settings_updated`. Progress contains `openIssues`, `closedIssues`, and `landedChanges`; it is derived from current issues and the queue. Creation, closure, and issue progress emit `milestone.created`, `milestone.closed`, and `milestone.updated` events. A milestone can be closed while issues remain open.

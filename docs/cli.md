@@ -128,4 +128,4 @@ The generic command preserves API success and failure envelopes. It does not gra
 
 Use `concord issue create --repo ID --title TITLE --body MARKDOWN` to record a task. `issue list`, `issue get --id NUMBER`, `issue edit --id NUMBER --expected-version N`, `issue close --id NUMBER --reason TEXT --expected-version N`, and `issue reopen` cover the issue lifecycle. `--labels` and `--allowed-files` accept JSON arrays. Link a change with `concord change create ... --issue N`.
 
-Use `concord milestone create --repo ID --title TITLE [--description TEXT] [--due-date YYYY-MM-DD]`, `milestone list`, `milestone get --id ID`, and `milestone close --id ID --expected-version N`. See the [issues API](api-issues.md).
+Agents and owners can use `concord milestone create --repo ID --title TITLE [--description TEXT] [--due-date YYYY-MM-DD]` by default. Owners can lock creation to owners in the Milestones screen or through the [settings API](api-issues.md#milestones). Also use `milestone list`, `milestone get --id ID`, and `milestone close --id ID --expected-version N`. See the [issues API](api-issues.md).

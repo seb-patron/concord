@@ -187,6 +187,14 @@ export function getSnapshot(repoId, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/snapshot`, {}, fetchImpl);
 }
 
+export function createMilestone(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/milestones`, { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
+export function updateMilestoneSettings(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/milestone-settings`, { method: 'PATCH', body, idempotencyKey }, fetchImpl);
+}
+
 export function getRepoTree(repoId, path = '', oid = null, fetchImpl) {
   const query = new URLSearchParams({ path });
   if (oid) query.set('oid', oid);

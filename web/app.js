@@ -10,6 +10,7 @@ import {
 import { createRepoPage } from './repo.js';
 import { appendObservedEvents, createTracker, observedDailyCount } from './tracker.js';
 import { createVerdictLoader } from './verdicts.js';
+import { renderMilestones } from './milestones.js';
 
 const $ = id => document.getElementById(id);
 const repoPage = createRepoPage($('code-view'));
@@ -41,7 +42,7 @@ const tracker = createTracker($('tracker-view'), {
 const views = {
   code: { render: () => repoPage.show(state.repoId, state.snapshot) },
   tracker: { render: context => tracker.render(context) },
-  milestones: { render: () => {} },
+  milestones: { render: context => renderMilestones(context) },
   desk: { render: () => {} },
   inbox: { render: () => {} },
 };
@@ -644,8 +645,9 @@ function render() {
     for (const button of document.querySelectorAll('[data-main-view]')) button.setAttribute('aria-current', String(button.dataset.mainView === state.view));
     if (state.view !== 'code') repoPage.hide();
     views[state.view]?.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
-      identity: state.identity, principals: state.principals, verdicts: state.verdicts,
-      verdictErrors: state.verdictErrors, message: state.deskMessage });
+      identity: state.identity, principals: state.principals, roles: roles(),
+      verdicts: state.verdicts, verdictErrors: state.verdictErrors, message: state.deskMessage,
+      refresh: async () => { await loadRepo(state.generation, false); return state.snapshot; } });
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
