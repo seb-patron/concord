@@ -1,6 +1,6 @@
 # Concord architecture
 
-Design contract v1, checked against live Cloudflare documentation on 2026-10-11 UTC. This repository currently contains a design, not an implemented service. Commands in the other documents are acceptance contracts for the implementation slices.
+Implemented and deployed at [concord.sebastian-patrones.workers.dev](https://concord.sebastian-patrones.workers.dev). Since the evening of 2026-10-13, Cloudflare Workers Builds has deployed this Worker from Concord's own canonical `main` on every landing, under [D-DEPLOY-WORKERS-BUILDS](decisions.md#L1485-L1490). The 2026-10-13 audit caveat that later server changes were undeployed predates that decision. Trusted-config policy changes still require `ops/install-trusted.sh`. The Cloudflare Worker serves the API and UI (`src/worker.ts`); tenant and per-repository coordination run in Durable Objects (`src/catalog.ts`, `src/coordinator.ts`); production Git storage uses Cloudflare Artifacts (`src/storage/artifacts.ts`); checker jobs run in local runner processes (`runner/main.ts`); and the optional GitHub mirror is one-way (`deploy/mirror.ts`). This document is the design contract the implementation follows.
 
 **Git conflicts on lines. Agents collide on meaning.** Concord gives an agent a unit of work, exclusive semantic claims, preserved intent, content-bound review, and a checker-backed route to canonical history. Git remains the transport and immutable object format. A change, rather than a pull request, is the collaboration record. The vocabulary used here (change, landing, claim, and the rest) is defined in the [glossary](GLOSSARY.md).
 
@@ -46,7 +46,7 @@ Workers hosts request handling rather than a native compiler or a long-running v
 
 ## Verified Artifacts capability boundary
 
-These are observed documentation capabilities, not claims that deployment has been tested. There is no Cloudflare account yet.
+This table records observed Cloudflare API capabilities and Concord's corresponding implementation choices. The Worker at [concord.sebastian-patrones.workers.dev](https://concord.sebastian-patrones.workers.dev) uses the production Artifacts configuration described in the [deployment runbook](deploy.md#provision-secrets-and-deploy); [D-DEPLOY-WORKERS-BUILDS](decisions.md#L1485-L1490) records that Workers Builds deploys it from Concord's own canonical `main` on every landing.
 
 | Need | Verified surface | Concord choice |
 | --- | --- | --- |
@@ -268,7 +268,7 @@ Use `wrangler dev --config wrangler.local.jsonc` without remote bindings and the
 
 | Risk / decision owner | Evidence and closest alternative | Release condition |
 | --- | --- | --- |
-| Account and Artifacts access — owner | Docs require access; none has been provisioned. Offline fake allows development but cannot satisfy the competition's deployed Artifacts evidence. | Owner creates account and grants narrowly scoped access for slice 12; otherwise label deployment blocked. |
+| Account and Artifacts access — owner (resolved) | The Worker at [concord.sebastian-patrones.workers.dev](https://concord.sebastian-patrones.workers.dev) uses production storage in the `concord-demo` Artifacts namespace. [D-DEPLOY-WORKERS-BUILDS](decisions.md#L1485-L1490) records that Workers Builds deploys from Concord's own canonical `main` on every landing; the earlier 2026-10-13 audit caveat predates that decision. | Resolved: production deployment and Artifacts access are provisioned. |
 | Branch-scoped write protection — architecture | Documented Git tokens are repo-scoped, so candidate forks and a trusted sole canonical promoter are the chosen alternative. | Never distribute canonical write tokens to agents; test cross-repo token rejection. |
 | Git conditional update semantics — slice 12 integrator | Git protocol docs support standard pushes; no explicit binding CAS API was found. Use expected-old Git push and readback, with ancestry enforcement. | Race two stale updates against a disposable deployed repo. If old-OID rejection fails, stop: closest alternative is immutable release refs plus a DO-owned canonical pointer, requiring owner approval of changed Git UX. |
 | General semantic dependency accuracy — owner | Explicit metadata covers only the synthetic row domain. Unknown dependencies force fresh review/coarse file claims. | Do not advertise automatic C dependency extraction or broad semantic correctness. |

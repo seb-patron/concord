@@ -1,6 +1,6 @@
 # Concord deployment and one-way demo mirror
 
-The local bridge is a development fake. A public deployment uses the `concord-demo` Artifacts namespace and `wrangler.jsonc`; it never uses `wrangler.local.jsonc` or `BRIDGE_URL`. No Cloudflare account or GitHub destination is provisioned by this repository. The owner must authorize account creation, deployment, and any mirror push. Keep `CONCORD_SHOW_DECOMPILED_C=0`; this release contains only the original public synthetic fixture.
+The local bridge is a development fake. A public deployment uses the `concord-demo` Artifacts namespace and `wrangler.jsonc`; it never uses `wrangler.local.jsonc` or `BRIDGE_URL`. This repository does not provision Cloudflare accounts or GitHub destinations. The owner's deployment is live at [concord.sebastian-patrones.workers.dev](https://concord.sebastian-patrones.workers.dev); deploying a fork requires the fork owner to use their own Cloudflare account and authorize the deployment. Keep `CONCORD_SHOW_DECOMPILED_C=0`; this release contains only the original public synthetic fixture.
 
 ## Phone and remote sign-in with Cloudflare Access
 
@@ -162,6 +162,10 @@ test -z "$(head "$EMPTY")"
 The `--force-with-lease` commands above are **only** for the disposable stale-ref experiment. Concord promotion uses its own frozen checked ticket and expected-old readback. The optional GitHub mirror uses a normal fast-forward push and never forces a ref.
 
 ## Provision secrets and deploy
+
+### Deployment
+
+Cloudflare Workers Builds deploys the Worker at [concord.sebastian-patrones.workers.dev](https://concord.sebastian-patrones.workers.dev) from Concord's own canonical `main` on every landing, as recorded in [D-DEPLOY-WORKERS-BUILDS](decisions.md#L1485-L1490) since the evening of 2026-10-13. Trusted-config policy changes still require `ops/install-trusted.sh`.
 
 Review the [cost guards and owner billing steps](cost.md) before deployment. Its limits come from the configured Worker and trusted tenant caps; actual billable usage and dollar totals come from the Cloudflare account's Billing → Billable Usage dashboard, not from the Fleet desk (`docs/cost.md`, `wrangler.jsonc`, `src/state.ts`).
 
