@@ -171,15 +171,29 @@ export async function waitChange(client: ConcordClient, path: string, deadline: 
   }
   throw new ConcordError('INSPECTION_TIMEOUT: checker did not finish', 'server');
 }
-async function prepareHead(source: string, commit: string, parent: string, base: string, canonical: { remote: string; token: string }): Promise<{ work: string; head: string; cherryPicked: boolean; cleanup: () => Promise<void> }> {
+async function prepareHead(source: string, commit: string, parent: string, base: string, canonical: { remote: string; token: string }, singleCommitMode: boolean): Promise<{ work: string; head: string; cherryPicked: boolean; cleanup: () => Promise<void> }> {
   if (parent === base) return { work: source, head: commit, cherryPicked: false, cleanup: async () => {} };
   const work = await mkdtemp(join(tmpdir(), 'concord-land-'));
   try {
     await git(['clone', '--quiet', '--shared', '--no-checkout', '--', source, work]);
     await git(['fetch', '--no-tags', '--', canonical.remote, base], { token: canonical.token }, work);
     await git(['checkout', '--quiet', '--detach', base], {}, work);
+    if (singleCommitMode && !await git(['merge-base', '--is-ancestor', parent, base], {}, work).then(() => true, () => false)) {
+      const count = Number(await git(['rev-list', '--count', `${base}..${commit}`], {}, work));
+      const suggestedBase = await git(['merge-base', commit, base], {}, work).catch(() => '');
+      throw new ConcordError(`REFUSED: --commit ${commit} has ${count} commits that are not on canonical base ${base}, but land without --base applies only that one commit; re-run with --base ${suggestedBase || '<the commit your work started from>'} to land all ${count} as one squash`, 'usage', undefined,
+        { commitsNotOnBase: count, canonicalBaseOid: base, suggestedBase: suggestedBase || null });
+    }
     try { await git(['-c', 'core.hooksPath=/dev/null', 'cherry-pick', '--no-gpg-sign', commit], { identity: true }, work); }
-    catch { throw new ConcordError('MERGE_CONFLICT: candidate does not apply to current canonical base', 'conflict'); }
+    catch {
+      const rawPaths = await gitBytes(['diff', '--name-only', '-z', '--diff-filter=U'], {}, work);
+      const paths = rawPaths.toString('utf8').split('\0').filter(Boolean);
+      if (paths.length) throw new ConcordError(`MERGE_CONFLICT: candidate does not apply to current canonical base ${base}; conflicted paths: ${paths.join(', ')}`, 'conflict', undefined,
+        { canonicalBaseOid: base, conflictedPaths: paths });
+      const indexUnchanged = await git(['diff', '--cached', '--quiet'], {}, work).then(() => true, () => false);
+      if (indexUnchanged) throw new ConcordError(`REFUSED: candidate has no changes left to apply on canonical base ${base}; its patch is already there`, 'usage');
+      throw new ConcordError(`CHERRY_PICK_FAILED: candidate could not be applied to canonical base ${base}`, 'server');
+    }
     return { work, head: await git(['rev-parse', 'HEAD'], {}, work), cherryPicked: true, cleanup: () => rm(work, { recursive: true, force: true }) };
   } catch (error) { await rm(work, { recursive: true, force: true }); throw error; }
 }
@@ -336,7 +350,8 @@ export async function land(input: LandOptions): Promise<Obj> {
     const latestRepo = (await api(client, root)).data;
     const canonical = await access(client, root, latestRepo, 'read', latestRepo.canonicalStorageName);
     const targetBase = alreadyQueued || current.headOid && current.baseOid === latestRepo.observedCanonicalOid ? current.baseOid : latestRepo.observedCanonicalOid;
-    const prepared = await prepareHead(squash?.work ?? source, squash?.oid ?? commit, changed.parent, targetBase, canonical);
+    const prepared = await prepareHead(squash?.work ?? source, squash?.oid ?? commit, changed.parent, targetBase, canonical,
+      !squash && !(options.dependsOn?.length));
     let priorWork: string | null = null;
     let priorHead: string | null = null;
     try {

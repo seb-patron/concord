@@ -714,6 +714,97 @@ describe('land input and evidence gates', () => {
       keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }], units: {} };
     expect(await unitKeys(dir, parent, head, ['families.tsv'], policy)).toEqual(['row:families:alpha']);
   });
+  async function runStackCase(kind: 'stack-edit' | 'stack-add' | 'conflict' | 'already-applied' | 'depends-on') {
+    const sourceDir = await temp(); await git(sourceDir, 'init', '-q', '-b', 'main');
+    await writeFile(join(sourceDir, 'x.txt'), 'one\n');
+    await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'base');
+    const base0 = await git(sourceDir, 'rev-parse', 'HEAD');
+    const addCommit = async (file: string, content: string, message: string) => {
+      await writeFile(join(sourceDir, file), content); await git(sourceDir, 'add', '--', file);
+      await git(sourceDir, 'commit', '-qm', message); return git(sourceDir, 'rev-parse', 'HEAD');
+    };
+    let allowedPath = 'x.txt'; let commit: string; let canonicalBase = base0;
+    if (kind === 'stack-edit') {
+      await addCommit('x.txt', 'two\n', 'A'); commit = await addCommit('x.txt', 'three\n', 'C');
+    } else if (kind === 'stack-add' || kind === 'depends-on') {
+      await addCommit('a.txt', 'A\n', 'A'); allowedPath = kind === 'stack-add' ? 'c.txt' : 'c.txt';
+      commit = await addCommit('c.txt', 'C\n', 'C');
+    } else if (kind === 'conflict') {
+      commit = await addCommit('x.txt', 'mine\n', 'candidate');
+      await git(sourceDir, 'checkout', '-qb', 'canonical', base0);
+      canonicalBase = await addCommit('x.txt', 'theirs\n', 'canonical change');
+      await git(sourceDir, 'checkout', '-q', 'main');
+    } else {
+      commit = await addCommit('y.txt', 'same\n', 'candidate'); allowedPath = 'y.txt';
+      await git(sourceDir, 'checkout', '-qb', 'canonical', base0);
+      canonicalBase = await addCommit('y.txt', 'same\n', 'same patch on main');
+      await git(sourceDir, 'checkout', '-q', 'main');
+    }
+    const candidateDir = await temp(); await git(candidateDir, 'init', '-q', '--bare');
+    const allowedFiles = join(await temp(), 'allowed.txt'); await writeFile(allowedFiles, `${allowedPath}\n`);
+    const change: Record<string, any> = { changeId: 'change', provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
+      branch: 'refs/heads/land/task', authorId: 'agent', baseOid: canonicalBase, headOid: null, revision: 0, status: 'draft',
+      dependencyChangeIds: kind === 'depends-on' ? ['dep'] : [], unitKeys: [`file:${allowedPath}`] };
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, any> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: canonicalBase,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${sourceDir}` }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {} , version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'change', state: 'active',
+        unitKey: `file:${allowedPath}`, leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote:
+        options?.body?.storageName === 'canonical' ? `file://${sourceDir}` : `file://${candidateDir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes/change/publish') {
+        change.headOid = options?.body?.headOid; change.revision++; change.status = 'ready';
+        return { data: change, version: 1 };
+      }
+      if (method === 'POST' && path === '/repos/demo/leases/lease/release') return { data: {}, version: 1 };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    let result: Awaited<ReturnType<typeof land>> | undefined; let error: unknown;
+    try { result = await land({ repo: 'demo', source: sourceDir, commit, intentKey: 'task', intent: 'stack test', allowedFiles,
+      ...(kind === 'depends-on' ? { dependsOn: ['dep'] } : {}), waitSeconds: 10,
+      client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} }); }
+    catch (caught) { error = caught; }
+    return { base0, commit, canonicalBase, candidateDir, request, result, error };
+  }
+  it('refuses a --commit that sits on an unlanded commit instead of reporting MERGE_CONFLICT', async () => {
+    const { base0, commit, request, error } = await runStackCase('stack-edit');
+    const message = `REFUSED: --commit ${commit} has 2 commits that are not on canonical base ${base0}, but land without --base applies only that one commit; re-run with --base ${base0} to land all 2 as one squash`;
+    expect(error).toMatchObject({ kind: 'usage', message,
+      payload: { commitsNotOnBase: 2, canonicalBaseOid: base0, suggestedBase: base0 } });
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/publish'))).toBe(false);
+  });
+  it('does not publish only the top commit of a stack', async () => {
+    const { base0, commit, candidateDir, request, error } = await runStackCase('stack-add');
+    expect(error).toMatchObject({ kind: 'usage', message: expect.stringContaining(`--commit ${commit} has 2 commits`),
+      payload: { commitsNotOnBase: 2, canonicalBaseOid: base0, suggestedBase: base0 } });
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/branches')).toBe(false);
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/publish'))).toBe(false);
+    expect(await git(candidateDir, 'for-each-ref', '--format=%(refname)')).toBe('');
+    expect(commit).not.toBe(base0);
+  });
+  it('names the canonical base and conflicted paths on a real conflict', async () => {
+    const { canonicalBase, error } = await runStackCase('conflict');
+    expect(error).toMatchObject({ kind: 'conflict',
+      message: `MERGE_CONFLICT: candidate does not apply to current canonical base ${canonicalBase}; conflicted paths: x.txt`,
+      payload: { canonicalBaseOid: canonicalBase, conflictedPaths: ['x.txt'] } });
+  });
+  it('refuses an already-applied patch without calling it a conflict', async () => {
+    const { canonicalBase, error } = await runStackCase('already-applied');
+    expect(error).toMatchObject({ kind: 'usage',
+      message: `REFUSED: candidate has no changes left to apply on canonical base ${canonicalBase}; its patch is already there` });
+  });
+  it('keeps dependency commits eligible for the existing single-commit cherry-pick behavior', async () => {
+    const { result, request, error } = await runStackCase('depends-on');
+    expect(error).toBeUndefined();
+    expect(result?.status).toBe('awaiting-review');
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/publish'))).toBe(true);
+  });
 });
 
 // A real bridge, Worker, and separate runner verify the orchestration route.
@@ -901,6 +992,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const carryEvidence = join(dir, 'carry-review.txt');
   await writeFile(carryEvidence, `# ✅ APPROVED FOR MERGE — head ${sourceOid}\nAPPROVED for merge\n`);
   const carryArgs = ['--repo', 'landdemo', '--source', oldSource, '--commit', sourceOid,
+    '--base', await git(oldSource, 'rev-parse', `${sourceOid}^`),
     '--intent-key', 'carry-task', '--intent', 'Carry old-parent update', '--allowed-files', carryAllowed,
     '--wait-seconds', '150', '--json'];
   const otherEvidence = join(dir, 'other-review.txt');
@@ -1078,6 +1170,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const staleEvidence = join(dir, 'stale-review.txt');
   await writeFile(staleEvidence, `# ✅ APPROVED FOR MERGE — head ${staleOid}\nAPPROVED for merge\n`);
   const staleArgs = ['--repo', 'landdemo', '--source', staleContext, '--commit', staleOid,
+    '--base', await git(staleContext, 'rev-parse', `${staleOid}^`),
     '--intent-key', 'stale-context-task', '--intent', 'Update nearby line', '--allowed-files', sharedAllowed,
     '--review-evidence', staleEvidence, '--wait-seconds', '150', '--json'];
   await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...staleArgs],
