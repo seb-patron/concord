@@ -116,6 +116,64 @@ describe('Concord agent CLI client', () => {
     expect(posts).toBe(5);
   });
 
+  it('waits through promotion freezes when cloning a repo', async () => {
+    const root = await tempDir('git-token-promotion-clone');
+    const destination = join(root, 'clone');
+    const shimDir = join(root, 'bin');
+    await mkdir(shimDir);
+    await writeFile(join(shimDir, 'git'), '#!/bin/sh\nexit 0\n');
+    await chmod(join(shimDir, 'git'), 0o755);
+    let tokenAttempts = 0;
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let text = ''; for await (const part of request) text += part;
+      response.setHeader('content-type', 'application/json');
+      if (request.method === 'GET' && request.url === '/v1/repos/r') {
+        response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical' }, version: 1 }));
+      } else if (request.method === 'POST' && request.url === '/v1/repos/r/git-token') {
+        const body = JSON.parse(text);
+        expect(body).toMatchObject({ storageName: 'canonical', scope: 'read' });
+        tokenAttempts++;
+        if (tokenAttempts <= 2) {
+          response.statusCode = 409;
+          response.end(JSON.stringify({ error: { code: 'PROMOTION_IN_PROGRESS', message: 'Repository promotion is in progress' } }));
+        } else response.end(JSON.stringify({ data: { remote: 'https://git.invalid/canonical.git', plaintext: 'clone-token' } }));
+      } else { response.statusCode = 404; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      const cloned = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'r', '--path', destination], {
+        cwd: process.cwd(), env: { ...process.env, PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+          CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+      });
+      expect(tokenAttempts).toBe(3);
+      expect(cloned.stdout).toContain('"cloned":true');
+      expect(cloned.stderr).toContain('waiting for landing in progress (1s)');
+      expect(cloned.stderr).toContain('waiting for landing in progress (2s)');
+      expect(cloned.stdout + cloned.stderr).not.toContain('clone-token');
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  }, 15_000);
+
+  it('stops retrying promotion freezes after 120 seconds with the error code', async () => {
+    vi.useFakeTimers();
+    let tokenAttempts = 0;
+    const client = new ConcordClient({ url: 'http://concord.invalid', fetch: async input => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/v1/repos/r') return Response.json({ data: {}, version: 1 });
+      tokenAttempts++;
+      return Response.json({ error: { code: 'PROMOTION_IN_PROGRESS' } }, { status: 409 });
+    } });
+    try {
+      const pending = mintGitToken(client, { repoPath: '/repos/r', storageName: 'canonical', scope: 'read' });
+      const rejected = expect(pending).rejects.toMatchObject({ message: 'Git token request failed with HTTP 409 PROMOTION_IN_PROGRESS' });
+      await vi.advanceTimersByTimeAsync(120_000);
+      await rejected;
+      expect(tokenAttempts).toBeGreaterThan(1);
+      expect(tokenAttempts).toBeLessThan(10);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('retries repo clone and change checkout after a stale Git-token version', async () => {
     const root = await tempDir('git-token-retry-callers');
     const destination = join(root, 'clone');

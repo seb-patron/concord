@@ -137,17 +137,62 @@ export class RepoCoordinator extends DurableObject<Env> {
         (route.method === '*' || route.method === request.method) && route.pattern.test(url.pathname));
       if (!moduleRoute) throw new HttpError(404, 'NOT_FOUND', 'Unknown repository route');
       const mutation = !['GET', 'HEAD'].includes(request.method);
-      const checkFreeze = () => {
+      let tokenBodyRead = false;
+      let tokenBody: { storageName?: unknown; scope?: unknown } | undefined;
+      let canonicalReadTokenChecked = false;
+      let canonicalReadTokenAllowed = false;
+      const canonicalReadToken = async (): Promise<boolean> => {
+        if (request.method !== 'POST' || url.pathname !== `/v1/repos/${repoId}/git-token`) return false;
+        if (canonicalReadTokenChecked) return canonicalReadTokenAllowed;
+        canonicalReadTokenChecked = true;
+        if (!tokenBodyRead) {
+          tokenBodyRead = true;
+          try {
+            tokenBody = await request.clone().json() as { storageName?: unknown; scope?: unknown };
+          } catch {
+            return false;
+          }
+        }
+        if (tokenBody?.scope !== 'read' || typeof tokenBody.storageName !== 'string') return false;
+        try {
+          const catalog = this.env.TENANT_CATALOG.get(this.env.TENANT_CATALOG.idFromName(`tenant:${principal.tenantId}`));
+          let cursor: string | null = null;
+          for (let page = 0; page < 50; page++) {
+            const path = cursor ? `/v1/repos?cursor=${encodeURIComponent(cursor)}` : '/v1/repos';
+            const response = await catalog.fetch(new Request(`https://concord.test${path}`, { headers: {
+              'x-concord-principal': JSON.stringify(principal), 'x-concord-tenant': principal.tenantId,
+            } }));
+            if (!response.ok) return false;
+            const result = await response.json() as {
+              data?: {
+                items?: Array<{ repoId: string; canonicalStorageName: string }>;
+                nextCursor?: string | null;
+              };
+            };
+            if (result.data?.items?.some(repo =>
+              repo.repoId === repoId && repo.canonicalStorageName === tokenBody!.storageName)) {
+              canonicalReadTokenAllowed = true;
+              return true;
+            }
+            cursor = result.data?.nextCursor ?? null;
+            if (!cursor) return false;
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      };
+      const checkFreeze = async () => {
         const decision = (queue.promotionFreeze ?? unfrozenPromotion)(this.context('queue', principal, repoId), request);
         const promoterOperation = request.method === 'POST'
           && (new RegExp(`^/v1/repos/${repoId}/jobs/[A-Za-z0-9_-]{1,64}/(?:heartbeat|credentials|result)$`).test(url.pathname)
             || url.pathname === `/v1/repos/${repoId}/runner/poll`)
           && principal.roles.includes('promoter');
-        if (decision.frozen && !(decision.exempt && promoterOperation)) {
+        if (decision.frozen && !(decision.exempt && promoterOperation) && !await canonicalReadToken()) {
           throw new HttpError(409, 'PROMOTION_IN_PROGRESS', 'Repository promotion is in progress');
         }
       };
-      if (mutation) checkFreeze();
+      if (mutation) await checkFreeze();
 
       let body: Record<string, unknown> | undefined;
       let key: string | null = null;
@@ -160,7 +205,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         requestDigest = await digest(body);
       }
       const dispatch = async (): Promise<Response> => {
-        if (mutation) checkFreeze();
+        if (mutation) await checkFreeze();
         if (key && requestDigest) {
           const previous = core.sql.exec<{ request_digest: string; status: number; body: string }>(
             'SELECT request_digest, status, body FROM concord_requests WHERE principal_id = ? AND route = ? AND idempotency_key = ?',

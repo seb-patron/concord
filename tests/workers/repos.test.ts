@@ -580,10 +580,45 @@ describe('repository and change lifecycle', () => {
     }, 'seed-check-result', 'local-checker'));
     expect(checkedResult.status).toBe(200);
     await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
-    const ticketed = (await responseBody(await fetchApi(apiRequest('/v1/repos/seed_case/snapshot')))).data.projections;
+    const ticketedResponse = await fetchApi(apiRequest('/v1/repos/seed_case/snapshot'));
+    const ticketedBody = await responseBody(ticketedResponse);
+    const ticketed = ticketedBody.data.projections;
     expect(ticketed.queue.promotion).toMatchObject({ state: 'pending', bootstrap: true, checkedNewOid: a });
     const promotionJob = ticketed.runners.jobs.find((job: { kind: string }) => job.kind === 'promote');
     expect(promotionJob.expectedRefs).toEqual({ [repo.canonicalStorageName]: null, [checkedJob.scratchStorageName]: a });
+    const catalog = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    const catalogIndexKey = 'module:repos:catalog:index';
+    const originalCatalogIndex = await runInDurableObject<TenantCatalog, Array<{ repoId: string; canonicalStorageName: string; tenantId: string }>>(
+      catalog, (_instance, durable) => {
+        const state = sqlState(durable.storage.sql);
+        const original = state.get<Array<{ repoId: string; canonicalStorageName: string; tenantId: string }>>(catalogIndexKey) ?? [];
+        const precedingRepos = Array.from({ length: 100 }, (_, index) => ({
+          repoId: `promotion_page_filler_${index}`, canonicalStorageName: `canonical_filler_${index}`, tenantId: 'local',
+        }));
+        state.put(catalogIndexKey, [...precedingRepos, ...original.filter(item => item.repoId === 'seed_case')]);
+        return original;
+      },
+    );
+    try {
+      const firstCatalogPage = (await responseBody(await fetchApi(apiRequest('/v1/repos')))).data;
+      expect(firstCatalogPage.items).toHaveLength(100);
+      expect(firstCatalogPage.items.some((item: { repoId: string }) => item.repoId === 'seed_case')).toBe(false);
+      const secondCatalogPage = (await responseBody(await fetchApi(apiRequest(`/v1/repos?cursor=${encodeURIComponent(firstCatalogPage.nextCursor)}`)))).data;
+      expect(secondCatalogPage.items.some((item: { repoId: string }) => item.repoId === 'seed_case')).toBe(true);
+      const canonicalRead = await fetchApi(mutation('/v1/repos/seed_case/git-token', {
+        expectedVersion: ticketedBody.version, storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 60,
+      }, 'token-during-promotion-read'));
+      expect(canonicalRead.status, JSON.stringify(await responseBody(canonicalRead))).toBe(200);
+      const forkWrite = await fetchApi(mutation('/v1/repos/seed_case/git-token', {
+        expectedVersion: ticketedBody.version, storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 60,
+      }, 'token-during-promotion-write'));
+      expect(forkWrite.status).toBe(409);
+      expect((await responseBody(forkWrite)).error.code).toBe('PROMOTION_IN_PROGRESS');
+    } finally {
+      await runInDurableObject<TenantCatalog, void>(catalog, (_instance, durable) => {
+        sqlState(durable.storage.sql).put(catalogIndexKey, originalCatalogIndex);
+      });
+    }
     const promoterPoll = await fetchApi(mutation('/v1/repos/seed_case/runner/poll', {
       runnerId: 'seed-promoter', role: 'promoter', supportedProfileDigests: [promotionJob.profileDigest],
     }, 'seed-promoter-poll', 'local-promoter'));
