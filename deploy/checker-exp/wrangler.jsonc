@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "concord-checker-exp",
+  "main": "../../src/experiments/checker-exp-worker.ts",
+  "compatibility_date": "2026-10-10",
+  "durable_objects": {
+    "bindings": [{ "name": "CHECKER_EXP", "class_name": "CheckerExperiment" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CheckerExperiment"] }],
+  "containers": [{
+    "name": "checker",
+    "class_name": "CheckerExperiment",
+    "scheduling_policy": "durable_object",
+    "images": { "checker": { "dockerfile": "./Dockerfile" } }
+  }],
+  "vars": {
+    "EXP_RUN_LIMIT": "3",
+    "EXP_REPO_URL": "https://github.com/seb-patron/concord-v2.git"
+  }
+}
