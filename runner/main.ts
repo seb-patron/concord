@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolveCredential } from '../cli/profile.ts';
 import type { Job, JobResult } from '../src/contracts';
 import { executeJob, type Credential, type CredentialProvider } from './execute';
-import { loadProfile, type LocalProfile } from './profiles';
+import { createCommandProfile, loadProfile, type LocalProfile } from './profiles';
 
 type Options = { repo: string; role: 'checker' | 'promoter'; profileFile?: string; profileDigest?: string;
   once: boolean; maxJobs: number; idleTimeoutSeconds: number; idleMaxDelaySeconds: number; idleMinDelayMs: number; runnerId: string };
@@ -259,6 +260,17 @@ export async function runLoop(options: Options, transport: Transport, profile: L
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'profile') {
+    const args = process.argv.slice(3);
+    if (args.length !== 4 || args[0] !== '--command-config' || args[2] !== '--out')
+      throw new Error('INVALID_ARGUMENT: profile --command-config FILE --out FILE');
+    const input = JSON.parse(await readFile(args[1], 'utf8')) as unknown;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('INVALID_PROFILE: object');
+    const profile = await createCommandProfile(input as Record<string, unknown>);
+    await writeFile(args[3], JSON.stringify(profile, null, 2) + '\n', { flag: 'wx' });
+    process.stdout.write(profile.digest + '\n');
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   let connection: Awaited<ReturnType<typeof resolveCredential>>;
   try { connection = await resolveCredential({}); }
