@@ -7,6 +7,7 @@ import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCred
 import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 import { importRepo } from './import.ts';
 import { land } from './land.ts';
+import { releaseByIntent, start } from './start.ts';
 
 const HELP = `Concord agent CLI
 
@@ -17,6 +18,8 @@ Common: --repo ID --json --idempotency-key KEY --expected-version N
 Mutations generate an idempotency key when omitted. Responses are JSON on stdout; errors are JSON on stderr.
 
 Commands and required fields:
+  start --repo ID --intent-key KEY --intent TEXT --allowed-files FILE [--base OID] [--hold 2h] [--json]
+  release --repo ID --intent-key KEY
   land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   repo create --name NAME --policy-id ID --profile-id ID
@@ -60,7 +63,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   let parsed;
   try {
     const options: Record<string, { type: 'string'; multiple?: boolean } | { type: 'boolean' }> = {};
-    for (const name of [...OPTION_NAMES, 'role', 'ttl']) options[name] = { type: 'string' };
+    for (const name of [...OPTION_NAMES, 'role', 'ttl', 'hold']) options[name] = { type: 'string' };
     options.exclude = { type: 'string', multiple: true };
     options['depends-on'] = { type: 'string', multiple: true };
     options.json = { type: 'boolean' };
@@ -76,6 +79,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   const [noun, verb, ...args] = parsed.positionals;
   const flags = parsed.values as Flags;
   if (!noun || noun === 'help' || flags.help) { print({ help: HELP }); return; }
+  if (noun === 'start' && !verb && !args.length) return print(await start({
+    repo: required(flags, 'repo'), intentKey: required(flags, 'intent-key'), intent: required(flags, 'intent'),
+    allowedFiles: required(flags, 'allowed-files'), base: typeof flags.base === 'string' ? flags.base : undefined,
+    hold: typeof flags.hold === 'string' ? flags.hold : undefined,
+    client: await clientFor(flags),
+  }));
+  if (noun === 'release' && !verb && !args.length) return print(await releaseByIntent(required(flags, 'repo'), required(flags, 'intent-key'), await clientFor(flags)));
   if (noun === 'land' && !verb && !args.length) {
     const values = parsed.values;
     await land({ repo: typeof flags.repo === 'string' ? flags.repo : undefined,
@@ -404,7 +414,7 @@ function validatePublishPayload(value: unknown, expected: { baseOid: string; hea
     throw new ConcordError('Publish body identity must match the server change and local HEAD', 'usage');
   }
   const fences = payload.leaseFences;
-  if (!fences || typeof fences !== 'object' || Array.isArray(fences) || Object.keys(fences).length !== Object.keys(expected.fences).length || Object.entries(expected.fences).some(([key, fence]) => (fences as Record<string, unknown>)[key] !== fence) || expected.unitKeys.length !== Object.keys(expected.fences).length || expected.unitKeys.some(key => !Object.hasOwn(expected.fences, key))) {
+  if (!fences || typeof fences !== 'object' || Array.isArray(fences) || Object.keys(fences).length !== Object.keys(expected.fences).length || Object.keys(expected.fences).length === 0 || Object.entries(expected.fences).some(([key, fence]) => fence < 1 || (fences as Record<string, unknown>)[key] !== fence)) {
     throw new ConcordError('Publish body leaseFences must match --lease-fences', 'usage');
   }
   return payload;
