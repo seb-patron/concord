@@ -71,6 +71,31 @@ it('renews all change leases through one MCP call without reading a snapshot', a
     options: { body: { changeId: 'c', ttlSeconds: 300 }, expectedVersion: undefined } });
 });
 
+it('lists changes with caller and status filters and closes with the current repo version', async () => {
+  const calls: Array<{ method: string; path: string; options?: { body?: unknown; expectedVersion?: number; idempotencyKey?: string } }> = [];
+  const client = { request: async (method: string, path: string, options?: { body?: unknown; expectedVersion?: number; idempotencyKey?: string }) => {
+    calls.push({ method, path, options });
+    if (path === '/repos/repo/changes') return { data: { items: [
+      { changeId: 'mine', authorId: 'agent', status: 'draft' },
+      { changeId: 'other', authorId: 'someone-else', status: 'ready' },
+      { changeId: 'closed', authorId: 'agent', status: 'closed' },
+    ], nextCursor: 'next' } };
+    if (path === '/me') return { data: { principalId: 'agent' } };
+    if (path === '/repos/repo/snapshot') return { data: {}, version: 8 };
+    return { data: { status: 'closed' }, version: 9 };
+  } } as unknown as ConcordClient;
+  const descriptor = tools.find(item => item.name === 'change_list')!;
+  expect(descriptor.inputSchema.required).toEqual(['repoId']);
+  const listed = await callTool(client, 'change_list', { repoId: 'repo', mine: true, status: 'draft,ready' }) as { items: unknown[]; nextCursor: string };
+  expect(listed.items).toEqual([{ changeId: 'mine', authorId: 'agent', status: 'draft' }]);
+  expect(listed.nextCursor).toBe('next');
+  await callTool(client, 'change_close', { repoId: 'repo', changeId: 'mine', reason: 'superseded', idempotencyKey: 'close-key' });
+  expect(calls.map(call => `${call.method} ${call.path}`)).toEqual([
+    'GET /repos/repo/changes', 'GET /me', 'GET /repos/repo/snapshot', 'POST /repos/repo/changes/mine/close',
+  ]);
+  expect(calls[3]?.options).toMatchObject({ body: { reason: 'superseded' }, expectedVersion: 8, idempotencyKey: 'close-key' });
+});
+
 const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
 const children: ChildProcess[] = [];

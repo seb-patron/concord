@@ -36,9 +36,10 @@ Commands and required fields:
   issue create|list|get|edit|close|reopen --repo ID [--id NUMBER] [--title TEXT] [--body TEXT] [--labels JSON_ARRAY] [--milestone-id ID] [--reason TEXT]
   milestone create|list|get|close --repo ID [--id ID] [--title TEXT] [--description TEXT] [--due-date YYYY-MM-DD]
   change get --repo ID --id ID
+  change list --repo ID [--mine] [--status draft,ready,...] [--cursor C] [--all]
   change checkout --repo ID --id ID --worktree PATH [--oid OID]
   change publish --repo ID --id ID --worktree PATH --lease-fences JSON_OBJECT
-  change close --repo ID --id ID --expected-version N [--reason TEXT]
+  change close --repo ID --id ID [--expected-version N] [--reason TEXT]
   lease claim --repo ID --change-id ID --unit-keys JSON_ARRAY --intent-text TEXT --expected-version N [--ttl-seconds N]
   lease list --repo ID
   lease renew --repo ID --id ID --fence N --expected-version N [--ttl-seconds N]
@@ -61,7 +62,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit', 'every', 'while-pid', 'public', 'profile', 'reviewer-profile'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'status', 'label', 'limit', 'every', 'while-pid', 'public', 'profile', 'reviewer-profile'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -75,6 +76,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     options['print-tree'] = { type: 'boolean' };
     options['require-match'] = { type: 'boolean' };
     options['with-history'] = { type: 'boolean' };
+    options.mine = { type: 'boolean' };
+    options.all = { type: 'boolean' };
     options.force = { type: 'boolean' };
     options.verbose = { type: 'boolean' };
     options.tenant = { type: 'boolean' };
@@ -267,9 +270,64 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     return print(await send('POST', `${root}/changes`, payload));
   }
   if (noun === 'change' && verb === 'get') return print(await send('GET', `${root}/changes/${encodeURIComponent(required(flags, 'id'))}`));
+  if (noun === 'change' && verb === 'list') {
+    const mine = flags.mine === true;
+    const principalId = mine ? stringField(unwrap(await send('GET', '/me')) as Record<string, unknown>, 'principalId') : undefined;
+    const statuses = typeof flags.status === 'string' ? new Set(flags.status.split(',').map(status => status.trim()).filter(Boolean)) : undefined;
+    let cursor = typeof flags.cursor === 'string' ? flags.cursor : undefined;
+    const changes: Record<string, unknown>[] = [];
+    const pages = flags.all === true ? 50 : 1;
+    let truncated = false;
+    for (let page = 0; page < pages; page++) {
+      const pageResult = unwrap(await send('GET', `${root}/changes${query({ cursor })}`)) as { items?: unknown; nextCursor?: unknown };
+      if (!Array.isArray(pageResult.items)) throw new ConcordError('Concord returned an invalid changes page', 'server');
+      for (const item of pageResult.items) {
+        if (!item || typeof item !== 'object') continue;
+        const change = item as Record<string, unknown>;
+        if (mine && change.authorId !== principalId) continue;
+        if (statuses?.size && (typeof change.status !== 'string' || !statuses.has(change.status))) continue;
+        changes.push(change);
+      }
+      cursor = typeof pageResult.nextCursor === 'string' && pageResult.nextCursor ? pageResult.nextCursor : undefined;
+      if (!cursor) break;
+      if (page === pages - 1) truncated = true;
+    }
+    const liveLeases = new Map<string, number>();
+    let leaseCursor: string | undefined;
+    let liveLeaseCountTruncated = false;
+    for (let page = 0; page < 50; page++) {
+      const leasePage = unwrap(await send('GET', `${root}/leases${query({ cursor: leaseCursor })}`)) as { items?: unknown; nextCursor?: unknown };
+      if (!Array.isArray(leasePage.items)) throw new ConcordError('Concord returned an invalid leases page', 'server');
+      for (const lease of leasePage.items) {
+        if (!lease || typeof lease !== 'object') continue;
+        const item = lease as Record<string, unknown>;
+        if (typeof item.changeId !== 'string' || !['active', 'reserved'].includes(String(item.state)) ||
+          typeof item.expiresAt !== 'number' || item.expiresAt <= Date.now()) continue;
+        liveLeases.set(item.changeId, (liveLeases.get(item.changeId) ?? 0) + 1);
+      }
+      leaseCursor = typeof leasePage.nextCursor === 'string' && leasePage.nextCursor ? leasePage.nextCursor : undefined;
+      if (!leaseCursor) break;
+      if (page === 49) liveLeaseCountTruncated = true;
+    }
+    const items = changes.map(change => {
+      const updatedAt = typeof change.updatedAt === 'string' ? Date.parse(change.updatedAt) : NaN;
+      return { ...change, ageSeconds: Number.isFinite(updatedAt) ? Math.max(0, Math.floor((Date.now() - updatedAt) / 1000)) : null,
+        liveLeaseCount: liveLeases.get(String(change.changeId)) ?? 0 };
+    });
+    if (truncated || liveLeaseCountTruncated) return print({ items, ...(truncated ? { truncated: true, nextCursor: cursor } : {}), ...(liveLeaseCountTruncated ? { liveLeaseCountTruncated: true } : {}) });
+    return print(items);
+  }
   if (noun === 'change' && verb === 'close') {
     const id = encodeURIComponent(required(flags, 'id'));
-    return print(await mutateExisting(`${root}/changes/${id}/close`, body ?? { reason: flags.reason ?? 'closed by agent' }));
+    const payload = body ?? (flags.reason === undefined ? {} : { reason: flags.reason });
+    let expectedVersion: number | undefined;
+    if (flags['expected-version'] !== undefined) expectedVersion = numberFlag(flags, 'expected-version');
+    else {
+      const repository = await send('GET', `/repos/${rid}`) as { version?: unknown; data?: Record<string, unknown> };
+      expectedVersion = Number.isSafeInteger(repository.version) ? repository.version as number : numberField(repository.data ?? {}, 'version');
+    }
+    if (expectedVersion === undefined) throw new ConcordError('Concord did not return a repository version', 'server');
+    return print(await client.request('POST', `${root}/changes/${id}/close`, requestOptions(flags, payload, expectedVersion)));
   }
   if (noun === 'change' && verb === 'checkout') {
     const id = encodeURIComponent(required(flags, 'id'));
