@@ -150,9 +150,17 @@ export async function unitKeys(source: string, parent: string, head: string, pat
   return [...new Set(result)].sort();
 }
 async function inspection(client: ConcordClient, root: string, change: Obj): Promise<{ result: Obj | null; jobState: string }> {
-  const snapshot = (await api(client, `${root}/snapshot`)).data;
-  const jobs = snapshot.projections?.runners?.jobs ?? [];
-  const job = [...jobs].reverse().find((item: Obj) => item.kind === 'inspect-candidate' && item.changeId === change.changeId && item.revision === change.revision);
+  let job: Obj | undefined;
+  if (Object.prototype.hasOwnProperty.call(change, 'inspection')) {
+    const current = change.inspection;
+    if (current && current.revision === change.revision && typeof current.jobId === 'string' && typeof current.state === 'string') {
+      job = current;
+    }
+  } else {
+    const snapshot = (await api(client, `${root}/snapshot`)).data;
+    const jobs = snapshot.projections?.runners?.jobs ?? [];
+    job = [...jobs].reverse().find((item: Obj) => item.kind === 'inspect-candidate' && item.changeId === change.changeId && item.revision === change.revision);
+  }
   if (!job || job.state !== 'completed') return { result: null, jobState: job?.state ?? 'missing' };
   try { return { result: (await api(client, `${root}/jobs/${encodeURIComponent(job.jobId)}/result`)).data.result, jobState: job.state }; }
   catch (error) {

@@ -1238,7 +1238,11 @@ describe('repository and change lifecycle', () => {
     expect((await responseBody(repeatPublish)).error.code).toBe('INVALID_JOB');
     const scheduleOriginal = runners.hooks['runners.schedule'];
     let scheduledJob!: import('../../src/contracts').Job;
-    runners.hooks['runners.schedule'] = (context, job) => { scheduledJob = job; return { status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } }; };
+    runners.hooks['runners.schedule'] = (context, job) => {
+      scheduledJob = job;
+      sqlState(context.sql).put(`module:runners:job:${job.jobId}`, { job: { state: 'pending' } });
+      return { status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } };
+    };
     try {
       const scheduled = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-scheduled', 'local-agent-a'));
       expect(scheduled.status).toBe(202);
@@ -1289,7 +1293,7 @@ describe('repository and change lifecycle', () => {
       expect(hook(context, inspection).version).toBe(accepted.version);
     });
     const ready = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
-    expect((await responseBody(ready)).data.status).toBe('ready');
+    expect((await responseBody(ready)).data).toMatchObject({ status: 'ready', inspection: { jobId: scheduledJob.jobId, revision: 1, state: 'pending' } });
     await fake('publish_case', provider => {
       provider.putCommit(change.candidateStorageName, { oid: d, treeOid: c, parents: [b] });
       provider.conditionalUpdateRef(change.candidateStorageName, input.branch, b, d);
@@ -1305,9 +1309,34 @@ describe('repository and change lifecycle', () => {
       expect(repos.hooks['repos.inspectRevision']!(context, inspection).status).toBe('blocked');
     });
     const stale = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
-    expect((await responseBody(stale)).data.status).toBe('draft');
-    const closed = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/close`, { expectedVersion: 5 }, 'close', 'local-agent-a'));
+    const latest = await responseBody(stale);
+    expect(latest.data.status).toBe('draft');
+    const revisionOneJob = scheduledJob.jobId;
+    const secondScheduleOriginal = runners.hooks['runners.schedule'];
+    let secondJob!: import('../../src/contracts').Job;
+    runners.hooks['runners.schedule'] = (context, job) => {
+      secondJob = job;
+      sqlState(context.sql).put(`module:runners:job:${job.jobId}`, { job: { state: 'pending' } });
+      return { status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } };
+    };
+    let secondPublished: Awaited<ReturnType<typeof responseBody>>;
+    try {
+      const published = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, {
+        ...publishBody, expectedVersion: latest.version, headOid: d,
+      }, 'publish-revision-two', 'local-agent-a'));
+      expect(published.status).toBe(202);
+      secondPublished = await responseBody(published);
+      const revisionTwoDetail = await responseBody(await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`)));
+      expect(revisionTwoDetail.data).toMatchObject({ revision: 2,
+        inspection: { jobId: secondJob.jobId, revision: 2, state: 'pending' } });
+      expect(secondJob.jobId).not.toBe(revisionOneJob);
+    } finally {
+      runners.hooks['runners.schedule'] = secondScheduleOriginal;
+    }
+    const closed = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/close`, { expectedVersion: secondPublished!.version }, 'close', 'local-agent-a'));
     expect(closed.status).toBe(200);
+    const closedDetail = await responseBody(await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`)));
+    expect(closedDetail.data.inspection).toBeNull();
     await runInDurableObject<RepoCoordinator, void>(stub, instance => {
       const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
         tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,

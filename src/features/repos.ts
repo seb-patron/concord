@@ -33,6 +33,14 @@ const getChange = (context: ModuleContext, changeId: string): Change => {
   return change ?? fail(404, 'CHANGE_NOT_FOUND', 'Change not found');
 };
 const changeResponse = (change: Change): Change => ({ ...change, authorModel: change.authorModel ?? null });
+function inspectionResponse(context: ModuleContext, change: Change): { jobId: string; revision: number; state: string } | null {
+  if (change.status === 'closed') return null;
+  const pending = context.state.get<InspectionPending>(`inspection:${change.changeId}`);
+  if (!pending || pending.revision !== change.revision) return null;
+  const job = sqlState(context.sql).get<{ job?: { state?: string } }>(`module:runners:job:${pending.jobId}`);
+  const state = job?.job?.state;
+  return typeof state === 'string' ? { jobId: pending.jobId, revision: pending.revision, state } : null;
+}
 type StartedChange = Change & { startUnitKeys?: string[] };
 function storeChange(context: ModuleContext, change: Change): void {
   const all = list<Change>(context, 'changes');
@@ -953,7 +961,7 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/repair-landed$/, handle: context => repairLandedChanges(context) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision), inspection: inspectionResponse(context, change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match, body) => close(context, match[2], body as Record<string, unknown>) },
   ],
