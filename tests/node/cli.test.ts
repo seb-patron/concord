@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
+import { land } from '../../cli/land.ts';
 import { parseArgs as parseRunnerArgs, runLoop } from '../../runner/main.ts';
 import { holdSeconds, releaseByIntent, start } from '../../cli/start.ts';
 
@@ -57,6 +58,48 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('returns the landed result when the change status poll already reports merged', async () => {
+    const { worktree, baseOid } = await publicationFixture('land-merged-status');
+    await writeFile(join(worktree, 'source.txt'), 'landed\n');
+    await git(['add', '--', 'source.txt'], {}, worktree);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'candidate'], {}, worktree);
+    const commit = await resolveHead(worktree);
+    const allowedFiles = join(await tempDir('land-merged-allowed'), 'allowed.txt');
+    await writeFile(allowedFiles, 'source.txt\n');
+    const change = { changeId: 'change-1', status: 'queued', candidateStorageName: 'candidate-fork',
+      branch: 'refs/heads/land/task', authorId: 'agent', baseOid, headOid: commit, revision: 1,
+      unitKeys: ['file:source.txt'], provisioning: { state: 'observed' } };
+    let statusPolls = 0;
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo') return { data: { canonicalStorageName: 'canonical',
+        canonicalRemote: 'file:///canonical', observedCanonicalOid: commit }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [] } } }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') {
+        return { data: statusPolls < 2 ? { entries: [{ changeId: 'change-1', state: 'checking' }] } :
+          { entries: [{ changeId: 'change-1', state: 'landed' }], finalCanonicalOid: commit, promotion: { ticketId: 'ticket-1' } }, version: 1 };
+      }
+      if (method === 'GET' && path === '/repos/demo/changes/change-1') {
+        statusPolls++;
+        return { data: { ...change, status: statusPolls >= 3 ? 'merged' : 'queued' }, version: 1 };
+      }
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: 'file:///canonical', plaintext: 'test-token' }, version: 1 };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const savedToken = process.env.CONCORD_TOKEN;
+    delete process.env.CONCORD_TOKEN;
+    try {
+      const result = await land({ repo: 'demo', source: worktree, commit, intentKey: 'task', intent: 'work',
+        allowedFiles, client: { baseUrl: 'http://127.0.0.1', request } as never, emit: () => {} });
+      expect(result).toEqual({ status: 'landed', changeId: 'change-1', canonicalOid: commit });
+      expect(statusPolls).toBe(4);
+    } finally {
+      if (savedToken === undefined) delete process.env.CONCORD_TOKEN;
+      else process.env.CONCORD_TOKEN = savedToken;
+    }
+  });
+
   it('sends issue, milestone and linked change CLI commands', async () => {
     const calls: Array<{ method: string; path: string; body: any }> = [];
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {

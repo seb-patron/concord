@@ -600,6 +600,95 @@ describe('queue with real lease hooks', () => {
 });
 
 describe('queue state machine', () => {
+  it('merges 33 sequential landings, frees the active slot, and repairs an older landing', async () => {
+    const h = harness;
+    const unit = 'row:landed';
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].units[unit] = { canonicalKey: unit, file: 'landed.tsv', resources: [], dependencyKeys: [] };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const createdRepo = await worker.fetch(mutation('/v1/repos', { name: h.repoId, policyId: 'local-demo', profileId: 'local-demo' }, crypto.randomUUID()), env);
+    expect(createdRepo.status).toBe(201);
+    const repo = (await responseBody(createdRepo)).data;
+    await h.fetch('');
+    await h.seed(repo.canonicalStorageName);
+    const scratchName = `concord-s-${h.repoId}`;
+    await h.seed(scratchName, null);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    let currentMain = main;
+    const ids: string[] = [];
+    for (let index = 0; index < 33; index++) {
+      const id = `landed-${index}`;
+      const candidateName = `candidate-${h.repoId}-${index}`;
+      const head = (100 + index).toString(16).padStart(40, '0');
+      const nextMain = (1000 + index).toString(16).padStart(40, '0');
+      if (index < 32) {
+        await h.seed(candidateName, currentMain);
+        await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+          const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+          const context = internal.context('repos', principal, h.repoId);
+          const changes = context.state.get<any[]>('changes') ?? [];
+          const change = { changeId: id, repoId: h.repoId, authorId: 'owner', intentKey: id, intentText: id,
+            candidateStorageName: candidateName, branch: 'refs/heads/work', baseOid: currentMain, headOid: head,
+            revision: 1, unitKeys: [unit], dependencyChangeIds: [], status: 'ready', version: 1 };
+          context.state.put('changes', [...changes, change]); context.state.put(`change:${id}`, change);
+        });
+      } else {
+        const created = await h.fetch('/changes', { intentKey: id, intentText: id, baseOid: currentMain,
+          branch: 'refs/heads/work', unitKeys: [unit], dependencyChangeIds: [] });
+        expect(created.response.status).toBe(201);
+        const change = created.body.data;
+        ids.push(change.changeId);
+        await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+          const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+          const context = internal.context('repos', principal, h.repoId);
+          const changes = context.state.get<any[]>('changes')!;
+          const stored = changes.find(item => item.changeId === change.changeId)!;
+          stored.status = 'ready'; stored.headOid = head; stored.revision = 1;
+          context.state.put('changes', changes); context.state.put(`change:${change.changeId}`, stored);
+        });
+        h.views.set(change.changeId, { authorId: 'owner', headOid: head, revision: 1, status: 'ready', unitKeys: [unit], frozen: false,
+          baseOid: currentMain, candidateStorageName: change.candidateStorageName, branch: 'refs/heads/work', dependencyChangeIds: [],
+          canonicalStorageName: repo.canonicalStorageName, scratchStorageName: scratchName, policyId: 'local-demo', profileId: 'local-demo', intentKey: id });
+      }
+      const changeId = index < 32 ? id : ids[32];
+      if (index < 32) {
+        ids.push(id);
+        h.views.set(id, { authorId: 'owner', headOid: head, revision: 1, status: 'ready', unitKeys: [unit], frozen: false,
+          baseOid: currentMain, candidateStorageName: candidateName, branch: 'refs/heads/work', dependencyChangeIds: [],
+          canonicalStorageName: repo.canonicalStorageName, scratchStorageName: scratchName, policyId: 'local-demo', profileId: 'local-demo', intentKey: id });
+      }
+      const enqueue = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+        changeId, verdictId: `v-${changeId}`, leaseFences: { [unit]: 1 } });
+      expect(enqueue.response.status).toBe(201);
+      await h.tick();
+      const job = [...h.jobs].reverse().find(item => item.kind === 'validate-stack' && item.candidates.some(candidate => candidate.changeId === changeId))!;
+      expect(job).toBeDefined();
+      expect((await h.deliver(job, 'PASS', { composed: nextMain })).status).toBe('eligible');
+      await h.tick();
+      expect(await h.put(repo.canonicalStorageName, 'refs/heads/main', nextMain, currentMain)).toBe(true);
+      await h.tick();
+      expect((await h.fetch(`/changes/${changeId}`)).body.data).toMatchObject({ status: 'merged', canonicalOid: nextMain });
+      const changes = (await h.fetch('/changes')).body.data.items;
+      expect(changes.filter((change: any) => !['merged', 'superseded', 'closed'].includes(change.status))).toHaveLength(0);
+      currentMain = nextMain;
+    }
+    const first = ids[0];
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('repos', principal, h.repoId);
+      const changes = context.state.get<any[]>('changes')!;
+      const old = changes.find(change => change.changeId === first)!;
+      old.status = 'ready'; delete old.canonicalOid;
+      context.state.put('changes', changes); context.state.put(`change:${first}`, old);
+    });
+    const repair = await h.fetch('/changes/repair-landed', { expectedVersion: (await h.fetch('/queue')).body.version });
+    expect(repair.response.status).toBe(200);
+    expect(repair.body.data.repairedChangeIds).toEqual([first]);
+    expect((await h.fetch(`/changes/${first}`)).body.data).toMatchObject({ status: 'merged', canonicalOid: (1000).toString(16).padStart(40, '0') });
+    const again = await h.fetch('/changes/repair-landed', { expectedVersion: repair.body.version });
+    expect(again.body.data.repairedChangeIds).toEqual([]);
+  }, 120_000);
+
   it('admits a row write using a live covering file lease fence', async () => {
     const h = harness;
     await h.seed(`canonical-${h.repoId}`); await h.seed(`scratch-${h.repoId}`, null);

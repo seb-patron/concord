@@ -7,6 +7,7 @@ import { eventSequence, sqlState } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
 import { jobInput, visibleCommit, visibleRef } from './runners';
+import { mergeLandedChanges } from '../repos/model';
 import { covers, resolveUnit, unitRegistry } from '../leases/units';
 import {
   advanceDiagnosis, COALESCE_MS, MAX_CANDIDATES, selectStack, startDiagnosis, STACK_WIDTH,
@@ -887,6 +888,9 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
         const entry = admitted(state, id);
         if (entry && active(entry)) transition(context, state, entry, 'landed');
       }
+      if (!ticket.bootstrap) mergeLandedChanges(context, ticket.admissionIds
+        .map(id => admitted(state, id)).filter((entry): entry is Entry => entry?.state === 'landed')
+        .map(entry => entry.changeId), observed);
       for (const changeId of ticket.memberIds) requireGate(context.call('issues.land', changeId, observed));
       if (ticket.bootstrap) state.bootstrap!.state = 'merged';
       observeMain(context, state, observed, ticket.memberIds);

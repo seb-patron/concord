@@ -1,9 +1,9 @@
 import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, TrustedPolicy, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
-import { activeChangeLimit, costLimits, eventSequence } from '../state';
+import { activeChangeLimit, costLimits, eventSequence, sqlState } from '../state';
 import { covers, MAX_NORMALIZED_UNITS, resolveUnit, unitRegistry, unitsOverCapMessage } from '../leases/units';
-import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
+import { branch, ids, mergeLandedChanges, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
 const page = <T>(items: T[], request: Request) => {
@@ -368,6 +368,50 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   return respond(context, { ...changeResponse(change), provisioning: intents(context)[intentKey('fork', candidateStorageName)] }, intents(context)[intentKey('fork', candidateStorageName)].state === 'observed' ? 201 : 202);
 }
 
+/** Owner-triggered, idempotent repair for landings made before changes were marked merged. */
+async function repairLandedChanges(context: ModuleContext): Promise<Response> {
+  requireRole(context.principal, 'owner');
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  const changes = list<Change>(context, 'changes').filter(change => change.status !== 'merged');
+  const queueState = sqlState(context.sql).get<{ entries: Array<{ changeId: string; state: string }> }>('module:queue:data');
+  const landed = new Set((queueState?.entries ?? []).filter(entry => entry.state === 'landed').map(entry => entry.changeId));
+  const outstanding = new Set(changes.filter(change => landed.has(change.changeId)).map(change => change.changeId));
+  if (!outstanding.size) return respond(context, { repairedChangeIds: [] });
+  const events = context.sql.exec<{ related_ids: string; payload: string }>(
+    "SELECT related_ids, payload FROM concord_events WHERE kind = 'queue.promotion_applied' ORDER BY sequence",
+  ).toArray();
+  const evidence = new Map<string, string>();
+  for (const event of events) {
+    const payload = JSON.parse(event.payload) as { canonicalOid?: string };
+    if (!payload.canonicalOid || !/^[a-f0-9]{40}$/.test(payload.canonicalOid)) continue;
+    for (const id of JSON.parse(event.related_ids) as string[]) if (outstanding.has(id)) evidence.set(id, payload.canonicalOid);
+  }
+  const main = await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
+  if (!main) return respond(context, { repairedChangeIds: [] });
+  const targets = new Set(evidence.values());
+  const found = new Set<string>();
+  const seen = new Set<string>();
+  const pending = [main];
+  while (pending.length && found.size < targets.size) {
+    const commitOid = pending.pop()!;
+    if (seen.has(commitOid)) continue;
+    seen.add(commitOid);
+    if (targets.has(commitOid)) found.add(commitOid);
+    const commit = await context.storage.readCommit(repo.canonicalStorageName, commitOid);
+    if (!commit) throw new HttpError(503, 'CANONICAL_HISTORY_UNAVAILABLE', 'Canonical commit history is unavailable');
+    pending.push(...commit.parents);
+  }
+  const repairedChangeIds = context.transaction(() => {
+    const repaired: string[] = [];
+    for (const [changeId, canonicalOid] of evidence) {
+      if (found.has(canonicalOid)) repaired.push(...mergeLandedChanges(context, [changeId], canonicalOid));
+    }
+    return repaired;
+  });
+  return respond(context, { repairedChangeIds });
+}
+
 async function registerBranch(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
   const repo = await catalogRepo(context);
   requireReady(repo);
@@ -725,6 +769,7 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/git-token$/, handle: (context, _request, _match, body) => gitToken(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes').map(changeResponse), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/repair-landed$/, handle: context => repairLandedChanges(context) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },

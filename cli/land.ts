@@ -165,7 +165,7 @@ export async function waitChange(client: ConcordClient, path: string, deadline: 
     if (change.status !== last) { emit({ state: 'change', status: change.status, changeId: change.changeId }); last = change.status; }
     const result = await inspection(inspector, path.slice(0, path.lastIndexOf('/changes/')), change);
     if (result && result.outcome !== 'PASS') failInspection(result);
-    if (['ready', 'queued', 'checking', 'landed', 'blocked', 'failed', 'closed'].includes(change.status)) return change;
+    if (['ready', 'queued', 'checking', 'landed', 'merged', 'blocked', 'failed', 'closed'].includes(change.status)) return change;
     await onTick();
     await pause(1000);
   }
@@ -232,10 +232,10 @@ export async function land(input: LandOptions): Promise<Obj> {
   const allowed = parseAllowed(await readFile(allowedFile, 'utf8'));
   const outside = changed.files.filter(file => !allowed.has(file));
   if (outside.length) throw new ConcordError(`OUTSIDE_ALLOWED_FILES: ${outside.join(', ')}`, 'usage');
-  const token = required(process.env.CONCORD_TOKEN, 'CONCORD_TOKEN');
-  const url = required(process.env.CONCORD_URL, 'CONCORD_URL');
+  const token = input.client ? '' : required(process.env.CONCORD_TOKEN, 'CONCORD_TOKEN');
+  const url = input.client?.baseUrl ?? required(process.env.CONCORD_URL, 'CONCORD_URL');
   const client = input.client ?? new ConcordClient({ url, token });
-  if (options.reviewEvidence && process.env.CONCORD_REVIEWER_TOKEN === token)
+  if (options.reviewEvidence && token && process.env.CONCORD_REVIEWER_TOKEN === token)
     throw new ConcordError('reviewer token must differ from author token', 'usage');
   const inspector = !input.client && process.env.CONCORD_REVIEWER_TOKEN && process.env.CONCORD_REVIEWER_TOKEN !== token
     ? new ConcordClient({ url, token: process.env.CONCORD_REVIEWER_TOKEN }) : client;
@@ -384,7 +384,7 @@ export async function land(input: LandOptions): Promise<Obj> {
           throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change head, base, or revision changed during land', 'conflict');
       };
       change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : renew, inspector);
-      if (!['ready', 'queued', 'checking', 'landed'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
+      if (!['ready', 'queued', 'checking', 'landed', 'merged'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
       requirePublishedChange(change);
       if (!alreadyQueued) await renew();
       const queue = (await api(client, `${root}/queue`)).data;
