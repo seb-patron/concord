@@ -108,6 +108,90 @@ describe('delegated principals', () => {
     expect(JSON.stringify(listing)).not.toContain('token_digest');
   });
 
+  it('stores and returns trimmed self-reported agent metadata', async () => {
+    const agent = { model: ' m-1 ', effort: ' high ', harness: ' harness-1 ', host: ' host-1 ', launchedFrom: ' parent-1 ' };
+    const response = await mint({ roles: ['agent'], agent, name: 'worker' });
+    expect(response.status).toBe(201);
+    const created = (await responseBody(response)).data;
+    const expected = { model: 'm-1', effort: 'high', harness: 'harness-1', host: 'host-1', launchedFrom: 'parent-1' };
+    expect(created.agent).toEqual(expected);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/principals/${created.id}`)))).data.agent).toEqual(expected);
+    const listing = (await responseBody(await fetchApi(apiRequest('/v1/principals')))).data.items;
+    expect(listing.find((item: { id: string }) => item.id === created.id).agent).toEqual(expected);
+    expect(JSON.stringify(created)).not.toContain('token_digest');
+  });
+
+  it('rejects descriptor values exceeding their length limits and control characters', async () => {
+    const overLimits: Record<string, string> = {
+      model: 'm'.repeat(65), effort: 'e'.repeat(17), harness: 'h'.repeat(33),
+      host: 'h'.repeat(65), launchedFrom: 'l'.repeat(129),
+    };
+    for (const [field, value] of Object.entries(overLimits)) {
+      const response = await mint({ roles: ['agent'], agent: { [field]: value } });
+      expect(response.status).toBe(400);
+      expect((await responseBody(response)).error.code).toBe('INVALID_AGENT');
+    }
+    const control = await mint({ roles: ['agent'], agent: { model: 'm-1\nother' } });
+    expect(control.status).toBe(400);
+    expect((await responseBody(control)).error.code).toBe('INVALID_AGENT');
+  });
+
+  it('records a delegated descriptor as the change author after an owner seed', async () => {
+    const parentToken = `descriptor-parent-${crypto.randomUUID()}`;
+    const parentDigest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(parentToken))),
+      byte => byte.toString(16).padStart(2, '0')).join('');
+    runtime.AUTH_TOKENS = JSON.stringify({ ...JSON.parse(originalTokens ?? '{}'), [parentDigest]: {
+      tenantId: 'local', principalId: 'descriptor-parent', roles: ['owner', 'agent'], repoIds: '*', expiresAt: Date.now() + 3_600_000,
+    } });
+    const repoId = `agent_descriptor_${crypto.randomUUID().replaceAll('-', '')}`;
+    const repoResponse = await fetchApi(mutation('/v1/repos', { name: repoId, policyId: 'local-demo', profileId: 'local-demo' }, crypto.randomUUID()));
+    expect([201, 202]).toContain(repoResponse.status);
+    const repo = (await responseBody(repoResponse)).data;
+    await fetchApi(apiRequest(`/v1/repos/${repoId}`));
+    const ownerSeed = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'owner-seed', intentText: 'initialize test repository', baseOid: null,
+      branch: 'refs/heads/owner-seed', unitKeys: [], dependencyChangeIds: [],
+    }, crypto.randomUUID()));
+    expect(ownerSeed.status).toBe(201);
+    const owner: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+    const stub = runtime.REPO_COORDINATOR.get(runtime.REPO_COORDINATOR.idFromName(`repo:local:${repoId}`));
+    const seedOid = 'a'.repeat(40);
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: Principal, repoId: string): ModuleContext })
+        .context('repos', owner, repoId);
+      const storage = context.storage as FakeStorage;
+      await storage.ensureRepo(repo.canonicalStorageName);
+      storage.putCommit(repo.canonicalStorageName, { oid: seedOid, treeOid: 'b'.repeat(40), parents: [] });
+      expect(storage.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, seedOid)).toBe(true);
+    });
+    const agent = { model: 'm-1', effort: 'high', harness: 'harness-1', host: 'host-1', launchedFrom: 'parent-1' };
+    const mintResponse = await mint({ roles: ['agent'], repoIds: [repoId], name: 'worker', agent, ttlSeconds: 120 }, crypto.randomUUID(), parentToken);
+    expect(mintResponse.status).toBe(201);
+    const minted = (await responseBody(mintResponse)).data;
+    const changeResponse = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'descriptor-task', intentText: 'descriptor task', baseOid: seedOid,
+      branch: 'refs/heads/descriptor', unitKeys: [], dependencyChangeIds: [],
+    }, crypto.randomUUID(), minted.token));
+    const changeEnvelope = await responseBody(changeResponse);
+    expect(changeResponse.status, JSON.stringify(changeEnvelope)).toBe(201);
+    const change = changeEnvelope.data;
+    const expectedAuthor = { ...agent, startedAt: minted.createdAt, name: 'worker' };
+    expect(change.authorModel).toBe('m-1');
+    expect(change.authorAgent).toEqual(expectedAuthor);
+    const listed = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/changes`)))).data.items;
+    expect(listed.find((item: { changeId: string }) => item.changeId === change.changeId).authorAgent).toEqual(expectedAuthor);
+    const snapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos.changes;
+    expect(snapshot.find((item: { changeId: string }) => item.changeId === change.changeId).authorAgent).toEqual(expectedAuthor);
+    const plainResponse = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'plain-task', intentText: 'plain task', baseOid: seedOid,
+      branch: 'refs/heads/plain', unitKeys: [], dependencyChangeIds: [],
+    }, crypto.randomUUID()));
+    expect(plainResponse.status).toBe(201);
+    const plain = (await responseBody(plainResponse)).data;
+    expect(plain.authorModel).toBeNull();
+    expect(plain).not.toHaveProperty('authorAgent');
+  });
+
   it('reads mint and revoke from the tenant event stream in order without secrets', async () => {
     const before = await responseBody(await fetchApi(apiRequest('/v1/principals')));
     const cursor = btoa(String(before.eventSeq));

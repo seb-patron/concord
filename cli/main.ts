@@ -28,7 +28,7 @@ Commands and required fields:
   repo create --name NAME --policy-id ID --profile-id ID [--public true|false]
   repo list [--cursor CURSOR]
   settings get|protect|unprotect --repo ID [--pattern GLOB --level agents|human-approval|human-only --note TEXT]
-  principals mint --role agent|reviewer|viewer|checker [--repo ID] [--ttl 30d] [--name NAME]
+  principals mint --role agent|reviewer|viewer|checker [--repo ID] [--ttl 30d] [--name NAME] [--model M] [--effort E] [--harness H] [--host H] [--launched-from TEXT]
   principals list [--cursor CURSOR]
   principals revoke ID
   repo clone --repo ID --path PATH                 (read-only canonical clone)
@@ -63,7 +63,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'pattern', 'level', 'note', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'status', 'label', 'limit', 'every', 'while-pid', 'public', 'profile', 'reviewer-profile'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'model', 'effort', 'harness', 'host', 'launched-from', 'policy-id', 'profile-id', 'path', 'pattern', 'level', 'note', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'oid', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'status', 'label', 'limit', 'every', 'while-pid', 'public', 'profile', 'reviewer-profile'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -182,6 +182,12 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       const payload: Record<string, unknown> = { roles: [role] };
       if (repo) payload.repoIds = [repo];
       if (flags.name !== undefined) payload.name = flags.name;
+      const agent: Record<string, string> = {};
+      for (const field of ['model', 'effort', 'harness', 'host'] as const) {
+        if (flags[field] !== undefined) agent[field] = String(flags[field]);
+      }
+      if (flags['launched-from'] !== undefined) agent.launchedFrom = String(flags['launched-from']);
+      if (Object.keys(agent).length) payload.agent = agent;
       if (flags.ttl !== undefined) {
         const match = /^([1-9][0-9]*)([smhd])$/.exec(String(flags.ttl));
         if (!match) throw new ConcordError('--ttl must use positive seconds, minutes, hours, or days (for example 30d)', 'usage');

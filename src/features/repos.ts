@@ -444,7 +444,9 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const candidateStorageName = `concord-f-${changeId}`;
   const requestDigest = await digest({ kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName });
   const change: StartedChange = {
-    changeId, repoId: repo.repoId, authorId: context.principal.principalId, authorModel: context.principal.model ?? null, intentKey: input.intentKey,
+    changeId, repoId: repo.repoId, authorId: context.principal.principalId, authorModel: context.principal.model ?? null,
+    ...(context.principal.agent ? { authorAgent: { ...context.principal.agent, startedAt: context.principal.agentStartedAt ?? context.now(),
+      ...(context.principal.agentName ? { name: context.principal.agentName } : {}) } } : {}), intentKey: input.intentKey,
     intentText: input.intentText, candidateStorageName, branch: input.branch, baseOid: input.baseOid,
     headOid: null, revision: 0, unitKeys: input.unitKeys, ...(input.startScope ? { startUnitKeys: [...input.unitKeys] } : {}), dependencyChangeIds: input.dependencyChangeIds,
     status: 'draft', version: 0, issueNumber: input.issueNumber,

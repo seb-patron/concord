@@ -1,4 +1,4 @@
-import type { DelegatedPrincipal, ModuleContext, Principal, Role, TrustedConfiguration } from '../contracts';
+import type { AgentDescriptor, DelegatedPrincipal, ModuleContext, Principal, Role, TrustedConfiguration } from '../contracts';
 import { requireTenant } from '../auth';
 import { encodeCursor, HttpError, json, parseCursor, readJson } from '../http';
 import { catalogVisibility, eventSequence } from '../state';
@@ -14,27 +14,36 @@ const MAX_REPO_IDS = 100;
 interface Row extends Record<string, SqlStorageValue> {
   id: string; token_digest: string; roles: string; repo_ids: string;
   expires_at: number; parent_id: string; created_at: number;
-  revoked_at: number | null; name: string | null;
+  revoked_at: number | null; name: string | null; agent: string | null;
 }
 
 export function initializePrincipals(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS principals_records (
     id TEXT PRIMARY KEY, token_digest TEXT NOT NULL UNIQUE, roles TEXT NOT NULL,
     repo_ids TEXT NOT NULL, expires_at INTEGER NOT NULL, parent_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL, revoked_at INTEGER, name TEXT,
+    created_at INTEGER NOT NULL, revoked_at INTEGER, name TEXT, agent TEXT,
     idempotency_key TEXT,
     UNIQUE(parent_id, idempotency_key)
   )`);
+  const columns = sql.exec<{ name: string }>('PRAGMA table_info(principals_records)').toArray();
+  if (!columns.some(column => column.name === 'agent')) {
+    sql.exec('ALTER TABLE principals_records ADD COLUMN agent TEXT');
+  }
   sql.exec('CREATE INDEX IF NOT EXISTS principals_parent_idx ON principals_records(parent_id)');
 }
 
-function publicRecord(row: Row): DelegatedPrincipal {
+function publicRecord(row: Row, agent?: AgentDescriptor): DelegatedPrincipal {
   return {
     id: row.id, roles: JSON.parse(row.roles) as Role[],
     repoIds: JSON.parse(row.repo_ids) as string[] | '*', expiresAt: row.expires_at,
     parentId: row.parent_id, createdAt: row.created_at, revokedAt: row.revoked_at,
     ...(row.name === null ? {} : { name: row.name }),
+    ...(agent ? { agent } : {}),
   };
+}
+
+function storedAgent(row: Row): AgentDescriptor | undefined {
+  return row.agent === null ? undefined : JSON.parse(row.agent) as AgentDescriptor;
 }
 
 function limits(config: TrustedConfiguration): { maxTtlMs: number; activeLimit: number; totalLimit: number } {
@@ -53,8 +62,28 @@ export function lookupPrincipal(sql: SqlStorage, digest: string, tenantId: strin
   if (!/^[a-f0-9]{64}$/.test(digest)) return null;
   const row = sql.exec<Row>('SELECT * FROM principals_records WHERE token_digest = ?', digest).toArray()[0];
   if (!row || row.revoked_at !== null || row.expires_at <= now) return null;
+  const agent = storedAgent(row);
   return { tenantId, principalId: row.id, roles: JSON.parse(row.roles) as Role[],
-    repoIds: JSON.parse(row.repo_ids) as string[] | '*', expiresAt: row.expires_at };
+    repoIds: JSON.parse(row.repo_ids) as string[] | '*', expiresAt: row.expires_at,
+    model: agent?.model ?? null, ...(agent ? { agent, agentStartedAt: row.created_at, agentName: row.name } : {}) };
+}
+
+const AGENT_LIMITS = { model: 64, effort: 16, harness: 32, host: 64, launchedFrom: 128 } as const;
+function validateAgent(value: unknown): AgentDescriptor | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, 'INVALID_AGENT', 'Agent must be an object');
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !Object.hasOwn(AGENT_LIMITS, key))) throw new HttpError(400, 'INVALID_AGENT', 'Agent has an unknown field');
+  const result: AgentDescriptor = {};
+  for (const [key, max] of Object.entries(AGENT_LIMITS)) {
+    const field = input[key];
+    if (field === undefined) continue;
+    if (typeof field !== 'string' || /\p{Cc}/u.test(field)) throw new HttpError(400, 'INVALID_AGENT', `Agent ${key} must be printable text`);
+    const trimmed = field.trim();
+    if (!trimmed || Array.from(trimmed).length > max) throw new HttpError(400, 'INVALID_AGENT', `Agent ${key} must be 1 to ${max} printable characters`);
+    result[key as keyof AgentDescriptor] = trimmed;
+  }
+  return result;
 }
 
 export async function handlePrincipalRoute(context: ModuleContext, request: Request, path: string): Promise<Response> {
@@ -71,7 +100,7 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
     ).toArray();
     const items = rows.slice(0, PAGE_SIZE);
     const nextCursor = rows.length > PAGE_SIZE ? encodeCursor(items[items.length - 1].page_cursor) : null;
-    return json({ items: items.map(publicRecord), nextCursor }, context.version(), eventSequence(sql));
+    return json({ items: items.map(row => publicRecord(row, storedAgent(row))), nextCursor }, context.version(), eventSequence(sql));
   }
   if (path === '/v1/principals' && request.method === 'POST') {
     if (!principal.roles.includes('owner') && !principal.roles.includes('agent')) {
@@ -108,6 +137,7 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
     if (body.name !== undefined && (typeof body.name !== 'string' || body.name.length < 1 || body.name.length > 128)) {
       throw new HttpError(400, 'INVALID_NAME', 'Name must be 1 to 128 characters');
     }
+    const agent = validateAgent(body.agent);
     const key = request.headers.get('idempotency-key');
     if (key !== null && (key.length < 1 || key.length > 128)) throw new HttpError(400, 'INVALID_KEY', 'Invalid idempotency key');
     const random = crypto.getRandomValues(new Uint8Array(32));
@@ -125,12 +155,13 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
       if (count >= activeLimit) throw new HttpError(409, 'PRINCIPAL_CAP', 'Active principal cap reached');
       const total = sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM principals_records').toArray()[0].count;
       if (total >= totalLimit) throw new HttpError(409, 'PRINCIPAL_CAP', 'Total principal cap reached');
-      sql.exec('INSERT INTO principals_records(id, token_digest, roles, repo_ids, expires_at, parent_id, created_at, revoked_at, name, idempotency_key) VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)',
-        id, digest, JSON.stringify(roles), JSON.stringify(repoIds), expiresAt, principal.principalId, now, body.name ?? null, key);
+      sql.exec('INSERT INTO principals_records(id, token_digest, roles, repo_ids, expires_at, parent_id, created_at, revoked_at, name, idempotency_key, agent) VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)',
+        id, digest, JSON.stringify(roles), JSON.stringify(repoIds), expiresAt, principal.principalId, now, body.name ?? null, key, agent ? JSON.stringify(agent) : null);
       context.appendEvent('principal.minted', [id], { parentId: principal.principalId, roles, repoIds, expiresAt }, context.nextVersion());
     });
     return json({ ...publicRecord({ id, token_digest: digest, roles: JSON.stringify(roles), repo_ids: JSON.stringify(repoIds), expires_at: expiresAt,
-      parent_id: principal.principalId, created_at: now, revoked_at: null, name: (body.name as string | undefined) ?? null }), token }, context.version(), eventSequence(sql), 201);
+      parent_id: principal.principalId, created_at: now, revoked_at: null, name: (body.name as string | undefined) ?? null,
+      agent: agent ? JSON.stringify(agent) : null }, agent), token }, context.version(), eventSequence(sql), 201);
   }
   const match = /^\/v1\/principals\/([A-Za-z0-9_-]{1,64})$/.exec(path);
   if (match && request.method === 'GET') {
@@ -138,7 +169,7 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
     if (!visibility.all && !visibility.principalIds.has(match[1])) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
     const row = sql.exec<Row>('SELECT * FROM principals_records WHERE id = ?', match[1]).toArray()[0];
     if (!row) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
-    return json(publicRecord(row), context.version(), eventSequence(sql));
+    return json(publicRecord(row, storedAgent(row)), context.version(), eventSequence(sql));
   }
   if (match && request.method === 'DELETE') {
     const visibility = catalogVisibility(sql, principal);

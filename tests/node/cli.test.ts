@@ -971,10 +971,10 @@ describe('Concord agent CLI client', () => {
     if (!address || typeof address === 'string') throw new Error('expected local server');
     const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'parent-token' };
     try {
-      const minted = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'mint', '--role', 'agent', '--repo', 'alpha', '--ttl', '2h', '--name', 'worker'], { cwd: process.cwd(), env });
+      const minted = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'mint', '--role', 'agent', '--repo', 'alpha', '--ttl', '2h', '--name', 'worker', '--model', 'm-1', '--effort', 'high', '--host', 'host-1'], { cwd: process.cwd(), env });
       expect(minted.stdout).toBe(`${token}\n`);
       expect(minted.stderr).not.toContain(token);
-      expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/principals', body: { roles: ['agent'], repoIds: ['alpha'], ttlSeconds: 7200, name: 'worker' } });
+      expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/principals', body: { roles: ['agent'], repoIds: ['alpha'], ttlSeconds: 7200, name: 'worker', agent: { model: 'm-1', effort: 'high', host: 'host-1' } } });
       const listed = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'list'], { cwd: process.cwd(), env });
       expect(JSON.parse(listed.stdout)).toMatchObject({ data: { items: [{ id: 'child' }] } });
       await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'list', '--cursor', 'MjU'], { cwd: process.cwd(), env });

@@ -5,6 +5,14 @@ export type Digest = `sha256:${string}`;
 export type Role = 'owner' | 'agent' | 'reviewer' | 'checker' | 'promoter' | 'viewer';
 export type Versioned = { version: number };
 
+export interface AgentDescriptor {
+  model?: string;
+  effort?: string;
+  harness?: string;
+  host?: string;
+  launchedFrom?: string;
+}
+
 export interface Principal {
   tenantId: Id;
   principalId: Id;
@@ -12,6 +20,9 @@ export interface Principal {
   repoIds: Id[] | '*';
   expiresAt: number;
   model?: string | null;
+  agent?: AgentDescriptor | null;
+  agentStartedAt?: number;
+  agentName?: string | null;
   authMethod?: 'access';
 }
 
@@ -22,7 +33,7 @@ export interface HumanIdentity {
 /** Public metadata for a runtime delegated identity. The token digest is never returned. */
 export interface DelegatedPrincipal {
   id: Id; roles: Role[]; repoIds: Id[] | '*'; expiresAt: number;
-  parentId: Id; createdAt: number; revokedAt: number | null; name?: string;
+  parentId: Id; createdAt: number; revokedAt: number | null; name?: string; agent?: AgentDescriptor;
 }
 
 export interface Repo extends Versioned {
@@ -41,6 +52,7 @@ export interface Change extends Versioned {
   changeId: Id; repoId: Id; authorId: Id; intentKey: string; intentText: string;
   issueNumber?: number | null;
   authorModel?: string | null;
+  authorAgent?: AgentDescriptor & { startedAt: number; name?: string };
   closeReason?: string | null;
   candidateStorageName: string; branch: string; baseOid: Oid | null;
   headOid: Oid | null; revision: number; unitKeys: string[];
