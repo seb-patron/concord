@@ -12,6 +12,11 @@ export interface Principal {
   repoIds: Id[] | '*';
   expiresAt: number;
   model?: string | null;
+  authMethod?: 'access';
+}
+
+export interface HumanIdentity {
+  email: string; tenantId: Id; principalId: Id; roles: Role[]; repoIds: Id[] | '*';
 }
 
 /** Public metadata for a runtime delegated identity. The token digest is never returned. */
@@ -139,6 +144,7 @@ export interface TrustedConfiguration {
   policies: Record<string, TrustedPolicy>;
   profiles: Record<string, TrustedProfile>;
   delegatedPrincipals?: { maxTtlMs?: number; activeLimit?: number; totalLimit?: number };
+  humans?: HumanIdentity[];
   costLimits?: {
     maxReposPerTenant?: number; maxForksPerTenant?: number; maxTokenMintsPerTenantPerDay?: number;
     /** Install-wide ceiling on non-terminal changes per repo (default 32); agents cannot change it. */

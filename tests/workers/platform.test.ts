@@ -14,6 +14,14 @@ import { apiRequest, mutation, responseBody } from '../helpers';
 const fetchApi = (request: Request) => worker.fetch(request, env);
 
 describe('local Worker and SQLite Durable Objects', () => {
+  it('advertises Access sign-in only when both Access settings are present', async () => {
+    const health = async (values: Record<string, unknown>) => responseBody(await worker.fetch(
+      new Request('https://concord.test/health'), { ...env, ...values } as Env));
+    expect((await health({ ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com' })).data.accessSignIn).toBe(false);
+    expect((await health({ ACCESS_AUD: 'aud' })).data.accessSignIn).toBe(false);
+    expect((await health({ ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', ACCESS_AUD: 'aud' })).data.accessSignIn).toBe(true);
+  });
+
   it('returns an exact authenticated principal profile for every role', async () => {
     for (const [token, principalId, role] of [
       ['local-owner', 'owner', 'owner'], ['local-agent-a', 'agent-a', 'agent'],
