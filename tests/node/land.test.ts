@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { approvedHead, filesChanged, land, parseAllowed, unitKeys, waitChange } from '../../cli/land.ts';
+import { approvedHead, currentVersion, filesChanged, land, parseAllowed, unitKeys, waitChange, waitQueue } from '../../cli/land.ts';
 import { ConcordError } from '../../cli/client.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
@@ -104,7 +104,8 @@ describe('land input and evidence gates', () => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       const method = init?.method ?? 'GET';
       let data: Record<string, any> = {};
-      if (method === 'GET' && url.pathname.endsWith('/snapshot')) data = { projections: { runners: { jobs: [
+      if (method === 'GET' && url.pathname === '/v1/repos/demo') data = {};
+      else if (method === 'GET' && url.pathname.endsWith('/snapshot')) data = { projections: { runners: { jobs: [
         { kind: 'inspect-candidate', changeId: 'change', revision: change.revision, jobId: `job-${change.revision}`, state: 'completed' },
       ] } } };
       else if (method === 'GET' && url.pathname.endsWith('/job-0/result') || method === 'GET' && url.pathname.endsWith(`/job-${change.revision}/result`))
@@ -477,6 +478,47 @@ describe('land input and evidence gates', () => {
         payload: { log: 'checker diagnostic tail' } });
     expect(request).toHaveBeenCalledTimes(3);
   });
+  it('backs off a checking queue read for 60 seconds without excess GETs', async () => {
+    let now = 0; let queueGets = 0;
+    const client = { request: vi.fn(async (_method: string, path: string) => {
+      if (path !== '/repos/demo/queue') throw new Error(`unexpected ${path}`);
+      queueGets++;
+      return { data: { entries: [{ changeId: 'change', state: 'checking' }] }, version: 1 };
+    }) };
+    await waitQueue(client as never, '/repos/demo', 'change', 60_000,
+      () => {}, async () => {}, () => Infinity,
+      { now: () => now, sleep: async ms => { now += ms; }, random: () => 0.5 });
+    expect(queueGets).toBeLessThanOrEqual(12);
+  });
+  it('observes a queue state change within the 10-second cap', async () => {
+    let now = 0; const observed: Array<{ at: number; state: string }> = [];
+    const client = { request: vi.fn(async () => ({ data: { entries: [{ changeId: 'change',
+      state: now < 6000 ? 'checking' : 'reserved' }] }, version: 1 })) };
+    await waitQueue(client as never, '/repos/demo', 'change', 60_000,
+      (_state, entry) => observed.push({ at: now, state: entry!.state }), async () => {}, () => Infinity,
+      { now: () => now, sleep: async ms => { now += ms; }, random: () => 0.5 });
+    expect(observed).toContainEqual({ at: 6000, state: 'reserved' });
+    expect(observed.find(item => item.state === 'reserved')!.at).toBeLessThanOrEqual(16_000);
+  });
+  it('caps queue sleep at the next lease renewal deadline', async () => {
+    let now = 0; let remainingSeconds = 122; let firstRenewalAt: number | undefined;
+    const sleeps: number[] = [];
+    const client = { request: vi.fn(async () => ({ data: { entries: [{ changeId: 'change', state: 'checking' }] }, version: 1 })) };
+    await waitQueue(client as never, '/repos/demo', 'change', 15_000, () => {}, async () => {
+      if (remainingSeconds <= 120) { firstRenewalAt ??= now; remainingSeconds = 300; }
+    }, () => Math.max(0, (remainingSeconds - 120) * 1000),
+    { now: () => now, sleep: async ms => { sleeps.push(ms); now += ms; remainingSeconds -= ms / 1000; }, random: () => 0.5 });
+    expect(sleeps[0]).toBe(2000);
+    expect(firstRenewalAt).toBe(2000);
+  });
+  it('reads a repository version from repo detail without requesting its snapshot', async () => {
+    const request = vi.fn(async (_method: string, path: string) => {
+      if (path !== '/repos/demo') throw new Error(`unexpected ${path}`);
+      return { data: {}, version: 17 };
+    });
+    await expect(currentVersion({ request } as never, '/repos/demo')).resolves.toBe(17);
+    expect(request).toHaveBeenCalledExactlyOnceWith('GET', '/repos/demo', {});
+  });
   it.each([401, 403, 404])('returns awaiting-review for an author-only PASS inspection when result read returns %s', async status => {
     const { dir, commit, parent } = await source();
     const allowed = join(await temp(), 'allowed.txt');
@@ -535,7 +577,7 @@ describe('land input and evidence gates', () => {
         { error: { code: 'INTENT_CONFLICT' } });
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') {
-        if (++changeReads >= 5) change.status = 'ready';
+        if (++changeReads >= 3) change.status = 'ready';
         return { data: change, version: 1 };
       }
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
