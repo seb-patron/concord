@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
+import { ConcordClient, ConcordError, redactOutput, redactString, rememberCredential, rememberCredentialsIn } from '../../cli/client.ts';
 import { mintGitToken } from '../../cli/git-token.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
 import { land } from '../../cli/land.ts';
@@ -1015,14 +1015,14 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
-  it('redacts numeric and boolean credentials echoed in an HTTP error', async () => {
-    const body = { nested: { password: 123456789, apiKey: 0, secret: false } };
+  it('redacts string credentials without remembering numeric and boolean credentials', async () => {
+    const body = { nested: { password: '123456789', apiKey: '987654321', secret: 'false-value' } };
     const fetcher: typeof fetch = async (_input, init) => {
       expect(JSON.parse(String(init?.body))).toEqual(body);
       expect(redactOutput('123456789')).toBe('[REDACTED]');
-      expect(redactOutput('0')).toBe('[REDACTED]');
-      expect(redactOutput('false')).toBe('[REDACTED]');
-      return new Response(JSON.stringify({ error: { code: 'BAD', message: 'password 123456789; key 0; secret false', details: { echoNumber: 123456789, echoZero: 0, echoBoolean: false } } }), { status: 400 });
+      expect(redactOutput('987654321')).toBe('[REDACTED]');
+      expect(redactOutput('false-value')).toBe('[REDACTED]');
+      return new Response(JSON.stringify({ error: { code: 'BAD', message: 'password 123456789; key 0; secret false-value', details: { echoNumber: 246801357, echoZero: 0, echoBoolean: false, echoString: '987654321' } } }), { status: 400 });
     };
     const client = new ConcordClient({ url: 'https://concord.invalid', fetch: fetcher });
     try {
@@ -1032,15 +1032,15 @@ describe('Concord agent CLI client', () => {
       const diagnostic = error as ConcordError;
       expect(diagnostic.kind).toBe('server');
       expect(diagnostic.message).not.toContain('123456789');
-      expect(diagnostic.message).not.toContain('false');
+      expect(diagnostic.message).not.toContain('false-value');
       expect(JSON.stringify(diagnostic.payload)).not.toContain('123456789');
-      expect(JSON.stringify(diagnostic.payload)).not.toContain('false');
-      expect(diagnostic.payload).toMatchObject({ error: { details: { echoNumber: '[REDACTED]', echoZero: '[REDACTED]', echoBoolean: '[REDACTED]' } } });
+      expect(JSON.stringify(diagnostic.payload)).not.toContain('false-value');
+      expect(diagnostic.payload).toMatchObject({ error: { details: { echoNumber: 246801357, echoZero: 0, echoBoolean: false, echoString: '[REDACTED]' } } });
     }
   });
 
   it('keeps stdout and stderr parseable when a token contains JSON syntax', async () => {
-    const secret = '"';
+    const secret = '"json-secret';
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
       response.setHeader('content-type', 'application/json');
       if (request.url === '/v1/ok') response.end(JSON.stringify({ data: { echoed: secret, quoted: `before ${secret} after` } }));
@@ -1109,8 +1109,8 @@ describe('Concord agent CLI client', () => {
   });
 
   it('omits members whose key or value still has escapes at the decoding limit', () => {
-    rememberCredential('abc');
-    let encoded = '%61%62%63';
+    rememberCredential('escape+limit/secret');
+    let encoded = encodeURIComponent('escape+limit/secret');
     for (let layer = 0; layer < 10; layer++) encoded = encodeURIComponent(encoded);
     const count = { omittedMembers: 0 };
     expect(redactOutput({ [encoded]: 'visible', value: encoded, items: [encoded, 'visible'] }, count))
@@ -1139,7 +1139,7 @@ describe('Concord agent CLI client', () => {
     let seed = 0x1234abcd;
     const next = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
     for (let caseNumber = 0; caseNumber < 100; caseNumber++) {
-      const secret = Array.from({ length: 1 + next() % 20 }, () => alphabet[next() % alphabet.length]).join('');
+      const secret = Array.from({ length: 8 + next() % 20 }, () => alphabet[next() % alphabet.length]).join('');
       rememberCredential(secret);
       const forms = [secret, `prefix ${secret} suffix`, encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, match => match.toLowerCase()), Buffer.from(secret).toString('base64'), `Bearer ${secret}`];
       const serialized = JSON.stringify(redactOutput(forms));
@@ -1147,31 +1147,49 @@ describe('Concord agent CLI client', () => {
     }
   });
 
-  it('preserves fixed envelope keys and error kind for a one-character credential', async () => {
+  it('preserves fixed envelope keys and error kind for a credential', async () => {
+    const secret = 'envelope-secret-credential';
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
       response.setHeader('content-type', 'application/json');
-      if (request.url === '/v1/ok') response.end(JSON.stringify({ data: { message: 'secret e', nested: { echo: 'e' } } }));
+      if (request.url === '/v1/ok') response.end(JSON.stringify({ data: { message: `secret ${secret}`, nested: { echo: secret } } }));
       else {
         response.statusCode = 400;
-        response.end(JSON.stringify({ error: { code: 'BAD', message: 'secret e', data: { echo: 'e' } } }));
+        response.end(JSON.stringify({ error: { code: 'BAD', message: `secret ${secret}`, data: { echo: secret } } }));
       }
     }));
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('expected local test server address');
-    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'e' };
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: secret };
     try {
       const ok = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/ok'], { cwd: process.cwd(), env });
-      expect(JSON.parse(ok.stdout)).toEqual({ data: {}, omittedMembers: 2 });
+      expect(JSON.parse(ok.stdout)).toEqual({ data: { message: '[REDACTED]', nested: { echo: '[REDACTED]' } } });
       try {
         await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/fail'], { cwd: process.cwd(), env });
         throw new Error('expected server failure');
       } catch (error) {
         const diagnostic = JSON.parse((error as { stderr: string }).stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
         expect(diagnostic.error).toMatchObject({ kind: 'server', status: 400 });
-        expect(diagnostic.omittedMembers).toBe(1);
-        expect(diagnostic.error.message).not.toContain('secret e');
+        expect(diagnostic).not.toHaveProperty('omittedMembers');
+        expect(diagnostic.error.message).not.toContain(secret);
       }
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('does not redact identifiers or scalar output for numbers and booleans mistaken as credential fields', () => {
+    const secret = 'art_v1_9f3c2b7e1d';
+    rememberCredentialsIn({ tokenVersion: 3, hasToken: true, secret });
+    expect(redactOutput({ fence: 3, ok: true, changeId: '3b2e51d4-d728-475a-94b3-36e17497b05c', headOid: 'e501c82c852352b92094c7c4c6ede74042dd3f72', intentKey: 'cp-35-105-git-token' }))
+      .toEqual({ fence: 3, ok: true, changeId: '3b2e51d4-d728-475a-94b3-36e17497b05c', headOid: 'e501c82c852352b92094c7c4c6ede74042dd3f72', intentKey: 'cp-35-105-git-token' });
+    expect(redactOutput({ remote: 'https://x.example/r.git', note: `token ${secret} here` }))
+      .toEqual({ remote: 'https://x.example/r.git', note: '[REDACTED]' });
+    expect(redactOutput({ note: Buffer.from(secret).toString('base64') })).toEqual({ note: '[REDACTED]' });
+    const percentEncoded = [...Buffer.from(secret)].map(byte => `%${byte.toString(16).padStart(2, '0')}`).join('');
+    expect(redactOutput({ note: percentEncoded })).toEqual({ note: '[REDACTED]' });
+  });
+
+  it('ignores remembered credentials shorter than eight characters', () => {
+    rememberCredential('abc');
+    expect(redactString('cabcd')).toBe('cabcd');
   });
 });
