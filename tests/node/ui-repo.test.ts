@@ -28,6 +28,58 @@ const fixture = {
 };
 
 describe('Repository code page', () => {
+  it('groups active leases by change in Working now and expands their units', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('page')!;
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.repos.changes = [
+        { changeId: 'change-a', authorModel: 'model-alpha', issueNumber: 11, branch: 'feature/alpha' },
+        { changeId: 'change-b', authorModel: 'model-beta', issueNumber: 22, branch: 'feature/beta' },
+        { changeId: 'change-c', issueNumber: 33, branch: 'feature/gamma' },
+      ];
+      snapshot.data.projections.issues.items = [
+        { number: 11, title: 'Alpha issue', state: 'open' },
+        { number: 22, title: 'Beta issue', state: 'open' },
+        { number: 33, title: 'Gamma issue', state: 'open' },
+      ];
+      snapshot.data.projections.leases.heldItems = [
+        ...Array.from({ length: 2 }, (_, index) => ({ changeId: 'change-a', holderId: 'worker-a', unitKey: `file:alpha-${index}.ts`, state: 'active', expiresAt: Date.now() + 120000, remainingSeconds: 125 })),
+        ...Array.from({ length: 5 }, (_, index) => ({ changeId: 'change-b', holderId: 'worker-b', unitKey: `file:beta-${index}.ts`, state: 'active', expiresAt: Date.now() + 300000, remainingSeconds: 245 })),
+        { changeId: 'change-c', holderId: 'worker-c', unitKey: 'file:gamma.ts', state: 'active', expiresAt: Date.now() + 60000, remainingSeconds: 45 },
+      ];
+      const page = createRepoPage(root, {
+        getRepoTree: async () => ({ data: { entries: [] } }),
+        getRepoReadme: async () => ({ data: {} }),
+        getRepoFile: async () => ({ data: {} }),
+      });
+
+      page.show('sample', snapshot);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const rows = [...root.querySelectorAll('.repo-working-row')];
+      expect(rows).toHaveLength(3);
+      expect(rows.map(row => row.querySelector('.repo-working-model')?.textContent)).toEqual(['model-beta', 'model-alpha', 'worker-c']);
+      expect(rows.map(row => row.querySelector('.repo-working-title')?.textContent)).toEqual([
+        '#22 Beta issue', '#11 Alpha issue', '#33 Gamma issue',
+      ]);
+      expect(rows.map(row => row.querySelector('.repo-working-branch')?.textContent)).toEqual([
+        'feature/beta', 'feature/alpha', 'feature/gamma',
+      ]);
+      expect(rows.map(row => row.querySelector('.repo-working-count')?.textContent)).toEqual(['5 files', '2 files', '1 file']);
+      expect(rows.every(row => row.querySelector('.repo-working-units') === null)).toBe(true);
+      const agentsNow = [...root.querySelectorAll('.repo-stats dt')].find(label => label.textContent === 'Agents now');
+      expect(agentsNow?.parentElement?.querySelector('dd')?.textContent).toBe('3');
+
+      (rows[1].querySelector('.repo-working-disclosure') as HTMLButtonElement).click();
+      const expanded = [...root.querySelectorAll('.repo-working-row')][1];
+      expect(expanded.querySelectorAll('.repo-working-units li')).toHaveLength(2);
+      expect(expanded.querySelector('.repo-working-units')?.textContent).toContain('file:alpha-0.ts');
+      expect(expanded.querySelector('.repo-working-units')?.textContent).toContain('3 min left');
+      expect(expanded.querySelector('.repo-working-disclosure')?.getAttribute('aria-expanded')).toBe('true');
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
   it('shows Code details and an accessible Git, Concord, and mirror clone panel', async () => {
     const dom = new JSDOM('<main id="page"></main>', { url: 'http://localhost/' });
     const previous = globalThis.document; globalThis.document = dom.window.document;
