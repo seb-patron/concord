@@ -13,10 +13,11 @@ import { runners } from './features/runners';
 import { findings } from './features/findings';
 import { verdicts } from './features/verdicts';
 import { issuesFeature } from './features/issues';
+import { settings } from './features/settings';
 import { measureSqlMetrics, metricsWindow, type RepoMetrics } from './features/metrics';
 
-/** The six modules are registered once. Each supplies migrations, routes, alarms and projections. */
-export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature];
+/** The modules are registered once. Each supplies migrations, routes, alarms and projections. */
+export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature, settings];
 
 export function selectStorage(env: Env, sql: SqlStorage, now: () => number): RepoStorage {
   if (env.CONCORD_MODE === 'local' && env.STORAGE_BACKEND === 'fake') return new FakeStorage(sqlState(sql), now);
@@ -146,7 +147,10 @@ export class RepoCoordinator extends DurableObject<Env> {
         const limit = limitRaw === null ? 100 : Number(limitRaw);
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400, 'INVALID_LIMIT', 'Limit must be 1 to 100');
         const page = eventsAfter(core.sql, after, limit + 1);
-        const items = page.slice(0, limit);
+        const items = page.slice(0, limit).map(event =>
+          event.kind === 'verdict.human_approval' && !principal.roles.includes('owner')
+            ? { ...event, payload: Object.fromEntries(Object.entries(event.payload).filter(([key]) => key !== 'evidenceDigest')) }
+            : event);
         const nextCursor = page.length > limit ? encodeCursor(items[items.length - 1].sequence) : null;
         return json({ items, nextCursor }, version, eventSequence(core.sql));
       }

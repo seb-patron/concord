@@ -704,6 +704,48 @@ describe('queue with real lease hooks', () => {
 });
 
 describe('queue state machine', () => {
+  it('holds a protected change until an owner decision and then permits landing', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    await h.seed(`candidate-${h.repoId}-A`);
+    h.views.set('A', { authorId: 'agent-a', headOid: oid('a'), revision: 1, status: 'ready', unitKeys: ['row:A'], frozen: false,
+      baseOid: main, candidateStorageName: `candidate-${h.repoId}-A`, branch: 'refs/heads/work',
+      dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`, scratchStorageName: `scratch-${h.repoId}`,
+      policyId: 'local-demo', profileId: 'local-demo' });
+    const manifest: ReviewManifest = { changedUnits: [{ unitKey: 'row:A', beforePath: 'AGENTS.md', afterPath: 'AGENTS.md',
+      beforeMode: '100644', afterMode: '100644', beforeDigest: `sha256:${'1'.repeat(64)}`, afterDigest: `sha256:${'2'.repeat(64)}` }],
+      policyVersion: 1, policyDigest: `sha256:${'0'.repeat(64)}`, checkerDigest: `sha256:${'0'.repeat(64)}`,
+      oracleDigest: `sha256:${'0'.repeat(64)}`, toolchainDigest: `sha256:${'0'.repeat(64)}`, coverage: 'complete', dependencyScope: [] };
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'verdicts', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('verdicts', principal, h.repoId);
+      sqlState(context.sql).put('module:settings:record', { version: 1, protectedPaths: [{ pattern: 'AGENTS.md', level: 'human-approval' }] });
+      context.state.put('inspection:A', { changeId: 'A', revision: 1,
+        candidate: { changeId: 'A', revision: 1, baseOid: main, headOid: oid('a'), storageName: `candidate-${h.repoId}-A`, ref: 'refs/heads/work' },
+        canonicalStorageName: `canonical-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo',
+        reviewManifest: manifest, reviewManifestDigest: `sha256:${'3'.repeat(64)}`, outcome: 'PASS' });
+    });
+    const enqueue = () => h.fetch('/queue/enqueue', { expectedVersion: 0, changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
+    const waiting = await enqueue();
+    expect(waiting.body.error.code).toBe('HUMAN_APPROVAL_REQUIRED');
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'verdicts', actor: Principal, repoId: string): ModuleContext };
+      internal.context('verdicts', principal, h.repoId).state.put('human:A', { revision: 1, headOid: oid('a'),
+        manifestDigest: `sha256:${'3'.repeat(64)}`, evidenceDigest: `sha256:${'4'.repeat(64)}`, ownerId: 'owner',
+        decision: 'approve', version: 1, patterns: ['AGENTS.md'] });
+    });
+    expect((await enqueue()).response.status).toBe(201);
+    await h.tick();
+    expect((await h.deliver(h.jobs[0], 'PASS')).status).toBe('eligible');
+    await h.tick();
+    const promotion = (await h.state()).promotion;
+    expect(promotion).toMatchObject({ state: 'pending', memberIds: ['A'] });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', promotion.checkedNewOid, main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries[0].state).toBe('landed');
+  });
   it('re-stacks a checking entry with a newly admitted change and lands both', async () => {
     const h = await setup('A');
     await h.tick();
