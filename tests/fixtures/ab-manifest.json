@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "batch": "P",
+  "startCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "validationCommand": "sh scripts/validate.sh",
+  "changes": [
+    {
+      "id": "X1",
+      "label": "X1",
+      "order": 1,
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dependsOn": [],
+      "charge": null
+    },
+    {
+      "id": "X2",
+      "label": "X2",
+      "order": 2,
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "cccccccccccccccccccccccccccccccccccccccc",
+      "dependsOn": ["X1"],
+      "charge": {
+        "resolvedHead": "dddddddddddddddddddddddddddddddddddddddd",
+        "rebaseRunMinutes": 12.5,
+        "reviewMinutes": 9
+      }
+    }
+  ]
+}
