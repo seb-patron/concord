@@ -105,6 +105,37 @@ describe('cost guards', () => {
     });
   });
 
+  it('does not plan alarms for repository reads', async () => {
+    const name = `cost_read_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`;
+    const created = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, `${name}-create`));
+    expect(created.status).toBe(201);
+    const repo = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
+    await runInDurableObject<RepoCoordinator, void>(repo, async (_instance, state) => state.storage.deleteAlarm());
+    const deadlineSpies = modules.map(module => vi.spyOn(module, 'nextDeadline'));
+
+    for (const path of ['queue', 'leases', 'changes', 'issues']) {
+      const response = await fetchApi(apiRequest(`/v1/repos/${name}/${path}`));
+      expect(response.status).toBe(200);
+      expect(deadlineSpies.every(spy => spy.mock.calls.length === 0)).toBe(true);
+    }
+    await runInDurableObject<RepoCoordinator, void>(repo, async (_instance, state) => expect(await state.storage.getAlarm()).toBeNull());
+  });
+
+  it('still plans alarms after a repository mutation', async () => {
+    const name = `cost_mutation_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`;
+    const created = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, `${name}-create`));
+    expect(created.status).toBe(201);
+    const repo = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
+    await runInDurableObject<RepoCoordinator, void>(repo, async (_instance, state) => state.storage.deleteAlarm());
+    const deadline = Date.now() + 10_000;
+    const deadlineSpies = modules.map(module => vi.spyOn(module, 'nextDeadline').mockReturnValue(deadline));
+
+    const response = await fetchApi(mutation(`/v1/repos/${name}/issues`, { title: 'Alarm deadline' }, `${name}-issue`));
+    expect(response.status).toBe(201);
+    expect(deadlineSpies.every(spy => spy.mock.calls.length === 1)).toBe(true);
+    await runInDurableObject<RepoCoordinator, void>(repo, async (_instance, state) => expect(await state.storage.getAlarm()).toBe(deadline));
+  });
+
   it('backs off a throwing repo module and floors a stuck deadline', async () => {
     const now = Date.now();
     (env as Env).CONCORD_TEST_NOW = String(now);
