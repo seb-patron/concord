@@ -58,6 +58,26 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('routes forced lease release with its audit reason', async () => {
+    const calls: Array<{ method: string; path: string; body: any; expectedVersion?: number }> = [];
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let text = ''; for await (const chunk of request) text += chunk;
+      calls.push({ method: request.method ?? '', path: request.url ?? '', body: text ? JSON.parse(text) : null,
+        expectedVersion: request.headers['if-match'] ? Number(request.headers['if-match']) : undefined });
+      response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ data: {}, version: 4 }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server unavailable');
+    try {
+      await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'lease', 'release', '--repo', 'r', '--id', 'l',
+        '--force', '--reason', 'operator recovery', '--expected-version', '3'], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'owner-token' },
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/repos/r/leases/l/force-release', body: { reason: 'operator recovery', expectedVersion: 3 } });
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it('returns the landed result when the change status poll already reports merged', async () => {
     const { worktree, baseOid } = await publicationFixture('land-merged-status');
     await writeFile(join(worktree, 'source.txt'), 'landed\n');
