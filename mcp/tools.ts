@@ -29,6 +29,7 @@ export const tools: Tool[] = [
   tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
   tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result. TTL is bounded by trusted maxLeaseHoldSeconds (default 14400).', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 86400 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
+  tool('lease_renew', 'Renew every live lease of a change in one call. Fences stay the same and holds are never shortened; renew before remainingSeconds drops below about 100.', { ...change, ttlSeconds: { type: 'integer', minimum: 1, maximum: 86400 }, idempotencyKey: s }, ['repoId', 'changeId']),
   tool('lease_force_release', 'Force-release a lease as an owner, recording the audit reason.', { ...repo, leaseId: s, reason: s, idempotencyKey: s }, ['repoId', 'leaseId', 'reason']),
   tool('lease_list', 'List active leases and recent refusals.', { ...repo, cursor: s }, ['repoId']),
   tool('change_checkout', 'Fetch the candidate revision, or create a new local branch at its base, with a short-lived, process-local Git credential.', { ...change, worktree: s }, ['repoId', 'changeId', 'worktree']),
@@ -155,6 +156,7 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
       break;
     }
     case 'lease_release': result = await mutation(client, `${r}/leases/${value(args, 'leaseId')}/release`, { fence: args.fence }, await currentVersion(client, args), args.idempotencyKey); break;
+    case 'lease_renew': result = await mutation(client, `${r}/leases/renew-batch`, { changeId: args.changeId, ttlSeconds: args.ttlSeconds ?? 300 }, undefined, args.idempotencyKey); break;
     case 'lease_force_release': result = await mutation(client, `${r}/leases/${value(args, 'leaseId')}/force-release`, { reason: args.reason }, await currentVersion(client, args), args.idempotencyKey); break;
     case 'lease_list': result = await client.request('GET', `${r}/leases${query('cursor', args.cursor)}`); break;
     case 'change_checkout': {

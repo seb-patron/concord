@@ -198,6 +198,37 @@ function renew(context: ModuleContext, leaseId: string, body: unknown): Response
   });
 }
 
+function renewBatch(context: ModuleContext, body: unknown): Response {
+  const input = body as Record<string, unknown>;
+  if (!validId(input?.changeId)) throw new HttpError(422, 'INVALID_RENEW', 'changeId is required');
+  const ttlSeconds = ttl(input.ttlSeconds, costLimits(context.trusted).maxLeaseHoldSeconds);
+  return context.transaction(() => {
+    const now = context.now();
+    expireDue(context, now);
+    const changeId = input.changeId as string;
+    const holderId = context.principal.principalId;
+    const selected = rows(context,
+      "SELECT * FROM leases_claims WHERE change_id = ? AND holder_id = ? AND state = 'active' AND expires_at > ? ORDER BY unit_key",
+      changeId, holderId, now);
+    const reserved = rows(context,
+      "SELECT * FROM leases_claims WHERE change_id = ? AND holder_id = ? AND state = 'reserved' AND expires_at > ? ORDER BY unit_key",
+      changeId, holderId, now);
+    const updated: Lease[] = [];
+    for (const row of selected) {
+      const expiresAt = Math.max(row.expires_at, now + ttlSeconds * 1000);
+      if (expiresAt === row.expires_at) { updated.push(asLease(context, row)); continue; }
+      const version = context.nextVersion();
+      const next = { ...row, expires_at: expiresAt, version, updated_at: now };
+      context.sql.exec('UPDATE leases_claims SET expires_at = ?, version = ?, updated_at = ? WHERE lease_id = ?',
+        expiresAt, version, now, row.lease_id);
+      makeEvent(context, 'lease.renewed', next, version);
+      updated.push(asLease(context, next));
+    }
+    return json({ leases: updated, reserved: reserved.map(row => asLease(context, row)), renewAfterSeconds: RENEW_AFTER_SECONDS },
+      context.version(), eventSequence(context.sql));
+  });
+}
+
 function release(context: ModuleContext, leaseId: string, body: unknown): Response {
   const input = body as Record<string, unknown>;
   return context.transaction(() => {
@@ -468,6 +499,7 @@ function reservationLive(context: ModuleContext, changeId: string, fences: Recor
 }
 
 const collection = /^\/v1\/repos\/[^/]+\/leases$/;
+const renewBatchPath = /^\/v1\/repos\/[^/]+\/leases\/renew-batch$/;
 const leaseAction = /^\/v1\/repos\/[^/]+\/leases\/([A-Za-z0-9_-]+)\/(renew|release)$/;
 const forceReleasePath = /^\/v1\/repos\/[^/]+\/leases\/([A-Za-z0-9_-]+)\/force-release$/;
 
@@ -483,6 +515,7 @@ export const leases: FeatureModule = {
     { method: 'GET', pattern: collection, handle: (context, request) => json(projection(context,
       parseLeaseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
+    { method: 'POST', pattern: renewBatchPath, handle: (context, _request, _match, body) => renewBatch(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
     { method: 'POST', pattern: forceReleasePath, handle: (context, _request, match, body) => forceRelease(context, match[1], body) },
   ],

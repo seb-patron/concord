@@ -17,6 +17,7 @@ Every tool input is a JSON object with `additionalProperties: false`. IDs and te
 | `change_status` | `repoId`, `changeId` | none | Change detail, provisioning and revision |
 | `lease_claim` | `repoId`, `changeId`, `unitKeys`, `intentText` | `ttlSeconds` (1–trusted `maxLeaseHoldSeconds`, default 120; default cap 14400), `idempotencyKey` | Grant with lease IDs and fences, or normal `conflict: true` result with holder, intent, expiry, keys and next action |
 | `lease_release` | `repoId`, `leaseId`, `fence` | `idempotencyKey` | Released lease |
+| `lease_renew` | `repoId`, `changeId` | `ttlSeconds` (integer 1–86400, default 300), `idempotencyKey` | Extends all live leases held by the caller for the change; preserves fences and never shortens a hold |
 | `lease_list` | `repoId` | `cursor` | Lease page and refusals |
 | `change_checkout` | `repoId`, `changeId`, `worktree` | none | Creates or reuses a dedicated Git worktree at `<worktree>/.concord/changes/<changeId>`, starting from the base or existing fork branch. Returns its path, branch and credential-free remote |
 | `change_publish` | `repoId`, `changeId`, `worktree`, `leaseFences` | `idempotencyKey` | Verifies the change-specific worktree and its HEAD, pushes the candidate fork, registers its ref, and publishes a revision |

@@ -20,12 +20,12 @@ async function get(client: ConcordClient, path: string): Promise<Envelope> { ret
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 // A pending queue promotion briefly freezes every repository mutation with 409 PROMOTION_IN_PROGRESS.
 // Retry for about ten seconds, re-reading the coordinator version that the promotion advances.
-async function post(client: ConcordClient, path: string, body: Obj, version?: number): Promise<Envelope> {
+async function post(client: ConcordClient, path: string, body: Obj, version?: number, sleep: (ms: number) => Promise<void> = pause): Promise<Envelope> {
   for (let attempt = 0; ; attempt++) {
     try { return await client.request('POST', path, { body, expectedVersion: version, idempotencyKey: idempotencyKey() }); }
     catch (error) {
       if (!(error instanceof ConcordError) || (error.payload as Obj)?.error?.code !== 'PROMOTION_IN_PROGRESS' || attempt >= 19) throw error;
-      await pause(500);
+      await sleep(500);
       const root = /^\/repos\/[^/]+/.exec(path)?.[0];
       if (version !== undefined && root) version = (await get(client, `${root}/snapshot`)).version;
     }
@@ -46,8 +46,9 @@ async function pages(client: ConcordClient, root: string, kind: 'changes' | 'lea
   } while (cursor);
   return items;
 }
-export async function changeByIntent(client: ConcordClient, root: string, intentKey: string): Promise<Obj | undefined> {
-  return (await pages(client, root, 'changes')).find(item => item.intentKey === intentKey && !['landed', 'closed', 'failed'].includes(item.status));
+export async function changeByIntent(client: ConcordClient, root: string, intentKey: string, includeTerminal = false): Promise<Obj | undefined> {
+  return (await pages(client, root, 'changes')).find(item => item.intentKey === intentKey &&
+    (includeTerminal || !['landed', 'closed', 'failed'].includes(item.status)));
 }
 export async function liveLeases(client: ConcordClient, root: string, changeId: string): Promise<Obj[]> {
   return (await pages(client, root, 'leases')).filter(item => item.changeId === changeId && item.state === 'active' && item.expiresAt > Date.now());
@@ -134,4 +135,75 @@ export async function releaseByIntent(repo: string, intentKey: string, clientInp
     await post(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, version);
   }
   return { changeId: change.changeId, released: held.map(item => item.unitKey) };
+}
+
+export type RenewOptions = { repo: string; intentKey: string; hold?: string; every?: number; whilePid?: number;
+  client?: ConcordClient; sleep?: (ms: number) => Promise<void>; alive?: (pid: number) => boolean };
+export async function renewByIntent(input: RenewOptions): Promise<Obj> {
+  const { repo, intentKey } = input;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(repo) || !keyPattern.test(intentKey))
+    throw new ConcordError('valid --repo and --intent-key are required', 'usage');
+  if (input.every !== undefined && (!Number.isSafeInteger(input.every) || input.every < 10 || input.every > 3600))
+    throw new ConcordError('--every must be an integer from 10 to 3600 seconds', 'usage');
+  if (input.whilePid !== undefined && (!Number.isSafeInteger(input.whilePid) || input.whilePid < 1))
+    throw new ConcordError('--while-pid must be a positive process ID', 'usage');
+  const ttlSeconds = holdSeconds(input.hold ?? '5m');
+  const client = clientFor(input.client); const root = `/repos/${encodeURIComponent(repo)}`;
+  const sleep = input.sleep ?? pause;
+  const alive = input.alive ?? ((pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } });
+  const change = await changeByIntent(client, root, intentKey, true);
+  if (!change) throw new ConcordError('change for intent key was not found', 'usage');
+  const round = async (): Promise<Obj> => {
+    let response: Envelope;
+    try { response = await post(client, `${root}/leases/renew-batch`, { changeId: change.changeId, ttlSeconds }, undefined, sleep); }
+    catch (error) {
+      if (error instanceof ConcordError && error.payload && (error.payload as Obj)?.error?.code === 'PROMOTION_IN_PROGRESS') throw error;
+      throw error;
+    }
+    const leases = (response.data.leases ?? []) as Obj[];
+    const reserved = (response.data.reserved ?? []) as Obj[];
+    if (!leases.length && reserved.length) return { changeId: change.changeId, renewed: [], status: 'queued' };
+    if (!leases.length && !reserved.length) {
+      const current = (await get(client, `${root}/changes/${encodeURIComponent(change.changeId)}`)).data;
+      if (['merged', 'closed', 'superseded'].includes(current.status)) return current;
+    }
+    const scope = (change.headOid ? change.unitKeys : change.startUnitKeys ?? change.unitKeys) as string[];
+    const coverageRows = [...leases, ...reserved];
+    let policy: Obj | undefined;
+    if (scope.some(unit => coverageRows.some(item => typeof item.unitKey === 'string' && item.unitKey.startsWith('file:') && item.unitKey !== unit))) {
+      const snapshot = (await get(client, `${root}/snapshot`)).data;
+      policy = snapshot.projections?.repos?.unitPolicy ?? (snapshot.projections?.runners?.jobs ?? [])
+        .map((job: Obj) => job.unitPolicy).find((item: Obj | undefined) => item?.digest === change.policyDigest);
+    }
+    const missing = scope.filter(unit => !coverageRows.some(item => typeof item.unitKey === 'string' && leaseCovers(item.unitKey, unit, policy)));
+    if (missing.length) throw new ConcordError(`LEASE_LOST: ${missing.join(', ')}; re-run concord start to claim them again`, 'conflict');
+    return { changeId: change.changeId, renewed: [...new Set(scope)], expiry: Math.min(...leases.map(item => Number(item.expiresAt))) };
+  };
+  if (input.every === undefined) return round();
+  const pid = input.whilePid ?? process.ppid;
+  let stopped = false;
+  let last: Obj = { changeId: change.changeId, renewed: [], status: 'stopped' };
+  let wake: (() => void) | undefined;
+  const stop = () => { stopped = true; wake?.(); };
+  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  try {
+    while (!stopped && alive(pid)) {
+      try {
+        const result = await round();
+        if (result.status === 'queued' || ['merged', 'closed', 'superseded'].includes(String(result.status))) return result;
+        last = result;
+      } catch (error) {
+        const code = error instanceof ConcordError ? (error.payload as Obj)?.error?.code : undefined;
+        const retryable = error instanceof ConcordError &&
+          ((error.kind === 'transport' && error.status === undefined) || (error.status === 409 && code === 'PROMOTION_IN_PROGRESS'));
+        if (!retryable) throw error;
+        // A heartbeat can recover from transport failures and promotion freezes on its next round.
+      }
+      if (!stopped) await Promise.race([sleep(input.every * 1000), new Promise<void>(resolve => { wake = resolve; })]);
+      wake = undefined;
+    }
+    return last;
+  } finally {
+    process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
+  }
 }

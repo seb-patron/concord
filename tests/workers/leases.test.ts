@@ -612,6 +612,89 @@ describe('RepoCoordinator lease routes', () => {
     });
   });
 
+  it('renews all active leases for a change in one batch without changing fences', async () => {
+    setupPolicy();
+    const repo = 'lease_batch_renew';
+    const grant = await claim(repo, 'local-agent-a', 'batch',
+      ['row:families:alpha', 'row:families:beta', 'symbol:sub_02000100'], 'batch-claim', { ttlSeconds: 60 });
+    expect(grant.status).toBe(201);
+    const original = (await responseBody(grant)).data.leases;
+    const before = Date.now();
+    const renewed = await fetchApi(mutation(`${path(repo)}/renew-batch`, { changeId: 'batch', ttlSeconds: 300 }, 'batch-renew', 'local-agent-a'));
+    expect(renewed.status).toBe(200);
+    const result = (await responseBody(renewed)).data;
+    expect(result.leases).toHaveLength(3);
+    expect(result.leases.map((item: { fence: number }) => item.fence)).toEqual(original.map((item: { fence: number }) => item.fence));
+    expect(result.leases.every((item: { expiresAt: number }) => item.expiresAt >= before + 299000)).toBe(true);
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      expect(state.storage.sql.exec<{ fence: number }>('SELECT fence FROM leases_fences ORDER BY unit_key').toArray().map(row => row.fence))
+        .toEqual(original.map((item: { fence: number }) => item.fence));
+      expect(state.storage.sql.exec('SELECT * FROM concord_events WHERE kind = ?', 'lease.renewed').toArray()).toHaveLength(3);
+    });
+  });
+
+  it('keeps long and reserved holds unchanged and isolates batch renewal by holder and change', async () => {
+    setupPolicy();
+    const repo = 'lease_batch_renew_scope';
+    const initial = await claim(repo, 'local-agent-a', 'batch-x', ['row:families:alpha', 'row:families:beta'], 'batch-x-short', { ttlSeconds: 60 });
+    const shortLeases = (await responseBody(initial)).data.leases;
+    const longGrant = await claim(repo, 'local-agent-a', 'batch-x', ['symbol:sub_02000100'], 'batch-x-long', { ttlSeconds: 3600 });
+    const longLease = (await responseBody(longGrant)).data.leases[0];
+    const otherGrant = await claim(repo, 'local-agent-b', 'batch-y', ['declaration:callee_alpha'], 'batch-y-other', { ttlSeconds: 60 });
+    const otherLease = (await responseBody(otherGrant)).data.leases[0];
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const context = contextFor(state, repo, 'agent-a', Date.now);
+      const reservedLease = shortLeases.find((item: { unitKey: string }) => item.unitKey === 'row:families:alpha');
+      addVerified(state, fakeReadyChange(repo, 'batch-x', 'agent-a', [reservedLease.unitKey]));
+      expect(context.transaction(() => leases.hooks['leases.reserve']!(context, 'batch-x', {
+        [reservedLease.unitKey]: reservedLease.fence,
+      }))).toMatchObject({ status: 'eligible' });
+    });
+    const beforeRenew = await runInDurableObject(stubFor(repo), async (_instance, state) => Object.fromEntries(
+      state.storage.sql.exec<{ lease_id: string; expires_at: number }>('SELECT lease_id, expires_at FROM leases_claims')
+        .toArray().map(row => [row.lease_id, row.expires_at])));
+    const response = await fetchApi(mutation(`${path(repo)}/renew-batch`, { changeId: 'batch-x', ttlSeconds: 300 }, 'batch-x-renew', 'local-agent-a'));
+    expect(response.status).toBe(200);
+    const data = (await responseBody(response)).data;
+    expect(data.leases.map((item: { leaseId: string }) => item.leaseId)).toContain(longLease.leaseId);
+    expect(data.reserved).toHaveLength(1);
+    expect(data.reserved[0]).toMatchObject({ leaseId: shortLeases[0].leaseId, expiresAt: beforeRenew[shortLeases[0].leaseId] });
+    expect(data.leases.find((item: { leaseId: string }) => item.leaseId === longLease.leaseId).expiresAt)
+      .toBe(beforeRenew[longLease.leaseId]);
+    const agentB = await fetchApi(mutation(`${path(repo)}/renew-batch`, { changeId: 'batch-x', ttlSeconds: 300 }, 'batch-b-renew', 'local-agent-b'));
+    expect((await responseBody(agentB)).data).toMatchObject({ leases: [], reserved: [] });
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      expect(state.storage.sql.exec<{ expires_at: number }>('SELECT expires_at FROM leases_claims WHERE lease_id = ?', otherLease.leaseId).toArray()[0].expires_at)
+        .toBe(beforeRenew[otherLease.leaseId]);
+      expect(state.storage.sql.exec<{ kind: string }>('SELECT kind FROM concord_events WHERE kind = ?', 'lease.renewed').toArray())
+        .toHaveLength(1);
+    });
+  });
+
+  it('expires due rows and validates batch renewal input and TTL', async () => {
+    setupPolicy();
+    const repo = 'lease_batch_renew_edges';
+    const grant = await claim(repo, 'local-agent-a', 'batch-expired', ['row:families:alpha'], 'batch-expired', { ttlSeconds: 1 });
+    const lease = (await responseBody(grant)).data.leases[0];
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const now = () => lease.expiresAt + 1;
+      const context = contextFor(state, repo, 'agent-a', now);
+      const route = leases.routes.find(item => item.method === 'POST' && item.pattern.test(`${path(repo)}/renew-batch`))!;
+      const requestPath = `${path(repo)}/renew-batch`;
+      const expired = await route.handle(context, new Request(`https://concord.test${requestPath}`), requestPath.match(route.pattern)!,
+        { changeId: 'batch-expired', ttlSeconds: 300 });
+      expect((await responseBody(expired)).data.leases).toEqual([]);
+      expect(state.storage.sql.exec<{ state: string }>('SELECT state FROM leases_claims WHERE lease_id = ?', lease.leaseId).toArray()[0].state)
+        .toBe('expired');
+    });
+    const tooLong = await fetchApi(mutation(`${path(repo)}/renew-batch`, { changeId: 'batch-expired', ttlSeconds: 14401 }, 'batch-too-long', 'local-agent-a'));
+    expect(tooLong.status).toBe(422);
+    expect((await responseBody(tooLong)).error.code).toBe('INVALID_TTL');
+    const missing = await fetchApi(mutation(`${path(repo)}/renew-batch`, { ttlSeconds: 300 }, 'batch-no-id', 'local-agent-a'));
+    expect(missing.status).toBe(422);
+    expect((await responseBody(missing)).error.code).toBe('INVALID_RENEW');
+  });
+
   it('lets owners force-release leases with an audited reason and invalidates the old fence', async () => {
     setupPolicy();
     const repo = 'lease_force_release';
