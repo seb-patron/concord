@@ -3,9 +3,11 @@ import { extname } from 'node:path';
 import { parseReplayJsonl } from './schema.ts';
 import { buildReplayReport, renderHtml, unavailableReport } from './report.ts';
 import { runAbReport } from './ab-report.ts';
+import { ManifestError, parseManifest } from './manifest.ts';
+import { replaySerial } from './serial.ts';
 
 function usage(): never {
-  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH | replay ab-report --serial S.json [--serial ...] --swarm L.jsonl [--swarm ...] --metrics M.json [--metrics ...] [--manifest manifest.json] [--monday monday.json] --out card.html|card.json');
+  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH | replay serial --manifest PATH --repo PATH --out PATH [--validation-timeout SECONDS] [--keep] | replay ab-report --serial S.json [--serial ...] --swarm L.jsonl [--swarm ...] --metrics M.json [--metrics ...] [--manifest manifest.json] [--monday monday.json] --out card.html|card.json');
 }
 function args(argv: string[]): { command: string; values: Map<string, string | true> } {
   const command = argv[0];
@@ -13,7 +15,7 @@ function args(argv: string[]): { command: string; values: Map<string, string | t
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) usage();
-    if (arg === '--explain-missing') { values.set(arg, true); continue; }
+    if (arg === '--explain-missing' || arg === '--keep') { values.set(arg, true); continue; }
     const value = argv[++i];
     if (!value || value.startsWith('--')) usage();
     values.set(arg, value);
@@ -38,8 +40,24 @@ async function writeReport(path: string, report: ReturnType<typeof unavailableRe
 }
 
 async function main(): Promise<void> {
-  if (process.argv[2] === 'ab-report') return runAbReport(process.argv.slice(3));
   const { command, values } = args(process.argv.slice(2));
+  if (command === 'ab-report') return runAbReport(process.argv.slice(3));
+  if (command === 'serial') {
+    for (const key of values.keys()) if (!['--manifest', '--repo', '--out', '--validation-timeout', '--keep'].includes(key)) usage();
+    let manifestText: string;
+    try { manifestText = await readFile(required(values, '--manifest'), 'utf8'); }
+    catch (error) { throw new ManifestError(`cannot read manifest: ${error instanceof Error ? error.message : String(error)}`); }
+    const manifest = parseManifest(manifestText);
+    const timeoutValue = values.get('--validation-timeout');
+    const timeout = timeoutValue === undefined ? 3600 : Number(timeoutValue);
+    const result = await replaySerial(manifest, required(values, '--repo'), {
+      validationTimeoutSeconds: timeout, keep: values.has('--keep'),
+    });
+    const output = required(values, '--out');
+    await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+    console.log(`Serial PR replay written to ${output}`);
+    return;
+  }
   if (command === 'validate') {
     const data = parseReplayJsonl(await readFile(required(values, '--input'), 'utf8'));
     console.log(`Valid provenance-bearing historical export: ${data.header.exportId} (${data.events.length} events, ${data.header.selected.taskIds.length} selected tasks)`);
@@ -66,5 +84,5 @@ async function main(): Promise<void> {
 
 main().catch(error => {
   console.error(`replay: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+  process.exitCode = error instanceof ManifestError ? 2 : 1;
 });
