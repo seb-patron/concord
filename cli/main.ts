@@ -19,7 +19,7 @@ Common: --repo ID --json --idempotency-key KEY --expected-version N
 Mutations generate an idempotency key when omitted. Responses are JSON on stdout; errors are JSON on stderr.
 
 Commands and required fields:
-  start --repo ID --intent-key KEY --intent TEXT --allowed-files FILE [--base OID] [--hold 2h] [--json]
+  start --repo ID --intent-key KEY --intent TEXT --allowed-files FILE [--base OID] [--hold 5m] [--json]
   release --repo ID --intent-key KEY
   renew --repo ID --intent-key KEY [--hold 5m] [--every SECONDS [--while-pid PID]] [--json]
   land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]

@@ -14,7 +14,8 @@ type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
 export type LandOptions = { repo?: string; source?: string; commit?: string; intentKey?: string; intent?: string;
   allowedFiles?: string; dependsOn?: string[]; reviewEvidence?: string; mirrorTo?: string; waitSeconds?: number;
-  base?: string; awRun?: string; expectedVersion?: number; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient };
+  base?: string; awRun?: string; expectedVersion?: number; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient;
+  renewEveryMs?: number };
 const sha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 const hash = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -314,12 +315,39 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
     owned = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active');
     held = owned.filter(item => units.some(unit => leaseCovers(item.unitKey, unit, policy)));
   };
-  const renew = async () => {
-    await refresh();
-    for (const item of held.filter(value => value.remainingSeconds < 60)) {
-      const updated = (await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/renew`, { fence: item.fence, ttlSeconds: 300 }, await currentVersion(client, root))).data.lease;
-      Object.assign(item, updated); emit({ state: 'lease-renewed', unitKey: item.unitKey, fence: item.fence });
-    }
+  const lostLeaseUnits = new Set<string>();
+  let renewInFlight: Promise<void> | undefined;
+  const renew = (force = false): Promise<void> => {
+    if (renewInFlight) return renewInFlight;
+    renewInFlight = (async () => {
+      const previouslyHeld = [...held];
+      await refresh();
+      if (!force && !held.some(item => Number(item.remainingSeconds ?? (item.expiresAt - Date.now()) / 1000) < 120)) return;
+      const response = (await api(client, `${root}/leases/renew-batch`, { changeId, ttlSeconds: 300 })).data;
+      const renewed: Obj[] = response.leases ?? [];
+      const reserved: Obj[] = response.reserved ?? [];
+      const returned = [...renewed, ...reserved];
+      for (const item of [...new Map([...previouslyHeld, ...held].map(item => [item.leaseId, item])).values()]) {
+        if (!returned.some(value => value.leaseId === item.leaseId)) lostLeaseUnits.add(item.unitKey);
+        const updated = renewed.find(value => value.leaseId === item.leaseId);
+        if (updated) Object.assign(item, updated);
+      }
+      if (renewed.length) emit({ state: 'lease-renewed', unitKeys: renewed.map(item => item.unitKey),
+        expiry: Math.min(...renewed.map(item => Number(item.expiresAt))) });
+    })().finally(() => { renewInFlight = undefined; });
+    return renewInFlight;
+  };
+  const assertLeasesLive = async () => {
+    if (renewInFlight) await renewInFlight.catch(() => {});
+    if (lostLeaseUnits.size) throw new ConcordError(`LEASE_LOST: ${[...lostLeaseUnits].sort().join(', ')} lapsed; re-run land to claim them again`, 'conflict');
+  };
+  const keepLeasesAlive = async () => { await renew(); await assertLeasesLive(); };
+  let renewTimer: ReturnType<typeof setInterval> | undefined;
+  const startRenewTimer = () => {
+    if (renewTimer || alreadyQueued) return;
+    renewTimer = setInterval(() => {
+      void renew(true).catch(() => {});
+    }, options.renewEveryMs ?? 100_000);
   };
   const fences = () => Object.fromEntries(held.map(item => [item.unitKey, item.fence]));
   let awaitingReview = false;
@@ -330,12 +358,14 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
     let attempt = 0;
     while (!alreadyQueued) {
       await refresh();
+      if (held.length) startRenewTimer();
       if (firstLeaseRead) { adoptedLease = held.length > 0; firstLeaseRead = false; }
       const missing = units.filter(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy)));
       if (!missing.length) break;
       try {
         const result = (await api(client, `${root}/leases`, { changeId, unitKeys: missing, intentText: intent, ttlSeconds: 300 }, await currentVersion(client, root))).data;
         held.push(...result.leases); emit({ state: 'leased', unitKeys: result.leases.map((item: Obj) => item.unitKey), missingUnits: missing });
+        if (held.length) startRenewTimer();
       } catch (error) {
         if (!(error instanceof ConcordError)) throw error;
         const code = (error.payload as Obj)?.error?.code;
@@ -344,7 +374,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         if (code === 'LEASE_CONFLICT') emit({ state: 'LEASE_CONFLICT', holderId: details.holderId, holderIntent: details.intentText, conflicts: details.conflicts });
         else emit({ state: 'promotion-in-progress', changeId });
         if (Date.now() >= deadline) throw new ConcordError(`${code}: timed out waiting for admission`, 'conflict', 409, details);
-        await renew(); await pause(Math.min(1000 * 2 ** Math.min(attempt++, 4), 15000, Math.max(0, deadline - Date.now())));
+        await keepLeasesAlive(); await pause(Math.min(1000 * 2 ** Math.min(attempt++, 4), 15000, Math.max(0, deadline - Date.now())));
       }
     }
     const current = (await api(client, path)).data;
@@ -389,6 +419,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           ...(change.headOid ? [`--force-with-lease=${change.branch}:${change.headOid}`] : []),
           '--', candidate.remote, `${prepared.head}:${change.branch}`], { token: candidate.token }, prepared.work);
         await api(client, `${root}/branches`, { storageName: change.candidateStorageName, ref: change.branch, observedHead: prepared.head, ownerId: change.authorId }, await currentVersion(client, root));
+        await assertLeasesLive();
         change = (await api(client, path)).data;
         await api(client, `${path}/publish`, { baseOid: targetBase, headOid: prepared.head, branch: change.branch, unitKeys: units, leaseFences: fences() }, (await api(client, path)).version);
         emit({ state: 'published', changeId, headOid: prepared.head });
@@ -399,7 +430,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         if (current.headOid !== prepared.head || current.baseOid !== targetBase || current.revision !== publishedRevision)
           throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change head, base, or revision changed during land', 'conflict');
       };
-      change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : renew, inspector);
+      change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : keepLeasesAlive, inspector);
       if (!['ready', 'queued', 'checking', 'landed', 'merged'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
       requirePublishedChange(change);
       if (!alreadyQueued) await renew();
@@ -408,6 +439,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
       if (!entry) {
         change = (await api(client, path)).data;
         requirePublishedChange(change);
+        await assertLeasesLive();
         if (!options.reviewEvidence) { awaitingReview = true; emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
         const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
@@ -445,6 +477,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         if (carriedFromOid) emit({ state: 'review-carried', sourceOid: carriedFromOid, publishedOid: prepared.head });
         emit({ state: 'reviewed', verdictId: verdict.verdictId, headOid: prepared.head });
         await renew();
+        await assertLeasesLive();
         try {
           entry = (await api(client, `${root}/queue/enqueue`, { changeId, verdictId: verdict.verdictId, leaseFences: fences() }, await currentVersion(client, root))).data;
         } catch (error) {
@@ -455,6 +488,8 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           if (!movedRepository.observedCanonicalOid || !sha.test(movedRepository.observedCanonicalOid))
             throw new ConcordError('canonical main is unavailable after STALE_BASE', 'server');
           emit({ state: 'rebased', fromBase: targetBase, toBase: movedRepository.observedCanonicalOid, publishedOid: prepared.head });
+          if (renewTimer) clearInterval(renewTimer);
+          if (renewInFlight) await renewInFlight.catch(() => {});
           return await landAttempt(input, staleBaseRounds + 1);
         }
         emit({ state: 'enqueued', entryId: entry.entryId });
@@ -483,6 +518,8 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
       throw new ConcordError('QUEUE_TIMEOUT: landing did not finish', 'server');
     } finally { if (priorWork) await rm(priorWork, { recursive: true, force: true }); await prepared.cleanup(); }
   } catch (error) { refused = true; throw error; } finally {
+    if (renewTimer) clearInterval(renewTimer);
+    if (renewInFlight) await renewInFlight.catch(() => {});
     await refresh().catch(() => {});
     const latest = await api(client, path).then(result => result.data).catch(() => null);
     const publishedUnits: string[] | null = latest?.headOid ? latest.unitKeys ?? units : null;
