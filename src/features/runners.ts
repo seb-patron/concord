@@ -201,6 +201,29 @@ function schedule(c: ModuleContext, job: Job): Gate<{ jobId: string }> {
   });
 }
 
+function cancelBootstrap(c: ModuleContext, jobId: string): Gate {
+  if (!c?.state?.get || !c?.principal || !c?.transaction)
+    return { status: 'blocked', version: 0, code: 'MODULE_UNAVAILABLE', reason: 'Runner context unavailable', evidenceIds: [] };
+  requireRole(c.principal, 'owner');
+  return c.transaction(() => {
+    const row = load(c, jobId);
+    if (!row) return { status: 'eligible', version: c.version(), evidenceIds: [jobId], value: undefined };
+    if ((row.job.kind !== 'validate-stack' && row.job.kind !== 'promote') || !row.job.bootstrap)
+      return { status: 'blocked', version: c.version(), code: 'BOOTSTRAP_BUSY', reason: 'Bootstrap job cannot be replaced', evidenceIds: [jobId] };
+    if (row.job.state === 'claimed' && row.job.expiresAt !== null && row.job.expiresAt > c.now())
+      return { status: 'blocked', version: c.version(), code: 'BOOTSTRAP_BUSY', reason: 'Bootstrap job has a live runner claim', evidenceIds: [jobId] };
+    if (row.job.runnerId) {
+      const owner = runner(c, row.job.runnerId);
+      if (owner?.activeJobId === jobId) saveRunner(c, row.job.runnerId, { ...owner, activeJobId: null });
+    }
+    row.job = { ...row.job, state: 'blocked', runnerId: null, expiresAt: null,
+      fence: row.job.fence + 1, version: c.nextVersion() };
+    save(c, row);
+    c.appendEvent('runner.cancelled', [jobId], { reason: 'BOOTSTRAP_REPINNED' }, row.job.version);
+    return { status: 'eligible', version: row.job.version, evidenceIds: [jobId], value: undefined };
+  });
+}
+
 function poll(c: ModuleContext, body: RunnerPollBody): Response {
   if (!body || !validId(body.runnerId) || !['checker', 'promoter'].includes(body.role) ||
     !Array.isArray(body.supportedProfileDigests) || body.supportedProfileDigests.some(value => !validDigest(value)) ||
@@ -457,5 +480,5 @@ export const runners: FeatureModule = {
   },
   nextDeadline: c => { const values = ids(c).map(id => load(c, id)?.job.expiresAt).filter((n): n is number => n !== null && n !== undefined); return values.length ? Math.min(...values) : null; },
   onAlarm: c => c.transaction(() => expire(c)),
-  hooks: { 'runners.schedule': schedule },
+  hooks: { 'runners.schedule': schedule, 'runners.cancelBootstrap': cancelBootstrap },
 };

@@ -368,6 +368,42 @@ describe('adopted root import', () => {
     await expect(importRepo({ ...options, excludes: ['private//secret.txt'] })).rejects.toThrow(/Invalid exclusion glob/);
   });
 
+  it('prints a blocked bootstrap reason and includes it in a reconcile timeout', async () => {
+    const root = await temporary();
+    const { source } = await fixture(root);
+    const candidate = join(root, 'candidate.git');
+    await git(root, 'init', '--bare', '--quiet', candidate);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const actualNow = Date.now;
+    let timeoutArmed = false;
+    let timeoutReads = 0;
+    let bootstrapRequests = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => timeoutArmed ?
+      (timeoutReads++ === 0 ? 0 : 300_001) : actualNow());
+    const reply = (data: Record<string, unknown>) => ({ version: 1, data });
+    const client = { baseUrl: 'http://127.0.0.1:8787/v1', request: async (method: string, path: string) => {
+      if (method === 'POST' && path === '/repos') return reply({ status: 'ready' });
+      if (method === 'POST' && path.endsWith('/changes')) return reply({ candidateStorageName: 'candidate',
+        authorId: 'owner', provisioning: { state: 'observed' } });
+      if (method === 'POST' && path.endsWith('/git-token')) return reply({ remote: `file://${candidate}`, secret: 'test-token' });
+      if (method === 'POST' && path.endsWith('/branches')) return reply({});
+      if (method === 'POST' && path.endsWith('/bootstrap')) {
+        bootstrapRequests++;
+        timeoutArmed = true;
+        return reply({ state: 'requested', jobId: 'old-job' });
+      }
+      if (method === 'GET') return reply({ canonicalStorageName: 'canonical', canonicalRemote: `file://${join(root, 'canonical.git')}`,
+        observedCanonicalOid: null, bootstrap: { state: 'waiting', blockedReason: 'PROFILE_CHANGED' } });
+      throw new Error(`Unexpected ${method} ${path}`);
+    } } as unknown as ConcordClient;
+    try {
+      await expect(importRepo({ source, ref: 'main', repo: 'blocked-import', policyId: 'local-demo', profileId: 'local-demo' }, client))
+        .rejects.toThrow(/Timed out waiting for canonical main \(PROFILE_CHANGED\)/);
+      expect(bootstrapRequests).toBe(1);
+      expect(error).toHaveBeenCalledWith('Bootstrap blocked: PROFILE_CHANGED; re-requesting bootstrap');
+    } finally { now.mockRestore(); error.mockRestore(); }
+  });
+
   it('imports through the local bridge and Worker as one canonical root, then reconciles', async () => {
     const root = await temporary();
     const { source: original, sourceOid } = await fixture(root);

@@ -68,8 +68,16 @@ the existing seed draft or reports the existing canonical OID. A different
 canonical OID is a conflict. Import uses the owner seed draft, fork write
 token, branch registration, and bootstrap routes; Git credentials are passed
 through the child process environment and never placed in a remote URL.
+When a pending bootstrap is blocked by `PROFILE_CHANGED` or `INVALID_JOB`,
+import prints that reason and repeats the same owner bootstrap request. The
+server cancels the stale job, pins the current trusted policy and profile,
+and schedules a new validation job using the existing scratch repository.
+Re-pinning is refused while a runner holds a live claim or after canonical
+`main` exists. The repository detail endpoint exposes the pending state and
+blocked reason.
 The command waits for canonical `main` and prints its OID. If it times out,
-check the checker/promoter runners and repeat the same command.
+the timeout includes the last blocked reason; check the checker/promoter
+runners and repeat the same command.
 
 After canonical `main` is confirmed, an owner may authorize the one-way
 mirror described in [Deployment](deploy.md). For an adopted repository, its
