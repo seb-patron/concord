@@ -1,5 +1,6 @@
 import type { Principal, Role } from './contracts';
 import { HttpError } from './http';
+import { accessConfigured, authenticateAccess } from './access';
 
 const local: Record<string, Omit<Principal, 'expiresAt'>> = {
   'local-owner': { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*' },
@@ -56,7 +57,12 @@ export function clock(env: Pick<Env, 'CONCORD_MODE' | 'CONCORD_TEST_NOW'>): () =
 
 export async function authenticateWithExpiry(request: Request, env: Env, now: () => number = clock(env)):
 Promise<{ principal: Principal; expiresAt: number | null }> {
-  const match = /^Bearer (\S+)$/i.exec(request.headers.get('authorization') ?? '');
+  const authorization = request.headers.get('authorization');
+  if (authorization === null && accessConfigured(env)) {
+    const principal = await authenticateAccess(request, env, now());
+    return { principal, expiresAt: principal.expiresAt };
+  }
+  const match = /^Bearer (\S+)$/i.exec(authorization ?? '');
   if (!match) throw new HttpError(401, 'UNAUTHORIZED', 'Bearer credential required');
   const secret = match[1];
   let credential: TokenPrincipal | undefined;

@@ -7,6 +7,8 @@ interface Env {
   AUTH_RATE_LIMIT: RateLimit;
   ARTIFACTS?: Artifacts;
   AUTH_TOKENS?: string;
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
   TRUSTED_CONFIG?: string;
   TRUSTED_CONFIG_PARTS?: string;
   BRIDGE_URL?: string;

@@ -1,6 +1,7 @@
 import type { Principal } from './contracts';
 import { authenticateWithExpiry, clock, requireRepo, requireRouteRole, requireTenant } from './auth';
 import { failure, HttpError, json } from './http';
+import { accessCookie, accessConfigured, accessLogoutUrl, authenticateAccess, clearAccessCookie } from './access';
 
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 
@@ -40,6 +41,8 @@ export { RepoCoordinator } from './coordinator';
 function forward(request: Request, principal: Principal, stub: DurableObjectStub): Promise<Response> {
   const headers = new Headers(request.headers);
   headers.delete('authorization');
+  headers.delete('cf-access-jwt-assertion');
+  headers.delete('cookie');
   headers.set('x-concord-principal', JSON.stringify(principal));
   headers.set('x-concord-tenant', principal.tenantId);
   return stub.fetch(new Request(request, { headers }));
@@ -50,7 +53,17 @@ export default {
     try {
       const url = new URL(request.url);
       if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/v1/health')) {
-        return json({ status: 'ok', mode: env.CONCORD_MODE, storageBackend: env.STORAGE_BACKEND });
+        return json({ status: 'ok', mode: env.CONCORD_MODE, storageBackend: env.STORAGE_BACKEND, accessSignIn: accessConfigured(env) });
+      }
+      if (url.pathname === '/v1/session/signout' && request.method === 'GET') {
+        return new Response(null, { status: 302, headers: { location: accessLogoutUrl(env) ?? '/', 'set-cookie': clearAccessCookie() } });
+      }
+      if (url.pathname === '/v1/session/signin' && request.method === 'GET') {
+        const now = clock(env)();
+        const principal = await authenticateAccess(request, env, now);
+        const assertion = request.headers.get('Cf-Access-Jwt-Assertion') || request.headers.get('cookie')?.split(';').map(part => part.trim()).find(part => part.startsWith('CF_Authorization='))?.slice('CF_Authorization='.length);
+        if (!assertion) throw new HttpError(401, 'UNAUTHORIZED', 'Invalid Access assertion');
+        return new Response(null, { status: 302, headers: { location: '/', 'set-cookie': accessCookie(assertion, principal.expiresAt, now) } });
       }
       if (!url.pathname.startsWith('/v1/')) {
         if (request.method === 'GET' || request.method === 'HEAD') return env.ASSETS.fetch(request);
@@ -65,7 +78,14 @@ export default {
         throw error;
       }
       requireTenant(principal, request.headers.get('x-tenant-id') ?? undefined);
+      if (principal.authMethod === 'access' && !['GET', 'HEAD'].includes(request.method) &&
+        request.headers.get('origin') !== url.origin) throw new HttpError(403, 'ORIGIN_REJECTED', 'Request origin rejected');
       requireRouteRole(principal, request.method, url.pathname);
+      if (request.method === 'GET' && url.pathname === '/v1/session') {
+        return json({ principalId: principal.principalId, roles: principal.roles,
+          authMethod: principal.authMethod ?? 'bearer', expiresAt: credentialExpiresAt,
+          ...(principal.authMethod === 'access' ? { logoutUrl: '/v1/session/signout' } : {}) });
+      }
       if (request.method === 'GET' && url.pathname === '/v1/me') {
         const { principalId, tenantId, roles, repoIds } = principal;
         return json({ principalId, tenantId, roles, repoIds, expiresAt: credentialExpiresAt, model: principal.model ?? null });

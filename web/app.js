@@ -1,7 +1,7 @@
 import {
-  allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
+  allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe, getSession,
   getSnapshot, getVerdicts, hasToken, isForbidden, listPrincipals, listRepos, newIdempotencyKey,
-  redactError, setSessionToken, submitVerdict, withdrawChange,
+  redactError, redactText, setSessionToken, submitVerdict, withdrawChange,
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
@@ -16,7 +16,7 @@ const repoPage = createRepoPage($('code-view'));
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
-  awaitingFreshSnapshot: false };
+  awaitingFreshSnapshot: false, accessSignIn: false };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
 const node = (tag, value, className) => {
@@ -82,13 +82,19 @@ function preserve(render) {
 }
 function sessionError(message) { $('session-error').textContent = message ?? ''; $('session-error').hidden = !message; }
 function showSession() {
-  const signedIn = hasToken() && !!state.identity;
+  const signedIn = (hasToken() || state.identity?.authMethod === 'access') && !!state.identity;
+  const access = state.identity?.authMethod === 'access';
   $('signed-out').hidden = signedIn;
   $('desk').hidden = !signedIn;
   $('repo-picker').hidden = !signedIn;
   $('principal').hidden = !signedIn;
-  $('token-clear').hidden = !signedIn;
-  if (signedIn) $('principal').textContent = state.identity.principalId
+  $('token-clear').hidden = !signedIn || access;
+  $('access-logout').hidden = !signedIn || !access;
+  $('access-signin').hidden = signedIn || !state.accessSignIn;
+  if (access) {
+    $('principal').textContent = `Signed in as ${state.identity.principalId} via Cloudflare Access`;
+    $('access-logout').href = state.identity.logoutUrl;
+  } else if (signedIn) $('principal').textContent = state.identity.principalId
     ? `Signed in as ${state.identity.principalId} · ${roles().join(', ') || 'role unverified'}${state.identity.model ? ` · ${state.identity.model}` : ''} · token in memory`
     : `Signed in · ${roles().join(', ') || 'role unverified'} · token in memory`;
 }
@@ -107,7 +113,7 @@ function signOut(message) {
   $('token-input').value = '';
   sessionError(message); showSession();
 }
-async function signIn(token, preferredRepo) {
+async function signIn(token, preferredRepo, accessSession = null) {
   const gen = ++state.generation;
   setSessionToken(token); $('token-input').value = ''; sessionError(null);
   try {
@@ -117,6 +123,7 @@ async function signIn(token, preferredRepo) {
       if (error.status !== 404) throw error;
       identity = { principalId: null, roles: [], repoIds: null, unverified: true };
     }
+    if (accessSession) identity = { ...identity, ...accessSession };
     const page = await listRepos();
     if (gen !== state.generation) return;
     state.identity = identity;
@@ -137,9 +144,11 @@ async function signIn(token, preferredRepo) {
     else { state.deskMessage = 'No repositories yet. Create one with concord repo create or the MCP tool.'; render(); }
   } catch (error) {
     if (gen !== state.generation) return;
-    const message = error.status === 403 ? 'Your token cannot see this repository.' :
-      error.status === 401 ? 'Sign in again: this token is invalid or expired.' :
-      `Could not sign in (${redactError(error).code}).`;
+    const safe = redactError(error);
+    const detail = redactText(safe.message).slice(0, 200);
+    const message = error.status === 403 ? 'Your identity cannot see this repository.' :
+      error.status === 401 ? 'Sign in again: this session is invalid or expired.' :
+      `Could not sign in (${safe.code}): ${detail}`;
     signOut(message);
   }
 }
@@ -710,9 +719,15 @@ function boot() {
     state.view = tab.dataset.mainView;
     render();
   });
+  const logout = node('a', 'Sign out', 'quiet');
+  logout.id = 'access-logout'; logout.hidden = true;
+  $('token-clear').after(logout);
+  const accessSignin = node('a', 'Sign in with Cloudflare Access', 'primary');
+  accessSignin.id = 'access-signin'; accessSignin.href = '/v1/session/signin'; accessSignin.hidden = true;
+  $('token-form').before(accessSignin);
   $('demo-open').hidden=!demo;
   $('demo-open').addEventListener('click',()=>{if(demo) void signIn(demo,window.CONCORD_DEMO_REPO_ID);});
-  $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value.trim();if(token)void signIn(token);});
+  $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value;if(!token)return;const invalid=token.search(/[^\x21-\x7E]/);if(invalid!==-1){sessionError(`The pasted token has a space, line break or non-ASCII character at position ${invalid+1}; copy it again.`);return;}void signIn(token);});
   $('token-clear').addEventListener('click',()=>signOut());
   $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; state.view='tracker'; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
@@ -729,8 +744,11 @@ function boot() {
     const next=cards[(index+(e.key==='ArrowLeft'||e.key==='ArrowUp'?-1:1)+cards.length)%cards.length];
     selectChange(next.dataset.changeId);$(next.id)?.focus();
   });
-  window.setInterval(()=>{if(hasToken()&&state.repoId)void poll();},1000);
-  void getHealth().then(body=>{const info=environmentBadge(body?.data,false);$('env-badge').textContent=info.label==='live Artifacts'?'Live · Cloudflare Artifacts':info.label;}).catch(()=>{$('env-badge').textContent='Backend unavailable';});
+  window.setInterval(()=>{if((hasToken()||state.identity?.authMethod==='access')&&state.repoId)void poll();},1000);
+  void getSession().then(body=>{
+    if (body?.data?.authMethod === 'access' && !hasToken()) void signIn(null, null, body.data);
+  }).catch(()=>{});
+  void getHealth().then(body=>{state.accessSignIn=body?.data?.accessSignIn===true;showSession();const info=environmentBadge(body?.data,false);$('env-badge').textContent=info.label==='live Artifacts'?'Live · Cloudflare Artifacts':info.label;}).catch(()=>{$('env-badge').textContent='Backend unavailable';});
   render();
 }
 boot();

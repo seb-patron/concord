@@ -50,9 +50,12 @@ export class ApiError extends Error {
  */
 export function redactText(value) {
   if (typeof value !== 'string') return value;
-  return value
+  let redacted = value
     .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/cct_[A-Za-z0-9_-]{1,64}_[a-f0-9]{64}/gi, '[REDACTED]')
     .replace(/([?&](?:token|secret|authorization)=)[^&\s]*/gi, '$1[REDACTED]');
+  if (sessionToken) redacted = redacted.split(sessionToken).join('[REDACTED]');
+  return redacted;
 }
 
 /** Reduce any failure to a display-safe { code, message, requestId }. */
@@ -167,6 +170,10 @@ export function listPrincipals(cursor = null, fetchImpl) {
 /** Identity is optional during rollout; callers handle a 404 with server-checked actions. */
 export function getMe(fetchImpl) {
   return apiFetch('/v1/me', {}, fetchImpl);
+}
+
+export function getSession(fetchImpl) {
+  return apiFetch('/v1/session', {}, fetchImpl);
 }
 
 /** Per-change approval records, including carried verdict provenance. */

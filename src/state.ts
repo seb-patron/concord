@@ -54,9 +54,10 @@ export function sqlState(sql: SqlStorage): StateStore {
 
 export function appendEvent(context: Pick<ModuleContext, 'sql' | 'principal' | 'now'>, kind: string, relatedIds: string[], payload: Record<string, unknown>, version: number): Event {
   const timestamp = context.now();
-  context.sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)', kind, context.principal.principalId, timestamp, version, JSON.stringify(relatedIds), JSON.stringify(payload));
+  const eventPayload = context.principal.authMethod === 'access' ? { ...payload, authMethod: 'access' } : payload;
+  context.sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)', kind, context.principal.principalId, timestamp, version, JSON.stringify(relatedIds), JSON.stringify(eventPayload));
   const row = context.sql.exec<{ sequence: number }>('SELECT last_insert_rowid() AS sequence').toArray()[0];
-  return { sequence: row.sequence, kind, actorId: context.principal.principalId, timestamp, version, relatedIds, payload };
+  return { sequence: row.sequence, kind, actorId: context.principal.principalId, timestamp, version, relatedIds, payload: eventPayload };
 }
 
 export function eventSequence(sql: SqlStorage): number {
@@ -169,6 +170,18 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   if (!value || typeof value !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
   const config = value as TrustedConfiguration;
   if (!config.policies || !config.profiles || typeof config.policies !== 'object' || typeof config.profiles !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
+  if (config.humans !== undefined) {
+    const validId = (id: unknown) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+    const roles = new Set(['owner', 'agent', 'reviewer', 'checker', 'promoter', 'viewer']);
+    if (!Array.isArray(config.humans) || config.humans.length > 1000 ||
+      config.humans.some(human => !human || typeof human !== 'object' ||
+        typeof human.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(human.email) ||
+        !validId(human.tenantId) || !validId(human.principalId) ||
+        !Array.isArray(human.roles) || human.roles.length === 0 || human.roles.some(role => !roles.has(role)) ||
+        (human.repoIds !== '*' && (!Array.isArray(human.repoIds) || human.repoIds.some(id => !validId(id)))) ||
+        Object.keys(human).some(key => !['email', 'tenantId', 'principalId', 'roles', 'repoIds'].includes(key))) ||
+      new Set(config.humans.map(human => human.email.toLowerCase())).size !== config.humans.length) throw new Error('TRUSTED_CONFIG_INVALID');
+  }
   const limits = config.costLimits;
   const outOfRange = (value: unknown, max: number) => !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > max;
   if (limits !== undefined && (!limits || typeof limits !== 'object' || Array.isArray(limits) ||

@@ -2,6 +2,14 @@
 
 The local bridge is a development fake. A public deployment uses the `concord-demo` Artifacts namespace and `wrangler.jsonc`; it never uses `wrangler.local.jsonc` or `BRIDGE_URL`. No Cloudflare account or GitHub destination is provisioned by this repository. The owner must authorize account creation, deployment, and any mirror push. Keep `CONCORD_SHOW_DECOMPILED_C=0`; this release contains only the original public synthetic fixture.
 
+## Phone and remote sign-in with Cloudflare Access
+
+1. In **Workers & Pages > concord > Settings > Domains & Routes > workers.dev**, enable Cloudflare Access and choose **Manage Cloudflare Access**. Record the application's AUD tag and team domain (`<team>.cloudflareaccess.com`).
+2. Edit that Access application and protect only the path `v1/session/signin`. Add an Allow policy with **Include > Emails >** your login email and One-time PIN. Confirm `curl -s -o /dev/null -w '%{http_code}' https://concord.sebastian-patrones.workers.dev/health` prints `200` and `/v1/session/signin` prints `302`. If `/health` returns `302`, turn Access off and tell the orchestrator; the edge is redirecting agents and health checks.
+3. In the Worker's **Settings > Variables and Secrets**, add `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` as type **Secret**. `wrangler.jsonc` declares plain `vars`, which are replaced on deploy.
+4. Add the owner mapping to the private trusted configuration and reinstall it: `"humans":[{"email":"<your Access email>","tenantId":"<from concord api GET /v1/me with your owner token>","principalId":"seb","roles":["owner"],"repoIds":"*"}]`.
+5. On the phone, open the Worker URL, tap **Sign in with Cloudflare Access**, and enter the emailed code. The app stores a short-lived HttpOnly cookie scoped to `/v1`; bearer API calls for agents continue to work on the same hostname.
+
 ## Local acceptance and release inputs
 
 From a clean clone with Node 22+, npm, and Git:

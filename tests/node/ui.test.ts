@@ -130,6 +130,97 @@ describe('Fleet desk derivation', () => {
 });
 
 describe('Fleet desk DOM', () => {
+  it('uses an Access session on load and leaves the token form for anonymous visitors', async () => {
+    for (const [access, enabled] of [[true, true], [false, true], [false, false]]) {
+      clearSessionToken();
+      const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/' });
+      const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+      Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+      dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+      dom.window.scrollTo = () => {};
+      dom.window.setInterval = (() => 1) as any;
+      const requests: Array<{ url: string; authorization: string | null }> = [];
+      globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+        requests.push({ url, authorization: new Headers(init.headers).get('authorization') });
+        if (url === '/health') return Response.json({ data: { accessSignIn: enabled } });
+        if (url === '/v1/session') return new Response(JSON.stringify(access ? { data: { principalId: 'phone-owner',
+          roles: ['owner'], authMethod: 'access', expiresAt: Date.now() + 60_000,
+          logoutUrl: 'https://example.cloudflareaccess.com/cdn-cgi/access/logout' } } :
+          { error: { code: 'UNAUTHORIZED' } }), { status: access ? 200 : 401 });
+        if (url === '/v1/me') return Response.json({ data: { principalId: 'phone-owner', roles: ['owner'], repoIds: '*' } });
+        if (url === '/v1/repos') return Response.json({ data: { items: [] } });
+        return Response.json({ data: { mode: 'production', storageBackend: 'artifacts' } });
+      }) as any;
+      try {
+        if (access) {
+          // @ts-expect-error Browser JS is intentionally untyped.
+          await import('../../web/app.js?access-dom-yes');
+        } else if (enabled) {
+          // @ts-expect-error Browser JS is intentionally untyped.
+          await import('../../web/app.js?access-dom-no-enabled');
+        } else {
+          // @ts-expect-error Browser JS is intentionally untyped.
+          await import('../../web/app.js?access-dom-no-disabled');
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const doc = dom.window.document;
+        expect(doc.getElementById('signed-out')!.hidden).toBe(access);
+        expect(doc.getElementById('token-form')!.closest('#signed-out')!.hidden).toBe(access);
+        expect((doc.getElementById('access-signin') as HTMLAnchorElement).hidden).toBe(access || !enabled);
+        if (access) {
+          expect(doc.getElementById('principal')!.textContent).toBe('Signed in as phone-owner via Cloudflare Access');
+          expect((doc.getElementById('access-logout') as HTMLAnchorElement).href).toBe('https://example.cloudflareaccess.com/cdn-cgi/access/logout');
+          expect(requests.every(request => request.authorization === null)).toBe(true);
+        }
+      } finally {
+        Object.assign(globalThis, previous);
+        dom.window.close();
+        clearSessionToken();
+      }
+    }
+  });
+  it('shows browser sign-in failures safely and refuses malformed pasted tokens before fetching', async () => {
+    clearSessionToken();
+    const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/' });
+    const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+    dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+    dom.window.scrollTo = () => {};
+    dom.window.setInterval = (() => 1) as any;
+    const requests: string[] = [];
+    const secret = 'cct_tenant_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    globalThis.fetch = (async (url: string) => {
+      requests.push(url);
+      if (url === '/v1/session') return new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED' } }), { status: 401 });
+      if (url === '/health') return Response.json({ data: { accessSignIn: false } });
+      if (url === '/v1/me') throw new TypeError(`Load failed ${secret}`);
+      return Response.json({ data: { items: [] } });
+    }) as any;
+    try {
+      // @ts-expect-error Browser JS is intentionally untyped.
+      await import('../../web/app.js?access-error-redaction');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const doc = dom.window.document;
+      (doc.getElementById('token-input') as HTMLInputElement).value = secret;
+      doc.getElementById('token-form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const message = doc.getElementById('session-error')!.textContent!;
+      expect(message).toContain('NETWORK_UNREACHABLE');
+      expect(message).toContain('Load failed');
+      expect(message).not.toContain(secret);
+      const meRequests = requests.filter(url => url === '/v1/me').length;
+      Object.defineProperty(doc.getElementById('token-input')!, 'value', { configurable: true, value: 'abc\ndef' });
+      doc.getElementById('token-form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      expect(doc.getElementById('session-error')!.textContent).toContain('position 4');
+      expect(requests.filter(url => url === '/v1/me')).toHaveLength(meRequests);
+    } finally {
+      Object.assign(globalThis, previous);
+      dom.window.close();
+      clearSessionToken();
+    }
+  });
+
   it('shows first run on 401, then renders the desk, inbox and verdict route', async () => {
     clearSessionToken();
     const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/' });
