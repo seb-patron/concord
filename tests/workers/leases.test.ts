@@ -558,6 +558,44 @@ describe('RepoCoordinator lease routes', () => {
     expect((await listing(repo)).items.some((item: { state: string; intentText: string }) => item.state === 'released' && item.intentText === 'Work by local-agent-a')).toBe(true);
   });
 
+  it('lets owners force-release leases with an audited reason and invalidates the old fence', async () => {
+    setupPolicy();
+    const repo = 'lease_force_release';
+    const grant = await claim(repo, 'local-agent-a', 'forced', ['row:families:alpha'], 'force-claim');
+    const lease = (await responseBody(grant)).data.leases[0];
+    const forcePath = `${path(repo)}/${lease.leaseId}/force-release`;
+    const denied = await fetchApi(mutation(forcePath, { expectedVersion: 1, reason: 'operator recovery' }, 'force-denied', 'local-agent-b'));
+    expect(denied.status).toBe(403);
+    expect((await responseBody(denied)).error.code).toBe('FORBIDDEN');
+    const missingReason = await fetchApi(mutation(forcePath, { expectedVersion: 1 }, 'force-no-reason'));
+    expect(missingReason.status).toBe(422);
+    expect((await responseBody(missingReason)).error.code).toBe('INVALID_REASON');
+
+    const forced = await fetchApi(mutation(forcePath, { expectedVersion: 1, reason: 'credential revoked' }, 'force-release'));
+    expect(forced.status).toBe(200);
+    expect((await responseBody(forced)).data.lease).toMatchObject({ state: 'released', version: 2 });
+    const eventRows = await runInDurableObject(stubFor(repo), async (_instance, state) => state.storage.sql.exec<{
+      kind: string; actor_id: string; payload: string;
+    }>('SELECT kind, actor_id, payload FROM concord_events WHERE kind = ?', 'lease.forceReleased').toArray());
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]).toMatchObject({ kind: 'lease.forceReleased', actor_id: 'owner' });
+    expect(JSON.parse(eventRows[0].payload)).toMatchObject({ actorId: 'owner', previousHolderId: 'agent-a',
+      unitKey: lease.unitKey, changeId: 'forced', reason: 'credential revoked' });
+
+    for (const action of ['renew', 'release']) {
+      const stale = await fetchApi(mutation(`${path(repo)}/${lease.leaseId}/${action}`,
+        { expectedVersion: 2, fence: lease.fence }, `stale-${action}`, 'local-agent-a'));
+      expect(stale.status).toBe(409);
+      expect((await responseBody(stale)).error.code).toBe('LEASE_STALE');
+    }
+    const replacement = await claim(repo, 'local-agent-b', 'replacement', [lease.unitKey], 'force-replacement');
+    expect(replacement.status).toBe(201);
+    expect((await responseBody(replacement)).data.leases[0].fence).toBeGreaterThan(lease.fence);
+    const again = await fetchApi(mutation(forcePath, { expectedVersion: 3, reason: 'again' }, 'force-again'));
+    expect(again.status).toBe(409);
+    expect((await responseBody(again)).error.code).toBe('LEASE_NOT_ACTIVE');
+  });
+
   it('enforces a lower trusted lease hold cap', async () => {
     setupPolicy();
     (env as Env).TRUSTED_CONFIG = JSON.stringify({ ...trusted, costLimits: { maxLeaseHoldSeconds: 3600 } });

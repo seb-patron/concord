@@ -39,7 +39,7 @@ Commands and required fields:
   lease claim --repo ID --change-id ID --unit-keys JSON_ARRAY --intent-text TEXT --expected-version N [--ttl-seconds N]
   lease list --repo ID
   lease renew --repo ID --id ID --fence N --expected-version N [--ttl-seconds N]
-  lease release --repo ID --id ID --fence N --expected-version N
+  lease release --repo ID --id ID [--fence N | --force --reason TEXT] --expected-version N
   queue list --repo ID
   queue enqueue --repo ID --change-id ID --verdict-id ID --lease-fences JSON_OBJECT --expected-version N
   queue withdraw --repo ID --change-id ID --reason TEXT --expected-version N
@@ -71,6 +71,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     options['print-tree'] = { type: 'boolean' };
     options['require-match'] = { type: 'boolean' };
     options['with-history'] = { type: 'boolean' };
+    options.force = { type: 'boolean' };
     options.verbose = { type: 'boolean' };
     options.tenant = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
@@ -270,6 +271,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   })));
   if (noun === 'lease' && (verb === 'renew' || verb === 'release')) {
     const id = encodeURIComponent(required(flags, 'id'));
+    if (verb === 'release' && flags.force === true) {
+      const payload = body ?? { reason: required(flags, 'reason') };
+      return print(await mutateExisting(`${root}/leases/${id}/force-release`, payload));
+    }
     const payload = body ?? { fence: numberFlag(flags, 'fence'), ...(verb === 'renew' ? { ttlSeconds: numberFlag(flags, 'ttl-seconds', 120) } : {}) };
     return print(await mutateExisting(`${root}/leases/${id}/${verb}`, payload));
   }

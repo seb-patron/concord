@@ -211,6 +211,34 @@ function release(context: ModuleContext, leaseId: string, body: unknown): Respon
   });
 }
 
+function forceRelease(context: ModuleContext, leaseId: string, body: unknown): Response {
+  if (!context.principal.roles.includes('owner')) throw new HttpError(403, 'FORBIDDEN', 'Only an owner may force-release a lease');
+  const input = body as Record<string, unknown>;
+  if (typeof input?.reason !== 'string' || input.reason.length < 1 || input.reason.length > 500) {
+    throw new HttpError(422, 'INVALID_REASON', 'reason must contain 1 to 500 characters');
+  }
+  return context.transaction(() => {
+    const now = context.now();
+    expireDue(context, now);
+    const row = rows(context, 'SELECT * FROM leases_claims WHERE lease_id = ?', leaseId)[0];
+    if (!row) throw new HttpError(404, 'LEASE_NOT_FOUND', 'Lease not found');
+    if (!['active', 'reserved'].includes(row.state) || row.expires_at <= now) {
+      throw new HttpError(409, 'LEASE_NOT_ACTIVE', 'Lease is not active');
+    }
+    const currentFence = rows(context, 'SELECT fence FROM leases_fences WHERE unit_key = ?', row.unit_key)[0]?.fence ?? row.fence;
+    const nextFence = currentFence + 1;
+    const version = context.nextVersion();
+    context.sql.exec('UPDATE leases_fences SET fence = ? WHERE unit_key = ?', nextFence, row.unit_key);
+    context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, now, leaseId);
+    const sequence = context.appendEvent('lease.forceReleased', [row.lease_id, row.change_id], {
+      unitKey: row.unit_key, holderId: row.holder_id, previousHolderId: row.holder_id,
+      changeId: row.change_id, actorId: context.principal.principalId, reason: input.reason,
+      fence: nextFence, expiresAt: row.expires_at,
+    }, version).sequence;
+    return json({ lease: asLease(context, { ...row, state: 'released', version }) }, version, sequence);
+  });
+}
+
 type LeaseCursor = { phase: 0 | 1; createdAt: number; leaseId: string; maxVersion: number; serverTime: number };
 
 function parseLeaseCursor(raw: string | null): LeaseCursor | null {
@@ -443,6 +471,7 @@ function reservationLive(context: ModuleContext, changeId: string, fences: Recor
 
 const collection = /^\/v1\/repos\/[^/]+\/leases$/;
 const leaseAction = /^\/v1\/repos\/[^/]+\/leases\/([A-Za-z0-9_-]+)\/(renew|release)$/;
+const forceReleasePath = /^\/v1\/repos\/[^/]+\/leases\/([A-Za-z0-9_-]+)\/force-release$/;
 
 export const leases: FeatureModule = {
   name: 'leases',
@@ -457,6 +486,7 @@ export const leases: FeatureModule = {
       parseLeaseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
+    { method: 'POST', pattern: forceReleasePath, handle: (context, _request, match, body) => forceRelease(context, match[1], body) },
   ],
   snapshot: context => ({ ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row)) }),
   nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,

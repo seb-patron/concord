@@ -10,7 +10,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { afterEach, expect, it } from 'vitest';
 import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenarios.ts';
 import type { ConcordClient } from '../../cli/client.ts';
-import { callTool } from '../../mcp/tools.ts';
+import { callTool, tools } from '../../mcp/tools.ts';
 
 it('dispatches issue and milestone MCP tools with issue links', async () => {
   const calls: Array<{ method: string; path: string; options: unknown }> = [];
@@ -29,6 +29,21 @@ it('dispatches issue and milestone MCP tools with issue links', async () => {
   ]);
   expect((calls[3].options as { body: object; expectedVersion: number }).expectedVersion).toBe(7);
   expect((calls[5].options as { body: { issueNumber: number } }).body.issueNumber).toBe(3);
+});
+
+it('exposes owner force-release and sends the audit reason with current version', async () => {
+  const calls: Array<{ method: string; path: string; options?: { body?: unknown; expectedVersion?: number } }> = [];
+  const client = { request: async (method: string, path: string, options?: { body?: unknown; expectedVersion?: number }) => {
+    calls.push({ method, path, options });
+    if (method === 'GET') return { data: {}, version: 9 };
+    return { data: {}, version: 10 };
+  } } as unknown as ConcordClient;
+  expect(tools.some(item => item.name === 'lease_force_release')).toBe(true);
+  await callTool(client, 'lease_force_release', { repoId: 'repo', leaseId: 'lease', reason: 'holder revoked', idempotencyKey: 'force-key' });
+  expect(calls.map(call => `${call.method} ${call.path}`)).toEqual([
+    'GET /repos/repo/snapshot', 'POST /repos/repo/leases/lease/force-release',
+  ]);
+  expect(calls[1].options).toMatchObject({ body: { reason: 'holder revoked' }, expectedVersion: 9 });
 });
 
 const execFile = promisify(execFileCallback);
