@@ -1,5 +1,6 @@
-import type { Change, Digest, Oid, Repo } from '../contracts';
+import type { Change, Digest, Intent, ModuleContext, Oid, Repo } from '../contracts';
 import { HttpError } from '../http';
+import { sqlState } from '../state';
 
 export { pendingInitialToken, pendingResultFailure } from '../contracts';
 /** Internal Artifacts cleanup after a create response was lost before its token was received. */
@@ -41,6 +42,35 @@ export interface BootstrapPending {
 }
 
 export const terminal = (change: Change): boolean => ['merged', 'superseded', 'closed'].includes(change.status);
+
+/** Keep the repo projection and intent index in step with a verified queue landing. */
+export function mergeLandedChanges(context: ModuleContext, changeIds: string[], canonicalOid: Oid): string[] {
+  const state = sqlState(context.sql);
+  const changesKey = 'module:repos:changes';
+  const changes = state.get<Array<Change & { canonicalOid?: Oid }>>(changesKey) ?? [];
+  const landed = new Set(changeIds);
+  const changed: string[] = [];
+  for (const change of changes) {
+    if (!landed.has(change.changeId) || (change.status === 'merged' && change.canonicalOid === canonicalOid)) continue;
+    change.status = 'merged';
+    change.canonicalOid = canonicalOid;
+    change.version = context.nextVersion();
+    context.appendEvent('change.merged', [change.changeId], { canonicalOid }, change.version);
+    state.put(`module:repos:change:${change.changeId}`, change);
+    changed.push(change.changeId);
+  }
+  if (changed.length) {
+    state.put(changesKey, changes);
+    const intentsKey = 'module:repos:intents';
+    const intents = state.get<Intent[]>(intentsKey) ?? [];
+    for (const intent of intents) {
+      const change = changes.find(item => item.changeId === intent.changeId && changed.includes(item.changeId));
+      if (change) { intent.terminal = true; intent.version = change.version; }
+    }
+    state.put(intentsKey, intents);
+  }
+  return changed;
+}
 export const repoName = (value: unknown): string => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value)) throw new HttpError(400, 'INVALID_REPO_NAME', 'Repository name must be 1 to 64 letters, digits, underscores, or hyphens');
   return value;
