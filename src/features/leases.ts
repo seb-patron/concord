@@ -438,14 +438,14 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
   });
 }
 
-function releaseForChange(context: ModuleContext, changeId: string): Gate {
+function releaseForChange(context: ModuleContext, changeId: string, reason: 'change-closed' | 'change-merged' = 'change-closed'): Gate {
   if (!context?.sql || !validId(changeId)) return unavailableGate();
   const now = context.now();
   const selected = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND state IN ('active','reserved') ORDER BY lease_id", changeId);
   for (const row of selected) {
     const version = context.nextVersion();
     context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, now, row.lease_id);
-    makeEvent(context, 'lease.released', row, version, { reason: 'change-closed' });
+    makeEvent(context, 'lease.released', row, version, { reason });
   }
   return { status: 'eligible', version: context.version(), evidenceIds: selected.map(row => row.lease_id), value: undefined };
 }

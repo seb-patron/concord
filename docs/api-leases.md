@@ -84,6 +84,8 @@ The internal `leases.reserve(context, changeId, leaseFences)` hook runs in the c
 
 The hook `leases.releaseReservation(context, changeId)` accepts only a queue record `module:queue:entry:<changeId>` in `merged` or `withdrawn` state. Queue code must write that terminal state in the same coordinator transaction before calling the hook. Agents cannot release a reservation through the lease route. A reservation also expires after 30 minutes, with or without a timely alarm.
 
+When queue landing or owner repair changes a change to `merged`, every remaining active or reserved lease for that change is released in the same transaction with reason `change-merged`. This includes leases outside the enqueue reservation fences. Other changes' leases are unaffected.
+
 An owner-created contest can share a parent reservation with exactly its recorded children. Queue code records matching `module:queue:contest:<contestId>` and `module:queue:contest-child:<childChangeId>` objects containing `contestId`, `parentChangeId`, `childChangeIds`, `selectedChangeId`, and `ownerCreated: true`. The child still needs its own verified write footprint, and the supplied fences must match the live parent reservation. Once selection is recorded, only the selected child can inherit it. The selected child's terminal queue transition releases the parent reservation. A request body cannot create this exception.
 
 Missing, stale, or ambiguous admission evidence returns a blocked gate; it never grants admission by default.

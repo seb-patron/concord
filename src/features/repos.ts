@@ -708,7 +708,7 @@ function close(context: ModuleContext, changeId: string): Response {
   if (!['draft', 'ready'].includes(change.status)) fail(409, 'CHANGE_FROZEN', 'Only unfrozen draft or ready changes can close');
   context.transaction(() => {
     try {
-      const release = (context.call as (name: string, id: string) => ReturnType<ModuleContext['call']>)('leases.releaseForChange', changeId);
+      const release = context.call('leases.releaseForChange', changeId, 'change-closed');
       if (release.status === 'blocked' && release.code !== 'MODULE_UNAVAILABLE') fail(409, release.code, release.reason);
     } catch (error) {
       if (!(error instanceof HttpError) || error.code !== 'MODULE_UNAVAILABLE') throw error;

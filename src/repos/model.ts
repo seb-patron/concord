@@ -57,6 +57,14 @@ export function mergeLandedChanges(context: ModuleContext, changeIds: string[], 
     change.version = context.nextVersion();
     context.appendEvent('change.merged', [change.changeId], { canonicalOid }, change.version);
     state.put(`module:repos:change:${change.changeId}`, change);
+    try {
+      const release = context.call('leases.releaseForChange', change.changeId, 'change-merged');
+      if (release.status === 'blocked' && release.code !== 'MODULE_UNAVAILABLE') {
+        throw new HttpError(409, release.code, release.reason);
+      }
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.code !== 'MODULE_UNAVAILABLE') throw error;
+    }
     changed.push(change.changeId);
   }
   if (changed.length) {
