@@ -114,11 +114,22 @@ export function eventsAfter(sql: SqlStorage, after: number, limit = 100, visibil
 
 const fixtureDigest = `sha256:${'0'.repeat(64)}` as const;
 export const MAX_RESULT_OUTPUT_BYTES = 16 * 1024;
-export interface CostLimits { maxReposPerTenant: number; maxForksPerTenant: number; maxTokenMintsPerTenantPerDay: number }
-const defaultCostLimits: CostLimits = { maxReposPerTenant: 100, maxForksPerTenant: 1000, maxTokenMintsPerTenantPerDay: 1000 };
+export interface CostLimits {
+  maxReposPerTenant: number; maxForksPerTenant: number; maxTokenMintsPerTenantPerDay: number;
+  maxActiveChangesPerRepo: number; activeChangeLimits: Record<string, number>;
+}
+const defaultCostLimits: CostLimits = {
+  maxReposPerTenant: 100, maxForksPerTenant: 1000, maxTokenMintsPerTenantPerDay: 1000,
+  maxActiveChangesPerRepo: 32, activeChangeLimits: {},
+};
 export function costLimits(config: TrustedConfiguration): CostLimits {
-  const supplied = (config as TrustedConfiguration & { costLimits?: Partial<CostLimits> }).costLimits;
-  return { ...defaultCostLimits, ...supplied };
+  return { ...defaultCostLimits, ...config.costLimits };
+}
+/** Effective non-terminal change cap for one repo: its override, else the install default, else 32. */
+export function activeChangeLimit(config: TrustedConfiguration, repoId: string): number {
+  const limits = costLimits(config);
+  const overrides = limits.activeChangeLimits ?? {};
+  return Object.hasOwn(overrides, repoId) ? overrides[repoId] : limits.maxActiveChangesPerRepo;
 }
 export function localFixtureConfig(mode: Env['CONCORD_MODE']): TrustedConfiguration {
   if (mode !== 'local') throw new Error('LOCAL_FIXTURE_FORBIDDEN');
@@ -158,10 +169,15 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   if (!value || typeof value !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
   const config = value as TrustedConfiguration;
   if (!config.policies || !config.profiles || typeof config.policies !== 'object' || typeof config.profiles !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
-  const limits = (config as TrustedConfiguration & { costLimits?: Record<string, unknown> }).costLimits;
+  const limits = config.costLimits;
+  const outOfRange = (value: unknown, max: number) => !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > max;
   if (limits !== undefined && (!limits || typeof limits !== 'object' || Array.isArray(limits) ||
-    Object.keys(limits).some(key => !['maxReposPerTenant', 'maxForksPerTenant', 'maxTokenMintsPerTenantPerDay'].includes(key)) ||
-    Object.values(limits).some(value => !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 10000))) throw new Error('TRUSTED_CONFIG_INVALID');
+    Object.keys(limits).some(key => !['maxReposPerTenant', 'maxForksPerTenant', 'maxTokenMintsPerTenantPerDay', 'maxActiveChangesPerRepo', 'activeChangeLimits'].includes(key)) ||
+    [limits.maxReposPerTenant, limits.maxForksPerTenant, limits.maxTokenMintsPerTenantPerDay].some(value => value !== undefined && outOfRange(value, 10000)) ||
+    (limits.maxActiveChangesPerRepo !== undefined && outOfRange(limits.maxActiveChangesPerRepo, 1000)) ||
+    (limits.activeChangeLimits !== undefined && (!limits.activeChangeLimits || typeof limits.activeChangeLimits !== 'object' || Array.isArray(limits.activeChangeLimits) ||
+      Object.keys(limits.activeChangeLimits).some(key => !/^[A-Za-z0-9_-]{1,64}$/.test(key)) ||
+      Object.values(limits.activeChangeLimits).some(value => outOfRange(value, 1000)))))) throw new Error('TRUSTED_CONFIG_INVALID');
   for (const [id, policy] of Object.entries(config.policies)) {
     if (!policy || typeof policy !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
     if (id !== policy.id || !/^sha256:[a-f0-9]{64}$/.test(policy.digest) || !/^sha256:[a-f0-9]{64}$/.test(policy.checkerDigest) || !policy.units || typeof policy.units !== 'object' || Array.isArray(policy.units)) throw new Error('TRUSTED_CONFIG_INVALID');

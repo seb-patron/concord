@@ -141,6 +141,22 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(nullProfile) })).toThrow('TRUSTED_CONFIG_INVALID');
   });
 
+  it('fails closed on invalid active-change limit entries in costLimits', () => {
+    const fixture = localFixtureConfig('local');
+    const production = { CONCORD_MODE: 'production' } as Env;
+    const withLimits = (costLimits: unknown) => JSON.stringify({ ...fixture, costLimits });
+    expect(loadTrustedConfig({ ...production, TRUSTED_CONFIG: withLimits({ maxActiveChangesPerRepo: 40, activeChangeLimits: { alpha: 7 } }) }))
+      .toMatchObject({ costLimits: { maxActiveChangesPerRepo: 40, activeChangeLimits: { alpha: 7 } } });
+    for (const costLimits of [
+      { maxActiveChangesPerRepo: 0 }, { maxActiveChangesPerRepo: 1001 }, { maxActiveChangesPerRepo: 2.5 }, { maxActiveChangesPerRepo: '40' },
+      { activeChangeLimits: 5 }, { activeChangeLimits: null }, { activeChangeLimits: [] },
+      { activeChangeLimits: { alpha: 0 } }, { activeChangeLimits: { alpha: 1001 } }, { activeChangeLimits: { alpha: 2.5 } },
+      { activeChangeLimits: { 'bad repo': 7 } }, { unknownCostKey: 40 },
+    ]) {
+      expect(() => loadTrustedConfig({ ...production, TRUSTED_CONFIG: withLimits(costLimits) })).toThrow('TRUSTED_CONFIG_INVALID');
+    }
+  });
+
   it('loads numbered trusted configuration parts and rejects incomplete or conflicting bindings', () => {
     const text = JSON.stringify(localFixtureConfig('local'));
     const production = { CONCORD_MODE: 'production' } as Env;

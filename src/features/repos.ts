@@ -1,7 +1,7 @@
 import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, TrustedPolicy, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
-import { costLimits, eventSequence } from '../state';
+import { activeChangeLimit, costLimits, eventSequence } from '../state';
 import { MAX_NORMALIZED_UNITS, resolveUnit, unitRegistry, unitsOverCapMessage } from '../leases/units';
 import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
@@ -17,7 +17,7 @@ const jobDigest = async (job: InspectCandidateJob | ValidateStackJob) => {
     runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, version: _version, ...input } = job;
   return digest(input);
 };
-const fail = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
+const fail = (status: number, code: string, message: string, details?: unknown): never => { throw new HttpError(status, code, message, details); };
 const versioned = (context: ModuleContext, kind: string, relatedIds: string[], payload: Record<string, unknown>): number => {
   const version = context.nextVersion();
   context.appendEvent(kind, relatedIds, payload, version);
@@ -233,7 +233,8 @@ async function repoDetail(context: ModuleContext): Promise<Response> {
   const pending = context.state.get<BootstrapPending>('bootstrap');
   const queue = pending ? context.call('queue.bootstrapStatus') : null;
   const active = queue?.status === 'eligible' ? queue.value : null;
-  return respond(context, { ...repo, bootstrap: pending ? { ...pending, state: active?.state ?? pending.status,
+  return respond(context, { ...repo, activeChangeLimit: activeChangeLimit(context.trusted, repo.repoId),
+    bootstrap: pending ? { ...pending, state: active?.state ?? pending.status,
     blockedReason: active?.blockedReason ?? null } : null }, repo.status === 'provisioning' ? 202 : 200);
 }
 
@@ -338,7 +339,9 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
     if (input.baseOid === null) fail(409, 'BASE_REQUIRED', 'An initialized repository requires a base OID');
     if (!await context.storage.readCommit(repo.canonicalStorageName, input.baseOid as string)) fail(422, 'BASE_NOT_FOUND', 'Base commit does not exist');
   }
-  if (all.filter(change => !terminal(change)).length >= 32) fail(429, 'CHANGE_LIMIT', 'Active change limit reached');
+  const active = all.filter(change => !terminal(change)).length;
+  const limit = activeChangeLimit(context.trusted, repo.repoId);
+  if (active >= limit) fail(429, 'CHANGE_LIMIT', 'Active change limit reached', { limit, active });
   await reserveFork(context);
   const changeId = crypto.randomUUID();
   const candidateStorageName = `concord-f-${changeId}`;
