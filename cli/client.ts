@@ -30,6 +30,7 @@ export interface RequestOptions {
   body?: unknown;
   idempotencyKey?: string;
   expectedVersion?: number;
+  retryMode?: 'default' | 'transport-only';
 }
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -158,15 +159,19 @@ export class ConcordClient {
     if (options.idempotencyKey) headers.set('idempotency-key', options.idempotencyKey);
     let lastError: unknown;
     for (let attempt = 0; attempt < (retryable ? 3 : 1); attempt++) {
+      let receivedResponse = false;
+      let responseStatus: number | undefined;
       try {
         const response = await this.fetcher(url, { method: verb, headers, body });
+        receivedResponse = true;
+        responseStatus = response.status;
         if (response.status === 204) return undefined as T;
         const text = await response.text();
         let payload: unknown = text;
         if (text) { try { payload = JSON.parse(text); } catch { /* preserve plain server text */ } }
         rememberCredentialsIn(payload);
         if (response.ok) return payload as T;
-        if (retryable && attempt < 2 && (response.status === 429 || response.status >= 500)) {
+        if (retryable && options.retryMode !== 'transport-only' && attempt < 2 && (response.status === 429 || response.status >= 500)) {
           const wait = this.retryDelay(response.headers.get('retry-after'), attempt);
           await this.sleep(wait);
           continue;
@@ -178,6 +183,7 @@ export class ConcordClient {
         throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload, count.omittedMembers);
       } catch (error) {
         if (error instanceof ConcordError) throw error;
+        if (receivedResponse && options.retryMode === 'transport-only') throw new ConcordError('Concord response could not be read', 'server', responseStatus);
         lastError = error;
         if (!retryable || attempt >= 2) break;
         await this.sleep(250 * (2 ** attempt));
