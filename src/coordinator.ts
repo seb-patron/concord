@@ -154,7 +154,7 @@ export class RepoCoordinator extends DurableObject<Env> {
           ).toArray()[0];
           if (previous) {
             if (previous.request_digest !== requestDigest) throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency key was used with another body');
-            return new Response(previous.body, { status: previous.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+            return new Response(previous.status === 204 ? null : previous.body, { status: previous.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
           }
         }
         const context = this.context(moduleRoute.module.name, principal, repoId);
@@ -174,7 +174,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         const serialize = async (response: Response) => {
           const headers: [string, string][] = [];
           response.headers.forEach((value, name) => headers.push([name, value]));
-          return { status: response.status, headers, body: await response.text() };
+          return { status: response.status, headers, body: response.status === 204 ? null : await response.text() };
         };
         try { return await serialize(await dispatch()); }
         catch (error) { return await serialize(failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'))); }

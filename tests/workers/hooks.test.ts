@@ -57,7 +57,8 @@ describe('cross-module coordinator hooks', () => {
       return nativeJson.call(this);
     };
     try {
-      const pending = fetchApi(mutation(mutatePath, { expectedVersion: 0, tenantId: 'local' }, 'slow-body'));
+      const pending = fetchApi(mutation(mutatePath, { expectedVersion: 0, tenantId: 'local' }, 'slow-body'))
+        .then(async response => ({ status: response.status, body: await responseBody(response) }));
       await reading;
       const frozen = await fetchApi(mutation(freezePath, { tenantId: 'local', expectedVersion: 0 }, 'start-freeze'));
       expect(frozen.status).toBe(200);
@@ -65,6 +66,7 @@ describe('cross-module coordinator hooks', () => {
       releaseBody?.();
       const blocked = await pending;
       expect(blocked.status).toBe(409);
+      expect(blocked.body.error.code).toBe('PROMOTION_IN_PROGRESS');
       const state = await fetchApi(apiRequest(mutatePath));
       expect((await responseBody(state)).data).toEqual({ mutated: false });
       const stillFrozen = await fetchApi(mutation(mutatePath, { expectedVersion: 0, tenantId: 'local' }, 'after-freeze'));
@@ -76,6 +78,86 @@ describe('cross-module coordinator hooks', () => {
       repos.routes.splice(repos.routes.indexOf(mutate), 1);
       repos.routes.splice(repos.routes.indexOf(inspect), 1);
       queue.routes.splice(queue.routes.indexOf(freeze), 1);
+    }
+  });
+
+  it('keeps an awaited mutation handler exclusive until it finishes', async () => {
+    const path = '/v1/repos/hooks_awaited_handler/test-mutate';
+    let active = 0;
+    let overlap = false;
+    let releaseFirst!: () => void;
+    let signalFirst!: () => void;
+    const firstEntered = new Promise<void>(resolve => { signalFirst = resolve; });
+    const firstMayFinish = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const route: ModuleRoute = {
+      method: 'POST', pattern: /^\/v1\/repos\/hooks_awaited_handler\/test-mutate$/,
+      handle: async (_context, _request, _match, body) => {
+        active++;
+        if (active > 1) overlap = true;
+        if (body && typeof body === 'object' && 'order' in body && body.order === 'first') {
+          signalFirst();
+          await firstMayFinish;
+        }
+        active--;
+        return json({ accepted: true });
+      },
+    };
+    repos.routes.unshift(route);
+    try {
+      const first = fetchApi(mutation(path, { expectedVersion: 0, order: 'first' }, 'first'));
+      await firstEntered;
+      const second = fetchApi(mutation(path, { expectedVersion: 0, order: 'second' }, 'second'));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      releaseFirst();
+      expect((await first).status).toBe(200);
+      expect((await second).status).toBe(200);
+      expect(overlap).toBe(false);
+    } finally {
+      releaseFirst();
+      repos.routes.splice(repos.routes.indexOf(route), 1);
+    }
+  });
+
+  it('preserves an empty runner poll response on the first call and idempotency replay', async () => {
+    const path = '/v1/repos/hooks_empty_poll/runner/poll';
+    const nativeResponse = globalThis.Response;
+    let polls = 0;
+    const route: ModuleRoute = {
+      method: 'POST', pattern: /^\/v1\/repos\/hooks_empty_poll\/runner\/poll$/,
+      handle: () => {
+        polls++;
+        return new nativeResponse(null, { status: 204 });
+      },
+    };
+    runners.routes.unshift(route);
+    // Enforce the standard null-body rule even when the local Workers runtime only warns.
+    globalThis.Response = new Proxy(nativeResponse, {
+      construct(target, args, newTarget) {
+        if (args[1]?.status === 204 && args[0] !== null) throw new TypeError('204 responses require a null body');
+        return Reflect.construct(target, args, newTarget) as Response;
+      },
+    });
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:hooks_empty_poll'));
+    const poll = () => runInDurableObject<RepoCoordinator, Response>(stub, instance => instance.fetch(new Request(`https://concord.test${path}`, {
+      method: 'POST',
+      headers: {
+        'x-concord-principal': JSON.stringify({ tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER }),
+        'content-type': 'application/json',
+        'idempotency-key': 'empty-poll',
+      },
+      body: JSON.stringify({ tenantId: 'local' }),
+    })));
+    try {
+      const first = await poll();
+      expect(first.status).toBe(204);
+      expect(first.body).toBeNull();
+      const replay = await poll();
+      expect(replay.status).toBe(204);
+      expect(replay.body).toBeNull();
+      expect(polls).toBe(1);
+    } finally {
+      globalThis.Response = nativeResponse;
+      runners.routes.splice(runners.routes.indexOf(route), 1);
     }
   });
 
