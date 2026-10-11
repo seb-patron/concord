@@ -121,9 +121,9 @@ describe('dispatch-lab local acceptance', () => {
     const prefixedRun = await demo(['seed', '--run', 'dispatch_a', '--state-dir', dir, '--pump-local'], env);
     expect(prefixedRun.repoId).toBe('dispatch_dispatch_a');
     expect(prefixedRun.canonicalOid).toMatch(/^[a-f0-9]{40}$/);
-    for (const name of ['context', 'leases', 'stack', 'isolate', 'negative', 'repair', 'carry', 'invalidate', 'contest', 'dedupe']) {
+    for (const name of ['context', 'leases', 'stack', 'isolate', 'negative', 'repair', 'carry', 'invalidate', 'contest', 'dedupe', 'aw']) {
       let result: any;
-      try { result = await demo(['scene', name, ...flags], env); }
+      try { result = await demo(['scene', name, ...(name === 'aw' ? flags.filter(flag => flag !== '--pump-local') : flags)], env); }
       catch (error) { throw new Error(`${name}: ${String(error)}\nWORKER: ${worker.output()}`); }
       expect(result.scene).toBe(name);
     }
@@ -139,6 +139,16 @@ describe('dispatch-lab local acceptance', () => {
     expect(inspected.evidence.contest.winnerId).toBe(inspected.changes['J-high'].changeId);
     expect(inspected.evidence.dedupe).toMatchObject({ attempts: 7 });
     expect(new Set(inspected.evidence.dedupe.observedBases).size).toBe(2);
+    expect(inspected.evidence.aw).toMatchObject({ attempts: 7, taskId: 'task-17', checkerOutcome: 'PASS', queueState: 'landed' });
+    expect(new Set(inspected.evidence.aw.changeIds).size).toBe(1);
+    expect(new Set(inspected.evidence.aw.observedBases).size).toBe(2);
+    expect(inspected.evidence.aw.headOid).toMatch(/^[a-f0-9]{40}$/);
+    expect(inspected.evidence.aw.headOid).not.toBe(inspected.evidence.aw.baseOid);
+    expect(inspected.changes.AW.headOid).toBe(inspected.evidence.aw.headOid);
+    expect(inspected.evidence.aw.leaseFences['row:families:gamma']).toBeGreaterThan(0);
+    expect(inspected.evidence.aw.verdictId).toBeTruthy();
+    expect(inspected.evidence.aw.canonicalOid).toBe(inspected.canonicalOid);
+    expect(inspected.queue.entries.find((entry: any) => entry.changeId === inspected.evidence.aw.changeId)?.state).toBe('landed');
     expect(inspected.audit.some((event: any) => event.resultDigest && event.jobId)).toBe(true);
     expect(inspected.queue.finalCanonicalOid).toBe(inspected.canonicalOid);
   }, 300_000);

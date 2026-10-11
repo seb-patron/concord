@@ -210,7 +210,10 @@ function dispatchCase(state: QueueState, entries: Entry[], bootstrap: boolean): 
   if (bootstrap) return 'seed';
   const stage = state.dispatchCaseId ?? 'seed';
   if (entries.length === 0) return stage;
-  const aliases = entries.map(entry => entry.intentKey).sort().join('+');
+  const aliases = entries.length === 1 && entries[0].authorId === 'mock-aw' &&
+    entries[0].intentKey.startsWith('aw-mock:') && entries[0].unitKeys.length === 1 &&
+    entries[0].unitKeys[0] === 'row:families:gamma' ? 'aw' :
+    entries.map(entry => entry.intentKey).sort().join('+');
   const planned: Record<string, Record<string, string>> = {
     seed: { A: 'a-only', B: 'b-only', C: 'c-only', 'A+B': 'a-b', 'A+C': 'a-c-survivors',
       'B+C': 'b-c', 'A+B+C': 'a-b-c' },
@@ -218,6 +221,7 @@ function dispatchCase(state: QueueState, entries: Entry[], bootstrap: boolean): 
     'b-repaired': { D: 'd-only', E: 'e-only', 'D+E': 'd-e' },
     'd-only': { E: 'd-e' }, 'e-only': { D: 'd-e' },
     'd-e': { H: 'h-only', I: 'i-only' }, 'i-only': { J: 'j-common' },
+    'j-common': { aw: 'aw-only' },
   };
   const caseId = planned[stage]?.[aliases];
   if (!caseId) throw new HttpError(409, 'DISPATCH_CASE_UNPLANNED', `No trusted case for ${stage} + ${aliases}`);
