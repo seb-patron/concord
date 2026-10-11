@@ -23,6 +23,17 @@ function git(...args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
 }
 
+function commitWithRawPath(path: Buffer): string {
+  const blob = git('rev-parse', 'HEAD:README.md');
+  const treeInput = Buffer.concat([Buffer.from(`100644 blob ${blob}\t`), path, Buffer.from([0])]);
+  const tree = spawnSync('git', ['-C', repo, 'mktree', '-z'], { input: treeInput, encoding: 'utf8' });
+  expect(tree.status, tree.stderr).toBe(0);
+  const commit = spawnSync('git', ['-C', repo, '-c', 'user.name=Owner', '-c', 'user.email=owner@example.test',
+    'commit-tree', tree.stdout.trim()], { input: 'raw path\n', encoding: 'utf8' });
+  expect(commit.status, commit.stderr).toBe(0);
+  return commit.stdout.trim();
+}
+
 function run(args: string[]) {
   return spawnSync(process.execPath, ['--import', 'tsx', script, '--repo', repo, '--template', template, ...args],
     { cwd: resolve('.'), encoding: 'utf8' });
@@ -97,6 +108,45 @@ describe('owner file-unit generator', () => {
     { cwd: resolve('.'), encoding: 'utf8' });
     expect(fromArg.status).toBe(2);
     expect(fromArg.stderr).toContain('INVALID_ARGUMENT_ENCODING');
+  });
+
+  it('rejects invalid template bytes before they can authorize a replacement-character path', () => {
+    const path = 'fo\uFFFD.txt';
+    writeFileSync(join(repo, path), 'tracked');
+    git('add', path);
+    git('-c', 'user.name=Owner', '-c', 'user.email=owner@example.test', 'commit', '-qm', 'replacement path');
+    const unit = { canonicalKey: `file:${path}`, file: path, resources: [], dependencyKeys: [] };
+    const source = JSON.stringify({ ...baseTemplate, units: { ...baseTemplate.units, [`file:${path}`]: unit } });
+    writeFileSync(template, Buffer.from(source.replaceAll('\uFFFD', '\x80'), 'latin1'));
+
+    const result = run(['--oid', git('rev-parse', 'HEAD')]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('INVALID_TEMPLATE_ENCODING');
+    expect(result.stdout).toBe('');
+  });
+
+  it('rejects invalid UTF-8 in a tracked Git path', () => {
+    const rawPath = Buffer.concat([Buffer.from('fo'), Buffer.from([0x80]), Buffer.from('.txt')]);
+    const result = run(['--oid', commitWithRawPath(rawPath)]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('UNSUPPORTED_GIT_PATH_ENCODING');
+    expect(result.stdout).toBe('');
+  });
+
+  it('does not drop a UTF-8 BOM from the start of a Git path', () => {
+    const result = run(['--oid', commitWithRawPath(Buffer.from('\uFEFFfoo.txt'))]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('UNSAFE_PATH');
+    expect(result.stdout).toBe('');
+  });
+
+  it('rejects invalid UTF-8 in a comparison envelope', () => {
+    const priorFile = join(directory, 'previous.json');
+    writeFileSync(priorFile, Buffer.concat([Buffer.from('{"bad":"'), Buffer.from([0x80]), Buffer.from('"}')]));
+    const result = run(['--compare', priorFile, '--read-back-oid', oid]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('INVALID_COMPARISON_ENCODING');
+    expect(result.stdout).toBe('');
   });
 
   it('rejects duplicate template keys before a dependency can be overwritten', () => {

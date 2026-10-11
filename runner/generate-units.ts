@@ -20,6 +20,11 @@ interface Options {
 
 function fail(message: string): never { throw new Error(message); }
 
+function decodeUtf8(bytes: Uint8Array, error: string): string {
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { fail(error); }
+}
+
 function validPath(path: string): void {
   if (!path || path.length > 512 || `file:${path}`.length > 512 || path.startsWith('/') ||
     path.includes('\\') || /[\s\0]/u.test(path) ||
@@ -82,31 +87,35 @@ function git(repo: string, args: string[]): Buffer {
       stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   } catch (error) {
     const detail = error as { stderr?: Buffer; message?: string };
-    fail(`GIT_READ_FAILED: ${args[0]}: ${detail.stderr?.toString('utf8').trim() || detail.message}`);
+    const stderr = detail.stderr && decodeUtf8(detail.stderr, `INVALID_GIT_ERROR_ENCODING: ${args[0]}`).trim();
+    fail(`GIT_READ_FAILED: ${args[0]}: ${stderr || detail.message}`);
   }
 }
 
 function trackedPaths(repo: string, oid: string): string[] {
-  const kind = git(repo, ['cat-file', '-t', oid]).toString('ascii').trim();
+  const kind = decodeUtf8(git(repo, ['cat-file', '-t', oid]), 'INVALID_GIT_TYPE_ENCODING').trim();
   if (kind !== 'commit') fail(`NOT_A_COMMIT: ${oid} (${kind})`);
   const raw = git(repo, ['ls-tree', '-r', '-z', '--full-tree', oid]);
-  const decoder = new TextDecoder('utf-8', { fatal: true });
   const paths: string[] = [];
-  for (const entry of raw.subarray(0, raw.length ? raw.length - 1 : 0).toString('binary').split('\0')) {
-    if (!entry) continue;
-    let decoded: string;
-    try { decoded = decoder.decode(Buffer.from(entry, 'binary')); }
-    catch { fail('UNSUPPORTED_GIT_PATH_ENCODING'); }
-    const match = /^(\d{6}) (\w+) [a-f0-9]{40,64}\t(.*)$/su.exec(decoded);
-    if (!match) fail(`MALFORMED_TREE_ENTRY: ${JSON.stringify(decoded)}`);
-    const [, mode, type, path] = match;
+  let start = 0;
+  while (start < raw.length) {
+    const end = raw.indexOf(0, start);
+    if (end === -1) fail('MALFORMED_TREE_TERMINATOR');
+    const entry = raw.subarray(start, end);
+    const tab = entry.indexOf(0x09);
+    if (tab === -1) fail('MALFORMED_TREE_ENTRY');
+    const header = decodeUtf8(entry.subarray(0, tab), 'UNSUPPORTED_GIT_PATH_ENCODING');
+    const path = decodeUtf8(entry.subarray(tab + 1), 'UNSUPPORTED_GIT_PATH_ENCODING');
+    const match = /^(\d{6}) (\w+) [a-f0-9]{40,64}$/u.exec(header);
+    if (!match) fail(`MALFORMED_TREE_ENTRY: ${JSON.stringify(header)}`);
+    const [, mode, type] = match;
     validPath(path);
     if (!['100644', '100755'].includes(mode) || type !== 'blob') {
       fail(`UNSUPPORTED_TREE_ENTRY: ${JSON.stringify(path)} (${mode} ${type})`);
     }
     paths.push(path);
+    start = end + 1;
   }
-  if (raw.length && raw[raw.length - 1] !== 0) fail('MALFORMED_TREE_TERMINATOR');
   return paths;
 }
 
@@ -114,15 +123,13 @@ function plannedPaths(options: Options): string[] {
   const paths = [...options.allowPaths];
   for (const file of options.pathFiles) {
     const content = readFileSync(file);
-    const decoder = new TextDecoder('utf-8', { fatal: true });
     let start = 0;
     let lineNumber = 1;
     while (start < content.length) {
       const newline = content.indexOf(0x0a, start);
       const end = newline === -1 ? content.length : newline;
       const lineEnd = content[end - 1] === 0x0d ? end - 1 : end;
-      try { paths.push(decoder.decode(content.subarray(start, lineEnd))); }
-      catch { fail(`INVALID_PATH_ENCODING: ${file}:${lineNumber}`); }
+      paths.push(decodeUtf8(content.subarray(start, lineEnd), `INVALID_PATH_ENCODING: ${file}:${lineNumber}`));
       start = newline === -1 ? content.length : end + 1;
       lineNumber++;
     }
@@ -181,7 +188,7 @@ function rejectDuplicateJsonKeys(source: string): void {
 }
 
 function templateFrom(file: string): PolicyTemplate {
-  const source = readFileSync(file, 'utf8');
+  const source = decodeUtf8(readFileSync(file), `INVALID_TEMPLATE_ENCODING: ${file}`);
   const value: unknown = JSON.parse(source);
   rejectDuplicateJsonKeys(source);
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('INVALID_TEMPLATE: expected policy object');
@@ -259,7 +266,8 @@ export function main(argv: string[]): number {
   const options = parseArgs(argv);
   const envelope = generate(options);
   if (options.compareFile) {
-    const previous: unknown = JSON.parse(readFileSync(options.compareFile, 'utf8'));
+    const previous: unknown = JSON.parse(decodeUtf8(readFileSync(options.compareFile),
+      `INVALID_COMPARISON_ENCODING: ${options.compareFile}`));
     if (!previous || typeof previous !== 'object' || Array.isArray(previous)) fail('INVALID_COMPARISON_ENVELOPE');
     const prior = previous as Record<string, unknown>;
     if (!prior.policy || typeof prior.policy !== 'object' || Array.isArray(prior.policy) ||
