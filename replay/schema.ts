@@ -56,9 +56,9 @@ function nonempty(value: unknown): value is string { return typeof value === 'st
 function utc(value: unknown): value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)) return false;
   const date = new Date(value);
-  const normalized = value.replace(/\.\d+Z$/, 'Z');
-  return Number.isFinite(date.getTime()) && date.toISOString().replace('.000Z', 'Z') === normalized &&
-    !/^(1970-01-01|2000-01-01|9999-12-31)T/.test(normalized);
+  const normalized = value.replace(/(?:\.(\d{1,3}))?Z$/, (_match, milliseconds: string | undefined) => `.${(milliseconds ?? '').padEnd(3, '0')}Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString() === normalized &&
+    !/^(1970-01-01|2000-01-01|9999-12-31)T/.test(value);
 }
 function redacted(value: unknown): value is string {
   return nonempty(value) && /^(redacted:|https:\/\/[^/]+\/redacted\/)/i.test(value) && !/(token|secret|password|@)/i.test(value);
@@ -88,6 +88,7 @@ export function parseReplayJsonl(text: string, options: { allowSynthetic?: boole
   if (h.ownerReportedAggregates !== undefined) {
     if (!record(h.ownerReportedAggregates)) throw new Error('ownerReportedAggregates must be an object');
     for (const [name, raw] of Object.entries(h.ownerReportedAggregates)) {
+      if (record(raw) && Object.keys(raw).some(key => !['value', 'denominator', 'sourceRef'].includes(key))) throw new Error(`Owner aggregate ${name} has an unknown field`);
       if (!nonempty(name) || !record(raw) || !(raw.value === null || (typeof raw.value === 'number' && Number.isFinite(raw.value))) ||
           (raw.denominator !== undefined && !(raw.denominator === null || (typeof raw.denominator === 'number' && Number.isFinite(raw.denominator) && raw.denominator >= 0))) ||
           !redacted(raw.sourceRef)) throw new Error(`Owner aggregate ${name} requires value, valid denominator, and redacted sourceRef`);

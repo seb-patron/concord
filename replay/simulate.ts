@@ -40,7 +40,9 @@ export function simulateReplay(data: ReplayExport, options: SimulationOptions = 
   for (const taskId of order) {
     const events = rows.get(taskId)!;
     const work = events.find(e => e.durationMetric === 'work' && e.durationMs !== undefined);
-    const check = events.find(e => e.durationMetric === 'checker' && e.durationMs !== undefined);
+    const checks = events.filter(e => e.durationMetric === 'checker' && e.durationMs !== undefined)
+      .sort((a, b) => Date.parse(a.occurredAt) - Date.parse(b.occurredAt) || a.eventId.localeCompare(b.eventId));
+    const rechecks = events.filter(e => e.type === 'recheck_requested').length;
     const outcome = events.find(e => e.type === 'merged' || e.type === 'task_finished' || e.type === 'task_refused')?.outcome ??
       (events.some(e => e.type === 'merged') ? 'landed' : 'unknown');
     const dependencies = [...new Set(events.flatMap(e => e.dependencyTaskIds ?? []))];
@@ -51,8 +53,12 @@ export function simulateReplay(data: ReplayExport, options: SimulationOptions = 
       tasks.push({ taskId, status: 'unknown', outcome, reason: unresolvedDependency ? `dependency timing unknown: ${unresolvedDependency}` : `overlap timing unknown: ${unresolvedOverlap}` });
       continue;
     }
-    if (!work || !check) {
-      tasks.push({ taskId, status: 'unknown', outcome, reason: !work && !check ? 'work and checker durations missing' : !work ? 'work duration missing' : 'checker duration missing' });
+    if (!work || checks.length === 0) {
+      tasks.push({ taskId, status: 'unknown', outcome, reason: !work && checks.length === 0 ? 'work and checker durations missing' : !work ? 'work duration missing' : 'checker duration missing' });
+      continue;
+    }
+    if (checks.length <= rechecks) {
+      tasks.push({ taskId, status: 'unknown', outcome, reason: 'recheck duration missing' });
       continue;
     }
     const depReady = Math.max(0, ...dependencies.map(id => finishByTask.get(id) ?? 0));
@@ -61,10 +67,15 @@ export function simulateReplay(data: ReplayExport, options: SimulationOptions = 
     const workStartMs = Math.max(workSlots[slot], depReady, overlapReady);
     const workFinishMs = workStartMs + work.durationMs!;
     workSlots[slot] = workFinishMs;
-    const checkSlot = checkerSlots.indexOf(Math.min(...checkerSlots));
-    const checkerStartMs = Math.max(checkerSlots[checkSlot], workFinishMs);
-    const checkerFinishMs = checkerStartMs + check.durationMs!;
-    checkerSlots[checkSlot] = checkerFinishMs;
+    let checkerStartMs: number | undefined;
+    let checkerFinishMs = workFinishMs;
+    for (const check of checks) {
+      const checkSlot = checkerSlots.indexOf(Math.min(...checkerSlots));
+      const start = Math.max(checkerSlots[checkSlot], checkerFinishMs);
+      checkerStartMs ??= start;
+      checkerFinishMs = start + check.durationMs!;
+      checkerSlots[checkSlot] = checkerFinishMs;
+    }
     finishByTask.set(taskId, checkerFinishMs);
     tasks.push({ taskId, status: 'simulated', outcome, workStartMs, workFinishMs, checkerStartMs, checkerFinishMs });
   }

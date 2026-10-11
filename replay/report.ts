@@ -38,16 +38,21 @@ export function buildReplayReport(data: ReplayExport, options?: SimulationOption
   const countEvents = (type: string) => events.filter(e => e.type === type);
   const eventCounts: Record<string, number> = {};
   for (const e of events) eventCounts[e.type] = (eventCounts[e.type] ?? 0) + 1;
-  const terminal = new Set(events.filter(e => ['merged', 'task_finished', 'task_refused'].includes(e.type) && e.outcome !== 'unknown').map(e => e.taskId));
+  const terminal = new Set(events.filter(e => ['merged', 'task_finished', 'task_refused'].includes(e.type) && (e.outcome === 'landed' || e.outcome === 'refused')).map(e => e.taskId));
   const header = data.header;
+  const ownerReportedAggregateContext = header.ownerReportedAggregates === undefined ? null : Object.fromEntries(
+    Object.entries(header.ownerReportedAggregates).map(([name, aggregate]) => [name, {
+      value: aggregate.value, ...(aggregate.denominator !== undefined ? { denominator: aggregate.denominator } : {}), sourceRef: aggregate.sourceRef,
+    }]),
+  );
   return {
     status: 'available',
     provenance: {
       exportId: header.exportId, sourceType: header.sourceType, sourceRef: header.sourceRef, sourceDigest: header.sourceDigest,
       ownerReleaseApprovalRef: header.ownerReleaseApprovalRef, cohortId: header.selected.cohortId,
-      taskIds: [...taskIds], window: header.selected.window, releaseReferenceIsAttestationOnly: true,
+      taskIds: [...taskIds], window: { startAt: header.selected.window.startAt, endAt: header.selected.window.endAt }, releaseReferenceIsAttestationOnly: true,
     },
-    ownerReportedAggregateContext: header.ownerReportedAggregates ?? null,
+    ownerReportedAggregateContext,
     measuredHistoricalBaseline: header.evidenceClass === 'synthetic' ? null : {
       label: 'measured historical', eventCounts, durations,
       repairs: { count: countEvents('repair_submitted').length, taskDenominator: taskIds.length, sourceEventIds: countEvents('repair_submitted').map(e => e.eventId) },

@@ -60,6 +60,60 @@ describe('replay export provenance and report', () => {
     })]))).toThrow(/negative/);
   });
 
+  it('accepts nonzero millisecond timestamps and checks paired milliseconds exactly', () => {
+    const start = event('millis-start', 'check_started', '2026-01-01T00:00:00.123Z');
+    const end = event('millis-end', 'check_finished', '2026-01-01T00:00:00.247Z');
+    const duration = event('millis-duration', 'duration_record', '2026-01-01T00:00:00.247Z', {
+      durationMs: 124, durationMetric: 'checker', durationSource: { kind: 'paired_events', startEventId: 'millis-start', endEventId: 'millis-end' },
+    });
+    expect(() => parseReplayJsonl(historicalData([start, end, duration]))).not.toThrow();
+    expect(() => parseReplayJsonl(historicalData([start, end, { ...duration, durationMs: 123 }]))).toThrow(/disagrees/);
+  });
+
+  it('rejects unchecked owner aggregate fields and omits them from a report', () => {
+    const privateAggregate = { value: 2, sourceRef: 'redacted:aggregate', rawChat: 'PRIVATE CHAT CONTENT' };
+    const data = parseReplayJsonl(historicalData([event('start', 'task_started', '2026-01-01T00:00:00Z')]));
+    data.header.ownerReportedAggregates = { throughput: privateAggregate };
+    const [header, ...events] = historicalData(data.events).split('\n');
+    expect(() => parseReplayJsonl([JSON.stringify({ ...JSON.parse(header), ownerReportedAggregates: data.header.ownerReportedAggregates }), ...events].join('\n'))).toThrow(/aggregate.*field|unknown.*field/i);
+    expect(JSON.stringify(buildReplayReport(data))).not.toContain('PRIVATE CHAT CONTENT');
+    const privateWindow = { ...data.header.selected.window, rawChat: 'PRIVATE WINDOW CONTENT' };
+    data.header.selected.window = privateWindow;
+    expect(JSON.stringify(buildReplayReport(data))).not.toContain('PRIVATE WINDOW CONTENT');
+  });
+
+  it('models every recorded checker duration including a recheck', () => {
+    const events = [
+      event('work', 'duration_record', '2026-01-01T00:00:00.010Z', { durationMs: 10, durationMetric: 'work', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:work' } }),
+      event('check-1', 'duration_record', '2026-01-01T00:00:00.060Z', { durationMs: 50, durationMetric: 'checker', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:check-1' } }),
+      event('recheck', 'recheck_requested', '2026-01-01T00:00:00.070Z'),
+      event('check-2', 'duration_record', '2026-01-01T00:00:00.190Z', { durationMs: 120, durationMetric: 'checker', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:check-2' } }),
+    ];
+    const data = parseReplayJsonl(historicalData(events));
+    expect(buildReplayReport(data).measuredHistoricalBaseline?.durations.checker.valueMs).toBe(170);
+    expect(simulateReplay(data, { workerCapacity: 1, checkerCapacity: 1 }).tasks[0]).toMatchObject({
+      status: 'simulated', checkerStartMs: 10, checkerFinishMs: 180,
+    });
+  });
+
+  it('marks recheck timing unknown when its duration is missing', () => {
+    const data = parseReplayJsonl(historicalData([
+      event('work', 'duration_record', '2026-01-01T00:00:00Z', { durationMs: 10, durationMetric: 'work', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:work' } }),
+      event('check', 'duration_record', '2026-01-01T00:00:01Z', { durationMs: 50, durationMetric: 'checker', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:check' } }),
+      event('recheck', 'recheck_requested', '2026-01-01T00:00:02Z'),
+    ]));
+    const result = simulateReplay(data);
+    expect(result.tasks[0]).toMatchObject({ status: 'unknown', reason: expect.stringMatching(/recheck/) });
+    expect(result.makespanMs).toBeNull();
+  });
+
+  it('censors a finished task without an explicit known outcome', () => {
+    const data = parseReplayJsonl(historicalData([
+      event('finished', 'task_finished', '2026-01-01T00:00:01Z'),
+    ]));
+    expect(buildReplayReport(data).measuredHistoricalBaseline?.censoredTaskIds).toEqual(['task-a']);
+  });
+
   it('reproduces a hand-computable bounded schedule and preserves unknown outcomes', async () => {
     const result = simulateReplay(await synthetic(), { workerCapacity: 2, checkerCapacity: 1 });
     expect(result.label).toBe('simulated');
