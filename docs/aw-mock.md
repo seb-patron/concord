@@ -46,6 +46,8 @@ The JSON output includes `mock: true`, `identity`, `changeId`, `phase`, real `he
 
 The server's intent reservation is the durable source of truth. The local key is `project/taskId/explicitAttempt`; the server intent key is a stable digest of `project/taskId` and its `attempt` field carries `explicitAttempt`. The digest and branch are independent of base and head OIDs. On an active retry, the adapter reads the server phase before acting, so a published change does not create another commit and a draft can continue after an interrupted run. A different intent or unit set under the same task key is a conflict. A terminal change requires the next explicit attempt, as checked by Concord.
 
+Mutation keys identify an attempt within that task. Create uses `explicitAttempt`; publish and enqueue use the current revision and lease fences. Before a claim, the adapter reads live leases and Concord's event stream. A recorded `lease.refused` or `lease.claimed` event for the change advances the claim key only when no lease for that change remains live. This lets a draft retry after a refusal or expired lease even if the local run-state file is lost, without replaying the old keyed response. The event stream must be readable for a new claim; otherwise the adapter returns a structured block instead of guessing an attempt.
+
 ## Slice 12 handoff
 
 The current fixed text edit proves that a real commit can cross the local bridge and be published. It is **not** the dispatch-lab candidate edit, and it is not expected to satisfy dispatch-lab's trusted checker. Slice 12 should supply its pre-authored fixture candidate and use this sequence:

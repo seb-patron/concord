@@ -49,13 +49,22 @@ async function harness() {
     lastEnqueueFences: null as Record<string, number> | null,
     verdicts: [] as Array<{ verdictId: string; revision: number; decision: string }>, lastAttempt: 0, globalVersion: 1, nextFence: 7, canonicalOid: baseOid };
   const createBodies = new Map<string, string>();
+  const keyed = new Map<string, { body: string; status: number; payload: string }>();
+  const events: Array<{ sequence: number; kind: string; relatedIds: string[] }> = [];
+  const claimKeys: string[] = [];
+  const record = (kind: string, changeId: string) => events.push({ sequence: events.length + 1, kind, relatedIds: [changeId] });
   const ok = (data: unknown, status = 200) => new Response(JSON.stringify({ data, version: api.globalVersion }), { status, headers: { 'content-type': 'application/json' } });
   const fail = (code: string, status = 409, details?: unknown) => new Response(JSON.stringify({ error: { code, message: code, details } }), { status });
-  const fetcher: typeof fetch = async (input, init) => {
+  const handle: typeof fetch = async (input, init) => {
     const url = new URL(String(input)); const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
     const path = url.pathname;
     if (path === '/v1/repos/demo' && method === 'GET') return ok({ canonicalStorageName: 'canonical', observedCanonicalOid: api.canonicalOid, version: 1, status: 'ready' });
+    if (path === '/v1/repos/demo/events' && method === 'GET') {
+      const after = Number(url.searchParams.get('after') ?? 0);
+      const items = events.filter(event => event.sequence > after).slice(0, 100);
+      return ok({ items, nextCursor: events.some(event => event.sequence > (items.at(-1)?.sequence ?? after)) ? 'more' : null });
+    }
     if (path === '/v1/repos/demo/changes' && method === 'GET') return ok({ items: changes, nextCursor: null });
     if (path === '/v1/repos/demo/changes' && method === 'POST') {
       api.creates++;
@@ -83,10 +92,15 @@ async function harness() {
     if (changeMatch && method === 'GET') return ok(changes.find(item => item.changeId === changeMatch[1]));
     if (path === '/v1/repos/demo/leases' && method === 'POST') {
       api.claims++;
-      if (api.leaseConflict) return fail('LEASE_CONFLICT', 409, { holderId: 'other-agent', intentText: 'Other work', keys: ['unit:a'], nextAction: 'Wait for holder' });
+      claimKeys.push(new Headers(init?.headers).get('idempotency-key') ?? '');
+      if (api.leaseConflict) {
+        record('lease.refused', String(body.changeId));
+        return fail('LEASE_CONFLICT', 409, { holderId: 'other-agent', intentText: 'Other work', keys: ['unit:a'], nextAction: 'Wait for holder' });
+      }
       api.globalVersion++;
       const lease = { changeId: String(body.changeId), unitKey: 'unit:a', fence: api.nextFence++, state: 'active', expiresAt: Date.now() + 120_000 };
       api.leases.push(lease);
+      record('lease.claimed', lease.changeId);
       return ok({ leases: [lease] }, 201);
     }
     if (path === '/v1/repos/demo/leases' && method === 'GET') return ok({ items: api.leases, nextCursor: null });
@@ -111,7 +125,7 @@ async function harness() {
       api.publishes++;
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
       if (api.publishUnavailable) return fail('MODULE_UNAVAILABLE', 501);
-      if ((body.leaseFences as Record<string, number>)['unit:a'] !== api.leases.find(item => item.changeId === publishMatch[1])?.fence) return fail('LEASE_STALE');
+      if ((body.leaseFences as Record<string, number>)['unit:a'] !== [...api.leases].reverse().find(item => item.changeId === publishMatch[1] && item.expiresAt > Date.now())?.fence) return fail('LEASE_STALE');
       const change = changes.find(item => item.changeId === publishMatch[1])!;
       const commit = await storage.readCommit(change.candidateStorageName, String(body.headOid));
       if (!commit || commit.parents[0] !== baseOid || await storage.resolveRef(change.candidateStorageName, change.branch) !== body.headOid) return fail('HEAD_NOT_FOUND', 422);
@@ -125,12 +139,29 @@ async function harness() {
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
       if (api.queueUnavailable) return fail('MODULE_UNAVAILABLE', 501);
       api.lastEnqueueFences = body.leaseFences as Record<string, number>;
-      if (api.lastEnqueueFences['unit:a'] !== api.leases.find(item => item.changeId === body.changeId)?.fence) return fail('LEASE_STALE');
+      if (api.lastEnqueueFences['unit:a'] !== [...api.leases].reverse().find(item => item.changeId === body.changeId && item.expiresAt > Date.now())?.fence) return fail('LEASE_STALE');
       api.queue.push({ changeId: String(body.changeId), state: 'waiting' });
       changes.find(item => item.changeId === body.changeId)!.status = 'queued';
       return ok({ entryId: 'queue-1', state: 'waiting' }, 202);
     }
     return fail('NOT_FOUND', 404);
+  };
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? 'GET';
+    const key = new Headers(init?.headers).get('idempotency-key');
+    if (method !== 'POST' || !key) return handle(input, init);
+    const slot = `${url.pathname}:${key}`;
+    const body = String(init?.body ?? '');
+    const prior = keyed.get(slot);
+    if (prior) return prior.body === body ? new Response(prior.payload, { status: prior.status }) : fail('IDEMPOTENCY_CONFLICT');
+    const response = await handle(input, init);
+    // Concord records returned lease refusals and successful mutations. A
+    // thrown module error (the harness's 5xx responses) is not recorded.
+    if (response.ok || url.pathname.endsWith('/leases') && response.status === 409) {
+      keyed.set(slot, { body, status: response.status, payload: await response.clone().text() });
+    }
+    return response;
   };
   const client = new ConcordClient({ url: 'http://127.0.0.1:8787', token: 'local-mock-aw', fetch: fetcher, sleep: async () => {} });
   const run = () => runAwMock(fixturePath, statePath, client);
@@ -150,7 +181,7 @@ async function harness() {
     if (!address || typeof address === 'string') throw new Error('Expected local test server');
     return `http://127.0.0.1:${address.port}`;
   };
-  return { directory, storage, fixture, fixturePath, statePath, saveFixture, changes, api, baseOid, run, startServer };
+  return { directory, storage, fixture, fixturePath, statePath, saveFixture, changes, api, baseOid, run, startServer, claimKeys };
 }
 
 describe('AW mock adapter', () => {
@@ -184,7 +215,7 @@ describe('AW mock adapter', () => {
     expect(JSON.parse(restarted.stdout)).toMatchObject({ changeId: first.changeId, phase: 'awaiting_review', headOid: first.headOid });
     expect(h.changes).toHaveLength(1);
     expect(h.api).toMatchObject({ claims: 1, publishes: 1, enqueues: 0 });
-    expect(h.api.creates).toBe(2);
+    expect(h.api.creates).toBe(1);
     expect(JSON.parse(await readFile(h.statePath, 'utf8')).mappings['demo/task-7/1'].changeId).toBe(first.changeId);
   });
 
@@ -228,7 +259,7 @@ describe('AW mock adapter', () => {
     if (stage === 'approved') expect(h.api.lastEnqueueFences).toEqual({ 'unit:a': 9 });
     if (stage === 'approved-without-lease') expect(h.api.lastEnqueueFences).toEqual({ 'unit:a': 8 });
     expect(h.changes).toHaveLength(1);
-    expect(h.api).toMatchObject({ claims, publishes, enqueues, creates: 2 });
+    expect(h.api).toMatchObject({ claims, publishes, enqueues, creates: 1 });
     expect(JSON.parse(await readFile(h.statePath, 'utf8')).mappings['demo/task-7/1']).toMatchObject({ changeId: first.changeId, phase });
   });
 
@@ -247,6 +278,34 @@ describe('AW mock adapter', () => {
     expect(result).toMatchObject({ phase: 'blocked', blocked: { code: 'LEASE_CONFLICT', details: { holderId: 'other-agent' } } });
     expect(h.api.publishes).toBe(0);
     expect(JSON.parse(await readFile(h.statePath, 'utf8')).mappings['demo/task-7/1'].block.code).toBe('LEASE_CONFLICT');
+  });
+
+  it('uses a new claim key after a recorded refusal and lost run state', async () => {
+    const h = await harness(); h.api.leaseConflict = true;
+    expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { code: 'LEASE_CONFLICT' } });
+    expect(h.claimKeys).toHaveLength(1);
+    h.api.leaseConflict = false;
+    await rm(h.statePath);
+    expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
+    expect(h.claimKeys).toHaveLength(2);
+    expect(new Set(h.claimKeys).size).toBe(2);
+    expect(h.api.publishes).toBe(1);
+  });
+
+  it('uses a new claim key after an expired lease and lost run state', async () => {
+    const h = await harness(); h.api.publishPreparationUnavailable = true;
+    expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { status: 501 } });
+    expect(h.claimKeys).toHaveLength(1);
+    h.api.leases[0].expiresAt = Date.now() - 1;
+    h.api.publishPreparationUnavailable = false;
+    await rm(h.statePath);
+    const result = await h.run();
+    expect(result.blocked).toBeUndefined();
+    expect(result).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
+    expect(h.claimKeys).toHaveLength(2);
+    expect(new Set(h.claimKeys).size).toBe(2);
+    expect(h.api.leases.map(lease => lease.fence)).toEqual([7, 8]);
+    expect(h.api.publishes).toBe(1);
   });
 
   it('waits for independent review, then records unavailable queue as a structured blocked terminal run', async () => {
