@@ -119,13 +119,18 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
       const access = await gitAccess(client, args, field(change, 'candidateStorageName'), 'read', version(repository));
       const branch = field(change, 'branch');
       const worktree = field(args, 'worktree');
-      const localBranch = branch.replace(/^refs\/heads\//, '');
+      const localBranch = `concord/${value(args, 'changeId')}/${branch.replace(/^refs\/heads\//, '')}`;
       const existing = change.headOid === null
         ? await git(['ls-remote', '--heads', '--', access.remote, branch], { token: access.token }, worktree)
         : branch;
       if (change.headOid === null && !existing.split('\n').some(line => line.endsWith(`\t${branch}`))) {
         const baseOid = field(change, 'baseOid');
-        await git(['fetch', '--no-tags', '--', access.remote, baseOid], { token: access.token }, worktree);
+        try {
+          await git(['fetch', '--no-tags', '--', access.remote, baseOid], { token: access.token }, worktree);
+        } catch {
+          const canonical = await gitAccess(client, args, field(data(repository), 'canonicalStorageName'), 'read', version(repository));
+          await git(['fetch', '--no-tags', '--', canonical.remote, baseOid], { token: canonical.token }, worktree);
+        }
         await assertCommit(worktree, baseOid);
         const localRef = `refs/heads/${localBranch}`;
         const local = await git(['for-each-ref', '--format=%(refname)', localRef], {}, worktree);
@@ -137,7 +142,7 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
           await git(['switch', '-c', localBranch, baseOid], {}, worktree);
         }
       } else {
-        await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/concord/${localBranch}`], { token: access.token }, worktree);
+        await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/${localBranch}`], { token: access.token }, worktree);
       }
       result = { fetched: true, changeId: args.changeId, worktree, branch, remote: safeRemote(access.remote) };
       break;

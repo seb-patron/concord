@@ -4,10 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { afterEach, expect, it } from 'vitest';
 import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenarios.ts';
+import type { ConcordClient } from '../../cli/client.ts';
+import { callTool } from '../../mcp/tools.ts';
 
 const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
@@ -114,16 +117,35 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   expect(branchBeforePublish.trim()).toBe('');
   const existing = await a.call('change_checkout', { repoId, changeId: manifest.changes.A.changeId, worktree: manifest.changes.A.worktree });
   expect(existing.remote).toMatch(/^file:\/\//);
-  const { stdout: existingHead } = await execFile('git', ['rev-parse', 'refs/remotes/concord/demo'], { cwd: manifest.changes.A.worktree });
+  const { stdout: existingHead } = await execFile('git', ['rev-parse', `refs/remotes/concord/${manifest.changes.A.changeId}/demo`], { cwd: manifest.changes.A.worktree });
   expect(existingHead.trim()).toBe(manifest.changes.A.headOid);
   const { stdout: localBranch } = await execFile('git', ['symbolic-ref', 'HEAD'], { cwd: worktree });
-  expect(localBranch.trim()).toBe(branch);
+  expect(localBranch.trim()).toBe(`refs/heads/concord/${changeId}/mcp-fresh-alpha`);
   const tablePath = join(worktree, 'families.tsv');
   const original = await readFile(tablePath, 'utf8');
   expect(original).toMatch(/^alpha\t/m);
   await writeFile(tablePath, original.replace(/^alpha\t[^\n]*/m, 'alpha\t2\t1000'));
   await execFile('git', ['add', '--', 'families.tsv'], { cwd: worktree });
   await execFile('git', ['-c', 'user.name=MCP Test', '-c', 'user.email=mcp@example.invalid', 'commit', '--quiet', '-m', 'Tune alpha'], { cwd: worktree });
+  const { stdout: aHead } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: worktree });
+  const otherArgs = { ...createArgs, intentKey: 'mcp-fresh-beta', intentText: 'Edit beta through MCP', unitKeys: ['row:families:beta'] };
+  let other = await b.call('change_create', otherArgs);
+  await waitFor(async () => {
+    if (other.data.provisioning.state === 'observed') return true;
+    other = await b.call('change_create', otherArgs);
+    return other.data.provisioning.state === 'observed';
+  });
+  const otherId = other.data.changeId;
+  expect(otherId).not.toBe(changeId);
+  await b.call('change_checkout', { repoId, changeId: otherId, worktree });
+  const { stdout: otherBranch } = await execFile('git', ['symbolic-ref', 'HEAD'], { cwd: worktree });
+  const { stdout: otherHead } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: worktree });
+  expect(otherBranch.trim()).toBe(`refs/heads/concord/${otherId}/mcp-fresh-alpha`);
+  expect(otherHead.trim()).toBe(manifest.canonicalOid);
+  expect(otherHead.trim()).not.toBe(aHead.trim());
+  await execFile('git', ['switch', `concord/${changeId}/mcp-fresh-alpha`], { cwd: worktree });
+  const { stdout: restoredHead } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: worktree });
+  expect(restoredHead.trim()).toBe(aHead.trim());
   const conflictResponse = await b.client.callTool({ name: 'lease_claim', arguments: { repoId, changeId: manifest.changes.X.changeId, unitKeys: [unit], intentText: 'X edits alpha' } });
   observed.push(JSON.stringify(conflictResponse));
   expect(conflictResponse.isError).not.toBe(true);
@@ -149,3 +171,40 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   for (const secret of ['local-agent-a', 'local-agent-b', 'local-reviewer', bridgeToken]) expect(observed.join('\n')).not.toContain(secret);
   expect(worker.output()).not.toContain('local-agent-a');
 }, 180000);
+
+it('fetches an unreferenced canonical base when the candidate fork lacks it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'concord-mcp-base-'));
+  dirs.push(dir);
+  const source = join(dir, 'source');
+  const worktree = join(dir, 'worktree');
+  const canonical = join(dir, 'canonical.git');
+  const fork = join(dir, 'fork.git');
+  await Promise.all([mkdir(source), mkdir(worktree)]);
+  await execFile('git', ['init', '--quiet', source]);
+  await execFile('git', ['init', '--quiet', worktree]);
+  await execFile('git', ['init', '--quiet', '--bare', canonical]);
+  await execFile('git', ['init', '--quiet', '--bare', fork]);
+  await writeFile(join(source, 'base.txt'), 'canonical base\n');
+  await execFile('git', ['add', 'base.txt'], { cwd: source });
+  await execFile('git', ['-c', 'user.name=MCP Test', '-c', 'user.email=mcp@example.invalid', 'commit', '--quiet', '-m', 'Base'], { cwd: source });
+  const { stdout: baseOid } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: source });
+  await execFile('git', ['push', canonical, 'HEAD:refs/heads/temporary'], { cwd: source });
+  await execFile('git', ['push', canonical, ':refs/heads/temporary'], { cwd: source });
+  const requested: string[] = [];
+  const client = {
+    baseUrl: 'http://127.0.0.1:1',
+    request: async (_method: string, path: string, options?: { body?: { storageName: string } }) => {
+      if (path.endsWith('/changes/change-b')) return { data: { candidateStorageName: 'fork', branch: 'refs/heads/same', baseOid: baseOid.trim(), headOid: null } };
+      if (path.endsWith('/git-token')) {
+        const storageName = options!.body!.storageName;
+        requested.push(storageName);
+        return { data: { remote: pathToFileURL(storageName === 'fork' ? fork : canonical).href, token: 'test-token' } };
+      }
+      return { data: { canonicalStorageName: 'canonical' }, version: 1 };
+    },
+  } as unknown as ConcordClient;
+  await callTool(client, 'change_checkout', { repoId: 'repo', changeId: 'change-b', worktree });
+  expect(requested).toEqual(['fork', 'canonical']);
+  const { stdout: head } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: worktree });
+  expect(head.trim()).toBe(baseOid.trim());
+}, 30000);
