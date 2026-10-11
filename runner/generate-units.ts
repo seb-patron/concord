@@ -55,6 +55,8 @@ function parseArgs(argv: string[]): Options {
     }
     const value = argv[++i];
     if (!value) fail(`MISSING_ARGUMENT: ${flag}`);
+    // Node has already decoded argv; U+FFFD may represent bytes it could not decode.
+    if (value.includes('\uFFFD')) fail(`INVALID_ARGUMENT_ENCODING: ${flag}`);
     switch (flag) {
       case '--repo': if (options.repo) fail('DUPLICATE_ARGUMENT: --repo'); options.repo = value; break;
       case '--template': if (options.template) fail('DUPLICATE_ARGUMENT: --template'); options.template = value; break;
@@ -111,17 +113,77 @@ function trackedPaths(repo: string, oid: string): string[] {
 function plannedPaths(options: Options): string[] {
   const paths = [...options.allowPaths];
   for (const file of options.pathFiles) {
-    const content = readFileSync(file, 'utf8');
-    const lines = content.split('\n');
-    if (lines[lines.length - 1] === '') lines.pop();
-    for (const line of lines) paths.push(line.endsWith('\r') ? line.slice(0, -1) : line);
+    const content = readFileSync(file);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let start = 0;
+    let lineNumber = 1;
+    while (start < content.length) {
+      const newline = content.indexOf(0x0a, start);
+      const end = newline === -1 ? content.length : newline;
+      const lineEnd = content[end - 1] === 0x0d ? end - 1 : end;
+      try { paths.push(decoder.decode(content.subarray(start, lineEnd))); }
+      catch { fail(`INVALID_PATH_ENCODING: ${file}:${lineNumber}`); }
+      start = newline === -1 ? content.length : end + 1;
+      lineNumber++;
+    }
   }
   for (const path of paths) validPath(path);
   return paths;
 }
 
+function rejectDuplicateJsonKeys(source: string): void {
+  let at = 0;
+  const whitespace = (): void => { while (/[\t\n\r ]/.test(source[at] ?? '')) at++; };
+  const string = (): string => {
+    const start = at++;
+    while (source[at] !== '"') {
+      if (source[at] === '\\') at++;
+      at++;
+    }
+    at++;
+    return JSON.parse(source.slice(start, at)) as string;
+  };
+  const value = (): void => {
+    whitespace();
+    if (source[at] === '{') {
+      at++;
+      whitespace();
+      const keys = new Set<string>();
+      while (source[at] !== '}') {
+        const name = string();
+        if (keys.has(name)) fail(`DUPLICATE_TEMPLATE_KEY: ${name}`);
+        keys.add(name);
+        whitespace();
+        at++; // colon; JSON.parse has already validated the grammar.
+        value();
+        if (source[at] !== ',') break;
+        at++;
+        whitespace();
+      }
+      at++;
+    } else if (source[at] === '[') {
+      at++;
+      whitespace();
+      while (source[at] !== ']') {
+        value();
+        if (source[at] !== ',') break;
+        at++;
+      }
+      at++;
+    } else if (source[at] === '"') {
+      string();
+    } else {
+      while (at < source.length && !/[\t\n\r ,\]}]/.test(source[at])) at++;
+    }
+    whitespace();
+  };
+  value();
+}
+
 function templateFrom(file: string): PolicyTemplate {
-  const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  const source = readFileSync(file, 'utf8');
+  const value: unknown = JSON.parse(source);
+  rejectDuplicateJsonKeys(source);
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('INVALID_TEMPLATE: expected policy object');
   const policy = value as PolicyTemplate;
   key(policy.id, 'POLICY_ID');

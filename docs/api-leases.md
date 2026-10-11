@@ -27,7 +27,8 @@ After reading back the canonical OID, compare a fresh generation with the previo
 ```sh
 ./node_modules/.bin/tsx runner/generate-units.ts --repo /owner/checkout --template /owner/policy-template.json \
   --compare /owner/policy-envelope.json --read-back-oid 0123456789abcdef0123456789abcdef01234567 \
-  --allow-path-file /owner/run-a-paths.txt --allow-path-file /owner/run-b-paths.txt
+  --allow-path-file /owner/run-a-paths.txt --allow-path-file /owner/run-b-paths.txt \
+  --allow-path future/report.py
 ```
 
 Refresh writes a JSON envelope with `status: "unchanged"` and exits zero when the policy digest matches. It writes `status: "changed"` and exits 1 when it differs; input errors exit 2. It does not hot-install either result. On `changed`, stop admissions and have the owner review and reprovision the trusted policy and its pin before admitting more runs.

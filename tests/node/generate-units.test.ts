@@ -83,6 +83,35 @@ describe('owner file-unit generator', () => {
     ]);
   });
 
+  it('rejects malformed UTF-8 in a path list with its line number and rejects replacement in arguments', () => {
+    const list = join(directory, 'paths.txt');
+    writeFileSync(list, Buffer.concat([Buffer.from('future/ok.txt\nfo'), Buffer.from([0x80]), Buffer.from('.txt\n')]));
+    const fromFile = run(['--oid', oid, '--allow-path-file', list]);
+    expect(fromFile.status).toBe(2);
+    expect(fromFile.stderr).toContain(`${list}:2`);
+    expect(fromFile.stdout).toBe('');
+
+    const fromArg = spawnSync('sh', ['-c',
+      'bad=$(printf "\\200"); exec "$@" --allow-path "fo${bad}.txt"',
+      'sh', process.execPath, '--import', 'tsx', script, '--repo', repo, '--template', template, '--oid', oid],
+    { cwd: resolve('.'), encoding: 'utf8' });
+    expect(fromArg.status).toBe(2);
+    expect(fromArg.stderr).toContain('INVALID_ARGUMENT_ENCODING');
+  });
+
+  it('rejects duplicate template keys before a dependency can be overwritten', () => {
+    const first = { canonicalKey: 'file:README.md', file: 'README.md',
+      resources: [], dependencyKeys: ['file:missing.txt'] };
+    const second = { ...first, dependencyKeys: [] };
+    const units = `{"row:families:alpha":${JSON.stringify(row)},"file:README.md":${JSON.stringify(first)},` +
+      `"file:README.md":${JSON.stringify(second)}}`;
+    writeFileSync(template, JSON.stringify(baseTemplate).replace(JSON.stringify(baseTemplate.units), units));
+    const result = run(['--oid', oid]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('DUPLICATE_TEMPLATE_KEY: file:README.md');
+    expect(result.stdout).toBe('');
+  });
+
   it('rejects unsafe and unsupported paths with the offending name', () => {
     for (const path of ['../escape', 'white space.txt', 'x'.repeat(508), 'bad\\name', '.git/config']) {
       const result = run(['--oid', oid, '--allow-path', path]);
@@ -137,5 +166,26 @@ describe('owner file-unit generator', () => {
       '--allow-path', 'future/one.txt', '--allow-path', 'future/two.txt']);
     expect(changed.status).toBe(1);
     expect(JSON.parse(changed.stdout)).toMatchObject({ status: 'changed', sourceOid: readBack });
+  });
+
+  it('reports unchanged when generation and comparison use the same planned-path union and OID', () => {
+    const examples = [...readFileSync(resolve('docs/api-leases.md'), 'utf8').matchAll(/```sh\n([\s\S]*?)\n```/g)]
+      .map(match => match[1]);
+    const plannedFlags = (example: string) => [...example.matchAll(/--allow-path(?:-file)?\s+([^\s\\]+)/g)]
+      .map(match => match[0]);
+    expect(plannedFlags(examples[1])).toEqual(plannedFlags(examples[0]));
+
+    const listA = join(directory, 'run-a-paths.txt');
+    const listB = join(directory, 'run-b-paths.txt');
+    writeFileSync(listA, 'future/one.py\n');
+    writeFileSync(listB, 'future/two.py\n');
+    const paths = ['--allow-path-file', listA, '--allow-path-file', listB, '--allow-path', 'future/report.py'];
+    const initial = generated(['--oid', oid, ...paths]);
+    const priorFile = join(directory, 'policy-envelope.json');
+    writeFileSync(priorFile, JSON.stringify(initial));
+    const result = run(['--compare', priorFile, '--read-back-oid', oid, ...paths]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: 'unchanged', sourceOid: oid,
+      policyDigest: initial.policyDigest });
   });
 });
