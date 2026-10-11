@@ -56,6 +56,24 @@ async function fixture(repoId: string) {
 }
 
 describe('persistent findings and atomic repair rounds', () => {
+  it('rejects unit anchors outside the trusted change scope and permits an unknown anchor', async () => {
+    const h = await fixture('find_unknown_unit');
+    const before = (await h.api(`/v1/repos/${h.repoId}/snapshot`)).version;
+    for (const semanticAnchor of [undefined, { kind: 'unit', key: 'row:typo' }]) {
+      const attempt = await h.add('unmapped row', { unitKey: 'row:typo', ...(semanticAnchor ? { semanticAnchor } : {}) });
+      expect(attempt.status).toBe(422);
+      expect(attempt.body.error.code).toBe('UNKNOWN_UNIT');
+    }
+    expect((await h.api(`/v1/repos/${h.repoId}/snapshot`)).version).toBe(before);
+    expect(await h.list()).toMatchObject({ items: [], findingSetVersion: 0 });
+
+    const accepted = await h.add('unmapped row', {
+      unitKey: 'row:typo', semanticAnchor: { kind: 'unknown', key: 'unmapped row' },
+    });
+    expect(accepted.status).toBe(201);
+    expect(accepted.body.data.semanticAnchor).toEqual({ kind: 'unknown', key: 'unmapped row' });
+  });
+
   it('rejects an omitted or duplicate finding without creating a round', async () => {
     const h = await fixture('find_omission');
     const first = (await h.add('first')).body.data as Finding;

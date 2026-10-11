@@ -45,7 +45,7 @@ const active = (pending: StoredRound | null, change: ChangeView, current: Ledger
   pending.headOid === change.headOid && pending.findingSetVersion === current.findingSetVersion &&
   pending.findingIds.length === unresolved.length && unresolved.every(id => pending.findingIds.includes(id));
 
-function anchor(raw: unknown, unitKey: string): Finding['semanticAnchor'] {
+function anchor(raw: unknown, unitKey: string): NonNullable<Finding['semanticAnchor']> {
   if (raw === undefined) return { kind: 'unit', key: unitKey };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new HttpError(422, 'INVALID_ANCHOR', 'Semantic anchor must be an object');
   const value = raw as Record<string, unknown>;
@@ -104,6 +104,9 @@ export const findings: FeatureModule = {
       }
       const unitKey = body.unitKey;
       const nextAnchor = anchor(body.semanticAnchor, unitKey);
+      if (nextAnchor.kind === 'unit' && !change.unitKeys.includes(unitKey)) {
+        throw new HttpError(422, 'UNKNOWN_UNIT', 'Unit anchor is outside the current change review scope; use an unknown anchor');
+      }
       const reopenId = body.reopenFindingId;
       if (reopenId !== undefined && !isId(reopenId)) throw new HttpError(422, 'INVALID_FINDING', 'Invalid reopen finding ID');
       return context.transaction(() => {

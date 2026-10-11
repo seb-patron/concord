@@ -21,7 +21,7 @@ An independent reviewer creates a finding on the current ready revision:
 }
 ```
 
-When `semanticAnchor` is omitted, the server stores `{ "kind": "unit", "key": "<unitKey>" }`. To record a concern whose semantic location is unknown, supply `{ "kind": "unknown", "key": "<reviewer label>" }`; it remains open and gates approval until reviewed resolution. A reviewer reopens a resolved finding with `POST .../findings`, the same fields plus `reopenFindingId`. The unit key and semantic anchor kind/key must match the original; path and line hints, text, and evidence digest may change. Reopening increments `findingSetVersion` and appends `finding.reopened` with both prior and new evidence digests. The original creation and resolution events remain intact.
+When `semanticAnchor` is omitted, the server stores `{ "kind": "unit", "key": "<unitKey>" }`. A `unit` anchor must name a unit in the current change's trusted review scope; otherwise creation returns `422 UNKNOWN_UNIT`. To record a concern whose semantic location is unknown, supply `{ "kind": "unknown", "key": "<reviewer label>" }`; it remains open and gates approval until reviewed resolution. A reviewer reopens a resolved finding with `POST .../findings`, the same fields plus `reopenFindingId`. The unit key and semantic anchor kind/key must match the original; path and line hints, text, and evidence digest may change. Reopening increments `findingSetVersion` and appends `finding.reopened` with both prior and new evidence digests. The original creation and resolution events remain intact.
 
 ## Submit one complete repair
 
