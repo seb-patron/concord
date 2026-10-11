@@ -1,5 +1,5 @@
 import type { Change, FeatureModule, Gate, Lease, ModuleContext, Repo, TrustedPolicy } from '../contracts';
-import { encodeCursor, failure, HttpError, json, parseCursor, unavailableGate } from '../http';
+import { failure, HttpError, json, unavailableGate } from '../http';
 import { eventSequence, sqlState } from '../state';
 import { covers, normalizeUnits, overlaps, resolveUnit, unitRegistry, type UnitIdentity } from '../leases/units';
 
@@ -194,9 +194,48 @@ function release(context: ModuleContext, leaseId: string, body: unknown): Respon
   });
 }
 
-function projection(context: ModuleContext, offset = 0) {
+type LeaseCursor = { phase: 0 | 1; createdAt: number; leaseId: string; maxVersion: number; serverTime: number };
+
+function parseLeaseCursor(raw: string | null): LeaseCursor | null {
+  if (raw === null) return null;
+  try {
+    if (raw.length > 512 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error('invalid');
+    const value: unknown = JSON.parse(atob(raw.replace(/-/g, '+').replace(/_/g, '/')));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid');
+    const cursor = value as Record<string, unknown>;
+    if ((cursor.phase !== 0 && cursor.phase !== 1) ||
+      !Number.isSafeInteger(cursor.createdAt) || !validId(cursor.leaseId) ||
+      !Number.isSafeInteger(cursor.maxVersion) || (cursor.maxVersion as number) < 0 ||
+      !Number.isSafeInteger(cursor.serverTime) || (cursor.serverTime as number) < 0) throw new Error('invalid');
+    return cursor as LeaseCursor;
+  } catch { throw new HttpError(400, 'INVALID_CURSOR', 'Invalid lease cursor'); }
+}
+
+function encodeLeaseCursor(cursor: LeaseCursor): string {
+  return btoa(JSON.stringify(cursor)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function projection(context: ModuleContext, cursor: LeaseCursor | null = null) {
   const now = context.now();
-  const page = rows(context, "SELECT * FROM leases_claims ORDER BY CASE WHEN state IN ('active','reserved') AND expires_at > ? THEN 0 ELSE 1 END, created_at DESC, lease_id DESC LIMIT 101 OFFSET ?", now, offset);
+  const maxVersion = cursor?.maxVersion ?? context.sql.exec<{ max_version: number }>(
+    'SELECT COALESCE(MAX(version), 0) AS max_version FROM leases_claims').toArray()[0].max_version;
+  const serverTime = cursor?.serverTime ?? now;
+  const after = cursor ? 'AND (created_at < ? OR (created_at = ? AND lease_id < ?))' : '';
+  const query = `WITH ordered AS (
+    SELECT *, CASE WHEN state IN ('active','reserved') AND expires_at > ? THEN 0 ELSE 1 END AS live_rank
+    FROM leases_claims
+  ) SELECT * FROM ordered WHERE
+    (live_rank = 0 ${cursor?.phase === 1 ? 'AND 0' : after}) OR
+    (live_rank = 1 AND version <= ?
+      AND NOT (state IN ('active','reserved') AND expires_at > ?)
+      ${cursor?.phase === 1 ? after : ''})
+    ORDER BY live_rank, created_at DESC, lease_id DESC LIMIT 101`;
+  const position = cursor ? [cursor.createdAt, cursor.createdAt, cursor.leaseId] : [];
+  const args: (string | number)[] = [now];
+  if (cursor?.phase === 0) args.push(...position);
+  args.push(maxVersion, serverTime);
+  if (cursor?.phase === 1) args.push(...position);
+  const page = context.sql.exec<LeaseRow & { live_rank: 0 | 1 }>(query, ...args).toArray();
   const items = page.slice(0, 100)
     .map(row => ({ ...asLease(row),
       state: row.expires_at <= now && (row.state === 'active' || row.state === 'reserved') ? 'expired' : row.state,
@@ -210,7 +249,10 @@ function projection(context: ModuleContext, offset = 0) {
       })), createdAt: row.created_at,
       nextAction: 'Wait for the holder to release or the displayed expiry, then retry the claim.' }));
   return { status: items.length || refusals.length || Object.keys(policy(context).units).length ? 'ready' : 'unavailable',
-    items, nextCursor: page.length > 100 ? encodeCursor(offset + items.length) : null,
+    items, nextCursor: page.length > 100 ? encodeLeaseCursor({
+      phase: page[99].live_rank, createdAt: page[99].created_at, leaseId: page[99].lease_id,
+      maxVersion, serverTime,
+    }) : null,
     refusals, renewAfterSeconds: RENEW_AFTER_SECONDS, serverTime: now };
 }
 
@@ -355,7 +397,7 @@ export const leases: FeatureModule = {
   ] }],
   routes: [
     { method: 'GET', pattern: collection, handle: (context, request) => json(projection(context,
-      parseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
+      parseLeaseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
   ],

@@ -210,6 +210,49 @@ describe('RepoCoordinator lease routes', () => {
     expect((await fetchApi(apiRequest(`${path(repo)}?cursor=%%%`, 'local-viewer'))).status).toBe(400);
   });
 
+  it('keeps every remaining live lease exactly once when a page-one lease is released', async () => {
+    setupPolicy();
+    const repo = 'lease_page_release';
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      seedClaim(state, repo, 'seed', 'agent-a');
+      const now = Date.now();
+      for (let index = 0; index < 227; index++) {
+        state.storage.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          `live-${index}`, `row:seed:${index}`, 'agent-a', 'seed', 'Seeded lease', 1,
+          now + 60_000, index < 127 ? 'active' : 'released', 1, now + index, now + index);
+      }
+      sqlState(state.storage.sql).put('repo:version', 1);
+    });
+    const firstResponse = await fetchApi(apiRequest(path(repo), 'local-viewer'));
+    expect(firstResponse.status).toBe(200);
+    const first = (await responseBody(firstResponse)).data;
+    expect(first.items).toHaveLength(100);
+    const released = first.items[0].leaseId as string;
+    expect(first.items.every((item: { state: string }) => item.state === 'active')).toBe(true);
+    const releaseResponse = await fetchApi(mutation(`${path(repo)}/${released}/release`,
+      { expectedVersion: 1, fence: 1 }, 'release-between-pages', 'local-agent-a'));
+    expect(releaseResponse.status).toBe(200);
+
+    const seen = new Set<string>(first.items.map((item: { leaseId: string }) => item.leaseId));
+    let cursor: string | null = first.nextCursor;
+    const later: string[] = [];
+    for (let pageNumber = 0; cursor && pageNumber < 4; pageNumber++) {
+      const response = await fetchApi(apiRequest(`${path(repo)}?cursor=${cursor}`, 'local-viewer'));
+      expect(response.status).toBe(200);
+      const page = (await responseBody(response)).data;
+      for (const item of page.items as Array<{ leaseId: string }>) {
+        expect(seen.has(item.leaseId)).toBe(false);
+        seen.add(item.leaseId);
+        later.push(item.leaseId);
+      }
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(later).toContain('live-26');
+    expect(seen.size).toBe(227);
+    for (let index = 0; index < 127; index++) expect(seen.has(`live-${index}`)).toBe(true);
+  });
+
   it('serializes concurrent claims, refuses the entire multi-key request, and isolates repositories', async () => {
     setupPolicy();
     const repo = 'lease_race';
