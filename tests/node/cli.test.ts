@@ -510,6 +510,16 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
+  it('omits members whose key or value still has escapes at the decoding limit', () => {
+    rememberCredential('abc');
+    let encoded = '%61%62%63';
+    for (let layer = 0; layer < 10; layer++) encoded = encodeURIComponent(encoded);
+    const count = { omittedMembers: 0 };
+    expect(redactOutput({ [encoded]: 'visible', value: encoded, items: [encoded, 'visible'] }, count))
+      .toEqual({ items: ['visible'] });
+    expect(count.omittedMembers).toBe(3);
+  });
+
   it('rejects raw and encoded traversal, backslashes, and origin changes before fetch', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => new Response('{}'));
     const client = new ConcordClient({ url: 'https://concord.invalid/base', fetch: fetcher });

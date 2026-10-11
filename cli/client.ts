@@ -58,18 +58,19 @@ const normalizedEscapes = (value: string) => value.replace(/%[0-9a-f]{2}/gi, mat
 const decodeEscapesOnce = (value: string) => value.replace(/(?:%[0-9a-f]{2})+/gi, run => {
   try { return decodeURIComponent(run); } catch { return run; }
 });
-function percentDecoded(value: string): string {
+function percentDecoded(value: string): { decoded: string; exhausted: boolean } {
   let decoded = value;
   for (let i = 0; i < 10; i++) {
     const next = decodeEscapesOnce(decoded);
-    if (next === decoded) break;
+    if (next === decoded) return { decoded, exhausted: false };
     decoded = next;
   }
-  return decoded;
+  return { decoded, exhausted: /%[0-9a-f]{2}/i.test(decoded) };
 }
 export function redactString(value: string): string {
   const normalized = normalizedEscapes(value);
-  const decoded = percentDecoded(value);
+  const { decoded, exhausted } = percentDecoded(value);
+  if (exhausted) return '[REDACTED]';
   for (const secret of credentials) {
     let encoded = '';
     try { encoded = encodeURIComponent(secret); } catch { /* A lone surrogate cannot be URI encoded. */ }
@@ -87,11 +88,18 @@ export interface RedactionCount { omittedMembers: number }
 export function redactOutput(value: unknown, count: RedactionCount = { omittedMembers: 0 }): unknown {
   if (typeof value === 'string') return redactString(value);
   if (typeof value === 'number' || typeof value === 'boolean') return redactString(String(value)) === '[REDACTED]' ? '[REDACTED]' : value;
-  if (Array.isArray(value)) return value.map(item => redactOutput(item, count));
+  if (Array.isArray(value)) {
+    const safe: unknown[] = [];
+    for (const item of value) {
+      if (typeof item === 'string' && percentDecoded(item).exhausted) { count.omittedMembers++; continue; }
+      safe.push(redactOutput(item, count));
+    }
+    return safe;
+  }
   if (value && typeof value === 'object') {
     const safe: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
-      if (redactString(key) === '[REDACTED]') { count.omittedMembers++; continue; }
+      if (redactString(key) === '[REDACTED]' || (typeof item === 'string' && percentDecoded(item).exhausted)) { count.omittedMembers++; continue; }
       Object.defineProperty(safe, key, { value: redactOutput(item, count), enumerable: true, writable: true, configurable: true });
     }
     return safe;
