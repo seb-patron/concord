@@ -157,6 +157,10 @@ export CONCORD_SHOW_DECOMPILED_C=0
 export CONCORD_RUN_DIR="$(mktemp -d)"
 curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "production" and .storageBackend == "artifacts"'
 npm run deploy:check -- --remote
+```
+
+<!-- verified-by: 12c -->
+```sh
 npm run demo -- seed --run remote-01 --state-dir "$CONCORD_RUN_DIR"
 npm run demo -- scene leases --run remote-01 --state-dir "$CONCORD_RUN_DIR"
 npm run demo -- scene stack --run remote-01 --state-dir "$CONCORD_RUN_DIR"
@@ -167,14 +171,17 @@ Continue the checked landing through the driver's documented scene commands and 
 
 Set `CONCORD_REPO_ID` to the runtime ID printed by `seed`; set `CHECKED_SHA` to the promoted SHA shown by the ticket and `inspect`. The separately provisioned production checker and promoter tokens have distinct roles. Run their bounded jobs as the scene requests, then verify the API and a fresh read-only Git clone:
 
+Set `CONCORD_HOME` to an absolute, owner-provisioned directory outside this clone containing the production checker profile at `checker-profile.json`. The profile must pin the deployed job's checker, oracle, toolchain, and environment; the demo fixture profile is not production evidence.
+
 ```sh
+export CONCORD_HOME='<absolute owner-provisioned directory outside this clone>'
 export CONCORD_REPO_ID='<runtime repo ID>'
 export CHECKED_SHA='<promoted full Git SHA>'
 export CHECKER_TOKEN='<production checker bearer token>'
 export PROMOTER_TOKEN='<production promoter bearer token>'
 PROFILE_ID="$(curl -fsS -H "Authorization: Bearer $CONCORD_TOKEN" "$CONCORD_URL/v1/repos/$CONCORD_REPO_ID" | jq -er '.data.profileId')"
 PROFILE_DIGEST="$(jq -er --arg id "$PROFILE_ID" '.profiles[$id].digest | select(test("^sha256:[0-9a-f]{64}$"))' "$TRUSTED_CONFIG_FILE")"
-CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role checker --profile demo/profile.json --once
+CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role checker --profile "$CONCORD_HOME/checker-profile.json" --once
 CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role promoter --profile-digest "$PROFILE_DIGEST" --once
 npm run concord -- api GET "/repos/$CONCORD_REPO_ID" --json | jq -e --arg sha "$CHECKED_SHA" '.data.observedCanonicalOid == $sha'
 npm run concord -- repo clone --repo "$CONCORD_REPO_ID" --path "$CONCORD_RUN_DIR/canonical" --json
