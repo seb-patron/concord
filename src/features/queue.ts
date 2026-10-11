@@ -5,6 +5,7 @@ import type {
 import { digest, failure, HttpError, json } from '../http';
 import { eventSequence } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
+import { hashCanonical } from '../verdicts/manifest';
 import {
   advanceDiagnosis, COALESCE_MS, MAX_CANDIDATES, selectStack, startDiagnosis, STACK_WIDTH,
   type Diagnosis, type PlannedEntry,
@@ -24,6 +25,7 @@ interface JobRecord {
   admissionIds: Id[];
   contestId?: Id; result?: StackResult | PromotionResult; resultSequence?: number;
   consumed: boolean; retryOf?: Id; retryIssued?: boolean;
+  verified?: boolean;
 }
 interface ContestState {
   contestId: Id; childIds: [Id, Id]; admissionIds: [Id, Id]; creationSequences: [number, number];
@@ -494,15 +496,24 @@ function onResult(context: ModuleContext, result: StackResult | PromotionResult)
     if (!record || record.job.kind !== result.kind || record.job.inputDigest !== result.inputDigest
       || record.job.checkerDigest !== result.checkerDigest || record.job.toolchainDigest !== result.toolchainDigest
       || record.job.oracleDigest !== result.oracleDigest || record.job.environmentDigest !== result.environmentDigest
-      || result.attempt < 1 || result.fence < 1) return blocked(context, 'STALE_JOB_RESULT', 'Result does not match a scheduled job');
-    if (record.result) return record.result.resultDigest === result.resultDigest
-      ? eligible(context, { promotionId: state.ticket?.promotionId ?? null }, [result.jobId])
-      : blocked(context, 'CONFLICTING_RESULT', 'Result digest differs from recorded result');
+      || !Number.isSafeInteger(result.attempt) || result.attempt < 1
+      || !Number.isSafeInteger(result.fence) || result.fence < 1) return blocked(context, 'STALE_JOB_RESULT', 'Result does not match a scheduled job');
     if (record.job.generation !== state.generation && record.purpose !== 'promotion') return blocked(context, 'STALE_GENERATION', 'Queue generation has changed');
     if (result.kind === 'validate-stack' && (record.job.kind !== 'validate-stack'
       || result.bootstrap !== record.job.bootstrap || result.canonicalBaseOid !== record.job.canonicalBaseOid)) {
       return blocked(context, 'STALE_JOB_RESULT', 'Result base differs from scheduled job');
     }
+    const { resultDigest, ...preimage } = result;
+    if (hashCanonical(preimage) !== resultDigest) {
+      state.blockedReason = 'RESULT_DIGEST_MISMATCH';
+      emit(context, 'queue.result_rejected', record.memberIds, { jobId: result.jobId, reason: state.blockedReason });
+      if (record.purpose !== 'promotion') failRecord(context, state, record, 'RESULT_DIGEST_MISMATCH');
+      save(context, state);
+      return blocked(context, 'RESULT_DIGEST_MISMATCH', 'Result digest does not match its contents');
+    }
+    if (record.result) return record.result.resultDigest === result.resultDigest
+      ? eligible(context, { promotionId: state.ticket?.promotionId ?? null }, [result.jobId])
+      : blocked(context, 'CONFLICTING_RESULT', 'Result digest differs from recorded result');
     record.result = result;
     record.resultSequence = emit(context, 'queue.result_received', record.memberIds, { jobId: result.jobId,
       outcome: result.outcome, purpose: record.purpose, generation: record.job.generation });
@@ -665,6 +676,7 @@ async function processStackResult(context: ModuleContext, state: QueueState, rec
     failRecord(context, state, record, 'CHECKED_SCRATCH_MISMATCH');
     return;
   }
+  record.verified = true;
   if (record.purpose === 'contest') {
     await processContestResult(context, state, record, result, main);
     return;
@@ -710,8 +722,9 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
     return;
   }
   contest.resultIds.push(record.job.jobId);
-  const pair = contest.childIds.map(id => state.jobs.find(item => item.purpose === 'contest'
-    && item.contestId === contest.contestId && item.memberIds[0] === id && item.result?.kind === 'validate-stack'));
+  const pair = contest.childIds.map(id => [...state.jobs].reverse().find(item => item.purpose === 'contest'
+    && item.contestId === contest.contestId && item.memberIds[0] === id
+    && item.result?.kind === 'validate-stack' && item.verified && item.consumed && !item.retryIssued));
   if (pair.some(item => !item)) return;
   const [first, second] = pair as [JobRecord, JobRecord];
   if (first.job.kind !== 'validate-stack' || second.job.kind !== 'validate-stack') return;

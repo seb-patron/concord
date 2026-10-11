@@ -32,7 +32,7 @@ interface Harness {
   seed(name: string, base?: string | null): Promise<void>;
   put(name: string, ref: string, next: string, old?: string | null, tree?: string): Promise<boolean>;
   tick(flush?: boolean): Promise<void>;
-  deliver(job: Job, outcome: StackResult['outcome'], options?: { composed?: string; tree?: string; gates?: Array<{ gateId: string; outcome: StackResult['outcome'] }>; score?: { matched: number; total: number } }): Promise<Gate<{ promotionId: string | null }>>;
+  deliver(job: Job, outcome: StackResult['outcome'], options?: { composed?: string; tree?: string; gates?: Array<{ gateId: string; outcome: StackResult['outcome'] }>; score?: { matched: number; total: number }; badDigest?: boolean }): Promise<Gate<{ promotionId: string | null }>>;
   promoteResult(job: Job, outcome: PromotionResult['outcome'], observed: string | null): Promise<Gate<{ promotionId: string | null }>>;
   ageTicket(ms: number): Promise<void>;
   bootstrap(seed: BootstrapHandoff, asOwner?: boolean): Promise<Gate<{ stackId: string }>>;
@@ -108,7 +108,7 @@ beforeEach(() => {
         gateResults: options.gates ?? [{ gateId: 'default', outcome: 'PASS' as const }],
         score: options.score ?? null, bootstrap: job.bootstrap, canonicalBaseOid: job.canonicalBaseOid,
       };
-      const result = { ...preimage, resultDigest: await digest(preimage) } as StackResult;
+      const result = { ...preimage, resultDigest: options.badDigest ? `sha256:${'0'.repeat(64)}` : await digest(preimage) } as StackResult;
       return await runInDurableObject<RepoCoordinator, Gate<{ promotionId: string | null }>>(stub, instance => {
         const internal = instance as unknown as { context(name: 'runners', principal: Principal, repoId: string): ModuleContext };
         return internal.context('runners', { ...principal, principalId: 'checker', roles: ['checker'] }, repoId)
@@ -940,6 +940,109 @@ describe('queue state machine', () => {
     expect(h.releases).toEqual(['A']);
     await h.tick();
     expect((h.jobs[2] as any).candidates.map((item: any) => item.changeId)).toEqual(['B']);
+  });
+
+  it.each(['A,B', 'B,A'])('settles both valid children delivered %s before one alarm', async order => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
+        unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
+        branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+    }
+    await contestReal(h);
+    await h.tick();
+    expect(h.jobs).toHaveLength(2);
+    const jobs = Object.fromEntries(h.jobs.map(job => [job.kind === 'validate-stack' ? job.candidates[0].changeId : '', job]));
+    const [first, second] = order.split(',') as ['A' | 'B', 'A' | 'B'];
+    await h.deliver(jobs[first], 'PASS');
+    await h.deliver(jobs[second], 'PASS');
+    await h.tick();
+    expect((await h.state()).contests[0].state).toBe('open');
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'selected', winnerId: first });
+  });
+
+  it.each(['A,B', 'B,A'])('rejects a bad digest delivered %s before one alarm', async order => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
+        unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
+        branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+    }
+    await contestReal(h);
+    await h.tick();
+    const jobs = Object.fromEntries(h.jobs.map(job => [job.kind === 'validate-stack' ? job.candidates[0].changeId : '', job]));
+    const [first, second] = order.split(',') as ['A' | 'B', 'A' | 'B'];
+    await h.deliver(jobs[first], 'PASS', { badDigest: first === 'B' });
+    await h.deliver(jobs[second], 'PASS', { badDigest: second === 'B' });
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    const stored = await runInDurableObject<RepoCoordinator, any>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      return internal.context('queue', principal, h.repoId).state.get<any>('data');
+    });
+    expect(stored.jobs.find((item: any) => item.job.jobId === jobs.B.jobId).result).toBeUndefined();
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'RESULT_DIGEST_MISMATCH', winnerId: null });
+    expect((await h.state()).promotion).toBeNull();
+  });
+
+  it('checks the stored sibling scratch result before selecting a valid child', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
+        unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
+        branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+    }
+    await contestReal(h);
+    await h.tick();
+    const jobs = Object.fromEntries(h.jobs.map(job => [job.kind === 'validate-stack' ? job.candidates[0].changeId : '', job]));
+    await h.deliver(jobs.A, 'PASS');
+    await h.deliver(jobs.B, 'PASS');
+    if (jobs.B.kind !== 'validate-stack') throw new Error('expected contest child job');
+    expect(await h.put(jobs.B.scratchStorageName, jobs.B.scratchRef, oid('f'), oid('e'))).toBe(true);
+    await h.tick();
+    expect((await h.state()).contests[0].state).toBe('open');
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'CHECKED_SCRATCH_MISMATCH', winnerId: null });
+  });
+
+  it.each([
+    ['A,B', 'PASS'], ['B,A', 'PASS'], ['A,B', 'FAIL'], ['B,A', 'FAIL'],
+  ] as const)('waits for the retry with %s delivery and %s retry outcome', async (order, retryOutcome) => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
+        unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
+        branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+    }
+    await contestReal(h);
+    await h.tick();
+    const jobs = Object.fromEntries(h.jobs.map(job => [job.kind === 'validate-stack' ? job.candidates[0].changeId : '', job]));
+    for (const id of order.split(',')) await h.deliver(jobs[id], id === 'A' ? 'TIMEOUT' : 'PASS');
+    await h.tick();
+    await h.tick();
+    expect(h.jobs).toHaveLength(3);
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'open', winnerId: null });
+    await h.deliver(h.jobs[2], retryOutcome);
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'SUSPECTED_FLAKE', winnerId: null });
+    expect((await h.state()).promotion).toBeNull();
   });
 
   it('arbitrates hard gates before fixed-denominator score, ties by creation, and rejects profile mismatch', () => {
