@@ -291,6 +291,15 @@ export interface ServiceHooks {
 }
 export type HookName = keyof ServiceHooks;
 export type ModuleName = 'repos' | 'leases' | 'queue' | 'runners' | 'findings' | 'verdicts';
+/** A queue-owned decision made immediately before a module mutation is dispatched. */
+export interface PromotionFreezeDecision { frozen: boolean; exempt?: boolean }
+export type PromotionFreezeProvider = (context: ModuleContext, request: Request) => PromotionFreezeDecision;
+/** Repos owns the record; callers receive a detached, immutable projection. */
+export interface ChangeView {
+  readonly authorId: Id; readonly headOid: Oid | null; readonly revision: number;
+  readonly status: Change['status']; readonly unitKeys: readonly string[]; readonly frozen: boolean;
+}
+export type ChangeViewProvider = (context: ModuleContext, changeId: Id) => Gate<ChangeView>;
 export interface Migration { version: number; statements: string[] }
 export interface ModuleContext {
   readonly repoId: Id; readonly tenantId: Id; readonly principal: Principal;
@@ -303,6 +312,8 @@ export interface ModuleContext {
   appendEvent(kind: string, relatedIds: Id[], payload: Record<string, unknown>, version: number): Event;
   state: { get<T>(key: string): T | null; put<T>(key: string, value: T): void; delete(key: string): void };
   call<K extends HookName>(name: K, ...args: Parameters<ServiceHooks[K]> extends [ModuleContext, ...infer A] ? A : never): ReturnType<ServiceHooks[K]>;
+  /** Present on repo-coordinator contexts; catalog contexts do not read changes. */
+  readChange?(changeId: Id): Gate<ChangeView>;
 }
 export interface ModuleRoute {
   method: string; pattern: RegExp;
@@ -314,4 +325,8 @@ export interface FeatureModule {
   nextDeadline(context: ModuleContext): number | null;
   onAlarm(context: ModuleContext): void | Promise<void>;
   hooks: Partial<ServiceHooks>;
+  /** Slice 04 registers the queue's promotion state here. An absent provider reports unfrozen. */
+  promotionFreeze?: PromotionFreezeProvider;
+  /** Slice 02 registers a reader of repos-owned change state here. */
+  changeView?: ChangeViewProvider;
 }
