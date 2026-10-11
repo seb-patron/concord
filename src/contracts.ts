@@ -262,9 +262,13 @@ export interface PromotionResult extends ResultBase {
 }
 export type JobResult = InspectionResult | StackResult | DeltaResult | PromotionResult;
 
-export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning' }
+/** Internal handoff for a creation token; never included in JSON responses. */
+export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');
+/** Adapter validation failed after a credential was returned. The coordinator persists the credential before failing the intent. */
+export const pendingResultFailure: unique symbol = Symbol('pendingResultFailure');
+export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning'; [pendingInitialToken]?: string; [pendingResultFailure]?: string }
 export interface StorageCommit { oid: Oid; treeOid: Oid; parents: Oid[] }
-export interface StorageToken { secret: string; expiresAt: number }
+export interface StorageToken { secret: string; expiresAt: number; [pendingResultFailure]?: string }
 export interface RepoStorage {
   ensureRepo(name: string): Promise<StorageRepo>;
   fork(sourceName: string, targetName: string): Promise<StorageRepo>;
@@ -298,6 +302,8 @@ export type PromotionFreezeProvider = (context: ModuleContext, request: Request)
 export interface ChangeView {
   readonly authorId: Id; readonly headOid: Oid | null; readonly revision: number;
   readonly status: Change['status']; readonly unitKeys: readonly string[]; readonly frozen: boolean;
+  readonly baseOid?: Oid | null; readonly candidateStorageName?: string; readonly branch?: string;
+  readonly dependencyChangeIds?: readonly Id[]; readonly canonicalStorageName?: string;
 }
 export type ChangeViewProvider = (context: ModuleContext, changeId: Id) => Gate<ChangeView>;
 export interface Migration { version: number; statements: string[] }

@@ -1,10 +1,624 @@
-import type { FeatureModule } from '../contracts';
-import { unavailableGate, unavailableModule } from '../http';
+import type { BootstrapBody, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
+import { requireRole } from '../auth';
+import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
+import { eventSequence } from '../state';
+import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
-export const repos: FeatureModule = unavailableModule('repos', [
-  /^\/v1\/repos$/,
-  /^\/v1\/repos\/[^/]+$/,
-  /^\/v1\/repos\/[^/]+\/(?:bootstrap|branches|git-token)(?:\/[^/]+)?$/,
-  /^\/v1\/repos\/[^/]+\/changes(?:\/[^/]+(?:\/(?:publish|close))?)?$/,
-]);
-repos.hooks['repos.inspectRevision'] = () => unavailableGate();
+const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
+const page = <T>(items: T[], request: Request) => {
+  const offset = parseCursor(new URL(request.url).searchParams.get('cursor'));
+  const selected = items.slice(offset, offset + 100);
+  return { items: selected, nextCursor: offset + selected.length < items.length ? encodeCursor(offset + selected.length) : null };
+};
+const respond = <T>(context: ModuleContext, data: T, status = 200) => json(data, context.version(), eventSequence(context.sql), status);
+const jobDigest = async (job: InspectCandidateJob | ValidateStackJob) => {
+  const { inputDigest: _digest, state: _state, attempt: _attempt,
+    runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, version: _version, ...input } = job;
+  return digest(input);
+};
+const fail = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
+const versioned = (context: ModuleContext, kind: string, relatedIds: string[], payload: Record<string, unknown>): number => {
+  const version = context.nextVersion();
+  context.appendEvent(kind, relatedIds, payload, version);
+  return version;
+};
+const getChange = (context: ModuleContext, changeId: string): Change => {
+  const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
+  return change ?? fail(404, 'CHANGE_NOT_FOUND', 'Change not found');
+};
+const ownChange = (context: ModuleContext, change: Change) => {
+  if (change.authorId !== context.principal.principalId && !context.principal.roles.includes('owner')) fail(403, 'FORBIDDEN', 'Only the change author or owner can mutate this change');
+};
+const intentKey = (kind: 'ensure-repo' | 'fork', storageName: string) => `${kind}:${storageName}`;
+const intents = (context: ModuleContext) => context.state.get<Record<string, ProvisioningIntent>>('provisioning') ?? {};
+const saveIntent = (context: ModuleContext, intent: ProvisioningIntent) => {
+  const all = intents(context);
+  all[intentKey(intent.kind, intent.storageName)] = intent;
+  context.state.put('provisioning', all);
+};
+
+function scheduleInspection(context: ModuleContext, change: Change, job: InspectCandidateJob): Response {
+  try {
+    const gate = context.call('runners.schedule', job);
+    if (gate.status === 'blocked') return failure(new HttpError(gate.code === 'MODULE_UNAVAILABLE' ? 501 : 409, gate.code, gate.reason));
+    const pending = context.state.get<InspectionPending>(`inspection:${change.changeId}`);
+    if (!pending || pending.jobId !== job.jobId) fail(409, 'INSPECTION_SUPERSEDED', 'Inspection request was superseded');
+    context.state.put(`inspection:${change.changeId}`, { ...pending, scheduled: true });
+    return respond(context, change, 202);
+  } catch {
+    return failure(new HttpError(503, 'SCHEDULE_UNAVAILABLE', 'Inspection scheduler did not acknowledge the request'));
+  }
+}
+
+function scheduleBootstrap(context: ModuleContext, request: BootstrapPending, job: ValidateStackJob): Response {
+  try {
+    const gate = context.call('runners.schedule', job);
+    if (gate.status === 'blocked') {
+      context.state.put('bootstrap', { ...request, status: 'blocked' } satisfies BootstrapPending);
+      return failure(new HttpError(gate.code === 'MODULE_UNAVAILABLE' ? 501 : 409, gate.code, gate.reason));
+    }
+    context.state.put('bootstrap', { ...request, status: 'requested' } satisfies BootstrapPending);
+    return respond(context, { jobId: job.jobId, state: 'requested' }, 202);
+  } catch {
+    context.state.put('bootstrap', { ...request, status: 'blocked' } satisfies BootstrapPending);
+    return failure(new HttpError(503, 'SCHEDULE_UNAVAILABLE', 'Bootstrap scheduler did not acknowledge the request'));
+  }
+}
+
+const activeProvisioning = (intent: ProvisioningIntent) => intent.state !== 'observed' && intent.state !== 'failed';
+
+async function reconcile(context: ModuleContext, intent: ProvisioningIntent, retry: boolean): Promise<StorageRepo | null> {
+  const tokenKey = `initial-token:${intent.storageName}`;
+  try {
+    const expectedDigest = await digest(intent.kind === 'ensure-repo'
+      ? { kind: intent.kind, storageName: intent.storageName }
+      : { kind: intent.kind, storageName: intent.storageName, sourceName: intent.sourceName });
+    if (intent.requestDigest !== expectedDigest) throw new Error('PROVISIONING_INTENT_MISMATCH');
+    if (intent.state === 'failed') {
+      if (!retry) return null;
+      // A caller retry starts a new attempt. Keep any credential from the old attempt.
+      intent.polls = 0;
+      intent.state = context.state.get<string>(tokenKey) ? 'token-held' : 'intent';
+      delete intent.error;
+      saveIntent(context, intent);
+    }
+    if (intent.state !== 'observed' && intent.state !== 'creating' && intent.state !== 'token-held' && intent.state !== 'revoking') {
+      intent.state = 'creating';
+      saveIntent(context, intent);
+    }
+    let observed = await context.storage.info(intent.storageName);
+    if (!observed && intent.everObserved) throw new Error('PROVIDER_OBJECT_MISSING');
+    if (!observed && retry && !context.state.get<string>(tokenKey)) observed = intent.kind === 'ensure-repo'
+      ? await context.storage.ensureRepo(intent.storageName)
+      : await context.storage.fork(intent.sourceName!, intent.storageName);
+    if (observed && (observed.name !== intent.storageName || (observed.status === 'ready' && !observed.remote))) throw new Error('PROVIDER_IDENTITY_MISMATCH');
+    const returnedToken = observed?.[pendingInitialToken];
+    if (returnedToken && context.state.get<string>(tokenKey) && context.state.get<string>(tokenKey) !== returnedToken) throw new Error('INITIAL_TOKEN_CONFLICT');
+    if (returnedToken) {
+      context.state.put(tokenKey, returnedToken);
+      intent.state = 'token-held';
+      saveIntent(context, intent);
+    }
+    if (observed?.[pendingResultFailure]) throw new Error(observed[pendingResultFailure]);
+    const heldToken = context.state.get<string>(tokenKey);
+    if (observed?.status === 'ready') {
+      if (intent.state !== 'observed') {
+        intent.state = 'revoking';
+        saveIntent(context, intent);
+        if (heldToken) {
+          if (!await context.storage.revokeToken(intent.storageName, heldToken)) throw new Error('INITIAL_TOKEN_REVOCATION_FAILED');
+          context.state.delete(tokenKey);
+        }
+        if (!intent.everObserved) {
+          await (context.storage as typeof context.storage & { [revokeOrphanTokens]?: (name: string) => Promise<void> })[revokeOrphanTokens]?.(intent.storageName);
+        }
+      }
+      intent.state = 'observed';
+      intent.everObserved = true;
+      intent.retryAt = 0;
+      delete intent.error;
+      saveIntent(context, intent);
+      return observed;
+    }
+    intent.polls += 1;
+    if (intent.polls >= 30) {
+      intent.state = 'failed';
+      intent.error = 'Provider did not become ready within 30 status polls';
+      intent.retryAt = 0;
+      saveIntent(context, intent);
+      return observed;
+    }
+    intent.state = heldToken ? 'token-held' : 'creating';
+    intent.retryAt = context.now() + 1000;
+    delete intent.error;
+    saveIntent(context, intent);
+    return observed;
+  } catch {
+    intent.state = 'failed';
+    intent.error = 'Provider operation failed; retry the same request after checking provider state';
+    intent.retryAt = 0;
+    saveIntent(context, intent);
+    return null;
+  }
+}
+
+async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Promise<Response> {
+  requireRole(context.principal, 'owner');
+  const repoId = repoName(body.name);
+  const policy = context.trusted.policies[body.policyId];
+  const profile = context.trusted.profiles[body.profileId];
+  if (!policy || !profile) fail(400, 'UNKNOWN_POLICY_OR_PROFILE', 'Trusted policy and profile are required');
+  let repo = list<Repo>(context, 'catalog:index').find(item => item.repoId === repoId);
+  if (repo && (repo.policyId !== policy.id || repo.profileId !== profile.id)) fail(409, 'REPO_NAME_CONFLICT', 'Repository name belongs to another configuration');
+  if (!repo) {
+    const canonicalStorageName = `concord-r-${crypto.randomUUID()}`;
+    const requestDigest = await digest({ kind: 'ensure-repo', storageName: canonicalStorageName });
+    repo = {
+      repoId, tenantId: context.tenantId, displayName: repoId,
+      canonicalStorageName, defaultBranch: 'main', observedCanonicalOid: null,
+      policyId: policy.id, policyDigest: policy.digest, profileId: profile.id, status: 'provisioning', version: 0,
+    };
+    context.transaction(() => {
+      const current = list<Repo>(context, 'catalog:index');
+      if (current.some(item => item.repoId === repoId)) fail(409, 'REPO_NAME_CONFLICT', 'Repository already exists');
+      repo!.version = versioned(context, 'repo.provisioning', [repoId], { storageName: repo!.canonicalStorageName });
+      context.state.put('catalog:index', [...current, repo!]);
+      saveIntent(context, { kind: 'ensure-repo', storageName: repo!.canonicalStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
+    });
+  }
+  const intent = intents(context)[intentKey('ensure-repo', repo.canonicalStorageName)];
+  if (!intent) fail(503, 'PROVISIONING_INTENT_MISSING', 'Repository provisioning intent missing');
+  await reconcile(context, intent, true);
+  const status = intent.state === 'observed' ? 'ready' : intent.state === 'failed' ? 'blocked' : 'provisioning';
+  if (repo.status !== status) context.transaction(() => {
+    repo!.status = status;
+    repo!.version = versioned(context, `repo.${status}`, [repoId], {});
+    context.state.put('catalog:index', list<Repo>(context, 'catalog:index').map(item => item.repoId === repoId ? repo! : item));
+  });
+  if (status === 'blocked') fail(503, 'PROVISIONING_FAILED', 'Canonical repository provisioning failed; retry the same name');
+  return respond(context, repo, status === 'ready' ? 201 : 202);
+}
+
+async function catalogRepo(context: ModuleContext): Promise<Repo> {
+  const stub = context.env.TENANT_CATALOG.get(context.env.TENANT_CATALOG.idFromName(`tenant:${context.tenantId}`));
+  let cursor: string | null = null;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+    const url = `https://concord.test/v1/repos${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const response = await stub.fetch(new Request(url, { headers: {
+      'x-concord-principal': JSON.stringify(context.principal), 'x-concord-tenant': context.tenantId,
+    } }));
+    if (!response.ok) fail(503, 'CATALOG_UNAVAILABLE', 'Repository catalog unavailable');
+    const envelope = await response.json() as { data: { items: Repo[]; nextCursor: string | null } };
+    const repo = envelope.data.items.find(item => item.repoId === context.repoId);
+    if (repo) {
+      context.state.put('repo', repo);
+      // The local in-process fake stores objects in each DO's SQLite state.
+      // Reconcile its deterministic empty canonical name in the coordinator.
+      if (context.env.CONCORD_MODE === 'local' && context.env.STORAGE_BACKEND === 'fake' && repo.status === 'ready') {
+        if (!await context.storage.info(repo.canonicalStorageName)) {
+          if (context.state.get<boolean>('fake-canonical-materialized')) fail(503, 'PROVIDER_REPO_MISSING', 'Local fake canonical repository disappeared');
+          await context.storage.ensureRepo(repo.canonicalStorageName);
+        }
+        context.state.put('fake-canonical-materialized', true);
+      }
+      return repo;
+    }
+    cursor = envelope.data.nextCursor;
+    if (!cursor) break;
+  }
+  return fail(404, 'REPO_NOT_FOUND', 'Repository not found');
+}
+
+async function repoDetail(context: ModuleContext): Promise<Response> {
+  const repo = await catalogRepo(context);
+  if (repo.status === 'ready') {
+    repo.observedCanonicalOid = await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
+    context.state.put('repo', repo);
+  }
+  return respond(context, repo, repo.status === 'provisioning' ? 202 : 200);
+}
+
+function changeInput(body: CreateChangeBody) {
+  const intentKey = text(body.intentKey, 'intentKey', 128);
+  const intentText = text(body.intentText, 'intentText');
+  const baseOid = body.baseOid === null ? null : oid(body.baseOid);
+  const ref = branch(body.branch);
+  const unitKeys = ids(body.unitKeys, 'unitKeys');
+  const dependencyChangeIds = ids(body.dependencyChangeIds, 'dependencyChangeIds');
+  const attempt = body.attempt === undefined ? 1 : body.attempt;
+  if (!Number.isSafeInteger(attempt) || attempt < 1) fail(400, 'INVALID_ATTEMPT', 'attempt must be a positive integer');
+  return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt };
+}
+
+async function changeCreate(context: ModuleContext, body: CreateChangeBody): Promise<Response> {
+  requireRole(context.principal, 'owner', 'agent');
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  const input = changeInput(body);
+  const all = list<Change>(context, 'changes');
+  const priorIntent = list<Intent>(context, 'intents').find(item => item.intentKey === input.intentKey);
+  if (priorIntent) {
+    const prior = getChange(context, priorIntent.changeId);
+    if (prior.authorId !== context.principal.principalId) fail(409, 'INTENT_OWNED', 'Intent key belongs to another author');
+    if (!sameTask(prior, input)) fail(409, 'INTENT_CONFLICT', 'Intent key was used with different task content');
+    if (!terminal(prior)) {
+      if (body.attempt !== undefined && input.attempt !== priorIntent.attempt) fail(409, 'ATTEMPT_CONFLICT', 'Active intent attempt differs');
+      const pending = intents(context)[intentKey('fork', prior.candidateStorageName)];
+      if (!pending) fail(503, 'PROVISIONING_INTENT_MISSING', 'Candidate fork provisioning intent missing');
+      await reconcile(context, pending, true);
+      const provisioning = intents(context)[intentKey('fork', prior.candidateStorageName)];
+      if (provisioning?.state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Candidate fork provisioning failed; retry the same intent');
+      return respond(context, { ...prior, provisioning }, provisioning?.state === 'observed' ? 200 : 202);
+    }
+    if (body.attempt === undefined || input.attempt !== priorIntent.attempt + 1) fail(409, 'ATTEMPT_REQUIRED', 'Terminal intent needs the next explicit attempt');
+  } else if (input.attempt !== 1) fail(409, 'ATTEMPT_CONFLICT', 'First attempt must be 1');
+  const main = await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
+  if (main === null) {
+    requireRole(context.principal, 'owner');
+    if (input.baseOid !== null) fail(409, 'BASE_MISMATCH', 'Empty repository requires a seed draft');
+  } else {
+    if (input.baseOid === null) fail(409, 'BASE_REQUIRED', 'An initialized repository requires a base OID');
+    if (!await context.storage.readCommit(repo.canonicalStorageName, input.baseOid as string)) fail(422, 'BASE_NOT_FOUND', 'Base commit does not exist');
+  }
+  if (all.filter(change => !terminal(change)).length >= 32) fail(429, 'CHANGE_LIMIT', 'Active change limit reached');
+  const changeId = crypto.randomUUID();
+  const candidateStorageName = `concord-f-${changeId}`;
+  const requestDigest = await digest({ kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName });
+  const change: Change = {
+    changeId, repoId: repo.repoId, authorId: context.principal.principalId, intentKey: input.intentKey,
+    intentText: input.intentText, candidateStorageName, branch: input.branch, baseOid: input.baseOid,
+    headOid: null, revision: 0, unitKeys: input.unitKeys, dependencyChangeIds: input.dependencyChangeIds,
+    status: 'draft', version: 0,
+  };
+  context.transaction(() => {
+    change.version = versioned(context, 'change.draft', [changeId], { candidateStorageName });
+    context.state.put('changes', [...all, change]);
+    context.state.put('intents', [...list<Intent>(context, 'intents').filter(item => item.intentKey !== input.intentKey),
+      { repoId: repo.repoId, intentKey: input.intentKey, changeId, attempt: input.attempt, terminal: false, version: change.version } satisfies Intent]);
+    saveIntent(context, { kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
+  });
+  await reconcile(context, intents(context)[intentKey('fork', candidateStorageName)], true);
+  if (intents(context)[intentKey('fork', candidateStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Candidate fork provisioning failed; retry the same intent');
+  return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', candidateStorageName)] }, intents(context)[intentKey('fork', candidateStorageName)].state === 'observed' ? 201 : 202);
+}
+
+async function registerBranch(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  const storageName = text(body.storageName, 'storageName', 128);
+  const ref = branch(body.ref);
+  const head = oid(body.observedHead);
+  const ownerId = text(body.ownerId, 'ownerId', 64);
+  if (ownerId !== context.principal.principalId) fail(403, 'FORBIDDEN', 'Branch owner must be the caller');
+  const change = list<Change>(context, 'changes').find(item => item.candidateStorageName === storageName && item.authorId === ownerId);
+  if (!change || change.branch !== ref || terminal(change)) return fail(403, 'FORK_NOT_OWNED', 'Branch is outside the caller’s active candidate fork');
+  if (change.status === 'queued' || change.status === 'checking') fail(409, 'CHANGE_FROZEN', 'Candidate branch cannot change during queue or promotion');
+  if ((await context.storage.info(storageName))?.status !== 'ready') fail(409, 'FORK_NOT_READY', 'Candidate fork is not ready');
+  if (await context.storage.resolveRef(storageName, ref) !== head || !await context.storage.readCommit(storageName, head)) fail(422, 'HEAD_NOT_FOUND', 'Candidate ref does not resolve to the supplied commit');
+  const branches = list<Branch>(context, 'branches');
+  const existing = branches.find(item => item.storageName === storageName && item.ref === ref);
+  if (existing && existing.observedHead === head) return respond(context, existing);
+  const record: Branch = { logicalRepoId: repo.repoId, storageName, ref, ownerId, observedHead: head, version: 0 };
+  context.transaction(() => {
+    record.version = versioned(context, 'branch.registered', [change.changeId], { ref, head });
+    context.state.put('branches', [...branches.filter(item => item !== existing), record]);
+    if (existing && existing.observedHead !== head) {
+      change.status = 'draft';
+      change.version = record.version;
+      context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === change.changeId ? change : item));
+      context.state.delete(`review:${change.changeId}`);
+      context.state.delete(`inspection:${change.changeId}`);
+      context.state.delete(`inspection-job:${change.changeId}`);
+      context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
+    }
+  });
+  return respond(context, record, existing ? 200 : 201);
+}
+
+async function gitToken(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  const storageName = text(body.storageName, 'storageName', 128);
+  const scope = body.scope;
+  const ttlSeconds = body.ttlSeconds;
+  if (scope !== 'read' && scope !== 'write') fail(400, 'INVALID_SCOPE', 'Scope must be read or write');
+  if (!Number.isInteger(ttlSeconds) || Number(ttlSeconds) < 60 || Number(ttlSeconds) > 600) fail(400, 'INVALID_TTL', 'Token TTL must be 60 to 600 seconds');
+  const own = list<Change>(context, 'changes').some(item => item.candidateStorageName === storageName && item.authorId === context.principal.principalId && !terminal(item));
+  if (storageName === repo.canonicalStorageName) {
+    if (scope !== 'read') fail(403, 'CANONICAL_WRITE_FORBIDDEN', 'Canonical write tokens are reserved for the promoter');
+  } else if (!own) fail(403, 'FORK_NOT_OWNED', 'The caller does not own this candidate fork');
+  const storageRepo = await context.storage.info(storageName);
+  if (storageRepo?.status !== 'ready') fail(409, 'STORAGE_NOT_READY', 'Storage is not ready');
+  const mintKey = `mint-token:${storageName}`;
+  const prior = context.state.get<string>(mintKey);
+  if (prior) {
+    if (!await context.storage.revokeToken(storageName, prior)) fail(503, 'TOKEN_REVOCATION_FAILED', 'Token cleanup is pending');
+    context.state.delete(mintKey);
+  }
+  const token = await context.storage.mintToken(storageName, scope as 'read' | 'write', Number(ttlSeconds));
+  if (token[pendingResultFailure]) {
+    context.state.put(mintKey, token.secret);
+    if (await context.storage.revokeToken(storageName, token.secret)) context.state.delete(mintKey);
+    fail(503, 'TOKEN_RESULT_INVALID', 'Token provider response was invalid');
+  }
+  return respond(context, { storageName, remote: storageRepo!.remote, scope, ...token });
+}
+
+async function publish(context: ModuleContext, changeId: string, body: Record<string, unknown>): Promise<Response> {
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  const change = getChange(context, changeId);
+  ownChange(context, change);
+  if (change.status !== 'draft' && change.status !== 'ready' && change.status !== 'blocked') fail(409, 'CHANGE_FROZEN', 'Change is frozen or terminal');
+  const baseOid = body.baseOid === null ? null : oid(body.baseOid);
+  const headOid = oid(body.headOid);
+  const ref = branch(body.branch);
+  const unitKeys = ids(body.unitKeys, 'unitKeys');
+  if (!body.leaseFences || typeof body.leaseFences !== 'object' || Array.isArray(body.leaseFences)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must be a map');
+  const leaseFences = body.leaseFences as Record<string, unknown>;
+  if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');
+  if (baseOid === null || change.baseOid === null) fail(409, 'SEED_REQUIRES_BOOTSTRAP', 'Seed drafts use owner bootstrap');
+  if (ref !== change.branch) fail(409, 'BRANCH_MISMATCH', 'Change branch differs');
+  if (unitKeys.some(key => !context.trusted.policies[repo.policyId]?.units[key])) fail(422, 'UNKNOWN_UNIT', 'Unit key is not in the trusted policy');
+  const registered = list<Branch>(context, 'branches').find(item => item.storageName === change.candidateStorageName && item.ref === ref && item.ownerId === change.authorId);
+  if (!registered || registered.observedHead !== headOid) fail(409, 'BRANCH_NOT_REGISTERED', 'Register the current fork branch before publishing');
+  if (await context.storage.resolveRef(change.candidateStorageName, ref) !== headOid) fail(409, 'HEAD_MOVED', 'Registered candidate ref changed');
+  const head = await context.storage.readCommit(change.candidateStorageName, headOid);
+  if (!head) fail(422, 'HEAD_NOT_FOUND', 'Head commit does not exist');
+  if (!await context.storage.readCommit(repo.canonicalStorageName, baseOid as string)) fail(422, 'BASE_NOT_FOUND', 'Base commit does not exist');
+  if (change.headOid === headOid && change.baseOid === baseOid && JSON.stringify(change.unitKeys) === JSON.stringify(unitKeys)) {
+    const pending = context.state.get<InspectionPending>(`inspection:${changeId}`);
+    if (pending && !pending.scheduled) {
+      const pendingJob = context.state.get<InspectCandidateJob>(`inspection-job:${changeId}`);
+      if (!pendingJob) return fail(503, 'INSPECTION_JOB_MISSING', 'Inspection job intent missing');
+      return scheduleInspection(context, change, pendingJob);
+    }
+    return respond(context, change);
+  }
+  const profile = context.trusted.profiles[repo.profileId];
+  const policy = context.trusted.policies[repo.policyId];
+  const remote = (await context.storage.info(change.candidateStorageName))?.remote;
+  const canonicalRemote = (await context.storage.info(repo.canonicalStorageName))?.remote;
+  if (!remote || !canonicalRemote) fail(409, 'STORAGE_NOT_READY', 'Storage remote is not ready');
+  const revision = change.revision + 1;
+  const jobId = crypto.randomUUID();
+  const job: InspectCandidateJob = {
+    kind: 'inspect-candidate', jobId, repoId: repo.repoId, changeId, revision,
+    candidate: { changeId, revision, baseOid: baseOid as string, headOid, storageName: change.candidateStorageName, ref },
+    inputDigest: policy.digest, generation: revision, profileDigest: profile.digest,
+    policyId: policy.id, policyDigest: policy.digest, unitPolicy: policy,
+    expectedRefs: { [change.candidateStorageName]: headOid, [repo.canonicalStorageName]: baseOid },
+    storageRemotes: { [change.candidateStorageName]: remote!, [repo.canonicalStorageName]: canonicalRemote! },
+    checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
+    toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+    timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
+    state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null, version: 1,
+  };
+  job.inputDigest = await jobDigest(job);
+  context.transaction(() => {
+    change.baseOid = baseOid;
+    change.headOid = headOid;
+    change.unitKeys = unitKeys;
+    change.revision = revision;
+    change.status = 'draft';
+    change.version = versioned(context, 'change.published', [changeId], { revision, headOid, baseOid });
+    context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === changeId ? change : item));
+    context.state.put(`inspection:${changeId}`, { changeId, revision, jobId, inputDigest: job.inputDigest, sourceTreeOid: head!.treeOid, headOid, baseOid: baseOid as string, unitKeys, scheduled: false } satisfies InspectionPending);
+    context.state.put(`inspection-job:${changeId}`, job);
+    context.state.delete(`review:${changeId}`);
+    context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
+  });
+  return scheduleInspection(context, change, job);
+}
+
+async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<Response> {
+  requireRole(context.principal, 'owner');
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  if (body.policyId !== repo.policyId || body.profileId !== repo.profileId) fail(409, 'CONFIG_MISMATCH', 'Bootstrap policy/profile differ from repository');
+  if (await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main')) fail(409, 'ALREADY_INITIALIZED', 'Canonical main already exists');
+  const seedStorageName = text(body.seedStorageName, 'seedStorageName', 128);
+  const seedRef = branch(body.seedRef);
+  const headOid = oid(body.headOid);
+  const change = list<Change>(context, 'changes').find(item => item.candidateStorageName === seedStorageName && item.baseOid === null && item.authorId === context.principal.principalId);
+  if (!change) return fail(403, 'SEED_NOT_OWNED', 'Seed must be an owner draft fork');
+  if (change.status !== 'draft') fail(409, 'SEED_NOT_OPEN', 'Seed must be an open draft');
+  const registered = list<Branch>(context, 'branches').find(item => item.storageName === seedStorageName && item.ref === seedRef && item.observedHead === headOid);
+  if (!registered || await context.storage.resolveRef(seedStorageName, seedRef) !== headOid) fail(422, 'SEED_REF_MISMATCH', 'Registered seed ref does not match');
+  const head = await context.storage.readCommit(seedStorageName, headOid);
+  if (!head || head.parents.length !== 0) fail(422, 'SEED_NOT_ROOT', 'Seed must be an existing root commit');
+  const policy = context.trusted.policies[repo.policyId];
+  const profile = context.trusted.profiles[repo.profileId];
+  const seedRemote = (await context.storage.info(seedStorageName))?.remote;
+  const canonicalRemote = (await context.storage.info(repo.canonicalStorageName))?.remote;
+  if (!seedRemote || !canonicalRemote) fail(409, 'STORAGE_NOT_READY', 'Storage remote is not ready');
+  const existing = context.state.get<BootstrapPending>('bootstrap');
+  if (existing) {
+    if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
+    if (existing.status === 'requested') return respond(context, { jobId: existing.jobId, state: 'requested' }, 202);
+    if (existing.status === 'blocked') {
+      const pendingJob = context.state.get<ValidateStackJob>('bootstrap-job');
+      if (!pendingJob) return fail(503, 'BOOTSTRAP_JOB_MISSING', 'Bootstrap job intent missing');
+      return scheduleBootstrap(context, existing, pendingJob);
+    }
+  }
+  const jobId = existing?.jobId ?? crypto.randomUUID();
+  const scratchStorageName = existing?.scratchStorageName ?? `concord-s-${jobId}`;
+  if (!existing) {
+    const requestDigest = await digest({ kind: 'ensure-repo', storageName: scratchStorageName });
+    context.transaction(() => {
+      if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
+      context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
+      saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
+    });
+  }
+  const scratchIntent = intents(context)[intentKey('ensure-repo', scratchStorageName)];
+  if (!scratchIntent) fail(503, 'PROVISIONING_INTENT_MISSING', 'Scratch provisioning intent missing');
+  const scratch = await reconcile(context, scratchIntent, true);
+  if (intents(context)[intentKey('ensure-repo', scratchStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Scratch provisioning failed; retry the same request');
+  if (scratchIntent.state !== 'observed' || !scratch) return respond(context, { jobId, state: 'provisioning' }, 202);
+  const scratchRemote = scratch.remote;
+  const job: ValidateStackJob = {
+    kind: 'validate-stack', bootstrap: true, ownerAuthorized: true, jobId, repoId: repo.repoId,
+    canonicalBaseOid: null, candidates: [{ changeId: change.changeId, revision: 1, baseOid: null, headOid, seedStorageName, seedRef }],
+    stackId: crypto.randomUUID(), scratchStorageName, scratchRef: 'refs/heads/bootstrap',
+    inputDigest: policy.digest, generation: 1, profileDigest: profile.digest, policyId: policy.id,
+    policyDigest: policy.digest, unitPolicy: policy, expectedRefs: { [seedStorageName]: headOid, [repo.canonicalStorageName]: null, [scratchStorageName]: null },
+    storageRemotes: { [seedStorageName]: seedRemote!, [repo.canonicalStorageName]: canonicalRemote!, [scratchStorageName]: scratchRemote },
+    checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
+    toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+    timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
+    state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null, version: 1,
+  };
+  job.inputDigest = await jobDigest(job);
+  if (await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main')) fail(409, 'ALREADY_INITIALIZED', 'Canonical main appeared');
+  context.transaction(() => {
+    const pending = context.state.get<BootstrapPending>('bootstrap');
+    if (!pending || pending.jobId !== jobId || pending.status !== 'provisioning') fail(409, 'BOOTSTRAP_PENDING', 'Bootstrap provisioning was superseded');
+    context.state.put('bootstrap', { ...pending!, status: 'requested' } satisfies BootstrapPending);
+    context.state.put('bootstrap-job', job);
+    versioned(context, 'repo.bootstrap.requested', [repo.repoId, change.changeId], { headOid, jobId });
+  });
+  return scheduleBootstrap(context, context.state.get<BootstrapPending>('bootstrap')!, job);
+}
+
+function close(context: ModuleContext, changeId: string): Response {
+  const change = getChange(context, changeId);
+  ownChange(context, change);
+  if (context.state.get<BootstrapPending>('bootstrap')?.changeId === changeId) fail(409, 'BOOTSTRAP_FROZEN', 'Seed draft has a pending bootstrap request');
+  if (!['draft', 'ready'].includes(change.status)) fail(409, 'CHANGE_FROZEN', 'Only unfrozen draft or ready changes can close');
+  context.transaction(() => {
+    change.status = 'closed';
+    change.version = versioned(context, 'change.closed', [changeId], {});
+    context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === changeId ? change : item));
+    context.state.put('intents', list<Intent>(context, 'intents').map(item => item.changeId === changeId ? { ...item, terminal: true, version: change.version } : item));
+    context.state.delete(`inspection:${changeId}`);
+    context.state.delete(`inspection-job:${changeId}`);
+    context.state.delete(`review:${changeId}`);
+    context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
+  });
+  return respond(context, change);
+}
+
+const sha256Words = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+function evidenceHash(value: string): string {
+  const bytes = [...new TextEncoder().encode(value)];
+  const bitLength = BigInt(bytes.length) * 8n;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let shift = 56n; shift >= 0n; shift -= 8n) bytes.push(Number(bitLength >> shift & 255n));
+  const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const rotate = (word: number, count: number) => word >>> count | word << 32 - count;
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const words = new Array<number>(64);
+    for (let i = 0; i < 16; i++) words[i] = (bytes[offset + i * 4] << 24 | bytes[offset + i * 4 + 1] << 16 |
+      bytes[offset + i * 4 + 2] << 8 | bytes[offset + i * 4 + 3]) >>> 0;
+    for (let i = 16; i < 64; i++) {
+      const a = words[i - 15], b = words[i - 2];
+      words[i] = (words[i - 16] + (rotate(a, 7) ^ rotate(a, 18) ^ a >>> 3) + words[i - 7] +
+        (rotate(b, 17) ^ rotate(b, 19) ^ b >>> 10)) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let i = 0; i < 64; i++) {
+      const one = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + (e & f ^ ~e & g) + sha256Words[i] + words[i]) >>> 0;
+      const two = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + (a & b ^ a & c ^ b & c)) >>> 0;
+      h = g; g = f; f = e; e = (d + one) >>> 0; d = c; c = b; b = a; a = (one + two) >>> 0;
+    }
+    [a, b, c, d, e, f, g, h].forEach((word, i) => { state[i] = (state[i] + word) >>> 0; });
+  }
+  return 'sha256:' + state.map(word => word.toString(16).padStart(8, '0')).join('');
+}
+function inspectRevision(context: ModuleContext, result: InspectionResult) {
+  if (!result || !context.state) return unavailableGate();
+  const { resultDigest, ...preimage } = result;
+  const pending = list<Change>(context, 'changes').map(change => context.state.get<InspectionPending>(`inspection:${change.changeId}`)).find(value => value?.jobId === result.jobId);
+  if (!pending) return { status: 'blocked' as const, version: context.version(), code: 'UNKNOWN_INSPECTION', reason: 'No matching pending inspection', evidenceIds: [] };
+  const change = getChange(context, pending.changeId);
+  if (change.status !== 'draft' && change.status !== 'ready') return { status: 'blocked' as const, version: context.version(), code: 'CHANGE_FROZEN', reason: 'Change is no longer open for inspection', evidenceIds: [result.jobId] };
+  const repo = context.state.get<Repo>('repo');
+  const policy = repo && context.trusted.policies[repo.policyId];
+  const profile = repo && context.trusted.profiles[repo.profileId];
+  const valid = result.kind === 'inspect-candidate' && result.outcome === 'PASS' && result.jobId === pending.jobId &&
+    pending.scheduled &&
+    result.inputDigest === pending.inputDigest && result.observedHeadOid === pending.headOid &&
+    result.sourceTreeOid === pending.sourceTreeOid && !!result.reviewManifestDigest && /^sha256:[a-f0-9]{64}$/.test(result.reviewManifestDigest) &&
+    !!result.resultDigest && result.resultDigest === evidenceHash(stableJson(preimage)) &&
+    !!result.reviewManifest && result.reviewManifest.coverage === 'complete' && !!policy && !!profile &&
+    result.reviewManifestDigest === evidenceHash(stableJson(result.reviewManifest)) &&
+    result.checkerDigest === policy.checkerDigest && result.oracleDigest === profile.oracleDigest &&
+    result.toolchainDigest === profile.toolchainDigest && result.environmentDigest === profile.environmentDigest &&
+    result.reviewManifest.policyDigest === policy.digest && result.reviewManifest.checkerDigest === policy.checkerDigest &&
+    result.reviewManifest.oracleDigest === profile.oracleDigest && result.reviewManifest.toolchainDigest === profile.toolchainDigest &&
+    result.unitKeys.every(key => key in policy.units) &&
+    JSON.stringify([...new Set(result.reviewManifest.changedUnits.map(unit => unit.unitKey))].sort()) === JSON.stringify([...result.unitKeys].sort()) &&
+    JSON.stringify([...result.unitKeys].sort()) === JSON.stringify([...pending.unitKeys].sort()) &&
+    change.revision === pending.revision && change.headOid === pending.headOid;
+  if (!valid) return { status: 'blocked' as const, version: context.version(), code: 'INSPECTION_MISMATCH', reason: 'Inspection evidence is incomplete or stale', evidenceIds: [result.jobId] };
+  if (change.status === 'ready') {
+    if (context.state.get<string>(`review:${change.changeId}`) !== result.reviewManifestDigest) return { status: 'blocked' as const, version: context.version(), code: 'REVIEW_EVIDENCE_CONFLICT', reason: 'Ready revision already has different evidence', evidenceIds: [result.jobId] };
+    return { status: 'eligible' as const, version: context.version(), evidenceIds: [result.jobId], value: { changeId: change.changeId, revision: change.revision, reviewManifestDigest: result.reviewManifestDigest! } };
+  }
+  context.transaction(() => {
+    change.status = 'ready';
+    change.version = versioned(context, 'change.ready', [change.changeId], { revision: change.revision, jobId: result.jobId });
+    context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === change.changeId ? change : item));
+    context.state.put(`review:${change.changeId}`, result.reviewManifestDigest);
+  });
+  return { status: 'eligible' as const, version: context.version(), evidenceIds: [result.jobId], value: { changeId: change.changeId, revision: change.revision, reviewManifestDigest: result.reviewManifestDigest! } };
+}
+
+export const repos: FeatureModule = {
+  name: 'repos', migrations: [],
+  routes: [
+    { method: 'POST', pattern: /^\/v1\/repos$/, handle: (context, _request, _match, body) => catalogCreate(context, body as unknown as CreateRepoBody) },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)$/, handle: context => repoDetail(context) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/bootstrap$/, handle: (context, _request, _match, body) => bootstrap(context, body as unknown as BootstrapBody) },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Branch>(context, 'branches'), request)); } },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: (context, _request, _match, body) => registerBranch(context, body as Record<string, unknown>) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/git-token$/, handle: (context, _request, _match, body) => gitToken(context, body as Record<string, unknown>) },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes'), request)); } },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },
+  ],
+  snapshot: context => ({ repo: context.state.get<Repo>('repo'), branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes'), provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
+  nextDeadline: context => Object.values(intents(context)).filter(activeProvisioning).reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
+  onAlarm: async context => {
+    const all = Object.values(intents(context)).filter(intent => activeProvisioning(intent) && intent.retryAt <= context.now());
+    for (const intent of all) {
+      await reconcile(context, intent, false);
+      if (context.repoId === '') {
+        const repos = list<Repo>(context, 'catalog:index');
+        const repo = repos.find(item => item.canonicalStorageName === intent.storageName);
+        const status = intent.state === 'observed' ? 'ready' : intent.state === 'failed' ? 'blocked' : 'provisioning';
+        if (repo && repo.status !== status) {
+          repo.status = status;
+          repo.version = versioned(context, `repo.${status}`, [repo.repoId], {});
+          context.state.put('catalog:index', repos);
+        }
+      }
+    }
+  },
+  hooks: { 'repos.inspectRevision': inspectRevision, },
+  changeView: (context, changeId) => {
+    const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
+    const repo = context.state.get<Repo>('repo');
+    if (!change || !repo) return { status: 'blocked', version: context.version(), code: 'CHANGE_NOT_FOUND', reason: 'Change not found', evidenceIds: [] };
+    return { status: 'eligible', version: context.version(), evidenceIds: [changeId], value: {
+      authorId: change.authorId, headOid: change.headOid, revision: change.revision,
+      status: change.status, unitKeys: change.unitKeys, frozen: !['draft', 'ready'].includes(change.status) || context.state.get<BootstrapPending>('bootstrap')?.changeId === changeId,
+      baseOid: change.baseOid, candidateStorageName: change.candidateStorageName, branch: change.branch,
+      dependencyChangeIds: change.dependencyChangeIds, canonicalStorageName: repo.canonicalStorageName,
+    } };
+  },
+};

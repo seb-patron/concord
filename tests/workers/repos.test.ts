@@ -1,0 +1,833 @@
+import { env } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
+import { describe, expect, it, vi } from 'vitest';
+import worker from '../../src/worker';
+import type { TenantCatalog } from '../../src/catalog';
+import type { RepoCoordinator } from '../../src/coordinator';
+import type { InspectionResult, ModuleContext } from '../../src/contracts';
+import { repos } from '../../src/features/repos';
+import { runners } from '../../src/features/runners';
+import { digest as canonicalDigest } from '../../src/http';
+import { ids, pendingInitialToken, type ProvisioningIntent } from '../../src/repos/model';
+import { FakeStorage } from '../../src/storage/fake';
+import { artifactsStorage } from '../../src/storage/artifacts';
+import { sqlState } from '../../src/state';
+import { apiRequest, mutation, responseBody } from '../helpers';
+
+const fetchApi = (request: Request) => worker.fetch(request, env);
+const a = 'a'.repeat(40);
+const b = 'b'.repeat(40);
+const c = 'c'.repeat(40);
+const d = 'd'.repeat(40);
+const digest = `sha256:${'0'.repeat(64)}` as const;
+
+async function create(name: string) {
+  const response = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, `create-${name}`));
+  expect(response.status).toBe(201);
+  return (await responseBody(response)).data;
+}
+
+async function fake(name: string, action: (provider: FakeStorage) => void) {
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
+  await runInDurableObject(stub, (_instance, state) => action(new FakeStorage(sqlState(state.storage.sql))));
+}
+
+function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensure-repo' | 'fork') {
+  const state = (storage as unknown as { state: { get: <T>(key: string) => T | null } }).state;
+  const intents = state.get<Record<string, { storageName: string }>>('module:repos:provisioning');
+  expect(intents?.[`${kind}:${name}`]?.storageName).toBe(name);
+  return state;
+}
+
+describe('repository and change lifecycle', () => {
+  it('accepts trusted policy unit key syntax used by the demo', () => {
+    expect(ids(['file:dispatch.mjs', 'row:families:gamma'], 'unitKeys')).toEqual(['file:dispatch.mjs', 'row:families:gamma']);
+  });
+
+  it('creates a visible repo, allocates an owner seed fork, and records one bootstrap request', async () => {
+    const repo = await create('seed_case');
+    expect(repo).toMatchObject({ repoId: 'seed_case', status: 'ready', observedCanonicalOid: null });
+    const listing = await fetchApi(apiRequest('/v1/repos'));
+    expect((await responseBody(listing)).data.items).toContainEqual(expect.objectContaining({ repoId: 'seed_case' }));
+    const detail = await fetchApi(apiRequest('/v1/repos/seed_case'));
+    expect((await responseBody(detail)).data.observedCanonicalOid).toBeNull();
+    expect((await fetchApi(mutation('/v1/repos/seed_case/changes', {
+      intentKey: 'seed', intentText: 'first commit', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'agent-seed', 'local-agent-a'))).status).toBe(403);
+    const created = await fetchApi(mutation('/v1/repos/seed_case/changes', {
+      intentKey: 'seed', intentText: 'first commit', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'seed-change'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    expect(change).toMatchObject({ status: 'draft', revision: 0, baseOid: null, authorId: 'owner' });
+    expect((await fetchApi(mutation('/v1/repos/seed_case/git-token', {
+      expectedVersion: 1, storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 60,
+    }, 'wrong-token', 'local-agent-a'))).status).toBe(403);
+    const token = await fetchApi(mutation('/v1/repos/seed_case/git-token', {
+      expectedVersion: 1, storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 60,
+    }, 'owner-token'));
+    expect(token.status).toBe(200);
+    expect((await responseBody(token)).data.secret).toMatch(/^fake-token:/);
+    expect((await fetchApi(mutation('/v1/repos/seed_case/git-token', {
+      expectedVersion: 1, storageName: repo.canonicalStorageName, scope: 'write', ttlSeconds: 60,
+    }, 'canonical-token'))).status).toBe(403);
+    await fake('seed_case', provider => {
+      provider.putCommit(change.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, a)).toBe(true);
+    });
+    const registered = await fetchApi(mutation('/v1/repos/seed_case/branches', {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: a, ownerId: 'owner',
+    }, 'register-seed'));
+    expect(registered.status).toBe(201);
+    const bootstrapBody = { expectedVersion: 2, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a, policyId: 'local-demo', profileId: 'local-demo' };
+    const bootstrap = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', bootstrapBody, 'bootstrap-seed'));
+    expect(bootstrap.status).toBe(409);
+    expect((await responseBody(bootstrap)).error.code).toBe('INVALID_JOB');
+    const snapshot = await fetchApi(apiRequest('/v1/repos/seed_case/snapshot'));
+    expect((await responseBody(snapshot)).data.projections.repos.bootstrap).toMatchObject({ changeId: change.changeId, headOid: a, status: 'blocked' });
+    const retry = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', { ...bootstrapBody, expectedVersion: 3 }, 'bootstrap-retry'));
+    expect(retry.status).toBe(409);
+    expect((await responseBody(retry)).error.code).toBe('INVALID_JOB');
+    const secondSeed = await fetchApi(mutation('/v1/repos/seed_case/changes', {
+      intentKey: 'seed-two', intentText: 'another initializer', baseOid: null, branch: 'refs/heads/seed-two', unitKeys: [], dependencyChangeIds: [],
+    }, 'seed-two-change'));
+    expect(secondSeed.status).toBe(201);
+    const rival = (await responseBody(secondSeed)).data;
+    await fake('seed_case', provider => {
+      provider.putCommit(rival.candidateStorageName, { oid: c, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(rival.candidateStorageName, 'refs/heads/seed-two', null, c);
+    });
+    const rivalBranch = await fetchApi(mutation('/v1/repos/seed_case/branches', {
+      expectedVersion: 4, storageName: rival.candidateStorageName, ref: 'refs/heads/seed-two', observedHead: c, ownerId: 'owner',
+    }, 'register-rival'));
+    expect(rivalBranch.status).toBe(201);
+    const second = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', {
+      expectedVersion: 5, seedStorageName: rival.candidateStorageName, seedRef: 'refs/heads/seed-two', headOid: c,
+      policyId: 'local-demo', profileId: 'local-demo',
+    }, 'second-bootstrap'));
+    expect(second.status).toBe(409);
+    expect((await responseBody(second)).error.code).toBe('BOOTSTRAP_PENDING');
+  });
+
+  it('records only one bootstrap request from two concurrent owner initializers', async () => {
+    await create('bootstrap_race_case');
+    await fetchApi(apiRequest('/v1/repos/bootstrap_race_case'));
+    const drafts: Array<{ changeId: string; candidateStorageName: string; ref: string }> = [];
+    for (const [key, ref] of [['first', 'refs/heads/first'], ['second', 'refs/heads/second']] as const) {
+      const response = await fetchApi(mutation('/v1/repos/bootstrap_race_case/changes', {
+        intentKey: key, intentText: `seed ${key}`, baseOid: null, branch: ref, unitKeys: [], dependencyChangeIds: [],
+      }, `draft-${key}`));
+      expect(response.status).toBe(201);
+      drafts.push({ ...(await responseBody(response)).data, ref });
+    }
+    await fake('bootstrap_race_case', provider => {
+      for (const [index, draft] of drafts.entries()) {
+        const head = index === 0 ? a : c;
+        provider.putCommit(draft.candidateStorageName, { oid: head, treeOid: b, parents: [] });
+        provider.conditionalUpdateRef(draft.candidateStorageName, draft.ref, null, head);
+      }
+    });
+    for (const [index, draft] of drafts.entries()) {
+      const response = await fetchApi(mutation('/v1/repos/bootstrap_race_case/branches', {
+        expectedVersion: 2 + index, storageName: draft.candidateStorageName, ref: draft.ref,
+        observedHead: index === 0 ? a : c, ownerId: 'owner',
+      }, `branch-${index}`));
+      expect(response.status).toBe(201);
+    }
+    const responses = await Promise.all(drafts.map((draft, index) => fetchApi(mutation('/v1/repos/bootstrap_race_case/bootstrap', {
+      expectedVersion: 4, seedStorageName: draft.candidateStorageName, seedRef: draft.ref,
+      headOid: index === 0 ? a : c, policyId: 'local-demo', profileId: 'local-demo',
+    }, `race-${index}`))));
+    expect(responses.map(response => response.status).sort()).toEqual([409, 409]);
+    expect((await Promise.all(responses.map(response => responseBody(response)))).map(body => body.error.code).sort()).toEqual(['INVALID_JOB', 'STALE_VERSION']);
+    const snapshot = await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/snapshot'));
+    const bootstrap = (await responseBody(snapshot)).data.projections.repos.bootstrap;
+    expect(drafts.map(draft => draft.changeId)).toContain(bootstrap.changeId);
+  });
+
+  it('keeps one scratch intent and job while bootstrap storage is provisioning', async () => {
+    const repoId = 'slow_scratch_case';
+    await create(repoId);
+    await fetchApi(apiRequest(`/v1/repos/${repoId}`));
+    const created = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'seed', intentText: 'initial tree', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'slow-scratch-change'));
+    const change = (await responseBody(created)).data;
+    await fake(repoId, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, a);
+    });
+    expect((await fetchApi(mutation(`/v1/repos/${repoId}/branches`, {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: a, ownerId: 'owner',
+    }, 'slow-scratch-branch'))).status).toBe(201);
+
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const names: string[] = [];
+    let ready = false;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      if (name.startsWith('concord-s-')) {
+        const state = provisioningAtProvider(this, name, 'ensure-repo');
+        expect(state.get<{ jobId: string; scratchStorageName: string; status: string }>('module:repos:bootstrap'))
+          .toMatchObject({ scratchStorageName: name, jobId: name.slice('concord-s-'.length), status: 'provisioning' });
+        names.push(name);
+      }
+      const result = await originalEnsure.call(this, name);
+      return name.startsWith('concord-s-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const result = await originalInfo.call(this, name);
+      return result && name.startsWith('concord-s-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    try {
+      const body = { expectedVersion: 2, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a,
+        policyId: 'local-demo', profileId: 'local-demo' };
+      const first = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-first'));
+      expect(first.status).toBe(202);
+      const pending = (await responseBody(first)).data;
+      expect(pending.state).toBe('provisioning');
+      const second = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-second'));
+      expect(second.status).toBe(202);
+      expect((await responseBody(second)).data).toEqual(pending);
+      const snapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos;
+      expect(snapshot.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'provisioning' });
+      expect(snapshot.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'creating' }));
+      expect(names).toEqual([`concord-s-${pending.jobId}`]);
+      ready = true;
+      const third = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-ready'));
+      expect(third.status).toBe(409);
+      expect((await responseBody(third)).error.code).toBe('INVALID_JOB');
+      const finished = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos;
+      expect(finished.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'blocked' });
+      expect(finished.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'observed' }));
+      expect(names).toEqual([`concord-s-${pending.jobId}`]);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it('rejects a closed owner seed even when its registered root ref remains current', async () => {
+    const repoId = 'closed_seed_case';
+    await create(repoId);
+    const created = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'seed', intentText: 'initial tree', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'closed-seed-create'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    await fake(repoId, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, a)).toBe(true);
+    });
+    const registered = await fetchApi(mutation(`/v1/repos/${repoId}/branches`, {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: a, ownerId: 'owner',
+    }, 'closed-seed-branch'));
+    expect(registered.status).toBe(201);
+    const closed = await fetchApi(mutation(`/v1/repos/${repoId}/changes/${change.changeId}/close`, { expectedVersion: 2 }, 'closed-seed-close'));
+    expect(closed.status).toBe(200);
+    expect((await responseBody(closed)).data.status).toBe('closed');
+    const bootstrap = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, {
+      expectedVersion: 3, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a,
+      policyId: 'local-demo', profileId: 'local-demo',
+    }, 'closed-seed-bootstrap'));
+    expect(bootstrap.status).toBe(409);
+    expect((await responseBody(bootstrap)).error.code).toBe('SEED_NOT_OPEN');
+    const snapshot = await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`));
+    expect((await responseBody(snapshot)).data.projections.repos.bootstrap).toBeNull();
+  });
+
+  it('deduplicates changed-base tasks, verifies refs and objects, and leaves inspection pending when runner is unavailable', async () => {
+    const repo = await create('publish_case');
+    await fetchApi(apiRequest('/v1/repos/publish_case'));
+    await fake('publish_case', provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.putCommit(repo.canonicalStorageName, { oid: c, treeOid: b, parents: [a] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const lateBootstrap = await fetchApi(mutation('/v1/repos/publish_case/bootstrap', {
+      expectedVersion: 0, seedStorageName: 'unknown', seedRef: 'refs/heads/seed', headOid: b,
+      policyId: 'local-demo', profileId: 'local-demo',
+    }, 'late-bootstrap'));
+    expect(lateBootstrap.status).toBe(409);
+    expect((await responseBody(lateBootstrap)).error.code).toBe('ALREADY_INITIALIZED');
+    const input = { intentKey: 'task', intentText: 'edit row', baseOid: a, branch: 'refs/heads/candidate', unitKeys: [], dependencyChangeIds: [] };
+    const created = await fetchApi(mutation('/v1/repos/publish_case/changes', input, 'change-one', 'local-agent-a'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    const repeated = await fetchApi(mutation('/v1/repos/publish_case/changes', { ...input, baseOid: c }, 'change-two', 'local-agent-a'));
+    expect((await responseBody(repeated)).data.changeId).toBe(change.changeId);
+    const repeatedWithMissingBase = await fetchApi(mutation('/v1/repos/publish_case/changes', { ...input, baseOid: d }, 'change-three', 'local-agent-a'));
+    expect((await responseBody(repeatedWithMissingBase)).data.changeId).toBe(change.changeId);
+    expect((await fetchApi(mutation('/v1/repos/publish_case/changes', { ...input, intentText: 'another task' }, 'change-conflict', 'local-agent-a'))).status).toBe(409);
+    expect((await fetchApi(mutation('/v1/repos/publish_case/git-token', {
+      expectedVersion: 1, storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 60,
+    }, 'other-token', 'local-agent-b'))).status).toBe(403);
+    const missing = await fetchApi(mutation('/v1/repos/publish_case/branches', {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: input.branch, observedHead: b, ownerId: 'agent-a',
+    }, 'missing-head', 'local-agent-a'));
+    expect(missing.status).toBe(422);
+    await fake('publish_case', provider => {
+      provider.putCommit(change.candidateStorageName, { oid: b, treeOid: c, parents: [a] });
+      provider.conditionalUpdateRef(change.candidateStorageName, input.branch, null, b);
+    });
+    const registered = await fetchApi(mutation('/v1/repos/publish_case/branches', {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: input.branch, observedHead: b, ownerId: 'agent-a',
+    }, 'register-head', 'local-agent-a'));
+    expect(registered.status).toBe(201);
+    const badBase = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, {
+      expectedVersion: 2, baseOid: d, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {},
+    }, 'bad-base', 'local-agent-a'));
+    expect(badBase.status).toBe(422);
+    const unknownUnit = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, {
+      expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: ['file:unknown.mjs'], leaseFences: { 'file:unknown.mjs': 1 },
+    }, 'unknown-unit', 'local-agent-a'));
+    expect(unknownUnit.status).toBe(422);
+    const publishBody = { expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {} };
+    const publish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, publishBody, 'publish-one', 'local-agent-a'));
+    expect(publish.status).toBe(409);
+    expect((await responseBody(publish)).error.code).toBe('INVALID_JOB');
+    const detail = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
+    expect((await responseBody(detail)).data).toMatchObject({ revision: 1, headOid: b, status: 'draft' });
+    const repeatPublish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-again', 'local-agent-a'));
+    expect(repeatPublish.status).toBe(409);
+    expect((await responseBody(repeatPublish)).error.code).toBe('INVALID_JOB');
+    const scheduleOriginal = runners.hooks['runners.schedule'];
+    runners.hooks['runners.schedule'] = (context, job) => ({ status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } });
+    try {
+      const scheduled = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-scheduled', 'local-agent-a'));
+      expect(scheduled.status).toBe(202);
+      expect((await responseBody(scheduled)).data.revision).toBe(1);
+      const identical = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-identical', 'local-agent-a'));
+      expect(identical.status).toBe(200);
+      expect((await responseBody(identical)).data.revision).toBe(1);
+    } finally {
+      runners.hooks['runners.schedule'] = scheduleOriginal;
+    }
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:publish_case'));
+    let inspection!: InspectionResult;
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+        tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      }, 'publish_case');
+      const pending = context.state.get<{ jobId: string; inputDigest: string }>(`inspection:${change.changeId}`)!;
+      const reviewManifest = {
+        coverage: 'complete' as const, changedUnits: [], dependencyScope: [], policyVersion: 1,
+        policyDigest: digest, checkerDigest: digest, oracleDigest: digest, toolchainDigest: digest,
+      };
+      inspection = {
+        kind: 'inspect-candidate', jobId: pending.jobId, attempt: 1, inputDigest: pending.inputDigest as typeof digest,
+        fence: 1, sourceTreeOid: c, checkerDigest: digest, toolchainDigest: digest, oracleDigest: digest,
+        environmentDigest: digest, durationMs: 1, log: '', resultDigest: digest,
+        outcome: 'PASS', observedHeadOid: b, unitKeys: [], reviewManifestDigest: await canonicalDigest(reviewManifest),
+        reviewManifest,
+      };
+      const { resultDigest: _resultDigest, ...preimage } = inspection;
+      inspection.resultDigest = await canonicalDigest(preimage);
+      const hook = repos.hooks['repos.inspectRevision']!;
+      expect(hook(context, { ...inspection, observedHeadOid: d }).status).toBe('blocked');
+      const forgedManifestDigest = { ...inspection, reviewManifestDigest: digest };
+      const { resultDigest: _forgedResultDigest, ...forgedPreimage } = forgedManifestDigest;
+      forgedManifestDigest.resultDigest = await canonicalDigest(forgedPreimage);
+      expect(hook(context, forgedManifestDigest)).toMatchObject({ status: 'blocked', code: 'INSPECTION_MISMATCH' });
+      expect(hook(context, { ...inspection, log: 'tampered' })).toMatchObject({ status: 'blocked', code: 'INSPECTION_MISMATCH' });
+      const accepted = hook(context, inspection);
+      expect(accepted.status).toBe('eligible');
+      expect(hook(context, inspection).version).toBe(accepted.version);
+    });
+    const ready = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
+    expect((await responseBody(ready)).data.status).toBe('ready');
+    await fake('publish_case', provider => {
+      provider.putCommit(change.candidateStorageName, { oid: d, treeOid: c, parents: [b] });
+      provider.conditionalUpdateRef(change.candidateStorageName, input.branch, b, d);
+    });
+    const moved = await fetchApi(mutation('/v1/repos/publish_case/branches', {
+      expectedVersion: 4, storageName: change.candidateStorageName, ref: input.branch, observedHead: d, ownerId: 'agent-a',
+    }, 'move-head', 'local-agent-a'));
+    expect(moved.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+        tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      }, 'publish_case');
+      expect(repos.hooks['repos.inspectRevision']!(context, inspection).status).toBe('blocked');
+    });
+    const stale = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
+    expect((await responseBody(stale)).data.status).toBe('draft');
+    const closed = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/close`, { expectedVersion: 5 }, 'close', 'local-agent-a'));
+    expect(closed.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+        tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      }, 'publish_case');
+      expect(repos.hooks['repos.inspectRevision']!(context, inspection).status).toBe('blocked');
+    });
+    const afterClose = await fetchApi(mutation('/v1/repos/publish_case/changes', input, 'after-close', 'local-agent-a'));
+    expect(afterClose.status).toBe(409);
+    const attemptTwo = await fetchApi(mutation('/v1/repos/publish_case/changes', { ...input, attempt: 2 }, 'attempt-two', 'local-agent-a'));
+    expect(attemptTwo.status).toBe(201);
+  });
+
+  it('keeps a failed fork visible and reconciles a retry without allocating another change', async () => {
+    await create('retry_case');
+    await fetchApi(apiRequest('/v1/repos/retry_case'));
+    await fake('retry_case', provider => provider.failNext('fork'));
+    const body = { intentKey: 'retry-task', intentText: 'seed after failure', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [] };
+    const first = await fetchApi(mutation('/v1/repos/retry_case/changes', body, 'retry-first'));
+    expect(first.status).toBe(503);
+    const firstListing = await fetchApi(apiRequest('/v1/repos/retry_case/changes'));
+    const failed = (await responseBody(firstListing)).data.items[0];
+    expect(failed.status).toBe('draft');
+    const detail = await fetchApi(apiRequest(`/v1/repos/retry_case/changes/${failed.changeId}`));
+    expect((await responseBody(detail)).data.provisioning.state).toBe('failed');
+    const second = await fetchApi(mutation('/v1/repos/retry_case/changes', body, 'retry-first'));
+    expect(second.status).toBe(200);
+    const retried = (await responseBody(second)).data;
+    expect(retried.changeId).toBe(failed.changeId);
+    expect(retried.candidateStorageName).toBe(failed.candidateStorageName);
+    expect(retried.provisioning.state).toBe('observed');
+    const listing = await fetchApi(apiRequest('/v1/repos/retry_case/changes'));
+    expect((await responseBody(listing)).data.items).toHaveLength(1);
+  });
+
+  it('reuses one candidate fork while the provider is provisioning it', async () => {
+    const repoId = 'slow_fork_case';
+    await create(repoId);
+    await fetchApi(apiRequest(`/v1/repos/${repoId}`));
+    const originalFork = FakeStorage.prototype.fork;
+    const originalInfo = FakeStorage.prototype.info;
+    const names: string[] = [];
+    let ready = false;
+    const fork = vi.spyOn(FakeStorage.prototype, 'fork').mockImplementation(async function (this: FakeStorage, source, name) {
+      provisioningAtProvider(this, name, 'fork');
+      names.push(name);
+      const result = await originalFork.call(this, source, name);
+      return ready ? result : { name, remote: '', status: 'provisioning' };
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const result = await originalInfo.call(this, name);
+      return result && name.startsWith('concord-f-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    try {
+      const body = { intentKey: 'slow-task', intentText: 'seed later', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [] };
+      const first = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-first'));
+      expect(first.status).toBe(202);
+      const pending = (await responseBody(first)).data;
+      expect(pending.provisioning.state).toBe('creating');
+      const second = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-second'));
+      expect(second.status).toBe(202);
+      expect((await responseBody(second)).data.changeId).toBe(pending.changeId);
+      expect(names).toEqual([pending.candidateStorageName]);
+      ready = true;
+      const third = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-ready'));
+      expect(third.status).toBe(200);
+      expect((await responseBody(third)).data).toMatchObject({ changeId: pending.changeId, candidateStorageName: pending.candidateStorageName,
+        provisioning: { state: 'observed' } });
+      expect(names).toEqual([pending.candidateStorageName]);
+    } finally {
+      info.mockRestore();
+      fork.mockRestore();
+    }
+  });
+
+  it('reuses one canonical repository while the provider is provisioning it', async () => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const names: string[] = [];
+    let ready = false;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      if (name.startsWith('concord-r-')) {
+        provisioningAtProvider(this, name, 'ensure-repo');
+        names.push(name);
+      }
+      const result = await originalEnsure.call(this, name);
+      return name.startsWith('concord-r-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const result = await originalInfo.call(this, name);
+      return result && name.startsWith('concord-r-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    try {
+      const body = { name: 'slow_canonical_case', policyId: 'local-demo', profileId: 'local-demo' };
+      const first = await fetchApi(mutation('/v1/repos', body, 'slow-canonical-first'));
+      expect(first.status).toBe(202);
+      const pending = (await responseBody(first)).data;
+      expect(pending.status).toBe('provisioning');
+      const second = await fetchApi(mutation('/v1/repos', body, 'slow-canonical-second'));
+      expect(second.status).toBe(202);
+      expect((await responseBody(second)).data.canonicalStorageName).toBe(pending.canonicalStorageName);
+      expect(names).toEqual([pending.canonicalStorageName]);
+      ready = true;
+      const third = await fetchApi(mutation('/v1/repos', body, 'slow-canonical-ready'));
+      expect(third.status).toBe(201);
+      expect((await responseBody(third)).data).toMatchObject({ canonicalStorageName: pending.canonicalStorageName, status: 'ready' });
+      expect(names).toEqual([pending.canonicalStorageName]);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it('records repository provisioning before work and retries a failed provider call by storage name', async () => {
+    await fetchApi(apiRequest('/v1/repos'));
+    const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject(stub, (_instance, state) => new FakeStorage(sqlState(state.storage.sql)).failNext('ensureRepo'));
+    const body = { name: 'provider_retry_case', policyId: 'local-demo', profileId: 'local-demo' };
+    const first = await fetchApi(mutation('/v1/repos', body, 'provider-failure'));
+    expect(first.status).toBe(503);
+    const listing = await fetchApi(apiRequest('/v1/repos'));
+    const blocked = (await responseBody(listing)).data.items.find((item: { repoId: string }) => item.repoId === body.name);
+    expect(blocked.status).toBe('blocked');
+    const retry = await fetchApi(mutation('/v1/repos', body, 'provider-failure'));
+    expect(retry.status).toBe(201);
+    const ready = (await responseBody(retry)).data;
+    expect(ready.status).toBe('ready');
+    expect(ready.canonicalStorageName).toBe(blocked.canonicalStorageName);
+  });
+
+  it('blocks a previously observed repository that disappears instead of recreating an empty replacement', async () => {
+    const repo = await create('missing_provider_case');
+    const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject(stub, (_instance, state) => sqlState(state.storage.sql).delete(`fake:repo:${repo.canonicalStorageName}`));
+    const body = { name: repo.repoId, policyId: repo.policyId, profileId: repo.profileId };
+    const repeat = await fetchApi(mutation('/v1/repos', body, 'missing-provider'));
+    expect(repeat.status).toBe(503);
+    const again = await fetchApi(mutation('/v1/repos', body, 'missing-provider'));
+    expect(again.status).toBe(503);
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(sqlState(state.storage.sql).get(`fake:repo:${repo.canonicalStorageName}`)).toBeNull();
+    });
+    const listing = await fetchApi(apiRequest('/v1/repos'));
+    expect((await responseBody(listing)).data.items).toContainEqual(expect.objectContaining({ repoId: repo.repoId, status: 'blocked' }));
+  });
+
+  it.each([
+    { result: 'ready', token: false, revoked: true, status: 201, state: 'observed', polls: 0 },
+    { result: 'pending', token: false, revoked: true, status: 202, state: 'creating', polls: 1 },
+    { result: 'pending', token: true, revoked: true, status: 202, state: 'token-held', polls: 1 },
+    { result: 'ready', token: true, revoked: true, status: 201, state: 'observed', polls: 0 },
+    { result: 'ready', token: true, revoked: false, status: 503, state: 'failed', polls: 0 },
+  ])('persists provisioning transition for $result, token=$token, revoked=$revoked', async ({ result, token, revoked, status, state, polls }) => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const visited: string[] = [];
+    let storageName = '';
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      if (!name.startsWith('concord-r-')) return originalEnsure.call(this, name);
+      storageName = name;
+      const persisted = provisioningAtProvider(this, name, 'ensure-repo');
+      visited.push(persisted.get<Record<string, ProvisioningIntent>>('module:repos:provisioning')![`ensure-repo:${name}`].state);
+      const created = await originalEnsure.call(this, name);
+      const observation = result === 'pending' ? { name, remote: '', status: 'provisioning' as const } : created;
+      return token ? Object.assign(observation, { [pendingInitialToken]: 'initial-secret' }) : observation;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const found = await originalInfo.call(this, name);
+      return found && name === storageName && result === 'pending' ? { name, remote: '', status: 'provisioning' } : found;
+    });
+    const revoke = vi.spyOn(FakeStorage.prototype, 'revokeToken').mockImplementation(async function (this: FakeStorage, name, secret) {
+      const persisted = provisioningAtProvider(this, name, 'ensure-repo');
+      visited.push(persisted.get<Record<string, ProvisioningIntent>>('module:repos:provisioning')![`ensure-repo:${name}`].state);
+      expect(persisted.get<string>(`module:repos:initial-token:${name}`)).toBe(secret);
+      return revoked;
+    });
+    try {
+      const name = `transition_${result}_${token}_${revoked}`;
+      const response = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, `transition-${name}`));
+      expect(response.status).toBe(status);
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+      await runInDurableObject(stub, (_instance, durable) => {
+        const stored = sqlState(durable.storage.sql);
+        expect(stored.get<Record<string, ProvisioningIntent>>('module:repos:provisioning')![`ensure-repo:${storageName}`])
+          .toMatchObject({ state, polls });
+        expect(stored.get<string>(`module:repos:initial-token:${storageName}`)).toBe(token && (!revoked || result === 'pending') ? 'initial-secret' : null);
+      });
+      expect(visited).toEqual(token && result === 'ready' ? ['creating', 'revoking'] : ['creating']);
+    } finally {
+      revoke.mockRestore();
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it('retains a token after false revocation and retries cleanup without creating another repository', async () => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      return Object.assign(await originalEnsure.call(this, name), { [pendingInitialToken]: 'held-secret' });
+    });
+    const revoke = vi.spyOn(FakeStorage.prototype, 'revokeToken').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const body = { name: 'revocation_retry_case', policyId: 'local-demo', profileId: 'local-demo' };
+    try {
+      expect((await fetchApi(mutation('/v1/repos', body, 'revoke-first'))).status).toBe(503);
+      expect(ensure).toHaveBeenCalledTimes(1);
+      const retry = await fetchApi(mutation('/v1/repos', body, 'revoke-retry'));
+      expect(retry.status).toBe(201);
+      expect(ensure).toHaveBeenCalledTimes(1);
+      expect(revoke).toHaveBeenCalledTimes(2);
+      const name = (await responseBody(retry)).data.canonicalStorageName;
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+      await runInDurableObject(stub, (_instance, durable) => {
+        expect(sqlState(durable.storage.sql).get<string>(`module:repos:initial-token:${name}`)).toBeNull();
+      });
+    } finally {
+      revoke.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it.each([false, true])('persists an Artifacts creation token with empty remote=%s before retry despite an empty token listing', async emptyRemote => {
+    let createdName = '';
+    let active = false;
+    let revokeCalls = 0;
+    const binding = {
+      create: vi.fn(async (name: string) => {
+        createdName = name;
+        active = true;
+        return { name, remote: emptyRemote ? '' : `https://example.test/${name}.git`, token: 'artifact-secret' };
+      }),
+      get: vi.fn(async (name: string) => {
+        if (name !== createdName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
+        return {
+          [Symbol.dispose]: () => {},
+          info: async () => ({ name, remote: `https://example.test/${name}.git` }),
+          revokeToken: vi.fn(async (token: string) => {
+            expect(token).toBe('artifact-secret');
+            revokeCalls++;
+            if (!emptyRemote && revokeCalls === 1) return false;
+            active = false;
+            return true;
+          }),
+          listTokens: async () => ({ total: 0, tokens: [] }),
+        };
+      }),
+      list: vi.fn(async () => ({ repos: [], cursor: undefined })),
+    };
+    const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject<TenantCatalog, void>(stub, async instance => {
+      const context = (instance as unknown as { context(principal: object): ModuleContext }).context({
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const route = repos.routes[0];
+      const request = new Request('https://concord.test/v1/repos', { method: 'POST' });
+      const match = route.pattern.exec('/v1/repos')!;
+      const body = { name: emptyRemote ? 'artifact_empty_remote_retry' : 'artifact_revoke_retry', policyId: 'local-demo', profileId: 'local-demo' };
+      await expect(route.handle(context, request, match, body)).rejects.toMatchObject({ status: 503, code: 'PROVISIONING_FAILED' });
+      const intentKey = `ensure-repo:${createdName}`;
+      expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![intentKey].state).toBe('failed');
+      expect(context.state.get<string>(`initial-token:${createdName}`)).toBe('artifact-secret');
+      expect(active).toBe(true);
+      expect(revokeCalls).toBe(emptyRemote ? 0 : 1);
+      expect(await (await binding.get(createdName)).listTokens()).toEqual({ total: 0, tokens: [] });
+      const retry = await route.handle(context, request, match, body);
+      expect(retry.status).toBe(201);
+      expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![intentKey].state).toBe('observed');
+      expect(context.state.get<string>(`initial-token:${createdName}`)).toBeNull();
+      expect(active).toBe(false);
+      expect(revokeCalls).toBe(emptyRemote ? 1 : 2);
+      expect(binding.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('persists a fork token after source disposal throws and revokes it on retry despite an empty token listing', async () => {
+    let sourceName = '';
+    let candidateName = '';
+    let active = false;
+    let forkCalls = 0;
+    let revokeCalls = 0;
+    const binding = {
+      create: vi.fn(async (name: string) => {
+        sourceName = name;
+        return { name, remote: `https://example.test/${name}.git`, token: 'source-secret' };
+      }),
+      get: vi.fn(async (name: string) => {
+        if (name !== sourceName && name !== candidateName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
+        let forked = false;
+        return {
+          [Symbol.dispose]: () => { if (forked) throw new Error('dispose failed'); },
+          info: async () => ({ name, remote: `https://example.test/${name}.git` }),
+          log: async () => [],
+          fork: async (target: string) => {
+            forkCalls++;
+            forked = true;
+            candidateName = target;
+            active = true;
+            return { name: target, remote: `https://example.test/${target}.git`, token: 'fork-secret' };
+          },
+          revokeToken: async (secret: string) => {
+            if (name === candidateName) {
+              expect(secret).toBe('fork-secret');
+              revokeCalls++;
+              active = false;
+            }
+            return true;
+          },
+          listTokens: async () => ({ total: 0, tokens: [] }),
+        };
+      }),
+      list: vi.fn(async () => ({ repos: [], cursor: undefined })),
+    };
+    const catalog = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject<TenantCatalog, void>(catalog, async instance => {
+      const context = (instance as unknown as { context(principal: object): ModuleContext }).context({
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const path = '/v1/repos';
+      const route = repos.routes[0];
+      const response = await route.handle(context, new Request(`https://concord.test${path}`, { method: 'POST' }), route.pattern.exec(path)!,
+        { name: 'artifact_fork_disposal_retry', policyId: 'local-demo', profileId: 'local-demo' });
+      expect(response.status).toBe(201);
+    });
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:artifact_fork_disposal_retry'));
+    await runInDurableObject<RepoCoordinator, void>(coordinator, async instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      }, 'artifact_fork_disposal_retry');
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const path = '/v1/repos/artifact_fork_disposal_retry/changes';
+      const route = repos.routes.find(item => item.method === 'POST' && item.pattern.test(path))!;
+      const request = new Request(`https://concord.test${path}`, { method: 'POST' });
+      const body = { intentKey: 'disposal', intentText: 'fork retry', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [] };
+      await expect(route.handle(context, request, route.pattern.exec(path)!, body))
+        .rejects.toMatchObject({ status: 503, code: 'PROVISIONING_FAILED' });
+      expect(context.state.get<string>(`initial-token:${candidateName}`)).toBe('fork-secret');
+      expect(active).toBe(true);
+      expect(await (await binding.get(candidateName)).listTokens()).toEqual({ total: 0, tokens: [] });
+      const retry = await route.handle(context, request, route.pattern.exec(path)!, body);
+      expect(retry.status).toBe(200);
+      expect(context.state.get<string>(`initial-token:${candidateName}`)).toBeNull();
+      expect(active).toBe(false);
+      expect(forkCalls).toBe(1);
+      expect(revokeCalls).toBe(1);
+    });
+  });
+
+  it.each([false, true])('retains a minted token after malformed result or throwing disposal=%s until revocation succeeds on retry', async disposalThrows => {
+    const repoId = disposalThrows ? 'artifact_mint_disposal_retry' : 'artifact_mint_retry';
+    let createdName = '';
+    let mintCalls = 0;
+    let mintedRevocations = 0;
+    let disposeMintHandle = false;
+    const binding = {
+      create: vi.fn(async (name: string) => {
+        createdName = name;
+        return { name, remote: `https://example.test/${name}.git`, token: 'initial-secret' };
+      }),
+      get: vi.fn(async (name: string) => {
+        if (name !== createdName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
+        return {
+          [Symbol.dispose]: () => {
+            if (disposeMintHandle) {
+              disposeMintHandle = false;
+              throw new Error('dispose failed');
+            }
+          },
+          info: async () => ({ name, remote: `https://example.test/${name}.git` }),
+          revokeToken: async (secret: string) => {
+            if (secret === 'minted-secret') return ++mintedRevocations > 1;
+            return true;
+          },
+          listTokens: async () => ({ total: 0, tokens: [] }),
+          createToken: async () => {
+            if (++mintCalls === 1) {
+              disposeMintHandle = disposalThrows;
+              return { plaintext: 'minted-secret', expiresAt: disposalThrows ? '2026-10-11T08:00:00Z' : 'invalid' };
+            }
+            return { plaintext: 'next-secret', expiresAt: '2026-10-11T08:00:00Z' };
+          },
+        };
+      }),
+      list: vi.fn(async () => ({ repos: [], cursor: undefined })),
+    };
+    const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject<TenantCatalog, void>(stub, async instance => {
+      const context = (instance as unknown as { context(principal: object): ModuleContext }).context({
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const createRoute = repos.routes[0];
+      const createRequest = new Request('https://concord.test/v1/repos', { method: 'POST' });
+      const created = await createRoute.handle(context, createRequest, createRoute.pattern.exec('/v1/repos')!,
+        { name: repoId, policyId: 'local-demo', profileId: 'local-demo' });
+      expect(created.status).toBe(201);
+      Object.assign(context, { repoId });
+      const path = `/v1/repos/${repoId}/git-token`;
+      const tokenRoute = repos.routes.find(route => route.method === 'POST' && route.pattern.test(path))!;
+      const request = new Request(`https://concord.test${path}`, { method: 'POST' });
+      const body = { storageName: createdName, scope: 'read', ttlSeconds: 60 };
+      await expect(tokenRoute.handle(context, request, tokenRoute.pattern.exec(path)!, body))
+        .rejects.toMatchObject({ status: 503, code: 'TOKEN_RESULT_INVALID' });
+      expect(context.state.get<string>(`mint-token:${createdName}`)).toBe('minted-secret');
+      expect(mintedRevocations).toBe(1);
+      const retry = await tokenRoute.handle(context, request, tokenRoute.pattern.exec(path)!, body);
+      expect(retry.status).toBe(200);
+      expect((await responseBody(retry)).data.secret).toBe('next-secret');
+      expect(context.state.get<string>(`mint-token:${createdName}`)).toBeNull();
+      expect(mintedRevocations).toBe(2);
+    });
+  });
+
+  it.each([false, true])('maps an empty status poll with held token=%s to a persisted pending transition', async held => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      await originalEnsure.call(this, name);
+      const pending = { name, remote: '', status: 'provisioning' as const };
+      return held ? Object.assign(pending, { [pendingInitialToken]: 'pending-secret' }) : pending;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockResolvedValue(null);
+    try {
+      const body = { name: `empty_poll_${held}`, policyId: 'local-demo', profileId: 'local-demo' };
+      expect((await fetchApi(mutation('/v1/repos', body, `empty-${held}`))).status).toBe(202);
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+      await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+        const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+          tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+        }, '');
+        const all = context.state.get<Record<string, ProvisioningIntent>>('provisioning')!;
+        const intent = Object.values(all).find(item => item.storageName ===
+          (context.state.get<Array<{ repoId: string; canonicalStorageName: string }>>('catalog:index') ?? []).find(repo => repo.repoId === body.name)?.canonicalStorageName)!;
+        intent.retryAt = 0;
+        context.state.put('provisioning', all);
+        await repos.onAlarm!(context);
+        expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![`ensure-repo:${intent.storageName}`])
+          .toMatchObject({ state: held ? 'token-held' : 'creating', polls: 2 });
+        expect(context.state.get<string>(`initial-token:${intent.storageName}`)).toBe(held ? 'pending-secret' : null);
+      });
+      expect(ensure).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it('counts 30 pending observations across API retries and resets only after a failed attempt', async () => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      await originalEnsure.call(this, name);
+      return { name, remote: '', status: 'provisioning' };
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const found = await originalInfo.call(this, name);
+      return found?.name.startsWith('concord-r-') ? { name, remote: '', status: 'provisioning' } : found;
+    });
+    try {
+      const body = { name: 'poll_limit_case', policyId: 'local-demo', profileId: 'local-demo' };
+      for (let poll = 1; poll <= 31; poll++) {
+        const response = await fetchApi(mutation('/v1/repos', body, `poll-${poll}`));
+        expect(response.status).toBe(poll === 30 ? 503 : 202);
+        const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+        await runInDurableObject(stub, (_instance, durable) => {
+          const stored = sqlState(durable.storage.sql);
+          const intent = Object.values(stored.get<Record<string, ProvisioningIntent>>('module:repos:provisioning') ?? {})
+            .find(item => item.storageName.startsWith('concord-r-') && item.storageName ===
+              (stored.get<Array<{ repoId: string; canonicalStorageName: string }>>('module:repos:catalog:index') ?? []).find(repo => repo.repoId === body.name)?.canonicalStorageName);
+          expect(intent).toMatchObject({ polls: poll === 31 ? 1 : poll, state: poll === 30 ? 'failed' : 'creating' });
+        });
+      }
+      expect(ensure).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+});
