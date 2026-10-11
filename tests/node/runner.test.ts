@@ -63,6 +63,7 @@ describe('local runner Git and checker execution', () => {
       const b3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
       const g3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
       const g4 = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
+      const g5 = { retry_limit: 5, timeout_ms: 1250, output: 6250 };
       const c4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
       const c5 = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
       const e4 = { retry_limit: 4, timeout_ms: 1500, output: 6000 };
@@ -87,6 +88,7 @@ describe('local runner Git and checker execution', () => {
         'h-only': { rows: rows(a4, b2, g4, e4) },
         'i-only': { rows: rows(a3, b3, g4, e4) },
         'j-common': { rows: rows(a3, b3, g4, e4, jLow), epsilonChoices: [jLow, jHigh] },
+        'aw-only': { rows: rows(a3, b3, g5, e4, jHigh) },
       };
       const path = join(dir, 'dispatch-profile.json');
       const write = async (matrix: NonNullable<LocalProfile['cases']>) => {

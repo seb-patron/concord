@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { digest, requiresExpectedVersion } from '../src/http';
+import { ConcordClient } from '../cli/client';
+import { runAwMock } from '../adapters/aw-mock';
 import { localEnvironment, dispatchArgv, loadProfile } from '../runner/profiles';
 import type { LocalProfile } from '../runner/profiles';
 
@@ -119,6 +121,9 @@ async function queue(options: Options, manifest: Manifest): Promise<any> {
 }
 async function change(options: Options, manifest: Manifest, alias: string): Promise<any> {
   return ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}/changes/${manifest.changes[alias].changeId}`), 'change');
+}
+async function changeById(options: Options, manifest: Manifest, id: string): Promise<any> {
+  return ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}/changes/${id}`), 'change');
 }
 async function save(options: Options, manifest: Manifest): Promise<void> {
   await writeFile(validatePath(options), JSON.stringify(manifest, null, 2) + '\n');
@@ -583,7 +588,61 @@ export async function scene(options: Options, name: string): Promise<Manifest> {
     manifest.evidence.dedupe = { attempts: 7, changeId: ids[0], observedBases,
       stableIntent: 'Increase gamma retry budget safely' };
   } else if (name === 'aw') {
-    throw new Error('pending slice 10');
+    need('contest');
+    const fixturePath = join(resolve(options.stateDir), 'aw-task.json');
+    const runStatePath = join(resolve(options.stateDir), 'aw-run-state.json');
+    const template = JSON.parse(await readFile(join(root, 'aw-task.json'), 'utf8')) as Record<string, unknown>;
+    const client = new ConcordClient({ url: options.url, token: actor.aw });
+    const reviewer = new ConcordClient({ url: options.url, token: actor.reviewer });
+    const observedBases: string[] = [];
+    const changeIds: string[] = [];
+    const outputs: Array<{ phase: string; headOid: string | null }> = [];
+    const worktree = join(manifest.workDir, 'aw-task-checkout');
+    for (let retry = 0; retry < 7; retry++) {
+      const observedBaseOid = retry === 0 ? manifest.seedOid : manifest.canonicalOid;
+      observedBases.push(observedBaseOid);
+      await writeFile(fixturePath, JSON.stringify({ ...template, project: manifest.repoId, worktree, observedBaseOid }, null, 2) + '\n');
+      const result = await runAwMock(fixturePath, runStatePath, client, reviewer);
+      if (result.phase !== (retry === 0 ? 'awaiting_review' : 'queued') || !result.headOid || result.blocked) {
+        throw new Error(`AW_RETRY_${retry + 1}_FAILED ${JSON.stringify(result)}`);
+      }
+      changeIds.push(result.changeId);
+      outputs.push({ phase: result.phase, headOid: result.headOid });
+      if (retry === 0) {
+        const ready = await pump({ ...options, pumpLocal: true }, manifest, view => view.repos?.changes?.some((value: any) =>
+          value.changeId === result.changeId && value.status === 'ready' && value.revision === 1), 'inspect AW');
+        const current = await changeById(options, manifest, result.changeId);
+        manifest.changes.AW = { changeId: result.changeId, storageName: current.candidateStorageName,
+          branch: current.branch, worktree, baseOid: current.baseOid, headOid: result.headOid,
+          leaseFences: {}, leaseIds: {}, verdictId: null, revision: 1 };
+        if (!ready.repos.changes.some((value: any) => value.changeId === result.changeId && value.status === 'ready')) throw new Error('AW_INSPECTION_NOT_READY');
+        await approve(options, manifest, 'AW');
+      }
+    }
+    if (new Set(changeIds).size !== 1 || new Set(outputs.map(value => value.headOid)).size !== 1 ||
+      new Set(observedBases).size !== 2) throw new Error('AW_RETRY_DUPLICATED_CHANGE');
+    const all = ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}/changes`), 'AW changes');
+    const awChanges = all.items.filter((value: any) => value.intentKey.startsWith('aw-mock:'));
+    if (awChanges.length !== 1 || awChanges[0].changeId !== changeIds[0]) throw new Error('AW_SERVER_CHANGE_COUNT');
+    const adapterState = JSON.parse(await readFile(runStatePath, 'utf8')) as { mappings: Record<string, {
+      changeId: string; leaseFences?: Record<string, number> }> };
+    const mapping = adapterState.mappings[`${manifest.repoId}/${template.taskId}/1`];
+    if (mapping?.changeId !== changeIds[0] || !mapping.leaseFences?.['row:families:gamma']) throw new Error('AW_LEASE_EVIDENCE_MISSING');
+    manifest.changes.AW.leaseFences = mapping.leaseFences;
+    const landed = await pump({ ...options, pumpLocal: true }, manifest, view => view.queue?.entries?.some((entry: any) =>
+      entry.changeId === changeIds[0] && entry.state === 'landed'), 'land AW');
+    const entry = landed.queue.entries.find((value: any) => value.changeId === changeIds[0] && value.state === 'landed');
+    const checkJob = [...(landed.runners.jobs as any[])].reverse().find(job => job.kind === 'validate-stack' &&
+      job.caseId === 'aw-only' && job.candidates?.some((candidate: any) => candidate.changeId === changeIds[0]));
+    if (!checkJob) throw new Error('AW_TRUSTED_CASE_MISSING');
+    const check = ok(await api(options, 'reviewer', 'GET', `/repos/${manifest.repoId}/jobs/${checkJob.jobId}/result`), 'AW checker').result;
+    if (check.outcome !== 'PASS') throw new Error('AW_CHECKER_FAILED');
+    manifest.canonicalOid = landed.queue.finalCanonicalOid;
+    manifest.evidence.aw = { attempts: 7, taskId: template.taskId, changeId: changeIds[0], changeIds,
+      observedBases, baseOid: manifest.changes.AW.baseOid, headOid: outputs[0].headOid,
+      leaseFences: mapping.leaseFences, phases: outputs.map(value => value.phase),
+      verdictId: manifest.changes.AW.verdictId, checkerJobId: checkJob.jobId, checkerOutcome: check.outcome,
+      queueEntryId: entry.entryId, queueState: entry.state, canonicalOid: manifest.canonicalOid };
   } else throw new Error('UNKNOWN_SCENE: ' + name);
   manifest.scenes.push(name);
   manifest.audit.push(...pendingAudit.splice(0));

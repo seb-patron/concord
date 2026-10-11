@@ -13,6 +13,7 @@ const b2 = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
 const b3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
 const g3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
 const g4 = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
+const g5 = { retry_limit: 5, timeout_ms: 1250, output: 6250 };
 const d4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
 const d5 = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
 const de = { retry_limit: 4, timeout_ms: 1500, output: 6000 };
@@ -36,6 +37,7 @@ export const cases = Object.freeze({
   'h-only': { rows: { alpha: a4, beta: b2, gamma: g4, delta: de, epsilon: e1 } },
   'i-only': { rows: { alpha: a3, beta: b3, gamma: g4, delta: de, epsilon: e1 } },
   'j-common': { rows: { alpha: a3, beta: b3, gamma: g4, delta: de, epsilon: el }, epsilonChoices: [el, eh] },
+  'aw-only': { rows: { alpha: a3, beta: b3, gamma: g5, delta: de, epsilon: eh } },
 });
 
 const families = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];

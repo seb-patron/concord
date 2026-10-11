@@ -228,10 +228,17 @@ async function makeCandidate(client: ConcordClient, fixture: AwMockFixture, repo
     const actualBase = await git(['rev-parse', '--verify', `${change.baseOid}^{commit}`], {}, worktree);
     if (actualBase !== change.baseOid) throw new Error('CANONICAL_BASE_UNAVAILABLE');
     await git(['read-tree', actualBase], {}, worktree);
-    const edit = join(temporary, 'aw-mock-change.txt');
-    await writeFile(edit, 'Concord AW mock: pre-authored synthetic candidate edit.\n');
+    const dispatchTask = fixture.unitKeys.length === 1 && fixture.unitKeys[0] === 'row:families:gamma';
+    const target = dispatchTask ? 'families.tsv' : 'aw-mock-change.txt';
+    const edit = join(temporary, target);
+    if (dispatchTask) {
+      const table = await git(['show', `${actualBase}:families.tsv`], {}, worktree);
+      const before = 'gamma\t4\t1250';
+      if (table.split('\n').filter(line => line === before).length !== 1) throw new Error('AW_GAMMA_BASE_MISMATCH');
+      await writeFile(edit, table.split('\n').map(line => line === before ? 'gamma\t5\t1250' : line).join('\n') + '\n');
+    } else await writeFile(edit, 'Concord AW mock: pre-authored synthetic candidate edit.\n');
     const blob = await git(['hash-object', '-w', edit], {}, worktree);
-    await git(['update-index', '--add', '--cacheinfo', `100644,${blob},aw-mock-change.txt`], {}, worktree);
+    await git(['update-index', '--add', '--cacheinfo', `100644,${blob},${target}`], {}, worktree);
     const tree = await git(['write-tree'], {}, worktree);
     const headOid = await git(['-c', 'user.name=Concord AW Mock', '-c', 'user.email=aw-mock@example.invalid', 'commit-tree', tree, '-p', actualBase, '-m', 'AW mock synthetic edit'], {}, worktree);
     await git(['update-ref', 'HEAD', headOid], {}, worktree);
@@ -258,7 +265,7 @@ async function publishCandidate(client: ConcordClient, fixture: AwMockFixture, m
   } finally { await candidate.cleanup(); }
 }
 
-async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, post: Post): Promise<Change> {
+async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, post: Post, reviewer: ConcordClient): Promise<Change> {
   const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
   const change = viewed.data;
   const decision = reconcile({ change, attempt: fixture.explicitAttempt, queue: await queueEntries(client, fixture) }, fixture, workerPrincipal);
@@ -268,7 +275,7 @@ async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, 
   }
   if (decision.queued) { mapping.phase = 'queued'; mapping.block = undefined; return change; }
   if (!change.headOid) return change;
-  const verdicts = (await client.request<Envelope<{ items: Verdict[] }>>('GET', `${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/verdicts`)).data;
+  const verdicts = (await reviewer.request<Envelope<{ items: Verdict[] }>>('GET', `${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/verdicts`)).data;
   const approval = verdicts.items.find(item => item.revision === change.revision && item.decision === 'approve');
   if (!approval) { mapping.phase = 'awaiting_review'; return change; }
   let fences = await leaseFences(client, fixture, mapping);
@@ -283,7 +290,7 @@ async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, 
   return change;
 }
 
-async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, attempt: number, remember: () => Promise<void>, post: Post): Promise<Change> {
+async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, attempt: number, remember: () => Promise<void>, post: Post, reviewer: ConcordClient): Promise<Change> {
   const decision = reconcile({ change, attempt, queue: await queueEntries(client, fixture) }, fixture, workerPrincipal);
   mapping.headOid = change.headOid ?? undefined;
   if (decision.kind === 'refuse') {
@@ -297,7 +304,7 @@ async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Ma
   if (change.headOid) {
     mapping.phase = 'awaiting_review'; mapping.block = undefined;
     mapping.leaseFences = await leaseFences(client, fixture, mapping) ?? undefined;
-    return pollAndMaybeQueue(client, fixture, mapping, post);
+    return pollAndMaybeQueue(client, fixture, mapping, post, reviewer);
   }
   let fences = await leaseFences(client, fixture, mapping);
   if (!fences) {
@@ -307,7 +314,7 @@ async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Ma
   mapping.phase = 'leased'; mapping.block = undefined; await remember();
   const latestRepo = (await client.request<Envelope<Repo>>('GET', path(fixture.project))).data;
   const latestChange = await getChange(client, fixture, change.changeId);
-  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, attempt, remember, post);
+  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, attempt, remember, post, reviewer);
   const head = await registeredHead(client, fixture, latestChange);
   if (head) {
     const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
@@ -316,10 +323,10 @@ async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Ma
     mapping.headOid = head;
   } else mapping.headOid = await publishCandidate(client, fixture, mapping, latestRepo, latestChange, post);
   mapping.phase = 'awaiting_review'; await remember();
-  return pollAndMaybeQueue(client, fixture, mapping, post);
+  return pollAndMaybeQueue(client, fixture, mapping, post, reviewer);
 }
 
-export async function runAwMock(fixturePath: string, statePath: string, client: ConcordClient): Promise<ReturnType<typeof output>> {
+export async function runAwMock(fixturePath: string, statePath: string, client: ConcordClient, reviewer: ConcordClient = client): Promise<ReturnType<typeof output>> {
   const fixture = parseAwFixture(JSON.parse(await readFile(fixturePath, 'utf8')));
   if (dirname(resolve(statePath)) !== dirname(resolve(fixturePath)) || resolve(statePath) === resolve(fixturePath)) throw new Error('Run-state must be a separate file in the fixture demo directory');
   const state = await loadState(statePath);
@@ -377,7 +384,7 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
   else mapping.observedBaseOid = fixture.observedBaseOid;
   await remember();
   try {
-    const change = await resume(client, fixture, mapping, created, fixture.explicitAttempt, remember, post);
+    const change = await resume(client, fixture, mapping, created, fixture.explicitAttempt, remember, post, reviewer);
     await remember();
     return output(fixture, mapping, client, change);
   } catch (error) {
@@ -396,7 +403,8 @@ async function main() {
   const origin = new URL(url);
   if (!['127.0.0.1', 'localhost'].includes(origin.hostname)) throw new Error('AW mock only accepts a local Concord Worker');
   const client = new ConcordClient({ url, token });
-  process.stdout.write(`${JSON.stringify(redactOutput(await runAwMock(args[fixtureIndex + 1], args[stateIndex + 1], client)))}\n`);
+  const reviewer = process.env.CONCORD_REVIEW_TOKEN ? new ConcordClient({ url, token: process.env.CONCORD_REVIEW_TOKEN }) : client;
+  process.stdout.write(`${JSON.stringify(redactOutput(await runAwMock(args[fixtureIndex + 1], args[stateIndex + 1], client, reviewer)))}\n`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
