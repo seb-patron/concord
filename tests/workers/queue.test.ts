@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
-import type { BootstrapHandoff, ChangeView, Gate, Job, ModuleContext, Principal, PromotionResult, StackResult } from '../../src/contracts';
+import type { BootstrapHandoff, ChangeView, Gate, Job, ModuleContext, Principal, PromotionResult, ReviewManifest, StackResult } from '../../src/contracts';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
 import { queue } from '../../src/features/queue';
@@ -11,6 +11,7 @@ import { runners } from '../../src/features/runners';
 import { findings } from '../../src/features/findings';
 import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
+import { manifestDigest } from '../../src/verdicts/manifest';
 import { localFixtureConfig, sqlState } from '../../src/state';
 import { FakeStorage } from '../../src/storage/fake';
 import { arbitrate, accepted } from '../../src/queue/arbitrate';
@@ -691,6 +692,9 @@ describe('queue state machine', () => {
     await h.tick();
     expect((h.jobs[0] as any).candidates.map((candidate: any) => [candidate.changeId, candidate.baseOid]))
       .toEqual([['A', main], ['B', oid('a')]]);
+    expect((await h.deliver(h.jobs[0], 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A', 'B'] });
   });
 
   it('caps stack width at four and refuses a ninth active candidate', async () => {
@@ -835,6 +839,302 @@ describe('queue state machine', () => {
     await h.tick();
     expect((await h.state()).entries[0]).toMatchObject({ state: 'blocked', blockedReason: 'STALE_MAIN' });
     expect((await h.deliver(job, 'PASS')).status).toBe('blocked');
+    expect((await h.state()).promotion).toBeNull();
+  });
+
+  it('does not ticket an admission whose recorded base differs from live main', async () => {
+    const h = await setup('A');
+    await h.tick();
+    const checked = h.jobs[0];
+    const staleBase = oid('0');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const state = context.state.get<any>('data');
+      state.entries[0].baseOid = staleBase;
+      context.state.put('data', state);
+    });
+    h.views.set('A', { ...h.views.get('A')!, baseOid: staleBase });
+    expect((await h.deliver(checked, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toBeNull();
+  });
+
+  it('blocks old admissions when enqueue observes external main before an alarm', async () => {
+    const h = await setup('A');
+    const nextMain = oid('4');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    await h.seed(`candidate-${h.repoId}-B`);
+    h.views.set('B', { ...h.views.get('A')!, headOid: oid('b'), baseOid: nextMain,
+      candidateStorageName: `candidate-${h.repoId}-B`, unitKeys: ['row:B'] });
+    const added = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'B', verdictId: 'v-B', leaseFences: { 'row:B': 1 } });
+    expect(added.response.status).toBe(201);
+    const state = await h.state();
+    expect(state.observedMain).toBe(nextMain);
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.blockedReason]))
+      .toEqual([['A', 'blocked', 'STALE_MAIN'], ['B', 'reserved', null]]);
+    expect(h.releases).toEqual(['A']);
+    await h.tick();
+    expect(h.jobs.filter(job => job.kind === 'validate-stack').every(job =>
+      job.candidates.every(candidate => candidate.changeId !== 'A'))).toBe(true);
+  });
+
+  it('blocks old admissions when contest creation observes external main before an alarm', async () => {
+    const h = await setup('X');
+    const nextMain = oid('4');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { ...h.views.get('X')!, headOid: oid(id.toLowerCase()), baseOid: nextMain,
+        candidateStorageName: `candidate-${h.repoId}-${id}`, unitKeys: ['row:J'] });
+    }
+    const created = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete',
+      unitKey: 'row:J', baseOid: nextMain, profileId: 'local-demo', childChangeIds: ['A', 'B'],
+      verdictIds: ['v-A', 'v-B'], leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
+    expect(created.response.status).toBe(201);
+    const state = await h.state();
+    expect(state.observedMain).toBe(nextMain);
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.blockedReason]))
+      .toEqual([['X', 'blocked', 'STALE_MAIN'], ['A', 'reserved', null], ['B', 'reserved', null]]);
+    expect(state.contests[0].state).toBe('open');
+    expect(h.releases).toEqual(['X']);
+  });
+
+  it('blocks remaining old-base entries after its own stack lands, including a dependent', async () => {
+    const h = await setup('B', 'D', 'E');
+    for (const [id, deps] of [['F', []], ['A', ['B']], ['C', []]] as const) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1,
+        status: 'ready', unitKeys: [`row:${id}`], frozen: false, baseOid: main,
+        candidateStorageName: `candidate-${h.repoId}-${id}`, branch: 'refs/heads/work',
+        dependencyChangeIds: [...deps], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo' });
+    }
+    // Admit the remaining cohort in one coordinator turn, before its due alarm schedules the first four.
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const route = queue.routes.find(item => item.pattern.test(`/v1/repos/${h.repoId}/queue/enqueue`))!;
+      for (const id of ['F', 'A', 'C']) {
+        const response = await route.handle(context, new Request(`https://concord.test/v1/repos/${h.repoId}/queue/enqueue`,
+          { method: 'POST' }), [] as unknown as RegExpMatchArray,
+        { changeId: id, verdictId: `v-${id}`, leaseFences: { [`row:${id}`]: 1 } });
+        expect(response.status).toBe(201);
+      }
+    });
+    await h.tick();
+    const checked = h.jobs[0];
+    if (checked.kind !== 'validate-stack') throw new Error('expected stack job');
+    expect(checked.candidates.map(candidate => candidate.changeId)).toEqual(['B', 'D', 'E', 'F']);
+    expect((await h.deliver(checked, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['B', 'D', 'E', 'F'] });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    await h.tick();
+    const state = await h.state();
+    expect(state.promotion).toMatchObject({ state: 'applied', reconciliation: 'EXACT_NEW_OID' });
+    expect(state.finalCanonicalOid).toBe(oid('e'));
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.blockedReason])).toEqual([
+      ['B', 'landed', null], ['D', 'landed', null], ['E', 'landed', null], ['F', 'landed', null],
+      ['A', 'blocked', 'STALE_MAIN'], ['C', 'blocked', 'STALE_MAIN'],
+    ]);
+    expect([...h.releases].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
+    const generation = state.generation;
+    await h.tick(); await h.tick();
+    expect((await h.state()).generation).toBe(generation);
+    expect((await h.state()).promotion.promotionId).toBe(state.promotion.promotionId);
+    expect(h.jobs.filter(job => job.kind === 'promote')).toHaveLength(1);
+    expect([...h.releases].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
+    expect((await h.deliver(checked, 'PASS')).status).toBe('blocked');
+    expect((await h.state()).promotion.promotionId).toBe(state.promotion.promotionId);
+
+    const stale = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
+    expect(stale.response.status).toBe(409);
+    expect(stale.body.error.code).toBe('STALE_BASE');
+  });
+
+  it('requires withdrawal, rebase, republish, and revision-bound review before recovery', async () => {
+    const h = harness;
+    const unit = 'row:recovery';
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].units[unit] = { canonicalKey: unit, file: 'recovery.tsv',
+      resources: [], dependencyKeys: [] };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    repos.changeView = original.changeView;
+    verdicts.hooks['verdicts.gate'] = original.verdict;
+    findings.hooks['findings.gate'] = (_context, id, revision) => revision === h.findingsVersion.get(id)
+      ? gate({ findingSetVersion: revision, unresolvedIds: [], pendingRound: null })
+      : { status: 'blocked', version: 1, code: 'FINDINGS_STALE', reason: 'Wrong revision', evidenceIds: [] };
+    const post = async (path: string, body: Record<string, unknown>, actor = 'local-agent-a') => {
+      const response = await worker.fetch(mutation(`/v1/repos/${h.repoId}${path}`, body, crypto.randomUUID(), actor), env);
+      return { response, body: await responseBody(response) };
+    };
+    const createdRepo = await worker.fetch(mutation('/v1/repos', {
+      name: h.repoId, policyId: 'local-demo', profileId: 'local-demo',
+    }, crypto.randomUUID()), env);
+    expect(createdRepo.status).toBe(201);
+    const repo = (await responseBody(createdRepo)).data;
+    await h.fetch('');
+    await h.seed(repo.canonicalStorageName);
+    await h.seed(`concord-s-${h.repoId}`, null);
+    const created = await post('/changes', { intentKey: 'recovery', intentText: 'repair', baseOid: main,
+      branch: 'refs/heads/work', unitKeys: [unit], dependencyChangeIds: [] });
+    expect(created.response.status).toBe(201);
+    const changeId = created.body.data.changeId as string;
+    const storageName = created.body.data.candidateStorageName as string;
+    const branch = 'refs/heads/work';
+    const firstHead = oid('a');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+      const storage = internal.context('repos', principal, h.repoId).storage as FakeStorage;
+      storage.putCommit(storageName, { oid: firstHead, treeOid: oid('3'), parents: [main] });
+      expect(storage.conditionalUpdateRef(storageName, branch, null, firstHead)).toBe(true);
+    });
+    const register = async (headOid: string) => post('/branches', {
+      expectedVersion: (await h.fetch(`/changes/${changeId}`)).body.version,
+      storageName, ref: branch, observedHead: headOid, ownerId: 'agent-a',
+    });
+    expect((await register(firstHead)).response.status).toBe(201);
+    const publish = async (baseOid: string, headOid: string) => post(`/changes/${changeId}/publish`, {
+      expectedVersion: (await h.fetch(`/changes/${changeId}`)).body.version,
+      baseOid, headOid, branch, unitKeys: [unit], leaseFences: { [unit]: 1 },
+    });
+    expect((await publish(main, firstHead)).response.status).toBe(202);
+    const manifestFor = (revision: number): ReviewManifest => ({
+      changedUnits: [{ unitKey: unit, beforePath: 'recovery.tsv', afterPath: 'recovery.tsv',
+        beforeMode: '100644', afterMode: '100644', beforeDigest: `sha256:${'4'.repeat(64)}`,
+        afterDigest: `sha256:${String(revision + 4).repeat(64)}` }],
+      policyVersion: config.policies['local-demo'].version, policyDigest: config.policies['local-demo'].digest,
+      checkerDigest: config.policies['local-demo'].checkerDigest,
+      oracleDigest: config.profiles['local-demo'].oracleDigest,
+      toolchainDigest: config.profiles['local-demo'].toolchainDigest,
+      coverage: 'complete', dependencyScope: [],
+    });
+    const inspect = async (revision: number, expectedStatus = 200) => {
+      const manifest = manifestFor(revision);
+      const reviewManifestDigest = manifestDigest(manifest, config.policies['local-demo'], [unit]);
+      await h.fetch('/queue');
+      const job = h.jobs.find(item => item.kind === 'inspect-candidate' && item.changeId === changeId && item.revision === revision);
+      expect(job?.kind).toBe('inspect-candidate');
+      if (job?.kind !== 'inspect-candidate') throw new Error(`Missing inspection for revision ${revision}`);
+      const runnerId = `recovery-checker-${revision}`;
+      const poll = await post('/runner/poll', {
+        runnerId, role: 'checker', supportedProfileDigests: [job.profileDigest],
+      }, 'local-checker');
+      expect(poll.response.status).toBe(200);
+      const claimed = poll.body.data.job as Job;
+      expect(claimed.jobId).toBe(job.jobId);
+      if (claimed.kind !== 'inspect-candidate') throw new Error('Expected inspection job');
+      const preimage = {
+        kind: 'inspect-candidate' as const, jobId: claimed.jobId, attempt: claimed.attempt, fence: claimed.fence,
+        inputDigest: claimed.inputDigest, sourceTreeOid: oid('3'), checkerDigest: claimed.checkerDigest,
+        toolchainDigest: claimed.toolchainDigest, oracleDigest: claimed.oracleDigest,
+        environmentDigest: claimed.environmentDigest, durationMs: 1, log: '', outcome: 'PASS' as const,
+        observedHeadOid: claimed.candidate.headOid, unitKeys: [unit], reviewManifestDigest,
+        reviewManifest: manifest,
+      };
+      const resultDigest = await digest(preimage);
+      const result = await post(`/jobs/${job.jobId}/result`, {
+        attempt: claimed.attempt, fence: claimed.fence, inputDigest: claimed.inputDigest,
+        resultDigest, result: { ...preimage, resultDigest },
+      }, 'local-checker');
+      expect(result.response.status).toBe(expectedStatus);
+      if (expectedStatus === 200) {
+        expect(result.body.data.dispatch.status).toBe('eligible');
+        h.findingsVersion.set(changeId, revision);
+      }
+      return { reviewManifestDigest, result };
+    };
+    const review = async (revision: number, reviewManifestDigest: string) => post(`/changes/${changeId}/verdicts`, {
+      expectedVersion: (await h.fetch('/snapshot')).body.version,
+      revision, reviewManifestDigest, findingSetVersion: revision, decision: 'approve',
+      evidenceDigest: `sha256:${'6'.repeat(64)}`,
+    }, 'local-reviewer');
+    const enqueue = async (verdictId: string) => h.fetch('/queue/enqueue', {
+      expectedVersion: (await h.fetch('/queue')).body.version, changeId, verdictId, leaseFences: { [unit]: 1 },
+    });
+    const firstDigest = (await inspect(1)).reviewManifestDigest;
+    const firstReview = await review(1, firstDigest);
+    expect(firstReview.response.status).toBe(201);
+    const firstVerdict = firstReview.body.data.verdictId as string;
+    expect((await enqueue(firstVerdict)).response.status).toBe(201);
+    const nextMain = oid('4');
+    expect(await h.put(repo.canonicalStorageName, 'refs/heads/main', nextMain, main)).toBe(true);
+    expect((await enqueue(firstVerdict)).response.status).toBe(409);
+    const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId, reason: 'rebase onto current main' });
+    expect(withdrawn.response.status).toBe(200);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('STALE_BASE');
+    expect((await h.state()).promotion).toBeNull();
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+      const storage = internal.context('repos', principal, h.repoId).storage as FakeStorage;
+      // Fetch the new canonical commit into the candidate fork before checking ancestry.
+      storage.putCommit(storageName, { oid: nextMain, treeOid: oid('3'), parents: [main] });
+    });
+    // A claimed new base without new ancestry cannot produce a passing inspection.
+    expect((await publish(nextMain, firstHead)).response.status).toBe(202);
+    const unrebased = await inspect(2, 409);
+    expect(unrebased.result.body.error.code).toBe('RESULT_IDENTITY');
+    expect((await h.fetch(`/changes/${changeId}`)).body.data.status).toBe('draft');
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('CHANGE_NOT_READY');
+    expect((await h.state()).promotion).toBeNull();
+    const secondHead = oid('b');
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+      const storage = internal.context('repos', principal, h.repoId).storage as FakeStorage;
+      storage.putCommit(storageName, { oid: secondHead, treeOid: oid('3'), parents: [nextMain] });
+      expect(storage.conditionalUpdateRef(storageName, branch, firstHead, secondHead)).toBe(true);
+    });
+    const rebased = await runInDurableObject<RepoCoordinator, string[]>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'repos', actor: Principal, repoId: string): ModuleContext };
+      const storage = internal.context('repos', principal, h.repoId).storage as FakeStorage;
+      return storage.readCommit(storageName, secondHead).then(commit => commit?.parents ?? []);
+    });
+    expect(rebased).toEqual([nextMain]);
+    expect((await register(secondHead)).response.status).toBe(200);
+    expect((await publish(nextMain, secondHead)).response.status).toBe(202);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('CHANGE_NOT_READY');
+    const secondDigest = manifestDigest(manifestFor(3), config.policies['local-demo'], [unit]);
+    expect((await review(3, secondDigest)).body.error.code).toBe('REVIEW_REQUIRED');
+    expect((await h.state()).promotion).toBeNull();
+    expect((await inspect(3)).reviewManifestDigest).toBe(secondDigest);
+    expect((await h.fetch(`/changes/${changeId}`)).body.data.status).toBe('ready');
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('REVIEW_REQUIRED');
+    expect((await review(1, firstDigest)).body.error.code).toBe('INVALID_VERDICT');
+    const secondReview = await review(3, secondDigest);
+    expect(secondReview.response.status).toBe(201);
+    const secondVerdict = secondReview.body.data.verdictId as string;
+    expect(secondVerdict).not.toBe(firstVerdict);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('VERDICT_STALE');
+    expect((await h.state()).promotion).toBeNull();
+    expect((await enqueue(secondVerdict)).response.status).toBe(201);
+    await h.tick();
+    const job = h.jobs.find(item => item.kind === 'validate-stack' && item.candidates.some(candidate => candidate.changeId === changeId));
+    expect(job).toBeDefined();
+    expect(job?.kind === 'validate-stack' && job.candidates[0].revision).toBe(3);
+    expect((await h.deliver(job!, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: [changeId] });
+  });
+
+  it('closes an open contest once when external main makes both children stale', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    expect((await h.state()).contests[0].state).toBe('open');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('4'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'STALE_MAIN' });
+    expect((await h.state()).entries.map((entry: any) => [entry.state, entry.blockedReason]))
+      .toEqual([['blocked', 'STALE_MAIN'], ['blocked', 'STALE_MAIN']]);
+    expect(await contestReleaseCount(h)).toBe(1);
+    await h.tick();
+    expect(await contestReleaseCount(h)).toBe(1);
     expect((await h.state()).promotion).toBeNull();
   });
 

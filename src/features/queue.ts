@@ -319,6 +319,17 @@ function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, rea
   emit(context, 'queue.entry_blocked', [entry.changeId], { reason, confidence: 'none' });
   invalidate(context, state, reason, [entry.changeId]);
 }
+function blockOldBaseEntries(context: ModuleContext, state: QueueState, main: string | null): void {
+  for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
+    blockEntry(context, state, entry, 'STALE_MAIN');
+  }
+}
+function observeMain(context: ModuleContext, state: QueueState, main: string | null, ids: Id[] = []): void {
+  if (state.observedMain === main) return;
+  state.observedMain = main;
+  invalidate(context, state, 'MAIN_CHANGED', ids);
+  blockOldBaseEntries(context, state, main);
+}
 function closeContest(context: ModuleContext, state: QueueState, contest: ContestState, reason: string): void {
   contest.state = 'blocked'; contest.reason = reason;
   contestEvidence(context, contest, contest.childIds[0]);
@@ -345,8 +356,7 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     const state = read(context);
     if (state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)) throw new HttpError(409, 'PROMOTION_IN_PROGRESS', 'Promotion is pending');
     if (state.entries.filter(active).length >= MAX_CANDIDATES) throw new HttpError(429, 'QUEUE_FULL', 'Eight active candidates are allowed');
-    if (state.observedMain !== null && state.observedMain !== main) invalidate(context, state, 'MAIN_CHANGED', []);
-    state.observedMain = main;
+    observeMain(context, state, main);
     const checked = checkAdmission(context, state, changeId, body.verdictId as Id, body.leaseFences as Record<string, number>, main, null);
     context.state.delete(`contest-child:${changeId}`);
     const reservation = requireGate(context.call('leases.reserve', changeId, checked.reservationFences));
@@ -443,8 +453,7 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
     const state = read(context);
     if (state.entries.filter(active).length + 2 > MAX_CANDIDATES) throw new HttpError(429, 'QUEUE_FULL', 'Eight active candidates are allowed');
     if (state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)) throw new HttpError(409, 'PROMOTION_IN_PROGRESS', 'Promotion is pending');
-    if (state.observedMain !== null && state.observedMain !== main) invalidate(context, state, 'MAIN_CHANGED', []);
-    state.observedMain = main;
+    observeMain(context, state, main);
     const contestId = crypto.randomUUID();
     const prepared = children.map((id, i) => checkAdmission(context, state, id, verdicts[i], fences[i] as Record<string, number>, main, contestId));
     if (prepared[0].policyId !== prepared[1].policyId || prepared[0].canonicalStorageName !== prepared[1].canonicalStorageName
@@ -595,6 +604,20 @@ async function makePromotionJob(context: ModuleContext, state: QueueState, check
   };
   return { ...immutable, inputDigest: await digest(jobInput(immutable)) } as Job;
 }
+function ticketBaseMatches(state: QueueState, record: JobRecord, entry: Entry, main: string | null,
+  seen = new Set<Id>()): boolean {
+  if (entry.baseOid === main) return true;
+  if (seen.has(entry.entryId)) return false;
+  seen.add(entry.entryId);
+  const position = record.memberIds.indexOf(entry.changeId);
+  return entry.dependencyChangeIds.some(id => {
+    const prerequisitePosition = record.memberIds.indexOf(id);
+    if (prerequisitePosition < 0 || prerequisitePosition >= position) return false;
+    const prerequisite = member(state, record, id);
+    return !!prerequisite && prerequisite.headOid === entry.baseOid
+      && ticketBaseMatches(state, record, prerequisite, main, new Set(seen));
+  });
+}
 async function createTicket(context: ModuleContext, state: QueueState, record: JobRecord, result: StackResult,
   main: string | null): Promise<void> {
   if (state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)) return;
@@ -608,7 +631,8 @@ async function createTicket(context: ModuleContext, state: QueueState, record: J
   }
   if (!record.job.bootstrap && !record.memberIds.every(id => {
     const entry = member(state, record, id);
-    return entry && ['reserved', 'checking'].includes(entry.state) && admissionStillValid(context, entry);
+    return entry && ticketBaseMatches(state, record, entry, main) && ['reserved', 'checking'].includes(entry.state)
+      && admissionStillValid(context, entry);
   })) {
     invalidate(context, state, 'ELIGIBILITY_CHANGED', record.memberIds);
     return;
@@ -630,7 +654,8 @@ async function createTicket(context: ModuleContext, state: QueueState, record: J
     // The coordinator alarm is exclusive with HTTP mutations. Recheck the authoritative gates before freezing.
     if (!checkedJob.bootstrap && !memberIds.every(id => {
       const entry = member(state, record, id);
-      return entry && ['reserved', 'checking'].includes(entry.state) && admissionStillValid(context, entry);
+      return entry && ticketBaseMatches(state, record, entry, main) && ['reserved', 'checking'].includes(entry.state)
+        && admissionStillValid(context, entry);
     })) throw new HttpError(409, 'ELIGIBILITY_CHANGED', 'Admission changed before promotion freeze');
     schedule(context, state, promote, 'promotion', memberIds);
     state.ticket = {
@@ -796,10 +821,9 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
         if (entry && active(entry)) transition(context, state, entry, 'landed');
       }
       if (ticket.bootstrap) state.bootstrap!.state = 'merged';
-      state.observedMain = observed;
+      observeMain(context, state, observed, ticket.memberIds);
       emit(context, 'queue.promotion_applied', ticket.memberIds, { promotionId: ticket.promotionId,
         canonicalOid: observed, checkedNewOid: ticket.checkedNewOid, readback: true });
-      bump(context, state, 'MAIN_CHANGED', ticket.memberIds);
       save(context, state);
     });
     return;
@@ -925,13 +949,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
     state.bootstrap.state = 'blocked'; state.bootstrap.blockedReason = 'BOOTSTRAP_CONFLICT';
     emit(context, 'queue.bootstrap_blocked', [state.bootstrap.stackId], { reason: 'MAIN_EXISTS', observed: main });
   }
-  if (state.observedMain !== main) {
-    state.observedMain = main;
-    invalidate(context, state, 'MAIN_CHANGED', []);
-    for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
-      blockEntry(context, state, entry, 'STALE_MAIN');
-    }
-  }
+  observeMain(context, state, main);
   for (const entry of state.entries) if (active(entry) && entry.state !== 'blocked' && !admissionStillValid(context, entry)) {
     blockEntry(context, state, entry, 'ELIGIBILITY_CHANGED');
   }
