@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { artifactsStorage } from '../../src/storage/artifacts';
-import { pendingInitialToken, revokeOrphanTokens } from '../../src/repos/model';
+import { pendingInitialToken, pendingResultFailure, revokeOrphanTokens } from '../../src/repos/model';
 
 type RepoState = { remote: string; status: 'ready' | 'forking'; refs: Record<string, string>; token?: string };
 
@@ -40,6 +40,91 @@ function provider() {
 }
 
 describe('Artifacts binding adapter', () => {
+  it.each([
+    ['empty remote', { name: 'target', remote: '', token: 'held' }, true],
+    ['non-HTTPS remote', { name: 'target', remote: 'ssh://example.test/target', token: 'held' }, true],
+    ['wrong name', { name: 'other', remote: 'https://example.test/target', token: 'held' }, true],
+    ['missing remote', { name: 'target', token: 'held' }, true],
+    ['missing token', { name: 'target', remote: 'https://example.test/target' }, false],
+    ['null response', null, false],
+  ])('captures a create credential before validating %s', async (_case, raw, held) => {
+    const fixture = provider();
+    fixture.binding.create.mockResolvedValueOnce(raw as never);
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    if (!held) {
+      await expect(storage.ensureRepo('target')).rejects.toThrow('ARTIFACTS_CREATE_RESULT_INVALID');
+      return;
+    }
+    const result = await storage.ensureRepo('target');
+    expect(result).toMatchObject({ name: 'target', remote: '', status: 'provisioning' });
+    expect(result[pendingInitialToken]).toBe('held');
+    expect(result[pendingResultFailure]).toBe('ARTIFACTS_CREATE_RESULT_INVALID');
+  });
+
+  it.each([
+    ['empty remote', { name: 'target', remote: '', token: 'held' }, true],
+    ['non-HTTPS remote', { name: 'target', remote: 'ssh://example.test/target', token: 'held' }, true],
+    ['wrong name', { name: 'other', remote: 'https://example.test/target', token: 'held' }, true],
+    ['missing remote', { name: 'target', token: 'held' }, true],
+    ['missing token', { name: 'target', remote: 'https://example.test/target' }, false],
+    ['null response', null, false],
+  ])('captures a fork credential before validating %s', async (_case, raw, held) => {
+    const fixture = provider();
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    await storage.ensureRepo('source');
+    const originalGet = fixture.binding.get.getMockImplementation()!;
+    fixture.binding.get.mockImplementation(async name => {
+      const handle = await originalGet(name);
+      if (name === 'source') handle.fork.mockResolvedValueOnce(raw as never);
+      return handle;
+    });
+    if (!held) {
+      await expect(storage.fork('source', 'target')).rejects.toThrow('ARTIFACTS_CREATE_RESULT_INVALID');
+      return;
+    }
+    const result = await storage.fork('source', 'target');
+    expect(result).toMatchObject({ name: 'target', remote: '', status: 'provisioning' });
+    expect(result[pendingInitialToken]).toBe('held');
+    expect(result[pendingResultFailure]).toBe('ARTIFACTS_CREATE_RESULT_INVALID');
+  });
+
+  it.each([
+    ['invalid expiry', { plaintext: 'held', expiresAt: 'invalid' }, true],
+    ['missing expiry', { plaintext: 'held' }, true],
+    ['missing secret', { expiresAt: '2026-10-11T08:00:00Z' }, false],
+    ['null response', null, false],
+  ])('captures a minted credential before validating %s', async (_case, raw, held) => {
+    const fixture = provider();
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    await storage.ensureRepo('source');
+    const originalGet = fixture.binding.get.getMockImplementation()!;
+    fixture.binding.get.mockImplementation(async name => {
+      const handle = await originalGet(name);
+      handle.createToken.mockResolvedValueOnce(raw as never);
+      return handle;
+    });
+    if (!held) {
+      await expect(storage.mintToken('source', 'read', 60)).rejects.toThrow('ARTIFACTS_TOKEN_RESULT_INVALID');
+      return;
+    }
+    const result = await storage.mintToken('source', 'read', 60);
+    expect(result.secret).toBe('held');
+    expect(result[pendingResultFailure]).toBe('ARTIFACTS_TOKEN_RESULT_INVALID');
+  });
+
+  it.each([null, undefined, { token: 'unexpected' }, 'true', 1])('returns false for malformed revoke result %s', async raw => {
+    const fixture = provider();
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    await storage.ensureRepo('source');
+    const originalGet = fixture.binding.get.getMockImplementation()!;
+    fixture.binding.get.mockImplementation(async name => {
+      const handle = await originalGet(name);
+      handle.revokeToken.mockResolvedValueOnce(raw as never);
+      return handle;
+    });
+    expect(await storage.revokeToken('source', 'held')).toBe(false);
+  });
+
   it('uses documented create, get, fork, info, read and token result shapes', async () => {
     const fixture = provider();
     const storage = artifactsStorage(fixture.binding as unknown as Artifacts);

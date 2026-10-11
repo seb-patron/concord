@@ -2,7 +2,7 @@ import type { BootstrapBody, Branch, Change, CreateChangeBody, CreateRepoBody, F
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { eventSequence } from '../state';
-import { branch, ids, oid, pendingInitialToken, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
+import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
 const page = <T>(items: T[], request: Request) => {
@@ -99,6 +99,7 @@ async function reconcile(context: ModuleContext, intent: ProvisioningIntent, ret
       intent.state = 'token-held';
       saveIntent(context, intent);
     }
+    if (observed?.[pendingResultFailure]) throw new Error(observed[pendingResultFailure]);
     const heldToken = context.state.get<string>(tokenKey);
     if (observed?.status === 'ready') {
       if (intent.state !== 'observed') {
@@ -326,10 +327,21 @@ async function gitToken(context: ModuleContext, body: Record<string, unknown>): 
   if (storageName === repo.canonicalStorageName) {
     if (scope !== 'read') fail(403, 'CANONICAL_WRITE_FORBIDDEN', 'Canonical write tokens are reserved for the promoter');
   } else if (!own) fail(403, 'FORK_NOT_OWNED', 'The caller does not own this candidate fork');
-  if ((await context.storage.info(storageName))?.status !== 'ready') fail(409, 'STORAGE_NOT_READY', 'Storage is not ready');
+  const storageRepo = await context.storage.info(storageName);
+  if (storageRepo?.status !== 'ready') fail(409, 'STORAGE_NOT_READY', 'Storage is not ready');
+  const mintKey = `mint-token:${storageName}`;
+  const prior = context.state.get<string>(mintKey);
+  if (prior) {
+    if (!await context.storage.revokeToken(storageName, prior)) fail(503, 'TOKEN_REVOCATION_FAILED', 'Token cleanup is pending');
+    context.state.delete(mintKey);
+  }
   const token = await context.storage.mintToken(storageName, scope as 'read' | 'write', Number(ttlSeconds));
-  const remote = (await context.storage.info(storageName))!.remote;
-  return respond(context, { storageName, remote, scope, ...token });
+  if (token[pendingResultFailure]) {
+    context.state.put(mintKey, token.secret);
+    if (await context.storage.revokeToken(storageName, token.secret)) context.state.delete(mintKey);
+    fail(503, 'TOKEN_RESULT_INVALID', 'Token provider response was invalid');
+  }
+  return respond(context, { storageName, remote: storageRepo!.remote, scope, ...token });
 }
 
 async function publish(context: ModuleContext, changeId: string, body: Record<string, unknown>): Promise<Response> {

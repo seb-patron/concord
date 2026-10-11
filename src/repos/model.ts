@@ -1,7 +1,7 @@
 import type { Change, Digest, Oid, Repo } from '../contracts';
 import { HttpError } from '../http';
 
-export { pendingInitialToken } from '../contracts';
+export { pendingInitialToken, pendingResultFailure } from '../contracts';
 /** Internal Artifacts cleanup after a create response was lost before its token was received. */
 export const revokeOrphanTokens: unique symbol = Symbol('revokeOrphanTokens');
 

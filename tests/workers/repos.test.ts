@@ -573,7 +573,7 @@ describe('repository and change lifecycle', () => {
     }
   });
 
-  it('persists an Artifacts creation token before revocation and retries despite an empty token listing', async () => {
+  it.each([false, true])('persists an Artifacts creation token with empty remote=%s before retry despite an empty token listing', async emptyRemote => {
     let createdName = '';
     let active = false;
     let revokeCalls = 0;
@@ -581,7 +581,7 @@ describe('repository and change lifecycle', () => {
       create: vi.fn(async (name: string) => {
         createdName = name;
         active = true;
-        return { name, remote: `https://example.test/${name}.git`, token: 'artifact-secret' };
+        return { name, remote: emptyRemote ? '' : `https://example.test/${name}.git`, token: 'artifact-secret' };
       }),
       get: vi.fn(async (name: string) => {
         if (name !== createdName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
@@ -591,7 +591,7 @@ describe('repository and change lifecycle', () => {
           revokeToken: vi.fn(async (token: string) => {
             expect(token).toBe('artifact-secret');
             revokeCalls++;
-            if (revokeCalls === 1) return false;
+            if (!emptyRemote && revokeCalls === 1) return false;
             active = false;
             return true;
           }),
@@ -609,21 +609,75 @@ describe('repository and change lifecycle', () => {
       const route = repos.routes[0];
       const request = new Request('https://concord.test/v1/repos', { method: 'POST' });
       const match = route.pattern.exec('/v1/repos')!;
-      const body = { name: 'artifact_revoke_retry', policyId: 'local-demo', profileId: 'local-demo' };
+      const body = { name: emptyRemote ? 'artifact_empty_remote_retry' : 'artifact_revoke_retry', policyId: 'local-demo', profileId: 'local-demo' };
       await expect(route.handle(context, request, match, body)).rejects.toMatchObject({ status: 503, code: 'PROVISIONING_FAILED' });
       const intentKey = `ensure-repo:${createdName}`;
       expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![intentKey].state).toBe('failed');
       expect(context.state.get<string>(`initial-token:${createdName}`)).toBe('artifact-secret');
       expect(active).toBe(true);
-      expect(revokeCalls).toBe(1);
+      expect(revokeCalls).toBe(emptyRemote ? 0 : 1);
       expect(await (await binding.get(createdName)).listTokens()).toEqual({ total: 0, tokens: [] });
       const retry = await route.handle(context, request, match, body);
       expect(retry.status).toBe(201);
       expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![intentKey].state).toBe('observed');
       expect(context.state.get<string>(`initial-token:${createdName}`)).toBeNull();
       expect(active).toBe(false);
-      expect(revokeCalls).toBe(2);
+      expect(revokeCalls).toBe(emptyRemote ? 1 : 2);
       expect(binding.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('retains a malformed minted token until revocation succeeds on retry', async () => {
+    let createdName = '';
+    let mintCalls = 0;
+    let mintedRevocations = 0;
+    const binding = {
+      create: vi.fn(async (name: string) => {
+        createdName = name;
+        return { name, remote: `https://example.test/${name}.git`, token: 'initial-secret' };
+      }),
+      get: vi.fn(async (name: string) => {
+        if (name !== createdName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
+        return {
+          [Symbol.dispose]: () => {},
+          info: async () => ({ name, remote: `https://example.test/${name}.git` }),
+          revokeToken: async (secret: string) => {
+            if (secret === 'minted-secret') return ++mintedRevocations > 1;
+            return true;
+          },
+          listTokens: async () => ({ total: 0, tokens: [] }),
+          createToken: async () => ++mintCalls === 1
+            ? { plaintext: 'minted-secret', expiresAt: 'invalid' }
+            : { plaintext: 'next-secret', expiresAt: '2026-10-11T08:00:00Z' },
+        };
+      }),
+      list: vi.fn(async () => ({ repos: [], cursor: undefined })),
+    };
+    const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject<TenantCatalog, void>(stub, async instance => {
+      const context = (instance as unknown as { context(principal: object): ModuleContext }).context({
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const createRoute = repos.routes[0];
+      const createRequest = new Request('https://concord.test/v1/repos', { method: 'POST' });
+      const created = await createRoute.handle(context, createRequest, createRoute.pattern.exec('/v1/repos')!,
+        { name: 'artifact_mint_retry', policyId: 'local-demo', profileId: 'local-demo' });
+      expect(created.status).toBe(201);
+      Object.assign(context, { repoId: 'artifact_mint_retry' });
+      const path = '/v1/repos/artifact_mint_retry/git-token';
+      const tokenRoute = repos.routes.find(route => route.method === 'POST' && route.pattern.test(path))!;
+      const request = new Request(`https://concord.test${path}`, { method: 'POST' });
+      const body = { storageName: createdName, scope: 'read', ttlSeconds: 60 };
+      await expect(tokenRoute.handle(context, request, tokenRoute.pattern.exec(path)!, body))
+        .rejects.toMatchObject({ status: 503, code: 'TOKEN_RESULT_INVALID' });
+      expect(context.state.get<string>(`mint-token:${createdName}`)).toBe('minted-secret');
+      expect(mintedRevocations).toBe(1);
+      const retry = await tokenRoute.handle(context, request, tokenRoute.pattern.exec(path)!, body);
+      expect(retry.status).toBe(200);
+      expect((await responseBody(retry)).data.secret).toBe('next-secret');
+      expect(context.state.get<string>(`mint-token:${createdName}`)).toBeNull();
+      expect(mintedRevocations).toBe(2);
     });
   });
 

@@ -1,9 +1,32 @@
 import type { RepoStorage, StorageRepo } from '../contracts';
-import { pendingInitialToken, revokeOrphanTokens } from '../repos/model';
+import { pendingInitialToken, pendingResultFailure, revokeOrphanTokens } from '../repos/model';
 
 const progress = new Set(['CREATE_IN_PROGRESS', 'IMPORT_IN_PROGRESS', 'FORK_IN_PROGRESS']);
 const code = (error: unknown): string | undefined => typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : undefined;
 const pending = (name: string): StorageRepo => ({ name, remote: '', status: 'provisioning' });
+type Captured<T> = { ok: true; value: T; credential: string | null } | { ok: false; reason: string; credential: string | null };
+const field = (raw: unknown, key: string): unknown => raw && typeof raw === 'object' ? (raw as Record<string, unknown>)[key] : undefined;
+
+/** Capture a credential before inspecting any other provider response field. */
+function capture<T>(raw: unknown, credentialField: string | null, reason: string, validate: (raw: unknown) => T, suppliedCredential?: string): Captured<T> {
+  const extracted = credentialField ? field(raw, credentialField) : suppliedCredential;
+  const credential = typeof extracted === 'string' && extracted.length > 0 ? extracted : null;
+  try { return { ok: true, value: validate(raw), credential }; }
+  catch { return { ok: false, reason, credential }; }
+}
+
+function record(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object') throw new Error('INVALID_RESULT');
+  return raw as Record<string, unknown>;
+}
+
+function revoked(raw: unknown, tokenIdOrSecret: string): boolean {
+  const checked = capture(raw, null, 'ARTIFACTS_REVOKE_RESULT_INVALID', value => {
+    if (typeof value !== 'boolean') throw new Error('INVALID_RESULT');
+    return value;
+  }, tokenIdOrSecret);
+  return checked.ok ? checked.value : false;
+}
 
 /** Cloudflare Artifacts binding adapter. Never exposes creation tokens. */
 export function artifactsStorage(bindingInput: unknown): RepoStorage {
@@ -36,14 +59,22 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
     return null;
   }
 
-  async function created(result: ArtifactsCreateRepoResult, expectedName: string): Promise<StorageRepo> {
-    if (result.name !== expectedName || !result.remote.startsWith('https://') || !result.token) throw new Error('ARTIFACTS_CREATE_RESULT_INVALID');
+  async function created(result: unknown, expectedName: string): Promise<StorageRepo> {
+    const checked = capture(result, 'token', 'ARTIFACTS_CREATE_RESULT_INVALID', raw => {
+      const value = record(raw);
+      if (value.name !== expectedName || typeof value.remote !== 'string' || !value.remote.startsWith('https://') || typeof value.token !== 'string' || !value.token) throw new Error('INVALID_RESULT');
+      return value;
+    });
+    if (!checked.ok) {
+      if (checked.credential) return Object.assign(pending(expectedName), { [pendingInitialToken]: checked.credential, [pendingResultFailure]: checked.reason });
+      throw new Error(checked.reason);
+    }
     // The coordinator must persist the token before attempting revocation.
     // Even if the first status lookup fails, return the credential for retry.
     let observed: StorageRepo | null;
-    try { observed = await info(result.name); }
+    try { observed = await info(expectedName); }
     catch { observed = null; }
-    return Object.assign(observed ?? pending(result.name), { [pendingInitialToken]: result.token });
+    return Object.assign(observed ?? pending(expectedName), { [pendingInitialToken]: checked.credential! });
   }
 
   const storage: RepoStorage & { [revokeOrphanTokens]?: (name: string) => Promise<void> } = {
@@ -88,12 +119,20 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
     async mintToken(name, scope, ttlSeconds) {
       if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 600) throw new Error('INVALID_TOKEN_TTL');
       using repo = await binding.get(name);
-      const token = await repo.createToken(scope, ttlSeconds);
-      return { secret: token.plaintext, expiresAt: Date.parse(token.expiresAt) };
+      const checked = capture(await repo.createToken(scope, ttlSeconds), 'plaintext', 'ARTIFACTS_TOKEN_RESULT_INVALID', raw => {
+        const value = record(raw);
+        if (typeof value.plaintext !== 'string' || !value.plaintext || typeof value.expiresAt !== 'string') throw new Error('INVALID_RESULT');
+        const expiresAt = Date.parse(value.expiresAt);
+        if (!Number.isFinite(expiresAt)) throw new Error('INVALID_RESULT');
+        return { secret: value.plaintext, expiresAt };
+      });
+      if (checked.ok) return checked.value;
+      if (checked.credential) return { secret: checked.credential, expiresAt: NaN, [pendingResultFailure]: checked.reason };
+      throw new Error(checked.reason);
     },
     async revokeToken(name, tokenIdOrSecret) {
       using repo = await binding.get(name);
-      return repo.revokeToken(tokenIdOrSecret);
+      return revoked(await repo.revokeToken(tokenIdOrSecret), tokenIdOrSecret);
     },
   };
   storage[revokeOrphanTokens] = async name => {
@@ -101,7 +140,7 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
     const listing = await repo.listTokens();
     if (listing.total > 100) throw new Error('ARTIFACTS_TOKEN_AUDIT_REQUIRED');
     for (const token of listing.tokens) {
-      if (token.state === 'active' && !await repo.revokeToken(token.id)) throw new Error('ARTIFACTS_ORPHAN_TOKEN_REVOCATION_FAILED');
+      if (token.state === 'active' && !revoked(await repo.revokeToken(token.id), token.id)) throw new Error('ARTIFACTS_ORPHAN_TOKEN_REVOCATION_FAILED');
     }
   };
   return storage;

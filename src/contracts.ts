@@ -264,9 +264,11 @@ export type JobResult = InspectionResult | StackResult | DeltaResult | Promotion
 
 /** Internal handoff for a creation token; never included in JSON responses. */
 export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');
-export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning'; [pendingInitialToken]?: string }
+/** Adapter validation failed after a credential was returned. The coordinator persists the credential before failing the intent. */
+export const pendingResultFailure: unique symbol = Symbol('pendingResultFailure');
+export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning'; [pendingInitialToken]?: string; [pendingResultFailure]?: string }
 export interface StorageCommit { oid: Oid; treeOid: Oid; parents: Oid[] }
-export interface StorageToken { secret: string; expiresAt: number }
+export interface StorageToken { secret: string; expiresAt: number; [pendingResultFailure]?: string }
 export interface RepoStorage {
   ensureRepo(name: string): Promise<StorageRepo>;
   fork(sourceName: string, targetName: string): Promise<StorageRepo>;
