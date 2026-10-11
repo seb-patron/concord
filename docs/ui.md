@@ -57,41 +57,52 @@ Worker serves `web/` directly; `/health` reports the backend badge.
   is `unavailable` here — no replay dataset ships with this view, and no
   percentage is computed.
 
-## Honest demo mapping (docs/DEMO.md scenes)
+## Data routes and demo mapping (docs/DEMO.md scenes)
 
-Feature slices 02–07 have not landed in this worktree: every module route
-returns `501 MODULE_UNAVAILABLE` and every snapshot projection reports
-`{ status: 'unavailable', items: [] }`. So a manual walkthrough today
-observes the shell behaving correctly around absence, not the fleet scenes:
+The panels read projections from `GET /v1/repos/:repoId/snapshot`. The table
+names that route, the source module, and any module route used by that panel;
+event details also come from `GET /v1/repos/:repoId/events?after=`.
+
+| Panel | Route and module read |
+| --- | --- |
+| Lease board | Snapshot `leases` projection from `src/features/leases.ts`; mutations use `POST /v1/repos/:repoId/leases`. |
+| Changes and change details | Snapshot `repos` projection from `src/features/repos.ts`; claim uses the leases route, enqueue/withdraw use `src/features/queue.ts`, and verdict submission uses `src/features/verdicts.ts`. |
+| Queue and bisection | Snapshot `queue` projection from `src/features/queue.ts`; its read route is `GET /v1/repos/:repoId/queue`. |
+| Runner health | Snapshot `runners` projection from `src/features/runners.ts`; job polling and results use that module's runner/job routes. |
+| Findings round | Snapshot `findings` projection from `src/features/findings.ts`; detail reads use `GET /v1/repos/:repoId/changes/:changeId/findings` and `/repairs`. |
+| Approval provenance | Snapshot `verdicts` projection from `src/features/verdicts.ts`; verdict writes use `POST /v1/repos/:repoId/changes/:changeId/verdicts`. |
+| Canonical tip | Snapshot `repos` projection from `src/features/repos.ts`. |
+| History and events | History has no replay data route in this screen; the event log reads `GET /v1/repos/:repoId/events?after=`. |
+
+The demo scenes seed backend state through the documented commands. The UI
+renders the corresponding returned projections and event records:
 
 | DEMO scene | Expected UI observation today |
 | --- | --- |
-| X lease conflict on alpha | Lease board: `Unavailable` panel, not a faked conflict |
-| B red stack, bisection to singleton B | Queue: `Unavailable`; bisection tree states unavailability |
-| B-repair clears two findings | Findings: `Unavailable`; repair copy explains the exact-set rule |
-| D carried approval, H invalidation | Provenance: `Unavailable`; verdict copy explains carry links |
-| J epsilon contest 2/4 vs 4/4 | Queue card copy explains score arbitration; no scores shown |
-| AW-task seven attempts, one change | Changes: `Unavailable`; intent-key dedupe copy in detail panel |
-| Offline runner / flake | Three missed polls show `Disconnected`; mutations disable |
+| X lease conflict on alpha | Lease board reads the lease projection; a refused claim's conflict evidence identifies the live holder. |
+| B red stack, bisection to singleton B | Queue panel reads queue entries and diagnostic outcomes from the queue projection. |
+| B-repair clears two findings | Findings panel reads finding and repair-round records from the findings projection. |
+| D carried approval, H invalidation | Provenance panel reads verdict records and their parent/delta evidence from the verdict projection and event log. |
+| J epsilon contest 2/4 vs 4/4 | Queue panel displays the arbitration outcome recorded by the queue module. |
+| AW-task seven attempts, one change | Changes panel displays repo change records; attempt and task evidence is shown only when present in returned records. |
+| Offline runner / flake | Runner state comes from the runner projection; missed health polls show `Disconnected` and disable mutations. |
 
 The state/render suite (`tests/node/ui.test.ts`) covers the display and
 mutation rules above against labelled fixtures — rejected claim, stale
 mutation, bisection display, unresolved repair, carried/invalidation
 verdicts, network recovery, script-like intent text, and focus
-preservation — so when slices 02–07 land, the panels already know how to
-explain them. The walkthrough above was verified against a local fake
+preservation. The walkthrough above was verified against a local fake
 backend on this worktree; no live Artifacts run was available.
 
-## Snapshot projection shape for slice integration
+## Snapshot projection shape
 
 The coordinator keys projections by `repos`, `leases`, `queue`, `runners`,
 `findings`, and `verdicts`. The UI reads `repos.items` for canonical repo data
 and `repos.changes` for changes; `findings.items` for findings,
 `findings.rounds` for repair rounds, and `findings.findingSetVersions[changeId]` for
 review evidence. Lease fences come from `leases.items`. Missing evidence blocks
-mutation with a visible message. These additive fields are the expected shape
-for the feature slices when they land; the current placeholders remain
-`{ status: 'unavailable', items: [] }`.
+mutation with a visible message. A projection's availability is reported by
+its owning module; the UI does not infer records absent from the response.
 
 ## UI evidence and response audit
 
