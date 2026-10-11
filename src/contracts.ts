@@ -41,6 +41,8 @@ export interface Finding extends Versioned {
   findingId: Id; changeId: Id; originRevision: number; unitKey: string;
   evidenceDigest: Digest; text: string; status: 'open' | 'resolved';
   repairRound: number | null; resolvedAtRevision: number | null; resolvingReviewerId: Id | null;
+  /** Stable semantic target; path and line are display hints only. */
+  semanticAnchor?: { kind: 'unit' | 'unknown'; key: string; path?: string; line?: number };
 }
 export interface Verdict extends Versioned {
   verdictId: Id; changeId: Id; reviewerId: Id; revision: number;
@@ -136,7 +138,12 @@ export interface PublishBody extends MutationBody {
   leaseFences: Record<string, number>;
 }
 export interface EnqueueBody extends MutationBody { changeId: Id; verdictId: Id; leaseFences: Record<string, number> }
-export interface AddFindingBody extends MutationBody { revision: number; unitKey: string; text: string; evidenceDigest: Digest }
+export interface AddFindingBody extends MutationBody {
+  revision: number; unitKey: string; text: string; evidenceDigest: Digest;
+  semanticAnchor?: Finding['semanticAnchor'];
+  /** Reopen the existing stable ID with a new evidence event. */
+  reopenFindingId?: Id;
+}
 export interface SubmitRepairBody extends MutationBody {
   revision: number; findingSetVersion: number;
   dispositions: Array<{ findingId: Id; explanation: string; evidenceDigest: Digest }>;
