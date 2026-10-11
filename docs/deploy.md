@@ -162,7 +162,7 @@ If versioned secret provisioning reports that no Worker/version exists, stop and
 
 ## Deployed smoke and evidence
 
-Set `CONCORD_URL` to the **deployed** URL printed by Wrangler. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. The live scenario driver uses fresh bearer credentials and mints short-lived repo-scoped Git tokens through the Worker. Keep all generated files outside the clone. The provisioned principals have distinct roles and a 24-hour expiry; provision again for another recording day.
+Set `CONCORD_URL` to the **deployed** URL printed by Wrangler. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. The live scenario driver uses fresh bearer credentials and mints short-lived repo-scoped Git tokens through the Worker. Keep all generated files outside the clone. The provisioned principals have distinct roles and a 24-hour expiry; provision again for another recording day. The provision command resolves its output directory with `realpath` and requires it to be outside the physical clone.
 
 ```sh
 export CONCORD_URL='<Wrangler deployed HTTPS URL>'
