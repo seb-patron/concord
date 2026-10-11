@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
-import type { BootstrapHandoff, ChangeView, Gate, Job, ModuleContext, Principal, PromotionResult, StackResult } from '../../src/contracts';
+import type { BootstrapHandoff, ChangeView, Gate, InspectedRevision, Job, ModuleContext, Principal, PromotionResult, ReviewManifest, StackResult } from '../../src/contracts';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
 import { queue } from '../../src/features/queue';
@@ -11,6 +11,7 @@ import { runners } from '../../src/features/runners';
 import { findings } from '../../src/features/findings';
 import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
+import { manifestDigest } from '../../src/verdicts/manifest';
 import { localFixtureConfig, sqlState } from '../../src/state';
 import { FakeStorage } from '../../src/storage/fake';
 import { arbitrate, accepted } from '../../src/queue/arbitrate';
@@ -691,6 +692,9 @@ describe('queue state machine', () => {
     await h.tick();
     expect((h.jobs[0] as any).candidates.map((candidate: any) => [candidate.changeId, candidate.baseOid]))
       .toEqual([['A', main], ['B', oid('a')]]);
+    expect((await h.deliver(h.jobs[0], 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A', 'B'] });
   });
 
   it('caps stack width at four and refuses a ninth active candidate', async () => {
@@ -838,6 +842,66 @@ describe('queue state machine', () => {
     expect((await h.state()).promotion).toBeNull();
   });
 
+  it('does not ticket an admission whose recorded base differs from live main', async () => {
+    const h = await setup('A');
+    await h.tick();
+    const checked = h.jobs[0];
+    const staleBase = oid('0');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const state = context.state.get<any>('data');
+      state.entries[0].baseOid = staleBase;
+      context.state.put('data', state);
+    });
+    h.views.set('A', { ...h.views.get('A')!, baseOid: staleBase });
+    expect((await h.deliver(checked, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toBeNull();
+  });
+
+  it('blocks old admissions when enqueue observes external main before an alarm', async () => {
+    const h = await setup('A');
+    const nextMain = oid('4');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    await h.seed(`candidate-${h.repoId}-B`);
+    h.views.set('B', { ...h.views.get('A')!, headOid: oid('b'), baseOid: nextMain,
+      candidateStorageName: `candidate-${h.repoId}-B`, unitKeys: ['row:B'] });
+    const added = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'B', verdictId: 'v-B', leaseFences: { 'row:B': 1 } });
+    expect(added.response.status).toBe(201);
+    const state = await h.state();
+    expect(state.observedMain).toBe(nextMain);
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.blockedReason]))
+      .toEqual([['A', 'blocked', 'STALE_MAIN'], ['B', 'reserved', null]]);
+    expect(h.releases).toEqual(['A']);
+    await h.tick();
+    expect(h.jobs.filter(job => job.kind === 'validate-stack').every(job =>
+      job.candidates.every(candidate => candidate.changeId !== 'A'))).toBe(true);
+  });
+
+  it('blocks old admissions when contest creation observes external main before an alarm', async () => {
+    const h = await setup('X');
+    const nextMain = oid('4');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { ...h.views.get('X')!, headOid: oid(id.toLowerCase()), baseOid: nextMain,
+        candidateStorageName: `candidate-${h.repoId}-${id}`, unitKeys: ['row:J'] });
+    }
+    const created = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete',
+      unitKey: 'row:J', baseOid: nextMain, profileId: 'local-demo', childChangeIds: ['A', 'B'],
+      verdictIds: ['v-A', 'v-B'], leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
+    expect(created.response.status).toBe(201);
+    const state = await h.state();
+    expect(state.observedMain).toBe(nextMain);
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.blockedReason]))
+      .toEqual([['X', 'blocked', 'STALE_MAIN'], ['A', 'reserved', null], ['B', 'reserved', null]]);
+    expect(state.contests[0].state).toBe('open');
+    expect(h.releases).toEqual(['X']);
+  });
+
   it('blocks remaining old-base entries after its own stack lands, including a dependent', async () => {
     const h = await setup('B', 'D', 'E');
     for (const [id, deps] of [['F', []], ['A', ['B']], ['C', []]] as const) {
@@ -891,19 +955,124 @@ describe('queue state machine', () => {
       changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
     expect(stale.response.status).toBe(409);
     expect(stale.body.error.code).toBe('STALE_BASE');
-    h.views.set('A', { ...h.views.get('A')!, baseOid: oid('e'), revision: 2 });
-    h.findingsVersion.set('A', 2);
-    const fresh = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
-      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
-    expect(fresh.response.status).toBe(201);
+  });
+
+  it('requires withdrawal, rebase, republish, and revision-bound review before recovery', async () => {
+    const h = harness;
+    const unit = 'row:recovery';
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].units[unit] = { canonicalKey: unit, file: 'recovery.tsv',
+      resources: [], dependencyKeys: [] };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    repos.changeView = original.changeView;
+    verdicts.hooks['verdicts.gate'] = original.verdict;
+    findings.hooks['findings.gate'] = (_context, id, revision) => revision === h.findingsVersion.get(id)
+      ? gate({ findingSetVersion: revision, unresolvedIds: [], pendingRound: null })
+      : { status: 'blocked', version: 1, code: 'FINDINGS_STALE', reason: 'Wrong revision', evidenceIds: [] };
+    const post = async (path: string, body: Record<string, unknown>, actor = 'local-agent-a') => {
+      const response = await worker.fetch(mutation(`/v1/repos/${h.repoId}${path}`, body, crypto.randomUUID(), actor), env);
+      return { response, body: await responseBody(response) };
+    };
+    const createdRepo = await worker.fetch(mutation('/v1/repos', {
+      name: h.repoId, policyId: 'local-demo', profileId: 'local-demo',
+    }, crypto.randomUUID()), env);
+    expect(createdRepo.status).toBe(201);
+    const repo = (await responseBody(createdRepo)).data;
+    await h.fetch('');
+    await h.seed(repo.canonicalStorageName);
+    await h.seed(`concord-s-${h.repoId}`, null);
+    const created = await post('/changes', { intentKey: 'recovery', intentText: 'repair', baseOid: main,
+      branch: 'refs/heads/work', unitKeys: [unit], dependencyChangeIds: [] });
+    expect(created.response.status).toBe(201);
+    const changeId = created.body.data.changeId as string;
+    const storageName = created.body.data.candidateStorageName as string;
+    const branch = 'refs/heads/work';
+    const firstHead = oid('a');
+    expect(await h.put(storageName, branch, firstHead, null)).toBe(true);
+    const register = async (headOid: string) => post('/branches', {
+      expectedVersion: (await h.fetch(`/changes/${changeId}`)).body.version,
+      storageName, ref: branch, observedHead: headOid, ownerId: 'agent-a',
+    });
+    expect((await register(firstHead)).response.status).toBe(201);
+    const publish = async (baseOid: string, headOid: string) => post(`/changes/${changeId}/publish`, {
+      expectedVersion: (await h.fetch(`/changes/${changeId}`)).body.version,
+      baseOid, headOid, branch, unitKeys: [unit], leaseFences: { [unit]: 1 },
+    });
+    expect((await publish(main, firstHead)).response.status).toBe(202);
+    const manifestFor = (revision: number): ReviewManifest => ({
+      changedUnits: [{ unitKey: unit, beforePath: 'recovery.tsv', afterPath: 'recovery.tsv',
+        beforeMode: '100644', afterMode: '100644', beforeDigest: `sha256:${'4'.repeat(64)}`,
+        afterDigest: `sha256:${String(revision + 4).repeat(64)}` }],
+      policyVersion: config.policies['local-demo'].version, policyDigest: config.policies['local-demo'].digest,
+      checkerDigest: config.policies['local-demo'].checkerDigest,
+      oracleDigest: config.profiles['local-demo'].oracleDigest,
+      toolchainDigest: config.profiles['local-demo'].toolchainDigest,
+      coverage: 'complete', dependencyScope: [],
+    });
+    const readyForReview = async (revision: number, baseOid: string, headOid: string) => {
+      const manifest = manifestFor(revision);
+      const reviewManifestDigest = manifestDigest(manifest, config.policies['local-demo'], [unit]);
+      const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+      await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+        const internal = instance as unknown as { context(name: 'repos' | 'verdicts', actor: Principal, repoId: string): ModuleContext };
+        const reposContext = internal.context('repos', principal, h.repoId);
+        const changes = reposContext.state.get<any[]>('changes')!;
+        const change = { ...changes.find(item => item.changeId === changeId), status: 'ready' };
+        reposContext.state.put('changes', changes.map(item => item.changeId === changeId ? change : item));
+        reposContext.state.put(`change:${changeId}`, change);
+        internal.context('verdicts', principal, h.repoId).state.put(`inspection:${changeId}`, {
+          changeId, revision, candidate: { changeId, revision, baseOid, headOid, storageName, ref: branch },
+          canonicalStorageName: repo.canonicalStorageName, policyId: 'local-demo', profileId: 'local-demo',
+          reviewManifest: manifest, reviewManifestDigest, outcome: 'PASS',
+        } satisfies InspectedRevision);
+      });
+      h.findingsVersion.set(changeId, revision);
+      return reviewManifestDigest;
+    };
+    const review = async (revision: number, reviewManifestDigest: string) => post(`/changes/${changeId}/verdicts`, {
+      expectedVersion: (await h.fetch('/snapshot')).body.version,
+      revision, reviewManifestDigest, findingSetVersion: revision, decision: 'approve',
+      evidenceDigest: `sha256:${'6'.repeat(64)}`,
+    }, 'local-reviewer');
+    const enqueue = async (verdictId: string) => h.fetch('/queue/enqueue', {
+      expectedVersion: (await h.fetch('/queue')).body.version, changeId, verdictId, leaseFences: { [unit]: 1 },
+    });
+    const firstDigest = await readyForReview(1, main, firstHead);
+    const firstReview = await review(1, firstDigest);
+    expect(firstReview.response.status).toBe(201);
+    const firstVerdict = firstReview.body.data.verdictId as string;
+    expect((await enqueue(firstVerdict)).response.status).toBe(201);
+    const nextMain = oid('4');
+    expect(await h.put(repo.canonicalStorageName, 'refs/heads/main', nextMain, main)).toBe(true);
+    expect((await enqueue(firstVerdict)).response.status).toBe(409);
+    const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId, reason: 'rebase onto current main' });
+    expect(withdrawn.response.status).toBe(200);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('STALE_BASE');
+    expect((await h.state()).promotion).toBeNull();
+    const secondHead = oid('b');
+    expect(await h.put(storageName, branch, secondHead, firstHead)).toBe(true);
+    expect((await register(secondHead)).response.status).toBe(200);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('CHANGE_NOT_READY');
+    expect((await publish(nextMain, secondHead)).response.status).toBe(202);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('CHANGE_NOT_READY');
+    const secondDigest = await readyForReview(2, nextMain, secondHead);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('REVIEW_REQUIRED');
+    expect((await review(1, firstDigest)).body.error.code).toBe('INVALID_VERDICT');
+    const secondReview = await review(2, secondDigest);
+    expect(secondReview.response.status).toBe(201);
+    const secondVerdict = secondReview.body.data.verdictId as string;
+    expect(secondVerdict).not.toBe(firstVerdict);
+    expect((await enqueue(firstVerdict)).body.error.code).toBe('VERDICT_STALE');
+    expect((await h.state()).promotion).toBeNull();
+    expect((await enqueue(secondVerdict)).response.status).toBe(201);
     await h.tick();
-    const freshJob = h.jobs.at(-1)!;
-    if (freshJob.kind !== 'validate-stack') throw new Error('expected fresh stack job');
-    expect(freshJob.candidates.map(candidate => candidate.changeId)).toEqual(['A']);
-    expect((await h.state()).promotion.promotionId).toBe(state.promotion.promotionId);
-    expect((await h.deliver(freshJob, 'PASS', { composed: oid('f') })).status).toBe('eligible');
+    const job = h.jobs.find(item => item.kind === 'validate-stack' && item.candidates.some(candidate => candidate.changeId === changeId));
+    expect(job).toBeDefined();
+    expect(job?.kind === 'validate-stack' && job.candidates[0].revision).toBe(2);
+    expect((await h.deliver(job!, 'PASS')).status).toBe('eligible');
     await h.tick();
-    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A'] });
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: [changeId] });
   });
 
   it('closes an open contest once when external main makes both children stale', async () => {
