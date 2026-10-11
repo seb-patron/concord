@@ -310,8 +310,8 @@ for (const [name, value] of Object.entries(process.env)) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) runCli().catch(error => {
   const err = error instanceof ConcordError ? error : new ConcordError(error instanceof Error ? error.message : String(error), 'transport');
-  const diagnostic: Record<string, unknown> = { error: { kind: err.kind, message: err.message, ...(err.payload === undefined ? {} : { details: err.payload }), ...(err.status === undefined ? {} : { status: err.status }) } };
+  const diagnostic: Record<string, unknown> = { error: { kind: err.kind, message: redactOutput(err.message), ...(err.payload === undefined ? {} : { details: redactOutput(err.payload) }), ...(err.status === undefined ? {} : { status: err.status }) } };
   if (err.kind === 'conflict') diagnostic.nextAction = 'Inspect the current holder/version, then retry with a fresh idempotency key or renew your own active lease; leases are never stolen automatically.';
-  writeOutput(process.stderr, diagnostic);
+  process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
   process.exitCode = err.exitCode;
 });

@@ -48,7 +48,7 @@ export function rememberCredentialsIn(value: unknown): void {
   }
 }
 function rememberCredentialValues(value: unknown): void {
-  if (typeof value === 'string') rememberCredential(value);
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') rememberCredential(String(value));
   else if (Array.isArray(value)) for (const item of value) rememberCredentialValues(item);
   else if (value && typeof value === 'object') for (const item of Object.values(value)) rememberCredentialValues(item);
 }
@@ -74,8 +74,9 @@ export function redactString(value: string): string {
 // Redact values before JSON.stringify so a credential can never replace JSON syntax.
 export function redactOutput(value: unknown): unknown {
   if (typeof value === 'string') return redactString(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return redactString(String(value)) === '[REDACTED]' ? '[REDACTED]' : value;
   if (Array.isArray(value)) return value.map(redactOutput);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactString(key), redactOutput(item)]));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactOutput(item)]));
   return value;
 }
 

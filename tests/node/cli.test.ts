@@ -417,6 +417,30 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
+  it('redacts numeric and boolean credentials echoed in an HTTP error', async () => {
+    const body = { nested: { password: 123456789, apiKey: 0, secret: false } };
+    const fetcher: typeof fetch = async (_input, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual(body);
+      expect(redactOutput('123456789')).toBe('[REDACTED]');
+      expect(redactOutput('0')).toBe('[REDACTED]');
+      expect(redactOutput('false')).toBe('[REDACTED]');
+      return new Response(JSON.stringify({ error: { code: 'BAD', message: 'password 123456789; key 0; secret false', details: { echoNumber: 123456789, echoZero: 0, echoBoolean: false } } }), { status: 400 });
+    };
+    const client = new ConcordClient({ url: 'https://concord.invalid', fetch: fetcher });
+    try {
+      await client.request('POST', '/echo', { body });
+      throw new Error('expected HTTP error');
+    } catch (error) {
+      const diagnostic = error as ConcordError;
+      expect(diagnostic.kind).toBe('server');
+      expect(diagnostic.message).not.toContain('123456789');
+      expect(diagnostic.message).not.toContain('false');
+      expect(JSON.stringify(diagnostic.payload)).not.toContain('123456789');
+      expect(JSON.stringify(diagnostic.payload)).not.toContain('false');
+      expect(diagnostic.payload).toMatchObject({ error: { details: { echoNumber: '[REDACTED]', echoZero: '[REDACTED]', echoBoolean: '[REDACTED]' } } });
+    }
+  });
+
   it('keeps stdout and stderr parseable when a token contains JSON syntax', async () => {
     const secret = '"';
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
@@ -462,5 +486,32 @@ describe('Concord agent CLI client', () => {
       const serialized = JSON.stringify(redactOutput(forms));
       expect(JSON.parse(serialized), `case ${caseNumber}`).toEqual(forms.map(() => '[REDACTED]'));
     }
+  });
+
+  it('preserves fixed envelope keys and error kind for a one-character credential', async () => {
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/ok') response.end(JSON.stringify({ data: { message: 'secret e', nested: { echo: 'e' } } }));
+      else {
+        response.statusCode = 400;
+        response.end(JSON.stringify({ error: { code: 'BAD', message: 'secret e', data: { echo: 'e' } } }));
+      }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'e' };
+    try {
+      const ok = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/ok'], { cwd: process.cwd(), env });
+      expect(JSON.parse(ok.stdout)).toEqual({ data: { message: '[REDACTED]', nested: { echo: '[REDACTED]' } } });
+      try {
+        await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/fail'], { cwd: process.cwd(), env });
+        throw new Error('expected server failure');
+      } catch (error) {
+        const diagnostic = JSON.parse((error as { stderr: string }).stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
+        expect(diagnostic.error).toMatchObject({ kind: 'server', status: 400, details: { error: { code: 'BAD', message: '[REDACTED]', data: { echo: '[REDACTED]' } } } });
+        expect(diagnostic.error.message).not.toContain('secret e');
+      }
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 });
