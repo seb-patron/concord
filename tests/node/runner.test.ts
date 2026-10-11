@@ -402,7 +402,7 @@ export function attemptBudget(family) {
     });
   });
 
-  it('composes disjoint TSV candidates and blocks a divergent same-row candidate', async () => {
+  it('reports MERGE_CONFLICT for adjacent generic families.tsv edits', async () => {
     await temporaryWork(async dir => {
       const canonical = join(dir, 'canonical.git');
       const first = join(dir, 'first.git');
@@ -451,10 +451,9 @@ export function attemptBudget(family) {
         return executeJob(job, profile, credentials(remotes));
       };
       const composed = await run('second', second, secondHead, scratch);
-      expect(composed).toMatchObject({ outcome: 'PASS' });
-      if (composed.kind !== 'validate-stack' || !composed.composedOid) throw new Error('no composed commit');
-      const table = await git(seed, ['--git-dir=' + scratch, 'show', composed.composedOid + ':families.tsv']);
-      expect(table).toContain('alpha\t2\t1000\nbeta\t3\t1000');
+      expect(composed).toMatchObject({ outcome: 'MERGE_CONFLICT', composedOid: null });
+      expect(composed.log).toContain('MERGE_CONFLICT');
+      expect(await refOid(seed, pathToFileURL(scratch).href, 'refs/heads/check')).toBeNull();
       const rejected = await run('collision', collision, collisionHead, scratchCollision);
       expect(rejected).toMatchObject({ outcome: 'MERGE_CONFLICT' });
       expect(await refOid(seed, pathToFileURL(scratchCollision).href, 'refs/heads/check')).toBeNull();

@@ -1,9 +1,9 @@
 import type {
   BootstrapHandoff, CandidateInput, ChangeView, Digest, FeatureModule, FrozenAdmission, Gate, Id,
-  Job, ModuleContext, Promotion, PromotionResult, SeedInput, StackResult, ValidateStackJob,
+  Job, ModuleContext, Promotion, PromotionResult, Repo, SeedInput, StackResult, ValidateStackJob,
 } from '../contracts';
 import { digest, failure, HttpError, json } from '../http';
-import { eventSequence } from '../state';
+import { eventSequence, sqlState } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
 import { jobInput } from './runners';
@@ -237,6 +237,9 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
   const profileId = bootstrap ? seed!.profileId : first?.profileId;
   if (!canonicalName || !scratchName || !policyId || !profileId) throw new HttpError(409, 'IMMUTABLE_INPUT_MISSING', 'Stack inputs unavailable');
   const { policy, profile } = policyAndProfile(context, policyId, profileId);
+  if (contest && policy.checkerId !== 'dispatch-lab') {
+    throw new HttpError(409, 'CONTEST_UNSUPPORTED_FOR_PROFILE', 'Contests require a dispatch-lab policy');
+  }
   if (bootstrap && (state.bootstrap?.policyDigest !== policy.digest || state.bootstrap.profileDigest !== profile.digest)) {
     throw new HttpError(409, 'PROFILE_CHANGED', 'Bootstrap policy or profile changed');
   }
@@ -434,7 +437,16 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
     || typeof body.intentText !== 'string' || !body.intentText.trim()
     || typeof body.unitKey !== 'string' || !body.unitKey.trim() || !validOid(body.baseOid)
     || !validId(body.profileId)) throw new HttpError(400, 'INVALID_CONTEST', 'Two children with verdicts and fences are required');
+  const repo = sqlState(context.sql).get<Repo>('module:repos:repo');
+  if (repo && context.trusted.policies[repo.policyId]?.checkerId !== 'dispatch-lab') {
+    throw new HttpError(409, 'CONTEST_UNSUPPORTED_FOR_PROFILE', 'Contests require a dispatch-lab policy');
+  }
   const views = children.map(id => requiredView(context, id));
+  // Generic checkers have no pinned contest scoring protocol in v1.
+  // Reject before admission can reserve leases or schedule child jobs.
+  if (views.some(view => context.trusted.policies[view.policyId]?.checkerId !== 'dispatch-lab')) {
+    throw new HttpError(409, 'CONTEST_UNSUPPORTED_FOR_PROFILE', 'Contests require a dispatch-lab policy');
+  }
   if (!views.every(view => view.baseOid === body.baseOid && view.profileId === body.profileId
     && view.intentKey === body.intentKey && view.unitKeys.includes(body.unitKey as string))) {
     throw new HttpError(409, 'NON_COMPARABLE_CONTEST', 'Children must share intent, base, unit, and profile');
