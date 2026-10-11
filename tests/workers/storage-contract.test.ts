@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import type { FeatureModule, RepoStorage } from '../../src/contracts';
 import { FakeStorage } from '../../src/storage/fake';
@@ -13,6 +13,21 @@ describe('fake RepoStorage and module state', () => {
   it('keeps provider adapters explicitly unavailable', () => {
     expect(() => artifactsStorage({})).toThrow('ARTIFACTS_ADAPTER_UNAVAILABLE');
     expect(() => bridgeStorage('http://127.0.0.1:9999')).toThrow('BRIDGE_ADAPTER_UNAVAILABLE');
+  });
+  it('does not follow a bridge redirect with its bearer credential', async () => {
+    const requested = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.redirect).toBe('manual');
+      expect((init.headers as Record<string, string>).authorization).toBe('Bearer local-test-token');
+      return new Response(null, { status: 302, headers: { location: 'https://other.example/rpc' } });
+    });
+    vi.stubGlobal('fetch', requested);
+    try {
+      await expect(bridgeStorage('http://127.0.0.1:9999/?token=local-test-token').info('repo'))
+        .rejects.toThrow('BRIDGE_302');
+      expect(requested).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
   it('persists objects across provider instances, forks, faults, tokens and absent-ref CAS', async () => {
     await worker.fetch(apiRequest('/v1/repos/storage_case/snapshot'), env);

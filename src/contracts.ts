@@ -187,6 +187,10 @@ export interface JobBase extends Versioned {
   storageRemotes: Record<string, string>; checkerId: string; checkerDigest: Digest;
   oracleDigest: Digest; toolchainDigest: Digest; environmentDigest: Digest;
   timeoutMs: number; maxOutputBytes: number;
+  /** Trusted dispatch-lab case selected by the server, never from candidate files. */
+  caseId?: string;
+  /** Present only for score-comparable contest validation jobs. */
+  contest?: true;
   state: JobState; attempt: number; runnerId: Id | null; fence: number; expiresAt: number | null;
 }
 export interface CandidateInput {
@@ -255,6 +259,12 @@ export interface InspectionResult extends ResultBase {
   observedHeadOid: Oid | null;
   unitKeys: string[]; reviewManifestDigest: Digest | null; reviewManifest: ReviewManifest | null;
 }
+/** Trusted result handoff from repos inspection to verdict review. */
+export interface InspectedRevision {
+  changeId: Id; revision: number; candidate: CandidateInput;
+  canonicalStorageName: string; policyId: Id; profileId: Id;
+  reviewManifest: ReviewManifest; reviewManifestDigest: Digest; outcome: 'PASS' | 'MATCH';
+}
 export interface StackResultBase extends ResultBase {
   kind: 'validate-stack'; outcome: CheckOutcome; composedOid: Oid | null;
   composedTreeOid: Oid | null;
@@ -299,6 +309,7 @@ export type Gate<T = void> =
   | { status: 'blocked'; version: number; code: string; reason: string; evidenceIds: Id[] };
 export interface ServiceHooks {
   'repos.inspectRevision': (context: ModuleContext, result: InspectionResult) => Gate<{ changeId: Id; revision: number; reviewManifestDigest: Digest }>;
+  'verdicts.recordInspection': (context: ModuleContext, record: InspectedRevision) => Gate;
   'leases.reserve': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate<{ reservationFences: Record<string, number> }>;
   'leases.reservationLive': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate;
   'leases.releaseReservation': (context: ModuleContext, changeId: Id) => Gate;

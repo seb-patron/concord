@@ -378,7 +378,7 @@ export function attemptBudget(family) {
       expect(rejected).toMatchObject({ outcome: 'MERGE_CONFLICT' });
       expect(await refOid(seed, pathToFileURL(scratchCollision).href, 'refs/heads/check')).toBeNull();
     });
-  });
+  }, 15_000); // Six bare repos, three native commits, two composed checks and a collision check.
 
   it('delta-check reruns the affected unit with the pinned profile', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {

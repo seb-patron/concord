@@ -3,6 +3,9 @@ import { requireRole } from '../auth';
 import { digest, HttpError, json, stableJson } from '../http';
 
 const CLAIM_MS = 60_000;
+// The bridge, like Artifacts, issues Git credentials for at least 60 seconds.
+// Give its job claim room for that token plus request latency.
+const claimMs = (c: ModuleContext) => c.env?.STORAGE_BACKEND === 'bridge' ? 90_000 : CLAIM_MS;
 type Stored = { job: Job; result?: JobResult; dispatch?: Gate<unknown>; completedPrincipalId?: string };
 type RunnerState = { principalId: string; role: 'checker' | 'promoter'; activeJobId: string | null;
   supportedProfileDigests: string[]; lastSeenAt: number };
@@ -192,7 +195,7 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
     if (!previous) c.state.put('runner-ids', [...(c.state.get<string[]>('runner-ids') ?? []), body.runnerId]);
     if (!row) return new Response(null, { status: 204 });
     row.job = { ...row.job, state: 'claimed', attempt: row.job.attempt + 1, fence: row.job.fence + 1,
-      runnerId: body.runnerId, expiresAt: c.now() + CLAIM_MS, version: c.nextVersion() };
+      runnerId: body.runnerId, expiresAt: c.now() + claimMs(c), version: c.nextVersion() };
     save(c, row);
     const event = c.appendEvent('runner.claimed', [row.job.jobId], { attempt: row.job.attempt, fence: row.job.fence }, row.job.version);
     return json({ job: row.job }, row.job.version, event.sequence);
@@ -202,7 +205,7 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
 function heartbeat(c: ModuleContext, id: string, body: JobHeartbeatBody): Response {
   return c.transaction(() => {
     const row = current(c, id, body);
-    row.job = { ...row.job, expiresAt: c.now() + CLAIM_MS, version: c.nextVersion() };
+    row.job = { ...row.job, expiresAt: c.now() + claimMs(c), version: c.nextVersion() };
     save(c, row);
     const assigned = runner(c, row.job.runnerId!);
     if (assigned) saveRunner(c, row.job.runnerId!, { ...assigned, lastSeenAt: c.now() });
@@ -227,7 +230,8 @@ async function credentials(c: ModuleContext, id: string, body: JobCredentialsBod
   try {
     for (const name of names) {
       const live = current(c, id, fence);
-      const ttlSeconds = Math.min(59, Math.floor((live.job.expiresAt! - c.now() - 1000) / 1000));
+      const ttlSeconds = Math.min(c.env?.STORAGE_BACKEND === 'bridge' ? 60 : 59,
+        Math.floor((live.job.expiresAt! - c.now() - 1000) / 1000));
       if (ttlSeconds < 1) conflict('STALE_JOB');
       const issued = await c.storage.mintToken(name, body.operation === 'fetch' ? 'read' : 'write', ttlSeconds);
       if (issued.expiresAt > live.job.expiresAt!) {
@@ -295,7 +299,9 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
     const required = job.unitPolicy.acceptance.gates;
     if (value.gateResults.length !== required.length || required.some((gate, index) =>
       value.gateResults[index].gateId !== gate.id || value.gateResults[index].outcome !== gate.requiredOutcome) ||
-      job.unitPolicy.acceptance.kind === 'score' && value.score?.total !== job.unitPolicy.acceptance.fixedDenominator) conflict('RESULT_EVIDENCE');
+      job.unitPolicy.acceptance.kind === 'score' && job.kind === 'validate-stack' && job.contest === true &&
+      value.score?.total !== job.unitPolicy.acceptance.fixedDenominator ||
+      job.unitPolicy.acceptance.kind === 'score' && job.kind === 'validate-stack' && job.contest !== true && value.score !== null) conflict('RESULT_EVIDENCE');
   }
   if (value.kind === 'inspect-candidate' && value.outcome === 'PASS') {
     if (job.kind !== 'inspect-candidate') throw new HttpError(409, 'RESULT_IDENTITY', 'Kind mismatch');
@@ -358,6 +364,12 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
 export const runners: FeatureModule = {
   name: 'runners', migrations: [],
   routes: [
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/result$/, handle: (c, _r, m) => {
+      requireRole(c.principal, 'owner', 'reviewer');
+      const stored = load(c, m[1]);
+      if (!stored?.result || stored.job.state !== 'completed') throw new HttpError(404, 'RESULT_NOT_FOUND', 'Completed result unavailable');
+      return json({ jobId: stored.job.jobId, result: stored.result }, stored.job.version);
+    } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/runner\/poll$/, handle: (c, _r, _m, b) => poll(c, b as unknown as RunnerPollBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/heartbeat$/, handle: (c, _r, m, b) => heartbeat(c, m[1], b as unknown as JobHeartbeatBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/result$/, handle: (c, _r, m, b) => result(c, m[1], b as unknown as JobResultBody) },

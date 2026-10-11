@@ -26,11 +26,22 @@ const getChange = (context: ModuleContext, changeId: string): Change => {
   const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
   return change ?? fail(404, 'CHANGE_NOT_FOUND', 'Change not found');
 };
+function storeChange(context: ModuleContext, change: Change): void {
+  const all = list<Change>(context, 'changes');
+  context.state.put('changes', all.some(item => item.changeId === change.changeId)
+    ? all.map(item => item.changeId === change.changeId ? change : item) : [...all, change]);
+  // Lease reservation reads this exact versioned change from the shared SQL state.
+  context.state.put(`change:${change.changeId}`, change);
+}
 const ownChange = (context: ModuleContext, change: Change) => {
   if (change.authorId !== context.principal.principalId && !context.principal.roles.includes('owner')) fail(403, 'FORBIDDEN', 'Only the change author or owner can mutate this change');
 };
 const intentKey = (kind: 'ensure-repo' | 'fork', storageName: string) => `${kind}:${storageName}`;
 const intents = (context: ModuleContext) => context.state.get<Record<string, ProvisioningIntent>>('provisioning') ?? {};
+interface IntentContest {
+  repoId: string; intentKey: string; childAuthorIds: [string, string]; ownerId: string;
+}
+const intentContests = (context: ModuleContext) => context.state.get<IntentContest[]>('intent-contests') ?? [];
 const saveIntent = (context: ModuleContext, intent: ProvisioningIntent) => {
   const all = intents(context);
   all[intentKey(intent.kind, intent.storageName)] = intent;
@@ -231,16 +242,53 @@ function changeInput(body: CreateChangeBody) {
   return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt };
 }
 
+async function authorizeIntentContest(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
+  requireRole(context.principal, 'owner');
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  if (repo.policyId !== 'dispatch-lab' || repo.profileId !== 'dispatch-lab') {
+    fail(409, 'CONTEST_REPO_REQUIRED', 'Intent contests require the dispatch-lab repository configuration');
+  }
+  const key = text(body.intentKey, 'intentKey', 128);
+  const authors = ids(body.childAuthorIds, 'childAuthorIds');
+  if (authors.length !== 2 || authors.some(author => !/^[A-Za-z0-9_-]{1,64}$/.test(author))) {
+    fail(400, 'INVALID_CONTEST', 'Exactly two distinct child authors are required');
+  }
+  if (intentContests(context).some(item => item.intentKey === key)) {
+    fail(409, 'CONTEST_EXISTS', 'Intent contest already exists');
+  }
+  const contest: IntentContest = { repoId: repo.repoId, intentKey: key,
+    childAuthorIds: [authors[0], authors[1]], ownerId: context.principal.principalId };
+  context.state.put('intent-contests', [...intentContests(context), contest]);
+  versioned(context, 'repo.intent_contest_authorized', [repo.repoId, key], { childAuthorIds: authors });
+  return respond(context, contest, 201);
+}
+
 async function changeCreate(context: ModuleContext, body: CreateChangeBody): Promise<Response> {
   requireRole(context.principal, 'owner', 'agent');
   const repo = await catalogRepo(context);
   requireReady(repo);
   const input = changeInput(body);
   const all = list<Change>(context, 'changes');
-  const priorIntent = list<Intent>(context, 'intents').find(item => item.intentKey === input.intentKey);
+  const matchingIntents = list<Intent>(context, 'intents').filter(item => item.intentKey === input.intentKey);
+  const ownIntent = matchingIntents.find(item => all.some(change =>
+    change.changeId === item.changeId && change.authorId === context.principal.principalId));
+  const otherIntent = matchingIntents.find(item => all.some(change =>
+    change.changeId === item.changeId && change.authorId !== context.principal.principalId));
+  const otherChange = otherIntent ? getChange(context, otherIntent.changeId) : null;
+  const contest = intentContests(context).find(item => item.repoId === repo.repoId && item.intentKey === input.intentKey);
+  const contestChild = repo.policyId === 'dispatch-lab' && repo.profileId === 'dispatch-lab' &&
+    contest?.ownerId !== undefined && contest.childAuthorIds.includes(context.principal.principalId) &&
+    otherIntent !== undefined && !otherIntent.terminal && otherChange !== null &&
+    contest.childAuthorIds.includes(otherChange.authorId) &&
+    matchingIntents.every(item => {
+      const change = all.find(candidate => candidate.changeId === item.changeId);
+      return change && contest.childAuthorIds.includes(change.authorId);
+    }) && otherChange.baseOid === input.baseOid && sameTask(otherChange, input);
+  if (otherIntent && !contestChild) fail(409, 'INTENT_OWNED', 'Intent key belongs to another author');
+  const priorIntent = ownIntent;
   if (priorIntent) {
     const prior = getChange(context, priorIntent.changeId);
-    if (prior.authorId !== context.principal.principalId) fail(409, 'INTENT_OWNED', 'Intent key belongs to another author');
     if (!sameTask(prior, input)) fail(409, 'INTENT_CONFLICT', 'Intent key was used with different task content');
     if (!terminal(prior)) {
       if (body.attempt !== undefined && input.attempt !== priorIntent.attempt) fail(409, 'ATTEMPT_CONFLICT', 'Active intent attempt differs');
@@ -273,8 +321,8 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   };
   context.transaction(() => {
     change.version = versioned(context, 'change.draft', [changeId], { candidateStorageName });
-    context.state.put('changes', [...all, change]);
-    context.state.put('intents', [...list<Intent>(context, 'intents').filter(item => item.intentKey !== input.intentKey),
+    storeChange(context, change);
+    context.state.put('intents', [...list<Intent>(context, 'intents').filter(item => item.changeId !== priorIntent?.changeId),
       { repoId: repo.repoId, intentKey: input.intentKey, changeId, attempt: input.attempt, terminal: false, version: change.version } satisfies Intent]);
     saveIntent(context, { kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
   });
@@ -306,10 +354,11 @@ async function registerBranch(context: ModuleContext, body: Record<string, unkno
     if (existing && existing.observedHead !== head) {
       change.status = 'draft';
       change.version = record.version;
-      context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === change.changeId ? change : item));
+      storeChange(context, change);
       context.state.delete(`review:${change.changeId}`);
       context.state.delete(`inspection:${change.changeId}`);
       context.state.delete(`inspection-job:${change.changeId}`);
+      context.state.delete(`verified:${change.changeId}`);
       context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
     }
   });
@@ -393,6 +442,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
     checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
     toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
     timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
+    ...(policy.checkerId === 'dispatch-lab' ? { caseId: 'seed' } : {}),
     state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null, version: 1,
   };
   job.inputDigest = await jobDigest(job);
@@ -403,10 +453,11 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
     change.revision = revision;
     change.status = 'draft';
     change.version = versioned(context, 'change.published', [changeId], { revision, headOid, baseOid });
-    context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === changeId ? change : item));
+    storeChange(context, change);
     context.state.put(`inspection:${changeId}`, { changeId, revision, jobId, inputDigest: job.inputDigest, sourceTreeOid: head!.treeOid, headOid, baseOid: baseOid as string, unitKeys, scheduled: false } satisfies InspectionPending);
     context.state.put(`inspection-job:${changeId}`, job);
     context.state.delete(`review:${changeId}`);
+    context.state.delete(`verified:${changeId}`);
     context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
   });
   return scheduleInspection(context, change, job);
@@ -473,7 +524,7 @@ function close(context: ModuleContext, changeId: string): Response {
   context.transaction(() => {
     change.status = 'closed';
     change.version = versioned(context, 'change.closed', [changeId], {});
-    context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === changeId ? change : item));
+    storeChange(context, change);
     context.state.put('intents', list<Intent>(context, 'intents').map(item => item.changeId === changeId ? { ...item, terminal: true, version: change.version } : item));
     context.state.delete(`inspection:${changeId}`);
     context.state.delete(`inspection-job:${changeId}`);
@@ -551,10 +602,20 @@ function inspectRevision(context: ModuleContext, result: InspectionResult) {
     return { status: 'eligible' as const, version: context.version(), evidenceIds: [result.jobId], value: { changeId: change.changeId, revision: change.revision, reviewManifestDigest: result.reviewManifestDigest! } };
   }
   context.transaction(() => {
+    const handoff = context.call('verdicts.recordInspection', {
+      changeId: change.changeId, revision: change.revision,
+      candidate: { changeId: change.changeId, revision: change.revision, baseOid: pending.baseOid,
+        headOid: pending.headOid, storageName: change.candidateStorageName, ref: change.branch },
+      canonicalStorageName: repo!.canonicalStorageName, policyId: repo!.policyId, profileId: repo!.profileId,
+      reviewManifest: result.reviewManifest!, reviewManifestDigest: result.reviewManifestDigest!, outcome: 'PASS',
+    });
+    if (handoff.status === 'blocked') fail(409, handoff.code, handoff.reason);
     change.status = 'ready';
     change.version = versioned(context, 'change.ready', [change.changeId], { revision: change.revision, jobId: result.jobId });
-    context.state.put('changes', list<Change>(context, 'changes').map(item => item.changeId === change.changeId ? change : item));
+    storeChange(context, change);
     context.state.put(`review:${change.changeId}`, result.reviewManifestDigest);
+    context.state.put(`verified:${change.changeId}`, { changeId: change.changeId, revision: change.revision,
+      headOid: change.headOid!, policyDigest: policy!.digest, unitKeys: [...result.unitKeys], verifiedBy: 'checker' });
   });
   return { status: 'eligible' as const, version: context.version(), evidenceIds: [result.jobId], value: { changeId: change.changeId, revision: change.revision, reviewManifestDigest: result.reviewManifestDigest! } };
 }
@@ -570,6 +631,7 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/git-token$/, handle: (context, _request, _match, body) => gitToken(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes'), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },

@@ -55,14 +55,16 @@ Terminal 1, API Worker (keep foreground):
 ```sh
 npm ci
 sh scripts/validate.sh
-npm run dev -- --var STORAGE_BACKEND:bridge --var LOCAL_GIT_URL:http://127.0.0.1:8788 --var LOCAL_GIT_TOKEN:local-bridge
+export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
+npm run demo -- preflight --local --state-dir "$CONCORD_RUN_DIR"
+npm run dev -- --var STORAGE_BACKEND:bridge --var 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026' --var "TRUSTED_CONFIG:$(cat "$CONCORD_RUN_DIR/trusted-config.json")"
 ```
 
 Terminal 2, local fake Git backend (keep foreground; choose an empty directory):
 
 ```sh
-export CONCORD_GIT_DIR="$(mktemp -d)"
-CONCORD_BRIDGE_TOKEN=local-bridge npm run git-bridge -- --host 127.0.0.1 --port 8788 --data-dir "$CONCORD_GIT_DIR"
+export CONCORD_BRIDGE_DATA_DIR="$(mktemp -d)"
+CONCORD_BRIDGE_TOKEN=local-bridge-fixture-2026 CONCORD_BRIDGE_PORT=8788 npm run git-bridge
 ```
 
 Terminal 3, scenario driver:
@@ -71,8 +73,7 @@ Terminal 3, scenario driver:
 export CONCORD_URL=http://127.0.0.1:8787
 export CONCORD_TOKEN=local-owner
 export CONCORD_SHOW_DECOMPILED_C=0
-export CONCORD_RUN_DIR="$(mktemp -d)"
-npm run demo -- preflight --local
+export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
 npm run demo -- seed --run demo-01 --state-dir "$CONCORD_RUN_DIR"
 ```
 
@@ -83,8 +84,8 @@ Local mode has explicitly named fixture tokens: `local-owner`, `local-agent-a`, 
 Terminal 4 executes bounded runner commands printed by each scene, or use the driver's `--pump-local` option, which spawns the same commands, waits, and stops them. Conceptual invocation (REPO_ID is printed by seed):
 
 ```sh
-CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-checker npm run runner -- --repo REPO_ID --role checker --profile demo/profile.json --once
-CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-promoter npm run runner -- --repo REPO_ID --role promoter --once
+CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-checker npm run runner -- --repo REPO_ID --role checker --profile "$CONCORD_RUN_DIR/dispatch-profile.json" --once
+CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-promoter npm run runner -- --repo REPO_ID --role promoter --profile-digest PROFILE_DIGEST_FROM_PREFLIGHT --once
 ```
 
 `--pump-local` passes the actual manifest repo ID and starts a `--once` process per job, checking the scene barrier after each returned result (maximum 16 checker jobs and four promoter jobs per scene). It waits for children and does not use background busy loops. For bisection scenes it captures the failure tree before starting promotion, preserving the screenshot opportunity. No continuously running runner should race past the scene's inspection barrier.

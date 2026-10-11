@@ -17,7 +17,7 @@ interface Entry extends PlannedEntry {
   entryId: Id; revision: number; baseOid: string; headOid: string; storageName: string; ref: string;
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
   policyDigest: Digest; profileDigest: Digest;
-  authorId: Id; unitKeys: string[]; verdictId: Id; findingSetVersion: number;
+  authorId: Id; unitKeys: string[]; verdictId: Id; findingSetVersion: number; intentKey: string;
   reservationFences: Record<string, number>; admittedAt: number; state: EntryState; blockedReason: string | null;
   contestId: Id | null;
 }
@@ -54,7 +54,7 @@ interface QueueState {
   activeStackJobId: Id | null; diagnosis: Diagnosis | null; diagnosticResults: Array<{
     jobId: Id; memberIds: Id[]; outcome: string; composedOid: string | null; sequence: number;
   }>;
-  finalCanonicalOid: string | null; coalesceUntil: number | null; blockedReason: string | null;
+  finalCanonicalOid: string | null; coalesceUntil: number | null; blockedReason: string | null; dispatchCaseId?: string;
 }
 const empty = (): QueueState => ({
   generation: 0, observedMain: null, entries: [], jobs: [], contests: [], ticket: null, bootstrap: null,
@@ -161,7 +161,7 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
     storageName: view.candidateStorageName, ref: view.branch, canonicalStorageName: view.canonicalStorageName,
     scratchStorageName: view.scratchStorageName, policyId: view.policyId, profileId: view.profileId,
     policyDigest: policy.digest, profileDigest: profile.digest,
-    dependencyChangeIds: [...view.dependencyChangeIds], authorId: view.authorId, unitKeys: [...view.unitKeys],
+    dependencyChangeIds: [...view.dependencyChangeIds], authorId: view.authorId, unitKeys: [...view.unitKeys], intentKey: view.intentKey ?? '',
     verdictId, findingSetVersion: finding.findingSetVersion, reservationFences: { ...fences },
     state: 'admitted', blockedReason: null, contestId,
   };
@@ -206,7 +206,24 @@ function policyAndProfile(context: ModuleContext, policyId: Id, profileId: Id) {
   if (!policy || !profile) throw new HttpError(409, 'PROFILE_UNAVAILABLE', 'Trusted policy or profile unavailable');
   return { policy, profile };
 }
-async function makeStackJob(context: ModuleContext, state: QueueState, memberIds: Id[], bootstrap: boolean): Promise<ValidateStackJob> {
+function dispatchCase(state: QueueState, entries: Entry[], bootstrap: boolean): string {
+  if (bootstrap) return 'seed';
+  const stage = state.dispatchCaseId ?? 'seed';
+  if (entries.length === 0) return stage;
+  const aliases = entries.map(entry => entry.intentKey).sort().join('+');
+  const planned: Record<string, Record<string, string>> = {
+    seed: { A: 'a-only', B: 'b-only', C: 'c-only', 'A+B': 'a-b', 'A+C': 'a-c-survivors',
+      'B+C': 'b-c', 'A+B+C': 'a-b-c' },
+    'a-c-survivors': { B: 'b-repaired', 'wrong-exec': 'a-c-survivors', 'wrong-row': 'a-c-survivors' },
+    'b-repaired': { D: 'd-only', E: 'e-only', 'D+E': 'd-e' },
+    'd-only': { E: 'd-e' }, 'e-only': { D: 'd-e' },
+    'd-e': { H: 'h-only', I: 'i-only' }, 'i-only': { J: 'j-common' },
+  };
+  const caseId = planned[stage]?.[aliases];
+  if (!caseId) throw new HttpError(409, 'DISPATCH_CASE_UNPLANNED', `No trusted case for ${stage} + ${aliases}`);
+  return caseId;
+}
+async function makeStackJob(context: ModuleContext, state: QueueState, memberIds: Id[], bootstrap: boolean, contest = false): Promise<ValidateStackJob> {
   const entries = memberIds.map(id => current(state, id)!);
   const seed = state.bootstrap?.input;
   const first = entries[0] ?? current(state, state.diagnosis?.original[0] ?? '');
@@ -251,8 +268,10 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
         seedStorageName: seed!.seedStorageName, seedRef: seed!.seedRef }] as [SeedInput] }
     : { ...base, bootstrap: false as const, canonicalBaseOid: state.observedMain!, candidates,
       ...(candidates.length === 0 ? { baseCheck: true as const } : {}) };
-  const inputDigest = await digest(jobInput(immutable));
-  return { ...immutable, inputDigest } as ValidateStackJob;
+  const pinned = policy.checkerId === 'dispatch-lab' ? { ...immutable, caseId: dispatchCase(state, entries, bootstrap),
+    ...(contest ? { contest: true as const } : {}) } : immutable;
+  const inputDigest = await digest(jobInput(pinned));
+  return { ...pinned, inputDigest } as ValidateStackJob;
 }
 function schedule(context: ModuleContext, state: QueueState, job: Job, purpose: JobRecord['purpose'], memberIds: Id[], contestId?: Id): JobRecord {
   const entries = memberIds.map(id => current(state, id));
@@ -564,6 +583,7 @@ async function makePromotionJob(context: ModuleContext, state: QueueState, check
     }, storageRemotes: job.storageRemotes, checkerId: job.checkerId, checkerDigest: job.checkerDigest,
     oracleDigest: job.oracleDigest, toolchainDigest: job.toolchainDigest,
     environmentDigest: job.environmentDigest, timeoutMs: job.timeoutMs, maxOutputBytes: job.maxOutputBytes,
+    ...(job.caseId ? { caseId: job.caseId } : {}),
     state: 'pending' as const, attempt: 0, runnerId: null, fence: 0, expiresAt: null,
     promotionId, expectedOldOid: state.observedMain, checkedNewOid: result.composedOid,
     bootstrap: job.bootstrap, ...(job.bootstrap ? { ownerAuthorized: true as const } : {}),
@@ -668,7 +688,7 @@ async function processStackResult(context: ModuleContext, state: QueueState, rec
   }
   const policy = resultPolicy(context, record);
   if (!policy) { state.blockedReason = 'PROFILE_UNAVAILABLE'; failRecord(context, state, record, 'PROFILE_UNAVAILABLE'); return; }
-  const green = accepted(result, policy.acceptance);
+  const green = accepted(result, policy.acceptance, record.purpose === 'contest');
   if (green && !await checkedScratch(context, record, result)) {
     state.blockedReason = 'CHECKED_SCRATCH_MISMATCH';
     emit(context, 'queue.blocked', record.memberIds, { reason: state.blockedReason });
@@ -764,6 +784,8 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
     context.transaction(() => {
       ticket.state = 'applied'; ticket.reconciliation = 'EXACT_NEW_OID';
       state.finalCanonicalOid = observed;
+      const checked = state.jobs.find(item => item.job.jobId === ticket.resultId)?.job;
+      if (checked?.checkerId === 'dispatch-lab' && checked.caseId) state.dispatchCaseId = checked.caseId;
       state.blockedReason = null;
       for (const id of ticket.admissionIds) {
         const entry = admitted(state, id);
@@ -928,7 +950,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
     for (const id of contest.childIds) {
       const admissionId = contest.admissionIds[contest.childIds.indexOf(id)];
       if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId && record.admissionIds[0] === admissionId)) continue;
-      const job = await makeStackJob(context, state, [id], false);
+      const job = await makeStackJob(context, state, [id], false, true);
       context.transaction(() => { schedule(context, state, job, 'contest', [id], contest.contestId); save(context, state); });
     }
     save(context, state);

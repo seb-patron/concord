@@ -1135,6 +1135,10 @@ describe('queue state machine', () => {
       bootstrap: false, canonicalBaseOid: main,
     });
     const policy = { kind: 'score' as const, gates: [{ id: 'default', requiredOutcome: 'PASS' as const }], fixedDenominator: 100 };
+    const ordinary = { ...green(0), score: null };
+    expect(accepted(ordinary, policy, false)).toBe(true);
+    expect(accepted(ordinary, policy, true)).toBe(false);
+    expect(accepted({ ...ordinary, gateResults: [{ gateId: 'default', outcome: 'FAIL' }] }, policy, false)).toBe(false);
     const candidate = (id: string, result: StackResult, creationSequence: number, resultSequence: number, profileDigest = 'p') => ({
       changeId: id, result, creationSequence, resultSequence, policyDigest: 'policy', profileDigest,
       oracleDigest: result.oracleDigest, toolchainDigest: result.toolchainDigest,
