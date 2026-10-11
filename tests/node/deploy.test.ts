@@ -16,6 +16,23 @@ function documentedCommand(command: string, env: NodeJS.ProcessEnv = {}) {
   });
 }
 
+// These account-requiring commands are reviewed as complete lines. Wrangler's
+// --help exits successfully even when the command also contains an invalid flag.
+const reviewedAccountWranglerCommands = [
+  'npx wrangler versions upload --config wrangler.jsonc',
+  'npx wrangler versions secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
+  'npx wrangler versions secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"',
+  'npx wrangler deploy --config wrangler.jsonc',
+  'npx wrangler deployments list --config wrangler.jsonc',
+  'npx wrangler rollback \'<PRIOR_WORKER_VERSION_ID>\' --config wrangler.jsonc --message \'rollback Concord Worker\'',
+];
+
+function assertReviewedAccountWranglerCommand(command: string) {
+  if (!reviewedAccountWranglerCommands.includes(command)) {
+    throw new Error(`unreviewed Wrangler command: ${command}`);
+  }
+}
+
 describe('deployment preflight', () => {
   it('runs deploy-owned local and dry-run docs commands and parses account commands', async () => {
     const instructions = await readFile('docs/deploy.md', 'utf8');
@@ -52,11 +69,9 @@ describe('deployment preflight', () => {
       expect(result.status).toBe(2);
       expect(result.stdout).toContain('owner credentials required');
     }
-    for (const command of [commands[3], commands[4], commands[5], commands[6], commands[12], commands[13]]) {
-      const result = documentedCommand(command.replace(/ < "\$\w+"$/, '') + ' --help');
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toMatch(/wrangler/i);
-    }
+    const accountWranglerCommands = commands.filter(command => command.startsWith('npx wrangler ') && command !== commands[2]);
+    expect(accountWranglerCommands).toEqual(reviewedAccountWranglerCommands);
+    for (const command of accountWranglerCommands) assertReviewedAccountWranglerCommand(command);
 
     const directory = await mkdtemp(join(resolve(tmpdir()), 'concord-deploy-docs-'));
     try {
@@ -80,6 +95,15 @@ describe('deployment preflight', () => {
       expect(mirror.stderr).toContain('CONCORD_URL and CONCORD_TOKEN are required');
     }
   }, 120_000);
+
+  it('rejects unreviewed Wrangler flags and subcommands without executing them', () => {
+    expect(() => assertReviewedAccountWranglerCommand(
+      'npx wrangler versions secret put AUTH_TOKENS --definitely-invalid --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
+    )).toThrow(/unreviewed Wrangler command/);
+    expect(() => assertReviewedAccountWranglerCommand(
+      'npx wrangler secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
+    )).toThrow(/unreviewed Wrangler command/);
+  });
 
   it('documents the production profile pin required by the promoter smoke command', async () => {
     const instructions = await readFile('docs/deploy.md', 'utf8');
