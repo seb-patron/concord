@@ -21,7 +21,7 @@ import {
 import {
   activeElementId, captureScroll, changeNextAction, describeBisection,
   environmentBadge, leaseCountdown, panelCopy, projectionItems, repairStatus,
-  restoreFocus, restoreScroll, safeText, verdictProvenance,
+  restoreFocus, restoreScroll, safeText, snapshotCollections, mutationEvidence, verdictProvenance,
 } from './views.js';
 
 const $ = (id) => document.getElementById(id);
@@ -108,14 +108,17 @@ async function refreshRepos() {
     const page = body && body.data ? body.data : {};
     items = Array.isArray(page.items) ? page.items : [];
     state.repos = items;
-  } catch {
+    showSessionError(null);
+  } catch (error) {
     state.repos = [];
+    const redacted = redactError(error);
+    showSessionError(isForbidden(error) ? `Repository catalog authentication failed (${redacted.code}). Check the session token.` : `Repository catalog failed (${redacted.code}). Retry by entering a token.`);
   }
   select.replaceChildren();
   if (items.length === 0) {
     const option = document.createElement('option');
     option.value = '';
-    option.textContent = 'No repos listed — enter a repo ID';
+    option.textContent = $('session-error').hidden ? 'No repos listed — enter a repo ID' : 'Repository catalog unavailable';
     select.append(option);
   } else {
     for (const repo of items) {
@@ -128,7 +131,7 @@ async function refreshRepos() {
   if (current) {
     const match = [...select.options].find(o => o.value === current);
     if (match) select.value = current;
-    else if (items.length === 0) state.repoId = null;
+    else state.repoId = items.length > 0 ? select.value : null;
   }
   if (!state.repoId && items.length > 0) {
     state.repoId = select.value;
@@ -142,6 +145,7 @@ function currentRoles() {
 function refreshAffordances() {
   const actions = allowedActions(currentRoles());
   const authed = hasToken();
+  // No identity/roles endpoint exists in v1. A chosen role is an unverified intent.
   $('claim-form').hidden = !(authed && actions.claim);
   $('enqueue-form').hidden = !(authed && (actions.enqueue));
   $('verdict-form').hidden = !(authed && actions.verdict);
@@ -149,9 +153,9 @@ function refreshAffordances() {
   const note = $('mutation-note');
   if (!authed) note.textContent = 'Enter a session token to enable mutation controls. Viewers browse without them.';
   else if (!actions.claim && !actions.enqueue && !actions.verdict) {
-    note.textContent = 'Viewer role: browse only. Mutations require agent, owner, or reviewer credentials (server-enforced).';
+    note.textContent = 'Viewer mode: browse only. Credential roles are not verified by this page.';
   } else {
-    note.textContent = 'Mutations send Idempotency-Key and expectedVersion. A stale 409 refreshes context instead of pretending success.';
+    note.textContent = 'Requested role is unverified. The server decides whether this credential may act. Mutations use current snapshot evidence.';
   }
 }
 
@@ -160,6 +164,10 @@ function refreshAffordances() {
 function projections() {
   const data = state.snapshot && state.snapshot.data ? state.snapshot.data : {};
   return data.projections && typeof data.projections === 'object' ? data.projections : {};
+}
+
+function selectedChange() {
+  return snapshotCollections(state.snapshot).changes.items.find(change => change?.changeId === state.selectedChangeId);
 }
 
 async function refreshSnapshot() {
@@ -177,6 +185,8 @@ function appendEvents(items) {
   const log = $('event-log');
   for (const event of items.slice(-100)) {
     const line = el('li', `#${event.sequence} ${event.kind} by ${event.actorId} (v${event.version})`);
+    line.id = `event-${event.sequence}`;
+    line.dataset.relatedIds = JSON.stringify(event.relatedIds ?? []);
     log.append(line);
   }
   while (log.children.length > 100) log.firstChild.remove();
@@ -246,6 +256,7 @@ function renderLeases() {
   const now = Date.now();
   for (const lease of items) {
     const card = el('li', '', { class: 'card' });
+    if (lease.leaseId) card.id = `lease-${encodeURIComponent(lease.leaseId)}`;
     const countdown = leaseCountdown(lease, now);
     card.append(stateBadge(lease.state), el('strong', lease.unitKey ?? 'unknown unit'));
     const facts = el('dl');
@@ -279,7 +290,7 @@ function changeContext(change) {
 
 function renderChanges() {
   const list = $('change-list');
-  const { state: kind, items } = projectionItems(projections().changes);
+  const { state: kind, items } = snapshotCollections(state.snapshot).changes;
   if (kind === 'unavailable' || kind === 'unknown') return emptyInto(list, kind === 'unavailable' ? 'unavailable' : 'unknown');
   if (items.length === 0) return emptyInto(list, 'empty');
   const selected = state.selectedChangeId;
@@ -334,7 +345,11 @@ function renderDetail(change) {
   next.append(el('strong', `Next: ${action.label} — `), document.createTextNode(action.detail));
   body.append(next);
   if (action.kind === 'conflict' && action.holderId) {
-    body.append(el('p', `Lease holder: ${action.holderId}`, { class: 'next' }));
+    const lease = changeContext(change).leases.find(l => l?.holderId === action.holderId && action.conflictingKeys.includes(l.unitKey));
+    const line = el('p', 'Lease holder: ', { class: 'next' });
+    if (lease?.leaseId) line.append(el('a', action.holderId, { href: `#lease-${encodeURIComponent(lease.leaseId)}` }));
+    else line.append(document.createTextNode(action.holderId));
+    body.append(line);
   }
 }
 
@@ -348,17 +363,21 @@ function renderFindings() {
   const list = $('finding-list');
   const projs = projections();
   const findings = projectionItems(projs.findings);
-  const repairs = projectionItems(projs.repairs ?? projs.findings);
+  const repairs = snapshotCollections(state.snapshot).repairs;
   if (findings.state === 'unavailable') return emptyInto(list, 'unavailable');
   if (findings.state === 'unknown') return emptyInto(list, 'unknown');
-  const status = repairStatus(findings.items, repairs.items);
+  if (repairs.state === 'unknown') return emptyInto(list, 'unknown');
+  const scoped = state.selectedChangeId
+    ? findings.items.filter(f => f && f.changeId === state.selectedChangeId)
+    : findings.items;
+  const rounds = state.selectedChangeId
+    ? repairs.items.filter(round => round && round.changeId === state.selectedChangeId)
+    : repairs.items;
+  const status = repairStatus(scoped, rounds);
   list.replaceChildren();
   const summary = el('li', '', { class: 'card' });
   summary.append(el('strong', `Repair state: ${status.status} — `), document.createTextNode(status.summary));
   list.append(summary);
-  const scoped = state.selectedChangeId
-    ? findings.items.filter(f => f && f.changeId === state.selectedChangeId)
-    : findings.items;
   if (scoped.length === 0) {
     const item = el('li', '', { class: 'card' });
     item.append(el('p', state.selectedChangeId ? 'No findings for the selected change.' : 'No open findings.', { class: 'muted' }));
@@ -389,10 +408,22 @@ function renderVerdicts() {
   for (const verdict of scoped) {
     const provenance = verdictProvenance(verdict);
     const card = el('li', '', { class: 'card' });
+    if (verdict.verdictId) card.id = `verdict-${encodeURIComponent(verdict.verdictId)}`;
     card.append(stateBadge(verdict.decision), el('strong', verdict.verdictId ?? 'verdict'));
     card.append(el('p', provenance.summary));
     if (provenance.kind === 'carried') {
-      card.append(el('p', `Original review: ${provenance.parentVerdictId ?? '?'}; delta evidence: ${provenance.deltaResultId ?? 'missing'}`, { class: 'next' }));
+      const line = el('p', '', { class: 'next' });
+      line.append(document.createTextNode('Original review: '));
+      const parent = items.find(v => v?.verdictId === provenance.parentVerdictId);
+      if (parent) line.append(el('a', provenance.parentVerdictId, { href: `#verdict-${encodeURIComponent(provenance.parentVerdictId)}` }));
+      else line.append(document.createTextNode(`${provenance.parentVerdictId ?? 'missing'} (record unavailable)`));
+      line.append(document.createTextNode('; delta evidence: '));
+      const event = [...$('event-log').children].find(node => {
+        try { return JSON.parse(node.dataset.relatedIds ?? '[]').includes(provenance.deltaResultId); } catch { return false; }
+      });
+      if (event && provenance.deltaResultId) line.append(el('a', provenance.deltaResultId, { href: `#${event.id}` }));
+      else line.append(document.createTextNode(`${provenance.deltaResultId ?? 'missing'} (record unavailable)`));
+      card.append(line);
     }
     list.append(card);
   }
@@ -411,22 +442,24 @@ function renderQueue() {
     tree.append(el('p', 'Bisection tree: unknown projection shape.', { class: 'muted' }));
     return emptyInto(list, 'unknown');
   }
-  if (items.length === 0) {
+  const rawQueue = projections().queue;
+  const rawDiagnosis = rawQueue && typeof rawQueue === 'object' && !Array.isArray(rawQueue) ? rawQueue.diagnosis : null;
+  if (items.length === 0 && !rawDiagnosis) {
     tree.append(el('p', 'Queue empty: no admitted candidates.', { class: 'muted' }));
     return emptyInto(list, 'empty');
   }
-  const rawQueue = projections().queue;
-  const rawDiagnosis = rawQueue && typeof rawQueue === 'object' && !Array.isArray(rawQueue) ? rawQueue.diagnosis : null;
   const diagnosis = describeBisection(rawDiagnosis ?? null);
   const headline = el('p', '');
   headline.append(el('strong', `${diagnosis.headline} — `), document.createTextNode(diagnosis.note));
   tree.append(headline);
+  if (items.length === 0) return emptyInto(list, 'empty');
   list.replaceChildren();
   const entries = Array.isArray(items) ? items : [];
   for (const entry of entries) {
     const highlighted = diagnosis.highlightIds.includes(entry.changeId);
     const card = el('li', '', { class: 'card' });
-    card.append(stateBadge(entry.state), el('strong', highlighted ? `${entry.changeId} (isolated)` : (entry.changeId ?? 'entry')));
+    const label = highlighted ? diagnosis.classification === 'SINGLETON' ? ' (isolated)' : diagnosis.classification === 'INTERACTION' ? ' (failing set)' : ' (dependency group)' : '';
+    card.append(stateBadge(entry.state), el('strong', `${entry.changeId ?? 'entry'}${label}`));
     const facts = el('dl');
     const addFact = (term, value) => { facts.append(el('dt', term), el('dd', value)); };
     addFact('Revision:', `r${entry.admittedRevision ?? '?'}`);
@@ -531,9 +564,24 @@ async function runMutation(label, call) {
   } catch (error) {
     if (isStaleConflict(error)) {
       // Stale 409: refresh context, never pretend success.
-      await refreshSnapshot().catch(() => {});
-      renderAll();
-      setStatus(`${label}: stale context (409 ${error.code}). Refreshed — review the new state and retry.`);
+      try {
+        await refreshSnapshot();
+        renderAll();
+        setStatus(`${label}: stale context (409 ${error.code}). Refreshed — review the new state and retry.`);
+      } catch (refreshError) {
+        const redacted = redactError(refreshError);
+        setStatus(`${label}: stale context (409 ${error.code}); refresh failed (${redacted.code}). Retry refresh before acting.`);
+      }
+    } else if (error?.code === 'LEASE_CONFLICT') {
+      const d = error.details;
+      const status = $('mutation-status');
+      status.replaceChildren(document.createTextNode(`${label}: lease conflict. `));
+      if (d?.holderId) {
+        const lease = projectionItems(projections().leases).items.find(l => l?.holderId === d.holderId && d.conflictingKeys?.includes(l.unitKey));
+        if (lease?.leaseId) status.append(el('a', d.holderId, { href: `#lease-${encodeURIComponent(lease.leaseId)}` }));
+        else status.append(document.createTextNode(d.holderId));
+      } else status.append(document.createTextNode('Holder unknown'));
+      status.append(document.createTextNode(`; intent: ${d?.intentText ?? 'unknown'}; expires: ${d?.expiresAt ? new Date(d.expiresAt).toLocaleString() : 'unknown'}; units: ${d?.conflictingKeys?.join(', ') || 'unknown'}.`));
     } else if (isUnavailable(error)) {
       setStatus(`${label}: unavailable — the owning feature slice has not landed (MODULE_UNAVAILABLE).`);
     } else if (isForbidden(error)) {
@@ -554,6 +602,10 @@ function wireMutations() {
     event.preventDefault();
     const unitKeys = parseUnitKeys($('claim-units').value);
     const intentText = $('claim-intent').value.trim();
+    if (!selectedChange()) {
+      setStatus('Claim needs a selected change from the current snapshot.');
+      return;
+    }
     if (unitKeys.length === 0 || !intentText) {
       setStatus('Claim needs at least one unit key and intent text.');
       return;
@@ -572,14 +624,18 @@ function wireMutations() {
       setStatus('Enqueue needs the selected change and a verdict ID.');
       return;
     }
-    const body = { changeId: state.selectedChangeId, expectedVersion: state.version, verdictId, leaseFences: {} };
+    if (!Number.isSafeInteger(state.snapshot?.version)) return setStatus('Enqueue: current repo version is unavailable.');
+    const evidence = mutationEvidence(selectedChange(), projectionItems(projections().leases).items, snapshotCollections(state.snapshot).findingSetVersions?.[state.selectedChangeId]);
+    if (evidence.error) return setStatus(`Enqueue: ${evidence.error}`);
+    const body = { changeId: state.selectedChangeId, expectedVersion: state.version, verdictId, leaseFences: evidence.leaseFences };
     void runMutation('Enqueue', () => enqueueChange(state.repoId, body, newIdempotencyKey()));
   });
   $('withdraw-submit').addEventListener('click', () => {
-    if (!state.selectedChangeId) {
-      setStatus('Withdraw needs the selected change.');
+    if (!selectedChange()) {
+      setStatus('Withdraw needs a selected change from the current snapshot.');
       return;
     }
+    if (!Number.isSafeInteger(state.snapshot?.version)) return setStatus('Withdraw: current repo version is unavailable.');
     const body = { changeId: state.selectedChangeId, expectedVersion: state.version, reason: 'withdrawn from UI' };
     void runMutation('Withdraw', () => withdrawChange(state.repoId, body, newIdempotencyKey()));
   });
@@ -589,11 +645,14 @@ function wireMutations() {
       setStatus('Verdict needs the selected change.');
       return;
     }
+    if (!Number.isSafeInteger(state.snapshot?.version)) return setStatus('Verdict: current repo version is unavailable.');
+    const evidence = mutationEvidence(selectedChange(), projectionItems(projections().leases).items, snapshotCollections(state.snapshot).findingSetVersions?.[state.selectedChangeId], false);
+    if (evidence.error) return setStatus(`Verdict: ${evidence.error}`);
     const body = {
       expectedVersion: state.version,
-      revision: 1,
+      revision: evidence.revision,
       reviewManifestDigest: $('verdict-manifest').value.trim(),
-      findingSetVersion: 0,
+      findingSetVersion: evidence.findingSetVersion,
       decision: $('verdict-decision').value,
       evidenceDigest: $('verdict-evidence').value.trim(),
     };
@@ -604,7 +663,7 @@ function wireMutations() {
 // --- Session + keyboard wiring ---
 
 function wireSession() {
-  $('token-form').addEventListener('submit', (event) => {
+  $('token-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const value = $('token-input').value;
     $('token-input').value = '';
@@ -613,13 +672,28 @@ function wireSession() {
     } else {
       setSessionToken(value);
     }
+    clearSnapshot();
     refreshAffordances();
     showSessionError(null);
+    if (hasToken()) {
+      await refreshRepos();
+      if (state.repoId) await switchRepo(state.repoId);
+      else renderAll();
+    } else {
+      state.repoId = null;
+      $('repo-select').replaceChildren(el('option', 'Enter a session token to list repos'));
+      renderAll();
+    }
   });
   $('token-clear').addEventListener('click', () => {
     clearSessionToken();
     $('token-input').value = '';
     refreshAffordances();
+    clearSnapshot();
+    state.repoId = null;
+    $('repo-select').replaceChildren(el('option', 'Enter a session token to list repos'));
+    showSessionError(null);
+    renderAll();
   });
   $('role-select').addEventListener('change', refreshAffordances);
   $('repo-select').addEventListener('change', () => {
@@ -629,6 +703,17 @@ function wireSession() {
     const custom = $('repo-custom').value.trim();
     if (custom) void switchRepo(custom);
   });
+}
+
+function clearSnapshot() {
+  state.repos = [];
+  state.snapshot = null;
+  state.version = 0;
+  state.eventSeq = 0;
+  state.lastEventSeq = 0;
+  state.selectedChangeId = null;
+  $('event-log').replaceChildren();
+  $('detail-body').replaceChildren(el('p', 'No change selected.'));
 }
 
 async function switchRepo(repoId) {
@@ -662,7 +747,8 @@ function wireKeyboard() {
         ? options[(currentIndex + 1) % options.length]
         : options[(currentIndex - 1 + options.length) % options.length];
       selectChange(next.dataset.changeId || null);
-      next.focus();
+      const selected = [...$('change-list').querySelectorAll('[role="option"]')].find(o => o.dataset.changeId === next.dataset.changeId);
+      selected?.focus();
     } else if (event.key === 'Enter' && currentIndex >= 0) {
       event.preventDefault();
       $('detail-heading').setAttribute('tabindex', '-1');
@@ -690,13 +776,8 @@ async function boot() {
   wireKeyboard();
   refreshAffordances();
   await refreshBadge();
-  await refreshRepos();
-  if (!state.repoId && state.repos.length === 0) {
-    // Nothing listed yet (catalog slice unlanded or empty): panels explain.
-    renderAll();
-  } else if (state.repoId) {
-    await switchRepo(state.repoId);
-  }
+  $('repo-select').replaceChildren(el('option', 'Enter a session token to list repos'));
+  renderAll();
   window.setInterval(tick, 1000);
 }
 

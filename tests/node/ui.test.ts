@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 // web/ ships plain framework-free JS with no declaration files, so the test
 // loads it (and jsdom, likewise untyped) through a typed require handle
@@ -22,6 +23,7 @@ const {
   activeElementId, captureScroll, changeNextAction, describeBisection,
   environmentBadge, leaseCountdown, looksLikeMarkup, panelCopy,
   projectionItems, repairStatus, restoreFocus, restoreScroll, safeText,
+  snapshotCollections, mutationEvidence,
   verdictProvenance,
 } = require('../../web/views.js') as any;
 
@@ -59,6 +61,7 @@ describe('ui api client (fixtures)', () => {
       expect(apiError.status).toBe(409);
       expect(apiError.code).toBe('LEASE_CONFLICT');
       expect(apiError.requestId).toBe('req-conflict');
+      expect(apiError.details).toMatchObject({ holderId: 'agent-a', intentText: 'tune-alpha', expiresAt: 999 });
     } finally {
       clearSessionToken();
     }
@@ -102,10 +105,14 @@ describe('ui api client (fixtures)', () => {
 
   it('refuses absolute request paths and drops the token after forget', async () => {
     setSessionToken('local-viewer');
-    clearSessionToken();
     const seen: { url: string; init: RequestInit }[] = [];
     const fetchImpl = fixtureFetch({ '/v1/repos': { status: 200, body: { data: {} } } }, seen);
     await expect(apiFetch('https://evil.test/v1/repos', {}, fetchImpl)).rejects.toMatchObject({ code: 'INVALID_PATH' });
+    for (const path of ['//example.invalid/collect', '/\\example.invalid/collect', '/v1\\example.invalid/collect']) {
+      await expect(apiFetch(path, {}, fetchImpl)).rejects.toMatchObject({ code: 'INVALID_PATH' });
+    }
+    expect(seen).toHaveLength(0);
+    clearSessionToken();
     await apiFetch('/v1/repos', {}, fetchImpl);
     expect(new Headers(seen[0].init.headers).get('authorization')).toBeNull();
   });
@@ -199,6 +206,30 @@ describe('ui view helpers (fixtures)', () => {
     expect(repairStatus([{ status: 'resolved' }], []).status).toBe('resolved');
   });
 
+  it('reads change and round evidence from registered module projections', () => {
+    const envelope = { data: { projections: {
+      repos: { items: [{ repoId: 'demo' }], changes: [{ changeId: 'x', revision: 2, unitKeys: ['row:a'] }] },
+      leases: { items: [] }, queue: { items: [] }, runners: { items: [] },
+      findings: { items: [{ findingId: 'f1', changeId: 'x', status: 'open' }], rounds: [{ roundId: 'r1', changeId: 'x', status: 'pending' }], findingSetVersions: { x: 3, y: 8 } },
+      verdicts: { items: [] },
+    } } };
+    expect(snapshotCollections(envelope).changes.items[0].changeId).toBe('x');
+    expect(snapshotCollections(envelope).repairs.items[0].roundId).toBe('r1');
+    expect(snapshotCollections(envelope).findingSetVersions.x).toBe(3);
+    expect(snapshotCollections(envelope).findingSetVersions.y).toBe(8);
+    expect(snapshotCollections({ data: { projections: { repos: { status: 'unavailable', items: [] }, findings: { status: 'unavailable', items: [] } } } }).changes.state).toBe('unavailable');
+  });
+
+  it('requires current revision, finding version and each live lease fence', () => {
+    const change = { changeId: 'x', revision: 2, unitKeys: ['row:a'] };
+    const lease = { changeId: 'x', unitKey: 'row:a', fence: 7, expiresAt: Date.now() + 60_000, state: 'active' };
+    expect(mutationEvidence(change, [lease], 3)).toMatchObject({ revision: 2, findingSetVersion: 3, leaseFences: { 'row:a': 7 } });
+    expect(mutationEvidence(null, [lease], 3).error).toMatch(/Select/);
+    expect(mutationEvidence(change, [], 3).error).toMatch(/fence/);
+    expect(mutationEvidence(change, [], 3, false)).toMatchObject({ revision: 2, findingSetVersion: 3 });
+    expect(mutationEvidence(change, [lease], undefined).error).toMatch(/finding-set/);
+  });
+
   it('traces carried verdicts to the original review and states invalidations', () => {
     const carried = verdictProvenance({ verdictId: 'v2', parentVerdictId: 'v1', deltaResultId: 'd9' });
     expect(carried.kind).toBe('carried');
@@ -250,5 +281,121 @@ describe('ui view helpers (fixtures)', () => {
     expect(leaseCountdown({ state: 'released', expiresAt: 999_999 }, 0).text).toBe('expired');
     expect(panelCopy('disconnected').title).toBe('Disconnected');
     expect(panelCopy('nope').title).toBe('Unknown state');
+  });
+});
+
+describe('app event handlers (full snapshot fixtures)', () => {
+  it('refreshes after token entry, keeps keyboard focus, renders evidence and sends current mutations', async () => {
+    clearSessionToken();
+    const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/' });
+    const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+    dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+    dom.window.setInterval = (() => 1) as any;
+    const doc = dom.window.document;
+    const byId = (id: string) => doc.getElementById(id)!;
+    const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+    const submit = (id: string) => byId(id).dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    const sent: Array<{ url: string; body: any }> = [];
+    let catalogCalls = 0;
+    let failSnapshot = false;
+    let queue: any = { items: [{ changeId: 'x', state: 'blocked' }, { changeId: 'y', state: 'blocked' }], diagnosis: { classification: 'INTERACTION', failingSet: ['x', 'y'] } };
+    let mutationFailure: string | null = null;
+    const snapshot = () => ({ data: { projections: {
+      repos: { items: [{ repoId: 'demo', observedCanonicalOid: 'abc' }], changes: [
+        { changeId: 'x', intentText: 'first', status: 'ready', revision: 2, unitKeys: ['row:a'] },
+        { changeId: 'y', intentText: 'second', status: 'blocked', revision: 1, unitKeys: ['row:a'] },
+      ] },
+      leases: { items: [{ leaseId: 'l1', changeId: 'x', unitKey: 'row:a', holderId: 'agent-a', intentText: 'first', fence: 7, expiresAt: Date.now() + 60_000, state: 'active' }] },
+      queue, runners: { items: [] },
+      findings: { items: [{ findingId: 'f1', changeId: 'x', status: 'open' }], rounds: [{ roundId: 'r1', changeId: 'x', status: 'pending' }], findingSetVersions: { x: 3, y: 8 } },
+      verdicts: { items: [
+        { verdictId: 'v1', changeId: 'x', decision: 'approve' },
+        { verdictId: 'v2', changeId: 'x', decision: 'approve', parentVerdictId: 'v1', deltaResultId: 'd9' },
+      ] },
+    } }, version: 2, eventSeq: 1 });
+    globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      let status = 200;
+      let body: any;
+      if (url === '/health') body = { data: { mode: 'local', storageBackend: 'fake' } };
+      else if (url === '/v1/repos') {
+        catalogCalls++;
+        if (headers.get('authorization') === 'Bearer bad') {
+          status = 401; body = { error: { code: 'UNAUTHORIZED', message: 'invalid' } };
+        } else body = { data: { items: [{ repoId: 'demo', displayName: 'Demo' }] } };
+      } else if (url.endsWith('/snapshot')) {
+        if (failSnapshot) { status = 503; body = { error: { code: 'PLATFORM_UNAVAILABLE', message: 'offline' } }; }
+        else body = snapshot();
+      } else if (url.includes('/events?')) body = { data: { items: [{ sequence: 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: ['d9'] }] }, version: 2, eventSeq: 1 };
+      else {
+        sent.push({ url, body: JSON.parse(String(init.body)) });
+        if (mutationFailure === 'lease') { status = 409; body = { ...leaseConflictBody, error: { ...leaseConflictBody.error, details: { ...leaseConflictBody.error.details, conflictingKeys: ['row:a'] } } }; }
+        else if (mutationFailure === 'stale') { status = 409; body = { error: { code: 'STALE_VERSION', message: 'stale' } }; }
+        else body = { data: {}, version: 3, eventSeq: 2 };
+      }
+      return new Response(JSON.stringify(body), { status });
+    }) as any;
+    try {
+      // @ts-expect-error app is intentionally plain browser JS without declarations.
+      await import('../../web/app.js');
+      await flush();
+      expect(catalogCalls).toBe(0);
+      (byId('token-input') as HTMLInputElement).value = 'bad'; submit('token-form'); await flush();
+      expect(byId('session-error').textContent).toMatch(/authentication failed/);
+      expect(byId('repo-select').textContent).not.toContain('No repos listed');
+      (byId('token-input') as HTMLInputElement).value = 'local-viewer'; submit('token-form'); await flush(); await flush();
+      expect(catalogCalls).toBe(2);
+      expect(byId('change-list').textContent).toContain('first');
+      expect(byId('finding-list').textContent).toContain('pending-review');
+      (byId('role-select') as HTMLSelectElement).value = 'agent';
+      byId('role-select').dispatchEvent(new dom.window.Event('change'));
+      (byId('claim-units') as HTMLInputElement).value = 'row:a';
+      (byId('claim-intent') as HTMLInputElement).value = 'intent';
+      submit('claim-form'); await flush();
+      expect(byId('mutation-status').textContent).toContain('selected change');
+      expect(sent).toHaveLength(0);
+      expect(byId('queue-list').textContent).toContain('(failing set)');
+      expect(byId('queue-list').textContent).not.toContain('(isolated)');
+      const options = byId('change-list').querySelectorAll('[role="option"]');
+      (options[0] as HTMLElement).click();
+      (options[0] as HTMLElement).focus();
+      byId('change-list').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      expect(doc.activeElement).toBe(byId('change-list').querySelector('[aria-selected="true"]'));
+      expect(byId('detail-body').querySelector('a')?.getAttribute('href')).toBe('#lease-l1');
+      byId('change-list').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      expect(doc.activeElement).toBe(byId('change-list').querySelector('[aria-selected="true"]'));
+      expect(byId('verdict-list').querySelector('a[href="#verdict-v1"]')).not.toBeNull();
+      expect(byId('verdict-list').querySelector('a[href="#event-1"]')).not.toBeNull();
+      (byId('role-select') as HTMLSelectElement).value = 'reviewer';
+      byId('role-select').dispatchEvent(new dom.window.Event('change'));
+      expect(byId('mutation-note').textContent).toContain('unverified');
+      expect((byId('verdict-form') as HTMLElement).hidden).toBe(false);
+      (byId('verdict-manifest') as HTMLInputElement).value = 'sha256:manifest';
+      (byId('verdict-evidence') as HTMLInputElement).value = 'sha256:evidence';
+      submit('verdict-form'); await flush();
+      expect(sent.at(-1)?.body).toMatchObject({ revision: 2, findingSetVersion: 3, expectedVersion: 2 });
+      (byId('role-select') as HTMLSelectElement).value = 'agent';
+      byId('role-select').dispatchEvent(new dom.window.Event('change'));
+      (byId('enqueue-verdict') as HTMLInputElement).value = 'v1';
+      submit('enqueue-form'); await flush();
+      expect(sent.at(-1)?.body.leaseFences).toEqual({ 'row:a': 7 });
+      mutationFailure = 'lease'; submit('claim-form'); await flush();
+      expect(byId('mutation-status').textContent).toContain('agent-a');
+      expect(byId('mutation-status').querySelector('a')?.getAttribute('href')).toBe('#lease-l1');
+      mutationFailure = 'stale'; failSnapshot = true; submit('enqueue-form'); await flush();
+      expect(byId('mutation-status').textContent).toContain('refresh failed');
+      failSnapshot = false; mutationFailure = null;
+      queue = { items: [], diagnosis: { classification: 'BASE_RED' } };
+      (byId('repo-custom') as HTMLInputElement).value = 'demo'; byId('repo-use').click(); await flush();
+      expect(byId('queue-tree').textContent).toContain('Baseline itself fails');
+      byId('token-clear').click();
+      expect(byId('detail-body').textContent).toBe('No change selected.');
+      expect(byId('change-list').textContent).not.toContain('first');
+    } finally {
+      clearSessionToken();
+      dom.window.close();
+      Object.assign(globalThis, previous);
+    }
   });
 });

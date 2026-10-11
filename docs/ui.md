@@ -21,8 +21,9 @@ Worker serves `web/` directly; `/health` reports the backend badge.
    `local-agent-a` / `local-reviewer` for mutation buttons). The token lives
    in page memory only: never the URL, never localStorage. Use Forget to drop
    it.
-3. Pick the acting role. Viewers see no mutation controls; the server still
-   enforces every role, and a refused mutation names the missing role.
+3. Pick a requested role. This choice is unverified because v1 has no identity
+   endpoint; the server authorizes each action using the token's actual roles.
+   Viewer mode hides mutation controls. A refused mutation names the missing role.
 4. Pick a repo (or type its ID). Panels poll `GET events?after=` every
    second and refresh the snapshot when the repo version moves. Selection,
    focus, and scroll survive each re-render.
@@ -79,3 +80,14 @@ verdicts, network recovery, script-like intent text, and focus
 preservation — so when slices 02–07 land, the panels already know how to
 explain them. The walkthrough above was verified against a local fake
 backend on this worktree; no live Artifacts run was available.
+
+## Snapshot projection shape for slice integration
+
+The coordinator keys projections by `repos`, `leases`, `queue`, `runners`,
+`findings`, and `verdicts`. The UI reads `repos.items` for canonical repo data
+and `repos.changes` for changes; `findings.items` for findings,
+`findings.rounds` for repair rounds, and `findings.findingSetVersions[changeId]` for
+review evidence. Lease fences come from `leases.items`. Missing evidence blocks
+mutation with a visible message. These additive fields are the expected shape
+for the feature slices when they land; the current placeholders remain
+`{ status: 'unavailable', items: [] }`.

@@ -37,6 +37,29 @@ export function projectionItems(projection) {
   return { state: 'unknown', items: [] };
 }
 
+/** Snapshot ownership is fixed by the six registered coordinator modules. */
+export function snapshotCollections(envelope) {
+  const p = envelope?.data?.projections ?? {};
+  return {
+    changes: projectionItems(p.repos?.status === 'unavailable' ? p.repos : p.repos?.changes),
+    repairs: p.findings?.status === 'unavailable' ? { state: 'unavailable', items: [] } : projectionItems(p.findings?.rounds),
+    findingSetVersions: p.findings?.findingSetVersions,
+  };
+}
+
+export function mutationEvidence(change, leases, findingSetVersion, requireFences = true) {
+  if (!change?.changeId) return { error: 'Select a change first.' };
+  if (!Number.isSafeInteger(change.revision) || change.revision < 1) return { error: 'Current change revision is unavailable.' };
+  if (!Number.isSafeInteger(findingSetVersion) || findingSetVersion < 0) return { error: 'Current finding-set version is unavailable.' };
+  const fences = {};
+  for (const key of requireFences ? change.unitKeys ?? [] : []) {
+    const lease = leases.find(item => item?.changeId === change.changeId && item.unitKey === key && (item.state === 'active' || item.state === 'reserved'));
+    if (!lease || !Number.isSafeInteger(lease.fence) || lease.fence < 1 || lease.expiresAt <= Date.now()) return { error: `Current lease fence is unavailable for ${key}.` };
+    fences[key] = lease.fence;
+  }
+  return { revision: change.revision, findingSetVersion, leaseFences: fences };
+}
+
 /** Environment badge: local fake vs live Artifacts vs historical simulation. */
 export function environmentBadge(health, replayLoaded = false) {
   if (replayLoaded) return { label: 'historical simulation', detail: 'Replayed export; outcomes are recorded, not live.' };
@@ -114,18 +137,21 @@ export function describeBisection(diagnosis) {
   switch (d.classification) {
     case 'SINGLETON':
       return {
+        classification: 'SINGLETON',
         headline: `Culprit: ${(d.culpritChangeIds ?? []).join(', ') || 'unidentified'}`,
         highlightIds: d.culpritChangeIds ?? [],
         note: d.note ?? 'Isolated by bisection; every other candidate recomposes without it.',
       };
     case 'INTERACTION':
       return {
+        classification: 'INTERACTION',
         headline: `Failing set: ${(d.failingSet ?? []).join(' + ') || 'unidentified'}`,
         highlightIds: d.failingSet ?? [],
         note: 'Both halves pass alone; the combination fails. The set stays blocked for review, never single-blamed.',
       };
     case 'DEPENDENCY_GROUP':
       return {
+        classification: 'DEPENDENCY_GROUP',
         headline: 'Dependency group blocked',
         highlightIds: d.failingSet ?? [],
         note: 'Prerequisite closure prevents isolation; the group is blocked as a whole.',

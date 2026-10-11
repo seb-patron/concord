@@ -33,13 +33,14 @@ export function hasToken() {
 }
 
 export class ApiError extends Error {
-  constructor(status, code, message, requestId = null, retryable = false) {
+  constructor(status, code, message, requestId = null, retryable = false, details = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.requestId = requestId;
     this.retryable = retryable;
+    this.details = details;
   }
 }
 
@@ -80,7 +81,7 @@ export function newIdempotencyKey() {
  * absolute URLs are rejected so the in-memory token cannot leave this origin.
  */
 export async function apiFetch(path, options = {}, fetchImpl = fetch) {
-  if (typeof path !== 'string' || !path.startsWith('/')) {
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || path.includes('\\') || !/^\/(?:v1(?:\/|\?|$)|health(?:\?|$))/.test(path)) {
     throw new ApiError(400, 'INVALID_PATH', 'Refusing non-local request path');
   }
   const { method = 'GET', body, idempotencyKey } = options;
@@ -113,7 +114,15 @@ export async function apiFetch(path, options = {}, fetchImpl = fetch) {
     const code = failure && typeof failure.code === 'string' ? failure.code : `HTTP_${response.status}`;
     const message = failure && typeof failure.message === 'string' ? failure.message : `Request failed (${response.status})`;
     const requestId = parsed && typeof parsed === 'object' && typeof parsed.requestId === 'string' ? parsed.requestId : null;
-    throw new ApiError(response.status, code, message, requestId, response.status === 429 || response.status >= 500);
+    // Keep only the documented lease-conflict evidence, never arbitrary server details.
+    const raw = code === 'LEASE_CONFLICT' && response.status === 409 && failure?.details;
+    const details = raw && typeof raw === 'object' ? {
+      holderId: typeof raw.holderId === 'string' ? redactText(raw.holderId) : null,
+      intentText: typeof raw.intentText === 'string' ? redactText(raw.intentText) : null,
+      expiresAt: Number.isFinite(raw.expiresAt) ? raw.expiresAt : null,
+      conflictingKeys: Array.isArray(raw.conflictingKeys) ? raw.conflictingKeys.filter(key => typeof key === 'string').slice(0, 16).map(redactText) : [],
+    } : null;
+    throw new ApiError(response.status, code, message, requestId, response.status === 429 || response.status >= 500, details);
   }
   return parsed;
 }
