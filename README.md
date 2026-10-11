@@ -29,7 +29,7 @@ Prerequisites: Node 22+, npm, and native Git. In a clean clone, install the pinn
 npm ci
 ```
 
-Use four terminals for the remaining commands. They share one temporary run directory; use a fresh name for another rehearsal. No Cloudflare account or paid model is needed for this local path.
+Use four terminals for the remaining commands. The bridge and demo share one temporary run directory. Wrangler stores its local state in `.wrangler/state/` inside the clone; `.wrangler/` is gitignored. Its directory name is derived from the absolute run path, so a fresh run directory gets separate Worker state. No Cloudflare account or paid model is needed for this local path.
 
 Terminal 1, preflight:
 
@@ -53,7 +53,8 @@ Terminal 3, local API Worker (leave running):
 <!-- verified-by: 12c -->
 ```sh
 export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
-WRANGLER_SEND_METRICS=false npm run dev -- --persist-to "$CONCORD_RUN_DIR/wrangler" --var STORAGE_BACKEND:bridge --var 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026' --var "TRUSTED_CONFIG:$(cat "$CONCORD_RUN_DIR/trusted-config.json")"
+export CONCORD_WRANGLER_STATE=".wrangler/state/$(node -p 'require("node:crypto").createHash("sha256").update(process.env.CONCORD_RUN_DIR).digest("hex").slice(0,12)')"
+WRANGLER_SEND_METRICS=false npm run dev -- --persist-to "$CONCORD_WRANGLER_STATE" --var STORAGE_BACKEND:bridge --var 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026' --var "TRUSTED_CONFIG:$(cat "$CONCORD_RUN_DIR/trusted-config.json")"
 ```
 
 Terminal 4, seed and the first three scenes:

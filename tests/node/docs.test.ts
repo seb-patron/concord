@@ -1,4 +1,5 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { access, copyFile, mkdir, readFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -9,6 +10,20 @@ const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
 const children: ChildProcess[] = [];
 const directories: string[] = [];
+
+async function externalTempDir(prefix: string): Promise<string> {
+  for (const base of ['/tmp', join(cwd, '..', 'sandbox-home', 'tmp'), tmpdir()]) {
+    if (!relative(cwd, resolve(base)).startsWith('..')) continue;
+    try {
+      const root = await mkdtemp(join(base, prefix));
+      directories.push(root);
+      return root;
+    } catch (error) {
+      if (!['EACCES', 'EPERM', 'ENOENT'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+    }
+  }
+  throw new Error('No writable temporary directory outside the clone');
+}
 
 async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
   const document = await readFile(join(cwd, path), 'utf8');
@@ -70,12 +85,12 @@ afterEach(async () => {
 });
 
 describe('documented demo commands', () => {
-  it('passes absolute state and Wrangler paths even when TMPDIR is relative', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'concord-docs-paths-'));
-    directories.push(root);
+  it('keeps Wrangler persistence in the clone when TMPDIR is outside it', async () => {
+    const root = await externalTempDir('concord-docs-paths-');
     const readme = await taggedBlocks('README.md');
     const blocks = [...readme, ...await taggedBlocks('docs/DEMO.md'), ...await taggedBlocks('docs/deploy.md')];
-    const env = { ...process.env, TMPDIR: relative(cwd, root) };
+    const env = { ...process.env, TMPDIR: root };
+    expect(relative(cwd, root).startsWith('..')).toBe(true);
     const { stdout: runDir } = await execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
       { cwd, env });
     expect(isAbsolute(runDir)).toBe(true);
@@ -89,32 +104,43 @@ describe('documented demo commands', () => {
       for (const command of commands) {
         const script = [
           'npm() { previous=; for arg do',
-          '  if [ "$previous" = --state-dir ] || [ "$previous" = --persist-to ]; then printf "%s\\n" "$arg"; fi',
+          '  if [ "$previous" = --state-dir ] || [ "$previous" = --persist-to ]; then printf "%s\\n%s\\n" "$previous" "$arg"; fi',
           '  previous=$arg',
           'done; }',
           ...exports, command,
         ].join('\n');
         const { stdout } = await execFile('sh', ['-c', script], { cwd, env: { ...env, CONCORD_RUN_DIR: runDir } });
-        const paths = stdout.trim() ? stdout.trim().split('\n') : [];
-        expect(paths).toHaveLength((command.match(/--(?:state-dir|persist-to)\b/g) ?? []).length);
-        for (const path of paths) expect(isAbsolute(path), `${command}: ${path}`).toBe(true);
-        checked += paths.length;
+        const args = stdout.trim() ? stdout.trim().split('\n') : [];
+        expect(args).toHaveLength(2 * (command.match(/--(?:state-dir|persist-to)\b/g) ?? []).length);
+        for (let index = 0; index < args.length; index += 2) {
+          const [flag, path] = args.slice(index, index + 2);
+          if (flag === '--state-dir') {
+            expect(isAbsolute(path), `${command}: ${path}`).toBe(true);
+            expect(path.startsWith(root + '/'), `${command}: ${path}`).toBe(true);
+          } else {
+            expect(flag).toBe('--persist-to');
+            const runHash = createHash('sha256').update(runDir).digest('hex').slice(0, 12);
+            expect(resolve(cwd, path), `${command}: ${path}`).toBe(join(cwd, '.wrangler/state', runHash));
+          }
+          checked++;
+        }
       }
     }
     expect(checked).toBeGreaterThan(0);
   });
 
   it('runs every 12c-tagged local command against the real bridge and Worker', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'concord-docs-'));
-    directories.push(root);
-    // tsx's IPC socket needs a short TMPDIR here. The demo/runner needs an
-    // absolute TMPDIR for its candidate worktrees, so restore it in that child.
+    const root = await externalTempDir('concord-docs-');
+    // tsx needs a short socket path. This relative TMPDIR resolves outside the clone.
+    // Demo and runner need the absolute path for their candidate worktrees.
     const preload = join(root, 'restore-tmp.cjs');
     await writeFile(preload, "if (/(?:demo|runner)\\/main\\.ts$/.test(process.argv[1] ?? '')) process.env.TMPDIR = process.env.CONCORD_DOCS_ABS_TMPDIR;\n");
     const env = { ...process.env, TMPDIR: relative(cwd, root), XDG_CONFIG_HOME: root,
       CONCORD_RUN_DIR: join(root, 'concord-demo-01'), CONCORD_URL: 'http://127.0.0.1:8787',
       CONCORD_TOKEN: 'local-owner', CONCORD_SHOW_DECOMPILED_C: '0', WRANGLER_SEND_METRICS: 'false',
-      CONCORD_DOCS_ABS_TMPDIR: root, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim() };
+      CONCORD_DOCS_ABS_TMPDIR: root, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
+    };
+    expect(relative(cwd, resolve(env.TMPDIR)).startsWith('..')).toBe(true);
     const readme = await taggedBlocks('README.md');
     const demo = await taggedBlocks('docs/DEMO.md');
     const deploy = await taggedBlocks('docs/deploy.md');
