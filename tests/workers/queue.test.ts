@@ -264,6 +264,37 @@ async function contestReleaseCount(h: Harness): Promise<number> {
   });
 }
 
+async function contestLeaseGates(h: Harness): Promise<{ reserve: string; live: string }[]> {
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+  return runInDurableObject<RepoCoordinator, { reserve: string; live: string }[]>(stub, instance => {
+    const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+    const context = internal.context('queue', principal, h.repoId);
+    return ['A', 'B'].map(id => ({
+      reserve: context.call('leases.reserve', id, { 'row:J': 1 }).status,
+      live: context.call('leases.reservationLive', id, { 'row:J': 1 }).status,
+    }));
+  });
+}
+
+async function contestLeaseRecord(h: Harness): Promise<{ selectedChangeId: string | null; closed?: boolean }> {
+  const contestId = (await h.state()).contests[0].contestId;
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+  return runInDurableObject<RepoCoordinator, { selectedChangeId: string | null; closed?: boolean }>(stub, instance => {
+    const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+    return internal.context('queue', principal, h.repoId).state.get(`contest:${contestId}`)!;
+  });
+}
+
+async function expectContestTerminal(h: Harness, state: 'landed' | 'blocked'): Promise<void> {
+  expect((await h.state()).contests[0].state).toBe(state);
+  expect((await contestLeaseRecord(h)).closed).toBe(true);
+  expect((await leaseState(h, 'A')).state).toBe('released');
+  expect(await contestReleaseCount(h)).toBe(1);
+  expect(await contestLeaseGates(h)).toEqual([
+    { reserve: 'blocked', live: 'blocked' }, { reserve: 'blocked', live: 'blocked' },
+  ]);
+}
+
 async function prepareReal(changes: Array<{ id: string; unit: string }>, claimedIds: string[]): Promise<Harness> {
   const h = harness;
   await h.seed(`canonical-${h.repoId}`);
@@ -326,8 +357,12 @@ describe('queue with real lease hooks', () => {
     await h.deliver(h.jobs[1], 'PASS'); await h.tick();
     await h.deliver(h.jobs[0], 'PASS'); await h.tick();
     expect((await h.state()).contests[0].winnerId).toBe('B');
+    expect(await contestLeaseRecord(h)).toMatchObject({ selectedChangeId: 'B' });
     expect((await h.state()).entries.find((entry: any) => entry.changeId === 'A').state).toBe('failed');
     expect((await leaseState(h, 'A')).state).toBe('reserved');
+    expect(await contestLeaseGates(h)).toEqual([
+      { reserve: 'blocked', live: 'blocked' }, { reserve: 'eligible', live: 'eligible' },
+    ]);
     const loser = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
       changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:J': 1 } });
     expect(loser.response.status).toBe(409);
@@ -345,8 +380,7 @@ describe('queue with real lease hooks', () => {
     expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
     await h.tick();
     expect((await h.state()).entries.find((entry: any) => entry.changeId === 'B').state).toBe('landed');
-    expect((await leaseState(h, 'A')).state).toBe('released');
-    expect(await contestReleaseCount(h)).toBe(1);
+    await expectContestTerminal(h, 'landed');
     const stale = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
       changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:J': 1 } });
     expect(stale.response.status).toBe(409);
@@ -371,8 +405,7 @@ describe('queue with real lease hooks', () => {
     await h.tick();
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
     expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'ELIGIBILITY_CHANGED' });
-    expect((await leaseState(h, 'A')).state).toBe('released');
-    expect(await contestReleaseCount(h)).toBe(1);
+    await expectContestTerminal(h, 'blocked');
   });
 
   it('releases the contest reservation when a child job fails before arbitration', async () => {
@@ -383,8 +416,7 @@ describe('queue with real lease hooks', () => {
     expect(h.jobs).toHaveLength(3);
     await h.deliver(h.jobs[2], 'TIMEOUT'); await h.tick();
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
-    expect((await leaseState(h, 'A')).state).toBe('released');
-    expect(await contestReleaseCount(h)).toBe(1);
+    await expectContestTerminal(h, 'blocked');
   });
 
   it('releases the contest reservation when both children fail validation', async () => {
@@ -395,8 +427,7 @@ describe('queue with real lease hooks', () => {
     await h.deliver(h.jobs[1], 'FAIL'); await h.tick();
     expect((await h.state()).contests[0].state).toBe('blocked');
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
-    expect((await leaseState(h, 'A')).state).toBe('released');
-    expect(await contestReleaseCount(h)).toBe(1);
+    await expectContestTerminal(h, 'blocked');
   });
 
   it('releases the contest reservation when the selected winner becomes ineligible', async () => {
@@ -409,8 +440,21 @@ describe('queue with real lease hooks', () => {
     h.views.set('B', { ...h.views.get('B')!, status: 'draft' });
     await h.tick();
     expect((await h.state()).entries.find((entry: any) => entry.changeId === 'B').state).toBe('blocked');
-    expect((await leaseState(h, 'A')).state).toBe('released');
-    expect(await contestReleaseCount(h)).toBe(1);
+    await expectContestTerminal(h, 'blocked');
+  });
+
+  it('blocks the selected contest and releases its reservation when the winner withdraws', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    await h.tick();
+    await h.deliver(h.jobs[1], 'PASS'); await h.tick();
+    await h.deliver(h.jobs[0], 'PASS'); await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'selected', winnerId: 'B' });
+    const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'B', reason: 'cancel' });
+    expect(withdrawn.response.status).toBe(200);
+    expect((await h.state()).entries.find((entry: any) => entry.changeId === 'B').state).toBe('withdrawn');
+    await expectContestTerminal(h, 'blocked');
   });
 
   it('blocks both contest children and releases the shared reservation when one withdraws', async () => {
@@ -422,8 +466,7 @@ describe('queue with real lease hooks', () => {
       changeId: 'B', reason: 'cancel' });
     expect(withdrawn.response.status).toBe(200);
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'withdrawn']);
-    expect((await leaseState(h, 'A')).state).toBe('released');
-    expect(await contestReleaseCount(h)).toBe(1);
+    await expectContestTerminal(h, 'blocked');
   });
 
   it('blocks an expired reservation before scheduling a contest child', async () => {
@@ -440,6 +483,10 @@ describe('queue with real lease hooks', () => {
     await h.tick();
     expect(h.jobs).toHaveLength(0);
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
+    expect((await h.state()).contests[0].state).toBe('blocked');
+    expect(await contestLeaseGates(h)).toEqual([
+      { reserve: 'blocked', live: 'blocked' }, { reserve: 'blocked', live: 'blocked' },
+    ]);
   });
 
   it('does not issue a promotion ticket after the reservation expires', async () => {

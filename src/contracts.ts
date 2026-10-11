@@ -79,7 +79,7 @@ export interface RepairRound extends Versioned {
 export interface Contest extends Versioned {
   contestId: Id; intentKey: string; unitKey: string; baseOid: Oid;
   childChangeIds: [Id, Id]; selectedChangeId: Id | null;
-  state: 'open' | 'selected' | 'blocked';
+  state: 'open' | 'selected' | 'landed' | 'blocked';
 }
 export interface OutboxIntent extends Versioned {
   intentId: Id; kind: 'ensure-repo' | 'fork' | 'promotion';

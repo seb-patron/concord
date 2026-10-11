@@ -28,7 +28,7 @@ interface JobRecord {
 interface ContestState {
   contestId: Id; childIds: [Id, Id]; admissionIds: [Id, Id]; creationSequences: [number, number];
   intentKey: string; intentText: string; unitKey: string; baseOid: string; policyDigest: Digest; profileDigest: Digest;
-  state: 'open' | 'selected' | 'blocked'; winnerId: Id | null; reason: string | null;
+  state: 'open' | 'selected' | 'landed' | 'blocked'; winnerId: Id | null; reason: string | null;
   resultIds: Id[];
 }
 interface ContestLeaseEvidence {
@@ -74,9 +74,9 @@ function contestEvidence(context: ModuleContext, contest: ContestState, selected
   const evidence: ContestLeaseEvidence = { contestId: contest.contestId, parentChangeId: contest.childIds[0],
     childChangeIds: contest.childIds, selectedChangeId, ownerCreated: true };
   context.state.put(`contest:${contest.contestId}`, evidence);
-  for (const id of contest.childIds) context.state.put(`contest-child:${id}`, evidence);
+  for (const id of contest.childIds) context.state.put(`contest-child:${id}`, { contestId: contest.contestId });
 }
-function transition(context: ModuleContext, entry: Entry, next: EntryState, reason: string | null = null): void {
+function transition(context: ModuleContext, state: QueueState, entry: Entry, next: EntryState, reason: string | null = null): void {
   if (entry.state === next) return;
   const allowed: Record<EntryState, EntryState[]> = {
     admitted: ['reserved'],
@@ -90,7 +90,17 @@ function transition(context: ModuleContext, entry: Entry, next: EntryState, reas
       context.state.put(`entry:${entry.changeId}`, { changeId: entry.changeId,
         state: next === 'landed' ? 'merged' : 'withdrawn', entryId: entry.entryId });
       requireGate(context.call('leases.releaseReservation', entry.changeId));
+      const contest = state.contests.find(item => item.contestId === entry.contestId
+        && item.state === 'selected' && item.winnerId === entry.changeId);
+      if (contest) {
+        contest.state = next === 'landed' ? 'landed' : 'blocked';
+        if (next !== 'landed') contest.reason = reason;
+      }
+      entry.state = next;
+      entry.blockedReason = reason;
+      save(context, state);
     });
+    return;
   }
   entry.state = next;
   entry.blockedReason = reason;
@@ -270,7 +280,7 @@ function emit(context: ModuleContext, kind: string, ids: Id[], payload: Record<s
   return context.appendEvent(kind, ids, payload, version).sequence;
 }
 function invalidate(context: ModuleContext, state: QueueState, reason: string, ids: Id[]): void {
-  for (const entry of state.entries) if (entry.state === 'checking') transition(context, entry, 'reserved');
+  for (const entry of state.entries) if (entry.state === 'checking') transition(context, state, entry, 'reserved');
   bump(context, state, reason, ids);
 }
 function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, reason: string): void {
@@ -280,7 +290,7 @@ function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, rea
     invalidate(context, state, reason, contest.childIds);
     return;
   }
-  transition(context, entry, 'blocked', reason);
+  transition(context, state, entry, 'blocked', reason);
   emit(context, 'queue.entry_blocked', [entry.changeId], { reason, confidence: 'none' });
   invalidate(context, state, reason, [entry.changeId]);
 }
@@ -289,7 +299,7 @@ function closeContest(context: ModuleContext, state: QueueState, contest: Contes
   contestEvidence(context, contest, contest.childIds[0]);
   for (const id of contest.admissionIds) {
     const entry = admitted(state, id);
-    if (entry && active(entry)) transition(context, entry, 'blocked', reason);
+    if (entry && active(entry)) transition(context, state, entry, 'blocked', reason);
   }
 }
 async function enqueue(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
@@ -322,7 +332,7 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     const sequence = emit(context, 'queue.enqueued', [changeId], { revision: checked.revision, headOid: checked.headOid,
       verdictId: checked.verdictId, findingSetVersion: checked.findingSetVersion });
     const entry: Entry = { ...checked, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
-    transition(context, entry, 'reserved');
+    transition(context, state, entry, 'reserved');
     state.entries.push(entry);
     bump(context, state, 'ADMITTED', [changeId]);
     const waiting = ordered(state).filter(item => item.state === 'reserved');
@@ -368,13 +378,13 @@ function withdraw(context: ModuleContext, body: Record<string, unknown>): Respon
         contestEvidence(context, contest, entry.changeId);
       }
     }
-    transition(context, entry, 'withdrawn', body.reason as string);
+    transition(context, state, entry, 'withdrawn', body.reason as string);
     if (entry.contestId) {
       const contest = state.contests.find(item => item.contestId === entry.contestId && item.reason === 'CHILD_WITHDRAWN');
       if (contest) {
         for (const id of contest.admissionIds) {
           const sibling = admitted(state, id);
-          if (sibling && active(sibling)) transition(context, sibling, 'blocked', 'CHILD_WITHDRAWN');
+          if (sibling && active(sibling)) transition(context, state, sibling, 'blocked', 'CHILD_WITHDRAWN');
         }
       }
     }
@@ -435,7 +445,7 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
       const sequence = emit(context, 'queue.contest_child', [candidate.changeId, contestId], { headOid: candidate.headOid });
       creationSequences[i] = sequence;
       const entry: Entry = { ...candidate, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
-      transition(context, entry, 'reserved');
+      transition(context, state, entry, 'reserved');
       admissionIds[i] = entry.entryId;
       state.entries.push(entry);
     });
@@ -524,7 +534,7 @@ function failRecord(context: ModuleContext, state: QueueState, record: JobRecord
   if (contest) { contest.state = 'blocked'; contest.reason = reason; }
   const ids = contest?.admissionIds ?? (record.purpose === 'diagnostic' && state.diagnosis
     ? state.diagnosis.admissionIds ?? record.admissionIds : record.admissionIds);
-  for (const id of ids) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', reason); }
+  for (const id of ids) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, state, entry, 'blocked', reason); }
   state.activeStackJobId = null;
 }
 async function makePromotionJob(context: ModuleContext, state: QueueState, checked: JobRecord, result: StackResult, promotionId: Id): Promise<Job> {
@@ -617,23 +627,23 @@ function finishDiagnosis(context: ModuleContext, state: QueueState, record: JobR
   for (const [index, id] of diagnosis.original.entries()) {
     const entry = admitted(state, diagnosis.admissionIds?.[index] ?? '');
     if (entry && active(entry) && (reason !== 'SINGLETON' || diagnosis.blame.includes(id) || diagnosis.survivors.length === 0)) {
-      transition(context, entry, 'blocked', reason);
+      transition(context, state, entry, 'blocked', reason);
     }
   }
   if (reason !== 'SINGLETON' || diagnosis.survivors.length === 0) return;
   if (record.memberIds.length !== diagnosis.survivors.length
     || !record.memberIds.every(id => diagnosis.survivors.includes(id))) {
     state.blockedReason = 'DEPENDENCY_GROUP';
-    for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, entry, 'blocked', 'DEPENDENCY_GROUP'); }
+    for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, state, entry, 'blocked', 'DEPENDENCY_GROUP'); }
     return;
   }
   if (!diagnosis.survivors.every(id => { const entry = member(state, record, id); return entry && admissionStillValid(context, entry); })) {
-    for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, entry, 'blocked', 'ELIGIBILITY_CHANGED'); }
+    for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, state, entry, 'blocked', 'ELIGIBILITY_CHANGED'); }
     return;
   }
   return createTicket(context, state, record, result, state.observedMain).then(() => {
     if (!state.ticket || !['pending', 'reconcile'].includes(state.ticket.state)) {
-      for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, entry, 'blocked', state.blockedReason ?? 'TICKET_UNAVAILABLE'); }
+      for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, state, entry, 'blocked', state.blockedReason ?? 'TICKET_UNAVAILABLE'); }
     }
   });
 }
@@ -725,7 +735,7 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
     contest.state = 'selected'; contest.winnerId = outcome.winnerId;
     contestEvidence(context, contest, outcome.winnerId);
     const loser = admitted(state, contest.admissionIds[contest.childIds.indexOf(outcome.loserId)])!;
-    transition(context, loser, 'failed', outcome.reason);
+    transition(context, state, loser, 'failed', outcome.reason);
   }
   emit(context, 'queue.contest_arbitrated', contest.childIds, { contestId: contest.contestId,
     winnerId: contest.winnerId, reason: contest.reason, firstResult: first.result?.jobId, secondResult: second.result?.jobId });
@@ -745,7 +755,7 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
       state.blockedReason = null;
       for (const id of ticket.admissionIds) {
         const entry = admitted(state, id);
-        if (entry && active(entry)) transition(context, entry, 'landed');
+        if (entry && active(entry)) transition(context, state, entry, 'landed');
       }
       if (ticket.bootstrap) state.bootstrap!.state = 'merged';
       state.observedMain = observed;
@@ -762,7 +772,7 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
     state.blockedReason = null;
     for (const id of ticket.admissionIds) {
       const entry = admitted(state, id);
-      if (entry && entry.state === 'checking') transition(context, entry, 'reserved');
+      if (entry && entry.state === 'checking') transition(context, state, entry, 'reserved');
     }
     if (ticket.bootstrap) state.bootstrap!.state = 'waiting';
     emit(context, 'queue.promotion_failed', ticket.memberIds, { reason: 'CONFIRMED_OLD_REF', observed });
@@ -933,7 +943,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   const job = await makeStackJob(context, state, selected, false);
   context.transaction(() => {
     schedule(context, state, job, 'stack', selected);
-    for (const id of selected) transition(context, current(state, id)!, 'checking');
+    for (const id of selected) transition(context, state, current(state, id)!, 'checking');
     state.coalesceUntil = null;
     emit(context, 'queue.stack_checking', selected, { jobId: job.jobId, generation: state.generation, width: selected.length });
     save(context, state);
