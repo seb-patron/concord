@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
+import { normalizeManifest } from '../../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, git, refOid, temporaryWork } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
 import { dispatchArgv, loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
@@ -198,8 +199,8 @@ export function attemptBudget(family) {
       await git(repo, ['commit', '--quiet', '-m', 'alpha'], 30_000, commitEnv);
       const head = await git(repo, ['rev-parse', 'HEAD']);
       const rowPolicy: TrustedPolicy = { ...policy, units: {
-        'row:families:alpha': { canonicalKey: 'row:families:alpha', file: 'families.tsv', resources: ['alpha'], dependencyKeys: ['row:families:beta'] },
-        'row:families:beta': { canonicalKey: 'row:families:beta', file: 'families.tsv', resources: ['beta'], dependencyKeys: [] },
+        'row:families:alpha': { canonicalKey: 'row:families:alpha', file: 'families.tsv', resources: ['families.tsv#alpha'], dependencyKeys: ['row:families:beta'] },
+        'row:families:beta': { canonicalKey: 'row:families:beta', file: 'families.tsv', resources: ['families.tsv#beta'], dependencyKeys: [] },
       } };
       const job = { ...jobBase({}), unitPolicy: rowPolicy } as Job;
       const inspected = await inspectUnits(repo, base, head, job);
@@ -207,8 +208,85 @@ export function attemptBudget(family) {
       expect(inspected.manifest.coverage).toBe('complete');
       if (inspected.manifest.coverage !== 'complete') throw new Error('unknown');
       expect(inspected.manifest.dependencyScope).toMatchObject([{ unitKey: 'row:families:beta', path: 'families.tsv' }]);
+      expect(inspected.manifest.dependencyScope[0].contentDigest).toBe('sha256:' + createHash('sha256').update('beta\t2\t1000').digest('hex'));
+      expect(normalizeManifest(inspected.manifest, rowPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
       const beforeDigest = 'sha256:' + createHash('sha256').update('alpha\t1\t1000').digest('hex');
       expect(inspected.manifest.changedUnits[0].beforeDigest).toBe(beforeDigest);
+    });
+  });
+
+  it('collects transitive whole-file dependencies, cycles, and unknown scope from Git evidence', async () => {
+    await gitFixture(async ({ repo }) => {
+      await writeFile(join(repo, 'b.txt'), 'bee\n');
+      await writeFile(join(repo, 'c.txt'), 'see\n');
+      await git(repo, ['add', 'b.txt', 'c.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'dependencies'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await writeFile(join(repo, 'example.txt'), 'changed\n');
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'change'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const units: TrustedPolicy['units'] = {
+        'file:example.txt': { canonicalKey: 'file:example.txt', file: 'example.txt', resources: [], dependencyKeys: ['file:b.txt'] },
+        'file:b.txt': { canonicalKey: 'file:b.txt', file: 'b.txt', resources: [], dependencyKeys: ['file:c.txt'] },
+        'file:c.txt': { canonicalKey: 'file:c.txt', file: 'c.txt', resources: [], dependencyKeys: [] },
+      };
+      const filePolicy: TrustedPolicy = { ...policy, units };
+      const inspect = (unitPolicy: TrustedPolicy) => inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy } as Job);
+      const chain = await inspect(filePolicy);
+      expect(chain.unitKeys).toEqual(['file:example.txt']);
+      expect(chain.manifest.coverage).toBe('complete');
+      if (chain.manifest.coverage !== 'complete') throw new Error('unknown');
+      expect(chain.manifest.dependencyScope).toEqual([
+        { kind: 'unit', unitKey: 'file:b.txt', path: 'b.txt', mode: '100644', contentDigest: 'sha256:' + createHash('sha256').update('bee\n').digest('hex') },
+        { kind: 'unit', unitKey: 'file:c.txt', path: 'c.txt', mode: '100644', contentDigest: 'sha256:' + createHash('sha256').update('see\n').digest('hex') },
+      ]);
+      expect(normalizeManifest(chain.manifest, filePolicy, chain.unitKeys)).toEqual(chain.manifest);
+
+      const cyclePolicy: TrustedPolicy = { ...filePolicy, units: { ...units,
+        'file:b.txt': { ...units['file:b.txt'], dependencyKeys: ['file:example.txt'] } } };
+      const cycle = await inspect(cyclePolicy);
+      expect(cycle.manifest.coverage).toBe('complete');
+      if (cycle.manifest.coverage !== 'complete') throw new Error('unknown');
+      expect(cycle.manifest.dependencyScope.map(entry => entry.unitKey)).toEqual(['file:b.txt', 'file:example.txt']);
+      expect(cycle.manifest.dependencyScope[1].contentDigest).toBe('sha256:' + createHash('sha256').update('changed\n').digest('hex'));
+      expect(normalizeManifest(cycle.manifest, cyclePolicy, cycle.unitKeys)).toEqual(cycle.manifest);
+
+      for (const invalid of [
+        { ...units, 'file:c.txt': { ...units['file:c.txt'], file: 'missing.txt' } },
+        { ...units, 'file:b.txt': { ...units['file:b.txt'], resources: ['unreviewed'] } },
+        { ...units, 'file:b.txt': { ...units['file:b.txt'], dependencyKeys: ['file:missing.txt'] } },
+      ]) {
+        const unknown = await inspect({ ...filePolicy, units: invalid });
+        expect(unknown.manifest.coverage).toBe('unknown');
+        expect(unknown.manifest.dependencyScope).toEqual([{ kind: 'tree', treeOid: await git(repo, ['rev-parse', head + '^{tree}']) }]);
+      }
+    });
+  });
+
+  it('collects chained TSV row dependencies from the committed table', async () => {
+    await gitFixture(async ({ repo }) => {
+      const table = 'family\tretry_limit\ttimeout_ms\nalpha\t1\t1000\nbeta\t2\t1000\ngamma\t3\t1000\n';
+      await writeFile(join(repo, 'families.tsv'), table);
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'table'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await writeFile(join(repo, 'families.tsv'), table.replace('alpha\t1', 'alpha\t2'));
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'alpha'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const rowPolicy: TrustedPolicy = { ...policy, units: Object.fromEntries(['alpha', 'beta', 'gamma'].map((row, index) => [
+        `row:families:${row}`, { canonicalKey: `row:families:${row}`, file: 'families.tsv', resources: [`families.tsv#${row}`],
+          dependencyKeys: index < 2 ? [`row:families:${['beta', 'gamma'][index]}`] : [] },
+      ])) };
+      const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: rowPolicy } as Job);
+      expect(inspected.manifest.coverage).toBe('complete');
+      if (inspected.manifest.coverage !== 'complete') throw new Error('unknown');
+      expect(inspected.manifest.dependencyScope).toEqual(['beta', 'gamma'].map(row => ({
+        kind: 'unit', unitKey: `row:families:${row}`, path: 'families.tsv', mode: '100644',
+        contentDigest: 'sha256:' + createHash('sha256').update(`${row}\t${row === 'beta' ? 2 : 3}\t1000`).digest('hex'),
+      })));
+      expect(normalizeManifest(inspected.manifest, rowPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
     });
   });
 
@@ -391,7 +469,7 @@ export function attemptBudget(family) {
       await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/main']);
       const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
       const filePolicy: TrustedPolicy = { ...policy, units: { 'file:example.txt': {
-        canonicalKey: 'file:example.txt', file: 'example.txt', resources: ['example.txt'], dependencyKeys: [] } } };
+        canonicalKey: 'file:example.txt', file: 'example.txt', resources: [], dependencyKeys: [] } } };
       const oldReviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
       const job: Job = { ...jobBase(remotes), unitPolicy: filePolicy, kind: 'delta-check', changeId: 'change',
