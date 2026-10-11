@@ -231,10 +231,14 @@ export type ReviewManifest = ReviewManifestBase & (
 export interface ResultBase {
   jobId: Id; attempt: number; inputDigest: Digest; fence: number;
   sourceTreeOid: Oid | null; checkerDigest: Digest; toolchainDigest: Digest; oracleDigest: Digest;
-  environmentDigest: Digest; durationMs: number; log: string; resultDigest: Digest;
+  environmentDigest: Digest; durationMs: number; log: string;
+  /** sha256 of canonical sorted JSON of this result with the resultDigest field omitted; must equal JobResultBody.resultDigest. */
+  resultDigest: Digest;
 }
 export interface InspectionResult extends ResultBase {
-  kind: 'inspect-candidate'; outcome: CheckOutcome; observedHeadOid: Oid;
+  kind: 'inspect-candidate'; outcome: CheckOutcome;
+  /** Head the runner actually fetched; null only when it observed none (ENV_ERROR or TIMEOUT before fetch). Never a copy of the requested OID. */
+  observedHeadOid: Oid | null;
   unitKeys: string[]; reviewManifestDigest: Digest | null; reviewManifest: ReviewManifest | null;
 }
 export interface StackResultBase extends ResultBase {

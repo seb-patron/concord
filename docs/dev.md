@@ -28,7 +28,7 @@ Run a specific Workers test with `npm run test:target -- tests/workers/name.test
 
 ## Contract audit
 
-This table checks the runner, queue, verdict, and finding exchanges in `docs/ARCHITECTURE.md` and `docs/specs/03`–`07` against `src/contracts.ts`. The feature modules remain unavailable in slice 01; “covered” means the wire or shared type can carry the named data, not that the later slice implements the behavior. The producer must hash canonical sorted JSON for `ReviewManifest`, `dependencyScope`, and the full result, and the consumer must recompute those digests, compare the job input/fence/pins, verify the referenced Git objects, and reject missing or inconsistent evidence. An `unknown` review scope contains the whole relevant tree and cannot authorize automatic carry.
+This table checks the runner, queue, verdict, and finding exchanges in `docs/ARCHITECTURE.md` and `docs/specs/03`–`07` against `src/contracts.ts`. The feature modules remain unavailable in slice 01; “covered” means the wire or shared type can carry the named data, not that the later slice implements the behavior. The producer must hash canonical sorted JSON for `ReviewManifest`, `dependencyScope`, and the full result with its `resultDigest` field omitted (the canonical preimage), and `JobResultBody.resultDigest` must equal `result.resultDigest`, and the consumer must recompute those digests, compare the job input/fence/pins, verify the referenced Git objects, and reject missing or inconsistent evidence. An `unknown` review scope contains the whole relevant tree and cannot authorize automatic carry.
 
 | Exchange | Type | Fields carried | Verdict |
 | --- | --- | --- | --- |

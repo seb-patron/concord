@@ -90,12 +90,14 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   const config = value as TrustedConfiguration;
   if (!config.policies || !config.profiles || typeof config.policies !== 'object' || typeof config.profiles !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
   for (const [id, policy] of Object.entries(config.policies)) {
+    if (!policy || typeof policy !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
     if (id !== policy.id || !/^sha256:[a-f0-9]{64}$/.test(policy.digest) || !/^sha256:[a-f0-9]{64}$/.test(policy.checkerDigest) || !policy.units || typeof policy.units !== 'object' || Array.isArray(policy.units)) throw new Error('TRUSTED_CONFIG_INVALID');
     const acceptance = policy.acceptance;
     if (!acceptance || !['hard-gates', 'score'].includes(acceptance.kind) || !Array.isArray(acceptance.gates) || acceptance.gates.length === 0 || !acceptance.gates.every(gate => gate && typeof gate.id === 'string' && gate.id.length > 0 && ['MATCH', 'PASS'].includes(gate.requiredOutcome))) throw new Error('TRUSTED_CONFIG_INVALID');
     if (acceptance.kind === 'score' && (!Number.isSafeInteger(acceptance.fixedDenominator) || acceptance.fixedDenominator <= 0)) throw new Error('TRUSTED_CONFIG_INVALID');
   }
   for (const [id, profile] of Object.entries(config.profiles)) {
+    if (!profile || typeof profile !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
     if (id !== profile.id || ![profile.digest, profile.toolchainDigest, profile.oracleDigest, profile.environmentDigest].every(digest => /^sha256:[a-f0-9]{64}$/.test(digest)) || !Number.isSafeInteger(profile.maxOutputBytes) || profile.maxOutputBytes < 1 || profile.maxOutputBytes > MAX_RESULT_OUTPUT_BYTES) throw new Error('TRUSTED_CONFIG_INVALID');
   }
   return config;
