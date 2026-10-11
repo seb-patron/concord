@@ -211,18 +211,55 @@ describe('repository and change lifecycle', () => {
     });
   });
 
-  it('records only one bootstrap request from two concurrent owner initializers', async () => {
+  it('records only one bootstrap request from two concurrent retries of the same seed', async () => {
     await create('bootstrap_race_case');
     await fetchApi(apiRequest('/v1/repos/bootstrap_race_case'));
+    const ref = 'refs/heads/seed';
+    const response = await fetchApi(mutation('/v1/repos/bootstrap_race_case/changes', {
+      intentKey: 'seed', intentText: 'seed', baseOid: null, branch: ref, unitKeys: [], dependencyChangeIds: [],
+    }, 'draft-seed'));
+    expect(response.status).toBe(201);
+    const draft = (await responseBody(response)).data;
+    await fake('bootstrap_race_case', provider => {
+      provider.putCommit(draft.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(draft.candidateStorageName, ref, null, a);
+    });
+    const branchResponse = await fetchApi(mutation('/v1/repos/bootstrap_race_case/branches', {
+      expectedVersion: 1, storageName: draft.candidateStorageName, ref, observedHead: a, ownerId: 'owner',
+    }, 'branch-seed'));
+    expect(branchResponse.status).toBe(201);
+    const bootstrapBody = { expectedVersion: 2, seedStorageName: draft.candidateStorageName, seedRef: ref,
+      headOid: a, policyId: 'local-demo', profileId: 'local-demo' };
+    const responses = await Promise.all([0, 1].map(index => fetchApi(mutation('/v1/repos/bootstrap_race_case/bootstrap',
+      bootstrapBody, `race-${index}`))));
+    expect(responses.every(item => item.status === 202 || item.status === 409)).toBe(true);
+    expect(responses.some(item => item.status === 202)).toBe(true);
+    const bodies = await Promise.all(responses.map(response => responseBody(response)));
+    expect(bodies.filter(body => body.error).every(body => ['STALE_VERSION', 'BOOTSTRAP_PENDING'].includes(body.error.code))).toBe(true);
+    const snapshot = await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/snapshot'));
+    const projections = (await responseBody(snapshot)).data.projections;
+    const bootstrap = projections.repos.bootstrap;
+    expect(bootstrap).toMatchObject({ changeId: draft.changeId, status: 'requested', jobId: bodies.find(body => body.data)?.data.jobId });
+    for (const body of bodies.filter(body => body.data)) expect(body.data.jobId).toBe(bootstrap.jobId);
+    expect(projections.queue.bootstrap).toMatchObject({ state: 'waiting' });
+    const events = (await responseBody(await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/events')))).data.items;
+    const requests = events.filter((event: { kind: string }) => event.kind === 'repo.bootstrap.requested');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].relatedIds).toContain(draft.changeId);
+  });
+
+  it('records only one bootstrap request from competing owner seed drafts', async () => {
+    await create('bootstrap_competition_case');
+    await fetchApi(apiRequest('/v1/repos/bootstrap_competition_case'));
     const drafts: Array<{ changeId: string; candidateStorageName: string; ref: string }> = [];
     for (const [key, ref] of [['first', 'refs/heads/first'], ['second', 'refs/heads/second']] as const) {
-      const response = await fetchApi(mutation('/v1/repos/bootstrap_race_case/changes', {
+      const response = await fetchApi(mutation('/v1/repos/bootstrap_competition_case/changes', {
         intentKey: key, intentText: `seed ${key}`, baseOid: null, branch: ref, unitKeys: [], dependencyChangeIds: [],
       }, `draft-${key}`));
       expect(response.status).toBe(201);
       drafts.push({ ...(await responseBody(response)).data, ref });
     }
-    await fake('bootstrap_race_case', provider => {
+    await fake('bootstrap_competition_case', provider => {
       for (const [index, draft] of drafts.entries()) {
         const head = index === 0 ? a : c;
         provider.putCommit(draft.candidateStorageName, { oid: head, treeOid: b, parents: [] });
@@ -230,24 +267,27 @@ describe('repository and change lifecycle', () => {
       }
     });
     for (const [index, draft] of drafts.entries()) {
-      const response = await fetchApi(mutation('/v1/repos/bootstrap_race_case/branches', {
+      const response = await fetchApi(mutation('/v1/repos/bootstrap_competition_case/branches', {
         expectedVersion: 2 + index, storageName: draft.candidateStorageName, ref: draft.ref,
         observedHead: index === 0 ? a : c, ownerId: 'owner',
       }, `branch-${index}`));
       expect(response.status).toBe(201);
     }
-    const responses = await Promise.all(drafts.map((draft, index) => fetchApi(mutation('/v1/repos/bootstrap_race_case/bootstrap', {
+    const responses = await Promise.all(drafts.map((draft, index) => fetchApi(mutation('/v1/repos/bootstrap_competition_case/bootstrap', {
       expectedVersion: 4, seedStorageName: draft.candidateStorageName, seedRef: draft.ref,
       headOid: index === 0 ? a : c, policyId: 'local-demo', profileId: 'local-demo',
-    }, `race-${index}`))));
+    }, `compete-${index}`))));
     expect(responses.map(response => response.status).sort()).toEqual([202, 409]);
     const bodies = await Promise.all(responses.map(response => responseBody(response)));
     expect(bodies.filter(body => body.error).map(body => body.error.code)).toEqual(['STALE_VERSION']);
-    const snapshot = await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/snapshot'));
-    const projections = (await responseBody(snapshot)).data.projections;
-    const bootstrap = projections.repos.bootstrap;
-    expect(bootstrap).toMatchObject({ changeId: drafts[0].changeId, status: 'requested' });
+    const winner = responses.findIndex(response => response.status === 202);
+    const projections = (await responseBody(await fetchApi(apiRequest('/v1/repos/bootstrap_competition_case/snapshot')))).data.projections;
+    expect(projections.repos.bootstrap).toMatchObject({ changeId: drafts[winner].changeId, status: 'requested', jobId: bodies[winner].data.jobId });
     expect(projections.queue.bootstrap).toMatchObject({ state: 'waiting' });
+    const events = (await responseBody(await fetchApi(apiRequest('/v1/repos/bootstrap_competition_case/events')))).data.items;
+    const requests = events.filter((event: { kind: string }) => event.kind === 'repo.bootstrap.requested');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].relatedIds).toContain(drafts[winner].changeId);
   });
 
   it('keeps one scratch intent and job while bootstrap storage is provisioning', async () => {

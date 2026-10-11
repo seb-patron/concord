@@ -10,5 +10,5 @@
   ] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCatalog", "RepoCoordinator"] }],
   "artifacts": [{ "binding": "ARTIFACTS", "namespace": "concord-demo" }],
-  "vars": { "CONCORD_MODE": "production", "STORAGE_BACKEND": "artifacts" }
+  "vars": { "CONCORD_MODE": "production", "STORAGE_BACKEND": "artifacts", "CONCORD_SHOW_DECOMPILED_C": "0" }
 }
