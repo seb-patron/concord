@@ -186,7 +186,7 @@ export interface BootstrapStackJob extends JobBase {
 }
 export type ValidateStackJob = OrdinaryStackJob | BootstrapStackJob;
 export interface DeltaCheckJob extends JobBase {
-  kind: 'delta-check'; changeId: Id; oldManifestDigest: Digest; newBaseOid: Oid;
+  kind: 'delta-check'; changeId: Id; candidate: CandidateInput; oldManifestDigest: Digest; newBaseOid: Oid;
 }
 export interface OrdinaryPromoteJob extends JobBase {
   kind: 'promote'; promotionId: Id; expectedOldOid: Oid; checkedNewOid: Oid; bootstrap: false;
