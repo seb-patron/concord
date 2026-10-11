@@ -33,6 +33,12 @@ export async function assertCommit(worktree: string, oid: string): Promise<void>
   if (actual.toLowerCase() !== oid.toLowerCase()) throw new ConcordError(`Local base ${oid} did not resolve exactly`, 'usage');
 }
 
+export async function assertHeadBasedOn(worktree: string, baseOid: string, headOid: string): Promise<void> {
+  if (!/^[0-9a-f]{40,64}$/i.test(headOid)) throw new ConcordError('Local HEAD is missing or malformed', 'usage');
+  try { await git(['merge-base', '--is-ancestor', baseOid, headOid], {}, worktree); }
+  catch { throw new ConcordError('Local HEAD must descend from the server base commit', 'usage'); }
+}
+
 export async function cloneRepo(remote: string, destination: string, token?: string): Promise<void> {
   validateRemote(remote);
   await git(['clone', '--', remote, destination], { token });
@@ -44,10 +50,11 @@ export async function fetchFork(worktree: string, remote: string, branch: string
   await git(['fetch', '--no-tags', '--', remote, `refs/heads/${branch}:refs/remotes/concord/${branch}`], { token }, worktree);
 }
 
-export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string): Promise<void> {
+export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string, headOid = 'HEAD'): Promise<void> {
   validateRemote(remote);
   validateBranch(branch);
-  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `HEAD:refs/heads/${branch}`], { token }, worktree);
+  if (!/^(?:HEAD|[0-9a-f]{40,64})$/i.test(headOid)) throw new ConcordError('Candidate head OID is malformed', 'usage');
+  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch}`], { token }, worktree);
 }
 
 export function rejectCanonicalTarget(candidateStorageName: string, canonicalStorageName: unknown, candidateRemote: string, canonicalRemote?: unknown): void {

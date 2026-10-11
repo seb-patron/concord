@@ -105,6 +105,60 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
+  it('returns machine-readable help on stdout', async () => {
+    const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'help'], { cwd: process.cwd() });
+    expect(result.stderr).not.toContain('Concord agent CLI');
+    expect(JSON.parse(result.stdout)).toMatchObject({ help: expect.stringContaining('Concord agent CLI') });
+  });
+
+  it('redacts Git credentials when a token response is missing its remote', async () => {
+    const secret = 'git-token-that-must-not-leak';
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 } }));
+      else if (request.url === '/v1/repos/repo-1/git-token') response.end(JSON.stringify({ data: { token: secret, scope: 'read' } }));
+      else { response.statusCode = 404; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', '/unused'], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+      })).rejects.toMatchObject({ code: 5, stdout: '', stderr: expect.not.stringContaining(secret) });
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('rejects a mismatched publication identity before requesting Git write access', async () => {
+    const root = await tempDir('publish-identity');
+    const worktree = join(root, 'worktree');
+    await mkdir(worktree);
+    await git(['init', '-b', 'main', worktree]);
+    await writeFile(join(worktree, 'source.txt'), 'base\n');
+    await git(['add', '--', 'source.txt'], {}, worktree);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'base'], {}, worktree);
+    const baseOid = await resolveHead(worktree);
+    const bodyPath = join(root, 'publish-body.json');
+    await writeFile(bodyPath, JSON.stringify({ baseOid, headOid: baseOid, branch: 'different-branch', unitKeys: ['unit:a'], leaseFences: { 'unit:a': 1 } }));
+    const calls: string[] = [];
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      calls.push(request.url ?? '');
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { candidateStorageName: 'fork', branch: 'agent-branch', baseOid, unitKeys: ['unit:a'], version: 1 } }));
+      else if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', canonicalRemote: 'https://git.invalid/canonical.git', version: 1 } }));
+      else { response.statusCode = 500; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'change', 'publish', '--repo', 'repo-1', '--id', 'change-1', '--worktree', worktree, '--lease-fences', '{"unit:a":1}', '--body-file', bodyPath], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+      })).rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('Publish body identity') });
+      expect(calls).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1']);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
   it('uses argv safely with worktree paths containing spaces', async () => {
     const root = await tempDir('git path with spaces');
     const worktree = join(root, 'agent worktree with spaces');

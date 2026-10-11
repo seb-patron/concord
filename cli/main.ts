@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ConcordClient, ConcordError, idempotencyKey, type RequestOptions } from './client.ts';
-import { assertCommit, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
+import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 
 const HELP = `Concord agent CLI
 
@@ -51,12 +51,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const options: Record<string, { type: 'string' } | { type: 'boolean' }> = {};
     for (const name of OPTION_NAMES) options[name] = { type: 'string' };
     options.json = { type: 'boolean' };
+    options.help = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
     parsed = parseArgs({ args: argv, options, allowPositionals: true, strict: true });
   } catch (error) { throw new ConcordError(`${error instanceof Error ? error.message : error}\n\n${HELP}`, 'usage'); }
   const [noun, verb, ...args] = parsed.positionals;
   const flags = parsed.values as Flags;
-  if (!noun || noun === 'help' || flags.help) { process.stdout.write(HELP); return; }
+  if (!noun || noun === 'help' || flags.help) { print({ help: HELP }); return; }
   if (noun === 'api') {
     const method = verb;
     const path = args[0];
@@ -129,14 +130,16 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     if (baseOid === 'null') throw new ConcordError('Cannot publish a seed draft through change publish', 'usage');
     const headOid = await resolveHead(worktree);
     await assertCommit(worktree, baseOid);
+    await assertHeadBasedOn(worktree, baseOid, headOid);
+    if (!Array.isArray(change.unitKeys) || change.unitKeys.some(key => typeof key !== 'string') || new Set(change.unitKeys).size !== change.unitKeys.length) throw new ConcordError('Server change has an invalid unit key set', 'server');
+    const unitKeys = change.unitKeys as string[];
+    const fences = parseFences(required(flags, 'lease-fences'));
+    const payload = validatePublishPayload(body ?? { baseOid, headOid, branch, unitKeys, leaseFences: fences }, { baseOid, headOid, branch, unitKeys, fences });
     const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'write', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
     const remote = stringField(access, 'remote');
     rejectCanonicalTarget(storageName, repository.canonicalStorageName, remote,
       typeof repository.canonicalRemote === 'string' ? repository.canonicalRemote : typeof repository.remote === 'string' ? repository.remote : undefined);
-    await pushCandidate(worktree, remote, branch, tokenField(access));
-    const unitKeys = Array.isArray(change.unitKeys) ? change.unitKeys as string[] : [];
-    const fences = parseJson(required(flags, 'lease-fences')) as Record<string, number>;
-    const payload = body ?? { baseOid, headOid, branch, unitKeys, leaseFences: fences };
+    await pushCandidate(worktree, remote, branch, tokenField(access), headOid);
     return print(await client.request('POST', `${root}/changes/${id}/publish`, requestOptions(flags, payload, numberField(change, 'version'))));
   }
 
@@ -254,13 +257,40 @@ function query(values: Record<string, string | boolean | undefined>): string {
 function unwrap(value: unknown): unknown { return value && typeof value === 'object' && 'data' in value ? (value as { data: unknown }).data : value; }
 function stringField(value: Record<string, unknown>, name: string): string {
   const found = value[name];
-  if (typeof found !== 'string' || !found) throw new ConcordError(`Server response is missing ${name}`, 'server', undefined, value);
+  if (typeof found !== 'string' || !found) throw new ConcordError(`Server response is missing ${name}`, 'server', undefined, sanitizeDiagnosticPayload(value));
   return found;
 }
 function numberField(value: Record<string, unknown>, name: string): number | undefined { return typeof value[name] === 'number' ? value[name] as number : undefined; }
 function tokenField(value: Record<string, unknown>): string {
   for (const key of ['token', 'secret', 'plaintext']) if (typeof value[key] === 'string') return value[key] as string;
-  throw new ConcordError('Git token response did not include a token', 'server', undefined, { ...value, token: undefined, secret: undefined, plaintext: undefined });
+  throw new ConcordError('Git token response did not include a token', 'server', undefined, sanitizeDiagnosticPayload(value));
+}
+function sanitizeDiagnosticPayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeDiagnosticPayload);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !/(token|secret|password|credential|authorization)/i.test(key)).map(([key, item]) => [key, sanitizeDiagnosticPayload(item)]));
+  return value;
+}
+function parseFences(value: string): Record<string, number> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new ConcordError('--lease-fences has an invalid value', 'usage'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ConcordError('--lease-fences must be a JSON object', 'usage');
+  for (const [key, fence] of Object.entries(parsed)) {
+    if (!key || !Number.isSafeInteger(fence) || (fence as number) < 0) throw new ConcordError('--lease-fences must map unit keys to non-negative integer fences', 'usage');
+  }
+  return parsed as Record<string, number>;
+}
+function validatePublishPayload(value: unknown, expected: { baseOid: string; headOid: string; branch: string; unitKeys: string[]; fences: Record<string, number> }): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ConcordError('Publish body must be a JSON object', 'usage');
+  const payload = value as Record<string, unknown>;
+  const payloadUnitKeys = payload.unitKeys;
+  if (payload.baseOid !== expected.baseOid || payload.headOid !== expected.headOid || payload.branch !== expected.branch || !Array.isArray(payloadUnitKeys) || payloadUnitKeys.length !== expected.unitKeys.length || new Set(payloadUnitKeys).size !== expected.unitKeys.length || expected.unitKeys.some(key => !payloadUnitKeys.includes(key))) {
+    throw new ConcordError('Publish body identity must match the server change and local HEAD', 'usage');
+  }
+  const fences = payload.leaseFences;
+  if (!fences || typeof fences !== 'object' || Array.isArray(fences) || Object.keys(fences).length !== Object.keys(expected.fences).length || Object.entries(expected.fences).some(([key, fence]) => (fences as Record<string, unknown>)[key] !== fence) || expected.unitKeys.length !== Object.keys(expected.fences).length || expected.unitKeys.some(key => !Object.hasOwn(expected.fences, key))) {
+    throw new ConcordError('Publish body leaseFences must match --lease-fences', 'usage');
+  }
+  return payload;
 }
 function redactRemote(remote: string): string { try { const url = new URL(remote); return `${url.origin}${url.pathname}`; } catch { return '[remote]'; } }
 async function stdinText(): Promise<string> { let value = ''; for await (const chunk of process.stdin) value += chunk; return value; }
