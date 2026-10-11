@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential, type RequestOptions } from './client.ts';
+import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential, rememberCredentialsIn, type RequestOptions } from './client.ts';
 import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 
 const HELP = `Concord agent CLI
@@ -211,7 +211,11 @@ function requestOptions(flags: Flags, body?: unknown, impliedVersion?: number): 
   };
 }
 async function bodyFile(path: string): Promise<unknown> {
-  try { return JSON.parse(await readFile(path, 'utf8')); }
+  try {
+    const body: unknown = JSON.parse(await readFile(path, 'utf8'));
+    rememberCredentialsIn(body);
+    return body;
+  }
   catch (error) { throw new ConcordError(`Cannot read JSON body file: ${error instanceof Error ? error.message : error}`, 'usage'); }
 }
 function required(flags: Flags, name: string): string {
@@ -297,7 +301,7 @@ function validatePublishPayload(value: unknown, expected: { baseOid: string; hea
 }
 function redactRemote(remote: string): string { try { const url = new URL(remote); return `${url.origin}${url.pathname}`; } catch { return '[remote]'; } }
 async function stdinText(): Promise<string> { let value = ''; for await (const chunk of process.stdin) value += chunk; return value; }
-function writeOutput(stream: NodeJS.WriteStream, value: unknown): void { stream.write(redactOutput(`${JSON.stringify(value ?? null)}\n`)); }
+function writeOutput(stream: NodeJS.WriteStream, value: unknown): void { stream.write(`${JSON.stringify(redactOutput(value ?? null))}\n`); }
 function print(value: unknown): void { writeOutput(process.stdout, value); }
 
 for (const [name, value] of Object.entries(process.env)) {

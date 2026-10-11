@@ -24,7 +24,7 @@ Mutations accept `--idempotency-key KEY`; when omitted, the CLI creates one for 
 
 Exit codes are `0` success, `2` usage, `3` conflict or stale version, `4` authentication/authorization, and `5` transport or server failure. A 409 response retains the server's conflict details, including lease holder and intent when supplied, and gives a retry/renew next step. The CLI never steals an active lease. `MODULE_UNAVAILABLE` is shown as an explicit server error; the CLI does not substitute sample data.
 
-CLI stdout and stderr pass through a credential redactor before emission. It removes API and Git token values seen by the process, including bare values and URL-encoded values, plus common token forms. Git failures report a fixed category and exit code; Git stderr is never included in CLI diagnostics.
+CLI stdout and stderr are redacted as structured values before JSON serialization, so even tokens containing quotes leave valid JSON. Credentials are registered from the environment, stdin, Git-token responses, and credential-named fields in JSON body files. The redactor masks whole strings containing a registered value in raw, percent-encoded (either escape case), base64, or Bearer form, plus common token patterns. Free-text transport diagnostics use the same string redactor. Git failures report a fixed category and exit code; Git stderr is never included in CLI diagnostics.
 
 Safe GET requests and keyed mutations retry transient transport failures, HTTP 429, and server errors for at most three attempts. A retry reuses the same request body and idempotency key and honors `Retry-After` (bounded to 30 seconds). Other requests are not retried.
 

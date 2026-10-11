@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ConcordClient, ConcordError } from '../../cli/client.ts';
+import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
 
 const execFile = promisify(execFileCallback);
@@ -250,7 +250,7 @@ describe('Concord agent CLI client', () => {
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
       if (request.url === '/v1/echo-success') {
         response.writeHead(200, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ data: { echo: secret, embedded: `https://host.invalid/${encodeURIComponent(secret)}`, generic: 'ghp_abcdefghijklmnop' } }));
+        response.end(JSON.stringify({ data: { echo: secret, embedded: `https://host.invalid/${encodeURIComponent(secret)}`, lowerEncoded: encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, match => match.toLowerCase()), base64: Buffer.from(secret).toString('base64'), generic: 'ghp_abcdefghijklmnop' } }));
         return;
       }
       response.writeHead(400, { 'content-type': 'application/json' });
@@ -274,8 +274,11 @@ describe('Concord agent CLI client', () => {
       }
       const success = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/echo-success'], { cwd: process.cwd(), env });
       expect(success.stdout + success.stderr).not.toContain(secret);
+      expect(success.stdout).not.toContain(encodeURIComponent(secret).toLowerCase());
+      expect(success.stdout).not.toContain(Buffer.from(secret).toString('base64'));
       expect(success.stdout).not.toContain('ghp_abcdefghijklmnop');
       expect(JSON.parse(success.stdout).data.echo).toBe('[REDACTED]');
+      expect(JSON.parse(success.stdout).data.lowerEncoded).toBe('[REDACTED]');
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   }, 60_000);
 
@@ -381,5 +384,83 @@ describe('Concord agent CLI client', () => {
 
   it('never pushes a main branch, even if a server response assigns one', async () => {
     await expect(pushCandidate('/unused', 'https://git.invalid/fork.git', 'main')).rejects.toThrow(/invalid candidate branch/);
+  });
+
+  it('registers nested credentials from a body file before an error echoes them', async () => {
+    const root = await tempDir('body-secret');
+    const bodyPath = join(root, 'body.json');
+    const secrets = ['bodyToken+unique/123=', 'nestedPlaintext-456', 'nestedPassword-789', 'bodyAuthorization-ABC'];
+    await writeFile(bodyPath, JSON.stringify({ token: secrets[0], nested: { plaintext: secrets[1], password: secrets[2], authorization: `Bearer ${secrets[3]}` } }));
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { code: 'ECHO', message: body, details: JSON.parse(body) } }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      try {
+        await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'POST', '/echo', '--body-file', bodyPath], {
+          cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+        });
+        throw new Error('expected server failure');
+      } catch (error) {
+        expect(error).toMatchObject({ code: 5, stdout: '' });
+        const stderr = (error as { stderr: string }).stderr;
+        const diagnostic = JSON.parse(stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
+        expect(diagnostic.error.kind).toBe('server');
+        for (const secret of secrets) expect(stderr).not.toContain(secret);
+        expect(stderr).toContain('[REDACTED]');
+      }
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('keeps stdout and stderr parseable when a token contains JSON syntax', async () => {
+    const secret = '"';
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/ok') response.end(JSON.stringify({ data: { echoed: secret, quoted: `before ${secret} after` } }));
+      else { response.statusCode = 400; response.end(JSON.stringify({ error: { code: 'FAIL', message: secret } })); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: secret };
+    try {
+      const ok = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/ok'], { cwd: process.cwd(), env });
+      expect(JSON.parse(ok.stdout)).toEqual({ data: { echoed: '[REDACTED]', quoted: '[REDACTED]' } });
+      try {
+        await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/fail'], { cwd: process.cwd(), env });
+        throw new Error('expected server failure');
+      } catch (error) {
+        const diagnostic = JSON.parse((error as { stderr: string }).stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
+        expect(diagnostic.error).toMatchObject({ kind: 'server', message: 'FAIL: [REDACTED]' });
+      }
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('redacts lowercase percent escapes and base64 in response and transport diagnostics', async () => {
+    const secret = 'known+credential/unique=123';
+    const encoded = encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, match => match.toLowerCase());
+    const base64 = Buffer.from(secret).toString('base64');
+    const client = new ConcordClient({ url: 'https://concord.invalid', token: secret, fetch: async () => new Response(JSON.stringify({ data: { encoded, base64, bearer: `Bearer ${secret}` } })) });
+    expect(redactOutput(await client.request('GET', '/echo'))).toEqual({ data: { encoded: '[REDACTED]', base64: '[REDACTED]', bearer: '[REDACTED]' } });
+    const broken = new ConcordClient({ url: 'https://concord.invalid', token: secret, fetch: async () => { throw new Error(`failure ${encoded} ${base64}`); }, sleep: async () => {} });
+    await expect(broken.request('GET', '/echo')).rejects.toMatchObject({ kind: 'transport', message: expect.stringContaining('[REDACTED]'), payload: { message: '[REDACTED]' } });
+  });
+
+  it('preserves valid JSON for generated tokens with arbitrary punctuation and quotes', () => {
+    const alphabet = Array.from('abcXYZ09"\\\n\r\t+/%=&?[]{}:!@#$^*() é😀');
+    let seed = 0x1234abcd;
+    const next = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
+    for (let caseNumber = 0; caseNumber < 100; caseNumber++) {
+      const secret = Array.from({ length: 1 + next() % 20 }, () => alphabet[next() % alphabet.length]).join('');
+      rememberCredential(secret);
+      const forms = [secret, `prefix ${secret} suffix`, encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, match => match.toLowerCase()), Buffer.from(secret).toString('base64'), `Bearer ${secret}`];
+      const serialized = JSON.stringify(redactOutput(forms));
+      expect(JSON.parse(serialized), `case ${caseNumber}`).toEqual(forms.map(() => '[REDACTED]'));
+    }
   });
 });

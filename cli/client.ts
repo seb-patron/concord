@@ -33,29 +33,50 @@ export interface RequestOptions {
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 const credentials = new Set<string>();
-export function rememberCredential(value: string): void { if (value) credentials.add(value); }
+export function rememberCredential(value: string): void {
+  if (!value) return;
+  credentials.add(value);
+  const bearer = /^Bearer\s+(.+)$/i.exec(value);
+  if (bearer) credentials.add(bearer[1]);
+}
 export function rememberCredentialsIn(value: unknown): void {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) { for (const item of value) rememberCredentialsIn(item); return; }
   for (const [key, item] of Object.entries(value)) {
-    if (typeof item === 'string' && /(?:token|secret|plaintext|password|credential|api[_-]?key|authorization)/i.test(key)) rememberCredential(item);
+    if (/(?:token|secret|plaintext|password|credential|api[_-]?key|authorization)/i.test(key)) rememberCredentialValues(item);
     else rememberCredentialsIn(item);
   }
 }
-// The CLI calls this once for each complete JSON line, after serialization.
-export function redactOutput(line: string): string {
-  let result = line;
-  for (const secret of [...credentials].sort((a, b) => b.length - a.length)) {
-    for (const form of new Set([secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)])) {
-      if (form) result = result.split(form).join('[REDACTED]');
-    }
+function rememberCredentialValues(value: unknown): void {
+  if (typeof value === 'string') rememberCredential(value);
+  else if (Array.isArray(value)) for (const item of value) rememberCredentialValues(item);
+  else if (value && typeof value === 'object') for (const item of Object.values(value)) rememberCredentialValues(item);
+}
+const normalizedEscapes = (value: string) => value.replace(/%[0-9a-f]{2}/gi, match => match.toUpperCase());
+const percentDecoded = (value: string) => value.replace(/(?:%[0-9a-f]{2})+/gi, run => {
+  try { return decodeURIComponent(run); } catch { return run; }
+});
+export function redactString(value: string): string {
+  const normalized = normalizedEscapes(value);
+  const decoded = percentDecoded(value);
+  for (const secret of credentials) {
+    let encoded = '';
+    try { encoded = encodeURIComponent(secret); } catch { /* A lone surrogate cannot be URI encoded. */ }
+    const allEncoded = [...Buffer.from(secret)].map(byte => `%${byte.toString(16).padStart(2, '0').toUpperCase()}`).join('');
+    const formEncoded = new URLSearchParams({ value: secret }).toString().slice('value='.length);
+    const base64 = Buffer.from(secret).toString('base64');
+    const base64url = Buffer.from(secret).toString('base64url');
+    if (value.includes(secret) || decoded.includes(secret) || decoded.replace(/\+/g, ' ').includes(secret) || (encoded && normalized.includes(normalizedEscapes(encoded))) || normalized.includes(allEncoded) || normalized.includes(normalizedEscapes(formEncoded)) || value.includes(base64) || value.includes(base64url)) return '[REDACTED]';
   }
-  return result
-    .replace(/Bearer\s+[A-Za-z0-9._~+/%=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/(https?:\/\/)[^\s"'@/]+:[^\s"'@/]+@/gi, '$1[REDACTED]@')
-    .replace(/([?&](?:access_token|token|api_key|secret|password)=)[^&\s"']+/gi, '$1[REDACTED]')
-    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED]')
-    .replace(/\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]');
+  if (/Bearer\s+\S+/i.test(value) || /(https?:\/\/)[^\s"'@/]+:[^\s"'@/]+@/i.test(value) || /[?&](?:access_token|token|api_key|secret|password)=[^&\s"']+/i.test(value) || /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{12,})\b/.test(value) || /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/.test(value)) return '[REDACTED]';
+  return value;
+}
+// Redact values before JSON.stringify so a credential can never replace JSON syntax.
+export function redactOutput(value: unknown): unknown {
+  if (typeof value === 'string') return redactString(value);
+  if (Array.isArray(value)) return value.map(redactOutput);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactString(key), redactOutput(item)]));
+  return value;
 }
 
 export class ConcordClient {
@@ -83,6 +104,7 @@ export class ConcordClient {
     if (this.options.token) headers.set('authorization', `Bearer ${this.options.token}`);
     let body: string | undefined;
     if (options.body !== undefined) {
+      rememberCredentialsIn(options.body);
       const payload = options.expectedVersion === undefined || options.body === null || typeof options.body !== 'object' || Array.isArray(options.body)
         ? options.body
         : { ...options.body as Record<string, unknown>, expectedVersion: options.expectedVersion };
@@ -108,7 +130,7 @@ export class ConcordClient {
         }
         const kind: ConcordErrorKind = response.status === 409 ? 'conflict' : response.status === 401 || response.status === 403 ? 'auth' : 'server';
         if (url.pathname.endsWith('/git-token')) throw new ConcordError(`Git token request failed with HTTP ${response.status}`, kind, response.status);
-        const safePayload = redactSecret(payload, this.options.token);
+        const safePayload = redactOutput(payload);
         throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload);
       } catch (error) {
         if (error instanceof ConcordError) throw error;
@@ -118,7 +140,7 @@ export class ConcordClient {
       }
     }
     if (url.pathname.endsWith('/git-token')) throw new ConcordError('Git token request failed during transport', 'transport');
-    throw new ConcordError(`Concord transport failed: ${safeMessage(lastError, this.options.token)}`, 'transport', undefined, { message: safeMessage(lastError, this.options.token) });
+    throw new ConcordError(`Concord transport failed: ${safeMessage(lastError)}`, 'transport', undefined, { message: safeMessage(lastError) });
   }
 
   private retryDelay(value: string | null, attempt: number): number {
@@ -144,13 +166,6 @@ function errorMessage(payload: unknown, status: number): string {
   }
   return `Concord returned HTTP ${status}`;
 }
-function safeMessage(error: unknown, token?: string): string {
-  const message = String(error instanceof Error ? error.message : error ?? 'unknown error').replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-  return token ? message.split(token).join('[REDACTED]') : message;
-}
-function redactSecret(value: unknown, token?: string): unknown {
-  if (typeof value === 'string') return token ? value.split(token).join('[REDACTED]') : value.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-  if (Array.isArray(value)) return value.map(item => redactSecret(item, token));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecret(item, token)]));
-  return value;
+function safeMessage(error: unknown): string {
+  return redactString(String(error instanceof Error ? error.message : error ?? 'unknown error'));
 }
