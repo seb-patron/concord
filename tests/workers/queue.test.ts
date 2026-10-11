@@ -838,6 +838,89 @@ describe('queue state machine', () => {
     expect((await h.state()).promotion).toBeNull();
   });
 
+  it('blocks remaining old-base entries after its own stack lands, including a dependent', async () => {
+    const h = await setup('B', 'D', 'E');
+    for (const [id, deps] of [['F', []], ['A', ['B']], ['C', []]] as const) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1,
+        status: 'ready', unitKeys: [`row:${id}`], frozen: false, baseOid: main,
+        candidateStorageName: `candidate-${h.repoId}-${id}`, branch: 'refs/heads/work',
+        dependencyChangeIds: [...deps], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo' });
+    }
+    // Admit the remaining cohort in one coordinator turn, before its due alarm schedules the first four.
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const route = queue.routes.find(item => item.pattern.test(`/v1/repos/${h.repoId}/queue/enqueue`))!;
+      for (const id of ['F', 'A', 'C']) {
+        const response = await route.handle(context, new Request(`https://concord.test/v1/repos/${h.repoId}/queue/enqueue`,
+          { method: 'POST' }), [] as unknown as RegExpMatchArray,
+        { changeId: id, verdictId: `v-${id}`, leaseFences: { [`row:${id}`]: 1 } });
+        expect(response.status).toBe(201);
+      }
+    });
+    await h.tick();
+    const checked = h.jobs[0];
+    if (checked.kind !== 'validate-stack') throw new Error('expected stack job');
+    expect(checked.candidates.map(candidate => candidate.changeId)).toEqual(['B', 'D', 'E', 'F']);
+    expect((await h.deliver(checked, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['B', 'D', 'E', 'F'] });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    await h.tick();
+    const state = await h.state();
+    expect(state.promotion).toMatchObject({ state: 'applied', reconciliation: 'EXACT_NEW_OID' });
+    expect(state.finalCanonicalOid).toBe(oid('e'));
+    expect(state.entries.map((entry: any) => [entry.changeId, entry.state, entry.blockedReason])).toEqual([
+      ['B', 'landed', null], ['D', 'landed', null], ['E', 'landed', null], ['F', 'landed', null],
+      ['A', 'blocked', 'STALE_MAIN'], ['C', 'blocked', 'STALE_MAIN'],
+    ]);
+    expect([...h.releases].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
+    const generation = state.generation;
+    await h.tick(); await h.tick();
+    expect((await h.state()).generation).toBe(generation);
+    expect((await h.state()).promotion.promotionId).toBe(state.promotion.promotionId);
+    expect(h.jobs.filter(job => job.kind === 'promote')).toHaveLength(1);
+    expect([...h.releases].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
+    expect((await h.deliver(checked, 'PASS')).status).toBe('blocked');
+    expect((await h.state()).promotion.promotionId).toBe(state.promotion.promotionId);
+
+    const stale = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
+    expect(stale.response.status).toBe(409);
+    expect(stale.body.error.code).toBe('STALE_BASE');
+    h.views.set('A', { ...h.views.get('A')!, baseOid: oid('e'), revision: 2 });
+    h.findingsVersion.set('A', 2);
+    const fresh = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
+    expect(fresh.response.status).toBe(201);
+    await h.tick();
+    const freshJob = h.jobs.at(-1)!;
+    if (freshJob.kind !== 'validate-stack') throw new Error('expected fresh stack job');
+    expect(freshJob.candidates.map(candidate => candidate.changeId)).toEqual(['A']);
+    expect((await h.state()).promotion.promotionId).toBe(state.promotion.promotionId);
+    expect((await h.deliver(freshJob, 'PASS', { composed: oid('f') })).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', memberIds: ['A'] });
+  });
+
+  it('closes an open contest once when external main makes both children stale', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    expect((await h.state()).contests[0].state).toBe('open');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('4'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'STALE_MAIN' });
+    expect((await h.state()).entries.map((entry: any) => [entry.state, entry.blockedReason]))
+      .toEqual([['blocked', 'STALE_MAIN'], ['blocked', 'STALE_MAIN']]);
+    expect(await contestReleaseCount(h)).toBe(1);
+    await h.tick();
+    expect(await contestReleaseCount(h)).toBe(1);
+    expect((await h.state()).promotion).toBeNull();
+  });
+
   it('blocks stale head results before promotion', async () => {
     const h = await setup('B');
     await h.tick();

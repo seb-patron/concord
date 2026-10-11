@@ -319,6 +319,11 @@ function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, rea
   emit(context, 'queue.entry_blocked', [entry.changeId], { reason, confidence: 'none' });
   invalidate(context, state, reason, [entry.changeId]);
 }
+function blockOldBaseEntries(context: ModuleContext, state: QueueState, main: string | null): void {
+  for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
+    blockEntry(context, state, entry, 'STALE_MAIN');
+  }
+}
 function closeContest(context: ModuleContext, state: QueueState, contest: ContestState, reason: string): void {
   contest.state = 'blocked'; contest.reason = reason;
   contestEvidence(context, contest, contest.childIds[0]);
@@ -797,6 +802,7 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
       }
       if (ticket.bootstrap) state.bootstrap!.state = 'merged';
       state.observedMain = observed;
+      blockOldBaseEntries(context, state, observed);
       emit(context, 'queue.promotion_applied', ticket.memberIds, { promotionId: ticket.promotionId,
         canonicalOid: observed, checkedNewOid: ticket.checkedNewOid, readback: true });
       bump(context, state, 'MAIN_CHANGED', ticket.memberIds);
@@ -928,9 +934,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   if (state.observedMain !== main) {
     state.observedMain = main;
     invalidate(context, state, 'MAIN_CHANGED', []);
-    for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
-      blockEntry(context, state, entry, 'STALE_MAIN');
-    }
+    blockOldBaseEntries(context, state, main);
   }
   for (const entry of state.entries) if (active(entry) && entry.state !== 'blocked' && !admissionStillValid(context, entry)) {
     blockEntry(context, state, entry, 'ELIGIBILITY_CHANGED');
