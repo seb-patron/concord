@@ -88,7 +88,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const repoResult = unwrap(await send('GET', `/repos/${id}`)) as Record<string, unknown>;
     const storageName = stringField(repoResult, 'canonicalStorageName');
     const tokenResult = unwrap(await client.request('POST', `/repos/${id}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoResult, 'version')))) as Record<string, unknown>;
-    const remote = stringField(tokenResult, 'remote');
+    const remote = stringField(tokenResult, 'remote', true);
     const token = tokenField(tokenResult);
     await cloneRepo(remote, destination, token);
     return print({ cloned: true, repoId: repo, path: destination, access: 'read-only' });
@@ -115,8 +115,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const storageName = stringField(change, 'candidateStorageName');
     const branch = stringField(change, 'branch');
     const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
-    await fetchFork(worktree, stringField(access, 'remote'), branch, tokenField(access));
-    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, remote: redactRemote(stringField(access, 'remote')) });
+    const remote = stringField(access, 'remote', true);
+    await fetchFork(worktree, remote, branch, tokenField(access));
+    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, remote: redactRemote(remote) });
   }
   if (noun === 'change' && verb === 'publish') {
     const id = encodeURIComponent(required(flags, 'id'));
@@ -136,7 +137,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const fences = parseFences(required(flags, 'lease-fences'));
     const payload = validatePublishPayload(body ?? { baseOid, headOid, branch, unitKeys, leaseFences: fences }, { baseOid, headOid, branch, unitKeys, fences });
     const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'write', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
-    const remote = stringField(access, 'remote');
+    const remote = stringField(access, 'remote', true);
     rejectCanonicalTarget(storageName, repository.canonicalStorageName, remote,
       typeof repository.canonicalRemote === 'string' ? repository.canonicalRemote : typeof repository.remote === 'string' ? repository.remote : undefined);
     await pushCandidate(worktree, remote, branch, tokenField(access), headOid);
@@ -255,20 +256,21 @@ function query(values: Record<string, string | boolean | undefined>): string {
   const encoded = params.toString(); return encoded ? `?${encoded}` : '';
 }
 function unwrap(value: unknown): unknown { return value && typeof value === 'object' && 'data' in value ? (value as { data: unknown }).data : value; }
-function stringField(value: Record<string, unknown>, name: string): string {
+function stringField(value: Record<string, unknown>, name: string, tokenResponse = false): string {
   const found = value[name];
-  if (typeof found !== 'string' || !found) throw new ConcordError(`Server response is missing ${name}`, 'server', undefined, sanitizeDiagnosticPayload(value));
+  if (typeof found !== 'string' || !found) throw new ConcordError(`Server response is missing ${name}`, 'server', undefined, tokenResponse ? undefined : safeResponseDiagnostic(value));
   return found;
 }
 function numberField(value: Record<string, unknown>, name: string): number | undefined { return typeof value[name] === 'number' ? value[name] as number : undefined; }
 function tokenField(value: Record<string, unknown>): string {
   for (const key of ['token', 'secret', 'plaintext']) if (typeof value[key] === 'string') return value[key] as string;
-  throw new ConcordError('Git token response did not include a token', 'server', undefined, sanitizeDiagnosticPayload(value));
+  throw new ConcordError('Git token response did not include a token', 'server');
 }
-function sanitizeDiagnosticPayload(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeDiagnosticPayload);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !/(token|secret|password|credential|authorization)/i.test(key)).map(([key, item]) => [key, sanitizeDiagnosticPayload(item)]));
-  return value;
+function safeResponseDiagnostic(value: Record<string, unknown>): Record<string, unknown> {
+  const diagnostic: Record<string, unknown> = {};
+  if (typeof value.version === 'number' && Number.isSafeInteger(value.version)) diagnostic.version = value.version;
+  if (typeof value.eventSeq === 'number' && Number.isSafeInteger(value.eventSeq)) diagnostic.eventSeq = value.eventSeq;
+  return diagnostic;
 }
 function parseFences(value: string): Record<string, number> {
   let parsed: unknown;

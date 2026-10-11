@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,6 +15,44 @@ async function tempDir(label: string): Promise<string> {
   return dir;
 }
 afterEach(async () => { await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+
+async function publicationFixture(label: string) {
+  const root = await tempDir(label);
+  const worktree = join(root, 'worktree');
+  await mkdir(worktree);
+  await git(['init', '-b', 'main', worktree]);
+  await writeFile(join(worktree, 'source.txt'), 'base\n');
+  await git(['add', '--', 'source.txt'], {}, worktree);
+  await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'base'], {}, worktree);
+  return { root, worktree, baseOid: await resolveHead(worktree) };
+}
+
+async function publicationServer(baseOid: string, onToken?: () => Promise<void>) {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    calls.push({ path: request.url ?? '', body: body ? JSON.parse(body) : undefined });
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { candidateStorageName: 'fork', branch: 'agent-branch', baseOid, unitKeys: ['unit:a'], version: 1 } }));
+    else if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', canonicalRemote: 'https://git.invalid/canonical.git', version: 1 } }));
+    else if (request.url === '/v1/repos/repo-1/git-token') {
+      if (onToken) await onToken();
+      response.end(JSON.stringify({ data: { remote: 'https://git.invalid/fork.git', plaintext: 'git-test-token' } }));
+    } else if (request.url === '/v1/repos/repo-1/changes/change-1/publish') response.end(JSON.stringify({ data: { status: 'published' } }));
+    else { response.statusCode = 404; response.end('{}'); }
+  }));
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('expected local test server address');
+  return { calls, url: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) };
+}
+
+function publishCli(url: string, worktree: string, fences: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  return execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'change', 'publish', '--repo', 'repo-1', '--id', 'change-1', '--worktree', worktree, '--lease-fences', fences], {
+    cwd: process.cwd(), env: { ...process.env, CONCORD_URL: url, CONCORD_TOKEN: 'api-token', ...extraEnv },
+  });
+}
 
 describe('Concord agent CLI client', () => {
   it('drives a complete fake transport lifecycle with JSON envelopes', async () => {
@@ -90,6 +128,22 @@ describe('Concord agent CLI client', () => {
     }
   });
 
+  it('does not expose any Git-token error response fields in diagnostics', async () => {
+    const secret = 'unexpected-git-credential';
+    const client = new ConcordClient({
+      url: 'https://concord.invalid',
+      fetch: async () => new Response(JSON.stringify({ plaintext: secret, error: { message: secret }, arbitrary: { credential: secret } }), { status: 400 }),
+    });
+    try {
+      await client.request('POST', '/repos/r/git-token', { body: { scope: 'read' } });
+      throw new Error('expected Git-token request to fail');
+    } catch (error) {
+      expect(error).toMatchObject({ kind: 'server', status: 400, message: 'Git token request failed with HTTP 400' });
+      expect((error as ConcordError).payload).toBeUndefined();
+      expect(JSON.stringify(error)).not.toContain(secret);
+    }
+  });
+
   it('keeps CLI JSON stdout separate from structured stderr and server exit status', async () => {
     const server = await import('node:http').then(({ createServer }) => createServer((_request, response) => {
       response.writeHead(501, { 'content-type': 'application/json' });
@@ -112,20 +166,31 @@ describe('Concord agent CLI client', () => {
   });
 
   it('redacts Git credentials when a token response is missing its remote', async () => {
-    const secret = 'git-token-that-must-not-leak';
+    const secret = 'plaintext-git-secret';
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
       response.setHeader('content-type', 'application/json');
       if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 } }));
-      else if (request.url === '/v1/repos/repo-1/git-token') response.end(JSON.stringify({ data: { token: secret, scope: 'read' } }));
+      else if (request.url === '/v1/repos/repo-1/git-token') response.end(JSON.stringify({ data: { plaintext: secret, nested: { arbitrary: 'another-secret' }, scope: 'read' } }));
       else { response.statusCode = 404; response.end('{}'); }
     }));
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('expected local test server address');
     try {
-      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', '/unused'], {
-        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
-      })).rejects.toMatchObject({ code: 5, stdout: '', stderr: expect.not.stringContaining(secret) });
+      try {
+        await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', '/unused'], {
+          cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+        });
+        throw new Error('expected repo clone to reject a missing remote');
+      } catch (error) {
+        expect(error).toMatchObject({ code: 5, stdout: '' });
+        const stderr = (error as { stderr: string }).stderr;
+        expect(stderr).not.toContain(secret);
+        const diagnostic = JSON.parse(stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
+        expect(diagnostic.error).toMatchObject({ kind: 'server', message: 'Server response is missing remote' });
+        expect(diagnostic.error).not.toHaveProperty('details');
+        expect(JSON.stringify(diagnostic)).not.toContain('another-secret');
+      }
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
@@ -157,6 +222,60 @@ describe('Concord agent CLI client', () => {
       })).rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('Publish body identity') });
       expect(calls).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1']);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('rejects a valid but non-ancestor server base before requesting Git write access', async () => {
+    const { worktree, baseOid } = await publicationFixture('publish-ancestry');
+    await git(['checkout', '-b', 'agent-work'], {}, worktree);
+    await writeFile(join(worktree, 'source.txt'), 'head branch\n');
+    await git(['add', '--', 'source.txt'], {}, worktree);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'head'], {}, worktree);
+    await git(['checkout', '-b', 'sibling', baseOid], {}, worktree);
+    await writeFile(join(worktree, 'source.txt'), 'sibling branch\n');
+    await git(['add', '--', 'source.txt'], {}, worktree);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'sibling'], {}, worktree);
+    const siblingOid = await resolveHead(worktree);
+    await git(['checkout', 'agent-work'], {}, worktree);
+    const server = await publicationServer(siblingOid);
+    try {
+      await expect(publishCli(server.url, worktree, '{"unit:a":1}')).rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('must descend from the server base') });
+      expect(server.calls.map(call => call.path)).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1']);
+    } finally { await server.close(); }
+  });
+
+  it('rejects malformed lease fences before requesting Git write access', async () => {
+    const { worktree, baseOid } = await publicationFixture('publish-fences');
+    const server = await publicationServer(baseOid);
+    try {
+      await expect(publishCli(server.url, worktree, '{"unit:a":"invalid"}')).rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('--lease-fences must map') });
+      expect(server.calls.map(call => call.path)).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1']);
+    } finally { await server.close(); }
+  });
+
+  it('pushes the verified head OID even when HEAD moves before Git write access', async () => {
+    const { root, worktree, baseOid } = await publicationFixture('publish-pinned-head');
+    const verifiedOid = await resolveHead(worktree);
+    const gitPath = (await execFile('which', ['git'])).stdout.trim();
+    const shimDir = join(root, 'shim');
+    await mkdir(shimDir);
+    const shimPath = join(shimDir, 'git');
+    const pushLog = join(root, 'push-args.txt');
+    await writeFile(shimPath, '#!/bin/sh\nif [ "$3" = "push" ]; then\n  printf "%s\\n" "$@" > "$CONCORD_TEST_PUSH_LOG"\n  exit 0\nfi\nexec "$CONCORD_TEST_REAL_GIT" "$@"\n');
+    await chmod(shimPath, 0o755);
+    const server = await publicationServer(baseOid, async () => {
+      await writeFile(join(worktree, 'source.txt'), 'moved after verification\n');
+      await git(['add', '--', 'source.txt'], {}, worktree);
+      await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'moved'], {}, worktree);
+    });
+    try {
+      await publishCli(server.url, worktree, '{"unit:a":1}', { PATH: `${shimDir}:${process.env.PATH ?? ''}`, CONCORD_TEST_REAL_GIT: gitPath, CONCORD_TEST_PUSH_LOG: pushLog });
+      expect(await resolveHead(worktree)).not.toBe(verifiedOid);
+      const pushArgs = await import('node:fs/promises').then(({ readFile }) => readFile(pushLog, 'utf8'));
+      expect(pushArgs).toContain(`${verifiedOid}:refs/heads/agent-branch`);
+      expect(pushArgs).not.toContain('HEAD:refs/heads/agent-branch');
+      expect(server.calls.map(call => call.path)).toEqual(['/v1/repos/repo-1/changes/change-1', '/v1/repos/repo-1', '/v1/repos/repo-1/git-token', '/v1/repos/repo-1/changes/change-1/publish']);
+      expect(server.calls[3]?.body).toMatchObject({ headOid: verifiedOid, baseOid, branch: 'agent-branch' });
+    } finally { await server.close(); }
   });
 
   it('uses argv safely with worktree paths containing spaces', async () => {

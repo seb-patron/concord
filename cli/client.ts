@@ -78,8 +78,9 @@ export class ConcordClient {
           await this.sleep(wait);
           continue;
         }
-        const safePayload = redactSecret(payload, this.options.token);
         const kind: ConcordErrorKind = response.status === 409 ? 'conflict' : response.status === 401 || response.status === 403 ? 'auth' : 'server';
+        if (url.pathname.endsWith('/git-token')) throw new ConcordError(`Git token request failed with HTTP ${response.status}`, kind, response.status);
+        const safePayload = redactSecret(payload, this.options.token);
         throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload);
       } catch (error) {
         if (error instanceof ConcordError) throw error;
@@ -88,6 +89,7 @@ export class ConcordClient {
         await this.sleep(250 * (2 ** attempt));
       }
     }
+    if (url.pathname.endsWith('/git-token')) throw new ConcordError('Git token request failed during transport', 'transport');
     throw new ConcordError(`Concord transport failed: ${safeMessage(lastError, this.options.token)}`, 'transport', undefined, { message: safeMessage(lastError, this.options.token) });
   }
 
