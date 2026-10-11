@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -172,16 +172,18 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   expect(worker.output()).not.toContain('local-agent-a');
 }, 180000);
 
-it('fetches an unreferenced canonical base when the candidate fork lacks it', async () => {
+it('fetches an unreferenced canonical base through a symlinked workdir', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'concord-mcp-base-'));
   dirs.push(dir);
   const source = join(dir, 'source');
   const worktree = join(dir, 'worktree');
+  const linkedWorktree = join(dir, 'linked-worktree');
   const canonical = join(dir, 'canonical.git');
   const fork = join(dir, 'fork.git');
   await Promise.all([mkdir(source), mkdir(worktree)]);
   await execFile('git', ['init', '--quiet', source]);
   await execFile('git', ['init', '--quiet', worktree]);
+  await symlink(worktree, linkedWorktree, 'dir');
   await execFile('git', ['init', '--quiet', '--bare', canonical]);
   await execFile('git', ['init', '--quiet', '--bare', fork]);
   await writeFile(join(source, 'base.txt'), 'canonical base\n');
@@ -203,8 +205,11 @@ it('fetches an unreferenced canonical base when the candidate fork lacks it', as
       return { data: { canonicalStorageName: 'canonical' }, version: 1 };
     },
   } as unknown as ConcordClient;
-  await callTool(client, 'change_checkout', { repoId: 'repo', changeId: 'change-b', worktree });
-  expect(requested).toEqual(['fork', 'canonical']);
+  const checkout = await callTool(client, 'change_checkout', { repoId: 'repo', changeId: 'change-b', worktree: linkedWorktree }) as { worktree: string };
+  expect(checkout.worktree).toBe(join(linkedWorktree, '.concord', 'changes', 'change-b'));
+  const repeated = await callTool(client, 'change_checkout', { repoId: 'repo', changeId: 'change-b', worktree: linkedWorktree }) as { worktree: string };
+  expect(repeated.worktree).toBe(checkout.worktree);
+  expect(requested).toEqual(['fork', 'canonical', 'fork']);
   const { stdout: head } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: join(worktree, '.concord', 'changes', 'change-b') });
   expect(head.trim()).toBe(baseOid.trim());
 }, 30000);

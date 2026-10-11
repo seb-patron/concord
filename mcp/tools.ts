@@ -1,5 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredentialsIn } from '../cli/client.ts';
 import { assertCommit, assertHeadBasedOn, git, rejectCanonicalTarget, resolveHead, validateRemote } from '../cli/git.ts';
@@ -95,23 +95,24 @@ function changeBranch(changeId: string, branch: string): string {
 }
 
 async function changeWorktree(root: string, changeId: string, localBranch: string, mustExist: boolean): Promise<{ root: string; worktree: string; exists: boolean }> {
-  const top = resolve(await git(['rev-parse', '--show-toplevel'], {}, root));
-  if (top !== resolve(root)) throw new ConcordError('worktree must be the root of the shared Git repository', 'usage');
-  const worktree = join(top, '.concord', 'changes', changeId);
+  const top = await realpath(resolve(await git(['rev-parse', '--show-toplevel'], {}, root)));
+  const requestedRoot = resolve(root);
+  if (top !== await realpath(requestedRoot)) throw new ConcordError('worktree must be the root of the shared Git repository', 'usage');
+  const worktree = join(requestedRoot, '.concord', 'changes', changeId);
   let exists = false;
   try {
-    const actualTop = resolve(await git(['rev-parse', '--show-toplevel'], {}, worktree));
-    exists = actualTop === worktree;
+    const actualTop = await realpath(resolve(await git(['rev-parse', '--show-toplevel'], {}, worktree)));
+    exists = actualTop === await realpath(worktree);
   } catch { /* The change worktree has not been created. */ }
   if (mustExist && !exists) throw new ConcordError('Change worktree is missing; run change_checkout first', 'usage');
   if (exists) {
-    const common = resolve(worktree, await git(['rev-parse', '--git-common-dir'], {}, worktree));
-    const rootCommon = resolve(root, await git(['rev-parse', '--git-common-dir'], {}, root));
+    const common = await realpath(resolve(worktree, await git(['rev-parse', '--git-common-dir'], {}, worktree)));
+    const rootCommon = await realpath(resolve(root, await git(['rev-parse', '--git-common-dir'], {}, root)));
     if (common !== rootCommon || await git(['symbolic-ref', 'HEAD'], {}, worktree) !== `refs/heads/${localBranch}`) {
       throw new ConcordError('Change worktree is not on its assigned branch', 'usage');
     }
   }
-  return { root: top, worktree, exists };
+  return { root: requestedRoot, worktree, exists };
 }
 
 export async function callTool(client: ConcordClient, name: string, args: Args): Promise<unknown> {
