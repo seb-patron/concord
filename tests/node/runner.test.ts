@@ -7,7 +7,7 @@ import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
 import { childEnvironment, command, conditionalPush, git, refOid, temporaryWork } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
-import { loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
+import { dispatchArgv, loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
 import { inspectUnits, mergeTsv } from '../../runner/units';
 import { parseArgs, runLoop, type Transport } from '../../runner/main';
 
@@ -53,6 +53,66 @@ function credentials(remotes: Record<string, string>): CredentialProvider {
 }
 
 describe('local runner Git and checker execution', () => {
+  it('requires literal dispatch acceptance cases even with valid profile and oracle digests', async () => {
+    await temporaryWork(async dir => {
+      const rows = {
+        alpha: { retry_limit: 1, timeout_ms: 1000, output: 1000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+        gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 4, timeout_ms: 1000, output: 4000 },
+        epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
+      };
+      const cases: NonNullable<LocalProfile['cases']> = {
+        seed: { rows: structuredClone(rows) },
+        'a-only': { rows: structuredClone(rows) },
+        'c-only': { rows: structuredClone(rows) },
+        'a-c-survivors': { rows: structuredClone(rows) },
+        'b-repaired': { rows: structuredClone(rows) },
+      };
+      cases['a-only'].rows.alpha = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+      cases['c-only'].rows.delta = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
+      cases['a-c-survivors'].rows.alpha = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+      cases['a-c-survivors'].rows.delta = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
+      cases['b-repaired'].rows.alpha = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+      cases['b-repaired'].rows.gamma = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
+      cases['b-repaired'].rows.delta = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
+      const path = join(dir, 'dispatch-profile.json');
+      const write = async (matrix: NonNullable<LocalProfile['cases']>) => {
+        const content = { id: 'dispatch', checkerId: 'dispatch-lab', checkerDigest: pin, oracleDigest: await digest(matrix),
+          toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
+          executable: process.execPath, argv: dispatchArgv, toolchainFile: process.execPath, cases: matrix };
+        await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
+      };
+      await write(cases);
+      await expect(loadProfile(path)).resolves.toMatchObject({ checkerId: 'dispatch-lab' });
+      for (const name of Object.keys(cases)) {
+        const incomplete = structuredClone(cases);
+        delete incomplete[name];
+        await write(incomplete);
+        await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
+        const incorrect = structuredClone(cases);
+        incorrect[name].rows.alpha.output = 9999;
+        await write(incorrect);
+        await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
+      }
+      const extra = structuredClone(cases);
+      extra['unreviewed'] = { rows: structuredClone(rows) };
+      await write(extra);
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
+      const jCases = structuredClone(cases);
+      jCases['j-common'] = { rows: {
+        alpha: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, beta: { retry_limit: 3, timeout_ms: 1000, output: 3000 },
+        gamma: { retry_limit: 4, timeout_ms: 1250, output: 5000 }, delta: { retry_limit: 4, timeout_ms: 1500, output: 6000 },
+        epsilon: { retry_limit: 2, timeout_ms: 500, output: 1000 },
+      }, epsilonChoices: [
+        { retry_limit: 2, timeout_ms: 500, output: 1000 }, { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+      ] };
+      await write(jCases);
+      await expect(loadProfile(path)).resolves.toMatchObject({ checkerId: 'dispatch-lab' });
+      jCases['j-common'].rows.beta.output = 9999;
+      await write(jCases);
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
+    });
+  });
+
   it('loads a content-pinned owner profile with a 35-minute ceiling', async () => {
     await temporaryWork(async dir => {
       const checkerFile = join(dir, 'checker.js');

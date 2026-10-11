@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Job, CheckOutcome } from '../src/contracts';
-import { digest } from '../src/http';
+import { digest, stableJson } from '../src/http';
 import { childEnvironment, command, OUTPUT_CAP } from './git';
 
 export type ExpectedRow = { retry_limit: number; timeout_ms: number; output: number };
@@ -29,6 +29,43 @@ const validRow = (value: unknown): value is ExpectedRow => !!value && typeof val
   Number.isSafeInteger((value as ExpectedRow).timeout_ms) && (value as ExpectedRow).timeout_ms >= 250 && (value as ExpectedRow).timeout_ms <= 2000 &&
   Number.isSafeInteger((value as ExpectedRow).output);
 
+// The demo's reviewed fixture cases. A new case or changed expected value needs
+// a reviewed revision here as well as a new content-pinned owner profile.
+const requiredDispatchCases: NonNullable<LocalProfile['cases']> = {
+  seed: { rows: {
+    alpha: { retry_limit: 1, timeout_ms: 1000, output: 1000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 4, timeout_ms: 1000, output: 4000 },
+    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
+  } },
+  'a-only': { rows: {
+    alpha: { retry_limit: 2, timeout_ms: 1000, output: 2000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 4, timeout_ms: 1000, output: 4000 },
+    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
+  } },
+  'c-only': { rows: {
+    alpha: { retry_limit: 1, timeout_ms: 1000, output: 1000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 5, timeout_ms: 1000, output: 5000 },
+    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
+  } },
+  'a-c-survivors': { rows: {
+    alpha: { retry_limit: 2, timeout_ms: 1000, output: 2000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 5, timeout_ms: 1000, output: 5000 },
+    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
+  } },
+  'b-repaired': { rows: {
+    alpha: { retry_limit: 2, timeout_ms: 1000, output: 2000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+    gamma: { retry_limit: 4, timeout_ms: 1250, output: 5000 }, delta: { retry_limit: 5, timeout_ms: 1000, output: 5000 },
+    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
+  } },
+};
+const jCommonCase: NonNullable<LocalProfile['cases']>[string] = { rows: {
+  alpha: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, beta: { retry_limit: 3, timeout_ms: 1000, output: 3000 },
+  gamma: { retry_limit: 4, timeout_ms: 1250, output: 5000 }, delta: { retry_limit: 4, timeout_ms: 1500, output: 6000 },
+  epsilon: { retry_limit: 2, timeout_ms: 500, output: 1000 },
+}, epsilonChoices: [
+  { retry_limit: 2, timeout_ms: 500, output: 1000 }, { retry_limit: 2, timeout_ms: 1000, output: 2000 },
+] };
+
 export async function loadProfile(filename: string): Promise<LocalProfile> {
   if (!isAbsolute(filename)) throw new Error('PROFILE_ABSOLUTE_PATH_REQUIRED');
   const path = resolve(filename);
@@ -49,6 +86,11 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
     JSON.stringify(profile.argv) !== JSON.stringify(dispatchArgv))) throw new Error('INVALID_PROFILE_ARGV');
   if (profile.checkerId === 'dispatch-lab') {
     if (!profile.cases || !Object.keys(profile.cases).length) throw new Error('INVALID_PROFILE');
+    for (const [caseId, required] of Object.entries(requiredDispatchCases)) {
+      if (stableJson(profile.cases[caseId]) !== stableJson(required)) throw new Error('INVALID_PROFILE_CASE');
+    }
+    if (Object.keys(profile.cases).some(caseId => !Object.hasOwn(requiredDispatchCases, caseId) && caseId !== 'j-common') ||
+      profile.cases['j-common'] && stableJson(profile.cases['j-common']) !== stableJson(jCommonCase)) throw new Error('INVALID_PROFILE_CASE');
     const allowedChoices = ['2:500:1000', '2:1000:2000'];
     for (const [caseId, config] of Object.entries(profile.cases)) {
       if (!/^[a-z0-9-]{1,64}$/.test(caseId) || !config || !config.rows ||

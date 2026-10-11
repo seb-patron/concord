@@ -14,10 +14,49 @@ const saveRunner = (c: ModuleContext, id: string, value: RunnerState) => c.state
 const conflict = (code: string): never => { throw new HttpError(409, code, code); };
 const validId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const validDigest = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
+// Scheduling is synchronous (the feature hook and storage transaction are synchronous).
+// Hash the same UTF-8 canonical JSON bytes as src/http.ts without an async subtle.digest call.
+const sha256Words = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+function inputHash(value: string): string {
+  const bytes = [...new TextEncoder().encode(value)];
+  const bitLength = BigInt(bytes.length) * 8n;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let shift = 56n; shift >= 0n; shift -= 8n) bytes.push(Number(bitLength >> shift & 255n));
+  const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const rotate = (word: number, count: number) => word >>> count | word << 32 - count;
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const words = new Array<number>(64);
+    for (let i = 0; i < 16; i++) words[i] = (bytes[offset + i * 4] << 24 | bytes[offset + i * 4 + 1] << 16 |
+      bytes[offset + i * 4 + 2] << 8 | bytes[offset + i * 4 + 3]) >>> 0;
+    for (let i = 16; i < 64; i++) {
+      const a = words[i - 15], b = words[i - 2];
+      words[i] = (words[i - 16] + (rotate(a, 7) ^ rotate(a, 18) ^ a >>> 3) + words[i - 7] +
+        (rotate(b, 17) ^ rotate(b, 19) ^ b >>> 10)) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let i = 0; i < 64; i++) {
+      const one = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + (e & f ^ ~e & g) + sha256Words[i] + words[i]) >>> 0;
+      const two = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + (a & b ^ a & c ^ b & c)) >>> 0;
+      h = g; g = f; f = e; e = (d + one) >>> 0; d = c; c = b; b = a; a = (one + two) >>> 0;
+    }
+    [a, b, c, d, e, f, g, h].forEach((word, i) => { state[i] = (state[i] + word) >>> 0; });
+  }
+  return 'sha256:' + state.map(word => word.toString(16).padStart(8, '0')).join('');
+}
 async function ancestor(storage: RepoStorage, name: string, oldOid: string, newOid: string): Promise<boolean> {
   const pending = [newOid];
   const seen = new Set<string>();
-  while (pending.length && seen.size < 2048) {
+  while (pending.length) {
     const oid = pending.pop()!;
     if (oid === oldOid) return true;
     if (seen.has(oid)) continue;
@@ -30,6 +69,11 @@ async function ancestor(storage: RepoStorage, name: string, oldOid: string, newO
 }
 function immutableJob(job: Job): string {
   const { state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId, expiresAt: _expiresAt, version: _version, ...input } = job;
+  return stableJson(input);
+}
+function canonicalInput(job: Job): string {
+  const { inputDigest: _inputDigest, state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId,
+    expiresAt: _expiresAt, version: _version, ...input } = job;
   return stableJson(input);
 }
 function validManifest(job: Job, manifest: ReviewManifest | null): manifest is ReviewManifest {
@@ -82,8 +126,16 @@ function validJob(c: ModuleContext, job: Job): boolean {
   })) return false;
   if (Object.keys(job.expectedRefs).some(name => !job.storageRemotes[name])) return false;
   if (job.checkerId === 'dispatch-lab' && !/^[a-z0-9-]{1,64}$/.test((job as Job & { caseId?: string }).caseId ?? '')) return false;
-  if (job.kind === 'inspect-candidate' && (job.candidate.baseOid === null || 'seedStorageName' in job.candidate ||
-    !job.storageRemotes[job.candidate.storageName])) return false;
+  if (job.kind === 'inspect-candidate') {
+    const candidate = job.candidate;
+    if (candidate.baseOid === null) {
+      if (!('seedStorageName' in candidate) || 'storageName' in candidate || 'ref' in candidate ||
+        typeof candidate.seedRef !== 'string' || !candidate.seedRef.startsWith('refs/') ||
+        !job.storageRemotes[candidate.seedStorageName] ||
+        job.expectedRefs[candidate.seedStorageName] !== candidate.headOid ||
+        !c.principal.roles.includes('owner')) return false;
+    } else if ('seedStorageName' in candidate || !job.storageRemotes[candidate.storageName]) return false;
+  }
   if (job.kind === 'validate-stack') {
     if (!job.storageRemotes[job.scratchStorageName] || job.candidates.some(candidate => !job.storageRemotes['seedStorageName' in candidate ? candidate.seedStorageName : candidate.storageName])) return false;
     const candidateNames = new Set(job.candidates.map(candidate => 'seedStorageName' in candidate ? candidate.seedStorageName : candidate.storageName));
@@ -110,7 +162,8 @@ function schedule(c: ModuleContext, job: Job): Gate<{ jobId: string }> {
     if (prior) return prior.job.inputDigest === job.inputDigest && immutableJob(prior.job) === immutableJob(job) ?
       { status: 'eligible', version: prior.job.version, evidenceIds: [job.jobId], value: { jobId: job.jobId } } :
       { status: 'blocked', version: prior.job.version, code: 'JOB_CONFLICT', reason: 'Job identity changed', evidenceIds: [job.jobId] };
-    if (!validJob(c, job)) return { status: 'blocked', version: c.version(), code: 'INVALID_JOB', reason: 'Job pins or bootstrap input invalid', evidenceIds: [] };
+    if (!validJob(c, job) || inputHash(canonicalInput(job)) !== job.inputDigest)
+      return { status: 'blocked', version: c.version(), code: 'INVALID_JOB', reason: 'Job pins or input digest invalid', evidenceIds: [] };
     const version = c.nextVersion();
     save(c, { job: { ...job, version } });
     c.state.put('ids', [...ids(c), job.jobId]);
