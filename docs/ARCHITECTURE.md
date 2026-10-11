@@ -143,7 +143,7 @@ Environment failure is distinct from product failure. Permit one same-input retr
 
 ## Local checker-runner protocol
 
-Runners poll outbound HTTPS; no public inbound service on the Mac/PC is required. One runner handles one job at a time by default, preserving serialized project checkers. The same runner executable has separate `checker` and `promoter` roles with separate credentials and work directories. A promoter never runs a checker. The prototype executes only owner-controlled synthetic input; arbitrary untrusted repository code requires an OS/container sandbox before wider rollout.
+Runners poll outbound HTTPS; no public inbound service on the Mac/PC is required. One runner handles one job at a time by default, preserving serialized project checkers. The same runner executable has separate `checker` and `promoter` roles with separate credentials and work directories. A promoter never runs a checker. The `dispatch-lab` checker handles synthetic input, while the command checker executes code from the composed repository. Run command checker workers only on a trusted, isolated machine or container with no valuable host files or credentials accessible to that code. Its environment allowlist and credential filtering are not an OS sandbox.
 
 | Request | Required request fields | Response / behavior |
 | --- | --- | --- |

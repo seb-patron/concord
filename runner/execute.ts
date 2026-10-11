@@ -6,6 +6,11 @@ import { inspectUnits, mergeTsv } from './units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
+const tailLog = (value: string, cap: number): string => {
+  let tail = Buffer.from(value).subarray(Math.max(0, Buffer.byteLength(value) - cap)).toString('utf8');
+  while (Buffer.byteLength(tail) > cap) tail = tail.slice(1);
+  return tail;
+};
 
 export type Credential = { storageName: string; remote: string; secret: string; expiresAt: number };
 export type CredentialProvider = (operation: 'fetch' | 'scratch-push' | 'canonical-push') => Promise<Credential[]>;
@@ -58,7 +63,7 @@ async function runGates(profile: LocalProfile, job: Job, directory: string): Pro
   for (const gate of job.unitPolicy.acceptance.gates) {
     const checked = await pinnedCheck(profile, job, directory, gate.id);
     gates.push({ gateId: gate.id, outcome: checked.outcome });
-    log += checked.log + '\n';
+    log = tailLog(log + checked.log + '\n', Math.min(job.maxOutputBytes, OUTPUT_CAP));
     score = job.contest === true ? checked.score : null;
     if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log, score: null };
   }
@@ -161,7 +166,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     }
     return { ...common, kind: 'validate-stack', bootstrap: job.bootstrap, canonicalBaseOid: job.canonicalBaseOid,
       sourceTreeOid: tree, composedOid: composed, composedTreeOid: tree,
-      outcome: checked.outcome, gateResults: checked.gates, score: checked.score, log: checked.log.slice(0, OUTPUT_CAP) } as UnsignedResult;
+      outcome: checked.outcome, gateResults: checked.gates, score: checked.score, log: checked.log } as UnsignedResult;
   }
   if (job.kind === 'delta-check') {
     if (!profile) throw new Error('PROFILE_REQUIRED');
@@ -236,7 +241,8 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
   value.durationMs = Math.max(0, Date.now() - began);
   for (const secret of secrets) value.log = value.log.replaceAll(secret, '[REDACTED]');
   const cap = Math.min(job.maxOutputBytes, OUTPUT_CAP);
-  while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
+  if (value.kind === 'validate-stack') value.log = tailLog(value.log, cap);
+  else while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
   const resultDigest = await digest(value);
   return { ...value, resultDigest } as JobResult;
 }

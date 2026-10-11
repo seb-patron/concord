@@ -187,8 +187,7 @@ export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string,
   checkProfile(job, profile);
   if (profile.kind === 'command') {
     if (resolve(profile.executable!).startsWith(resolve(repo) + sep)) throw new Error('CHECKER_IN_CANDIDATE');
-    const env = childEnvironment();
-    for (const name of commandEnvNames) if (!profile.env!.includes(name)) delete env[name];
+    const env: NodeJS.ProcessEnv = {};
     for (const name of profile.env!) if (process.env[name] !== undefined) env[name] = process.env[name];
     const values = [...new Set(profile.env!.map(name => process.env[name]).filter((value): value is string => !!value))]
       .sort((a, b) => b.length - a.length);

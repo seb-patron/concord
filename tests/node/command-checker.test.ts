@@ -16,12 +16,12 @@ const filePin = (bytes: Buffer | string) => ('sha256:' + createHash('sha256').up
 const commitEnv = childEnvironment({ GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
   GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' });
 
-async function profileIn(dir: string, changes: Record<string, unknown> = {}) {
+async function profileIn(dir: string, changes: Record<string, unknown> = {}, maxOutputBytes = 256) {
   const binaryPin = filePin(await readFile(executable));
   const settings = { ...commandSettings, ...changes };
   const content = { id: 'command-demo', kind: 'command', checkerId: 'command-demo',
     checkerDigest: binaryPin, toolchainDigest: binaryPin, oracleDigest: await digest(settings),
-    environmentDigest: await digest(localEnvironment()), timeoutMs: 5_000, maxOutputBytes: 256,
+    environmentDigest: await digest(localEnvironment()), timeoutMs: 5_000, maxOutputBytes,
     toolchainFile: executable, ...settings };
   const path = join(dir, 'profile.json');
   await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
@@ -44,6 +44,61 @@ function jobFor(profile: Awaited<ReturnType<typeof loadProfile>>, remotes: Recor
 }
 
 describe('pinned command checker', () => {
+  it('keeps a later failing gate and its exit marker when combined output reaches the cap', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'repo');
+      const canonical = join(dir, 'canonical.git');
+      const scratch = join(dir, 'scratch.git');
+      await git(dir, ['init', '--quiet', repo]);
+      await git(dir, ['init', '--bare', '--quiet', canonical]);
+      await git(dir, ['init', '--bare', '--quiet', scratch]);
+      await mkdir(join(repo, 'scripts'));
+      await writeFile(join(repo, 'scripts/validate.sh'),
+        `if [ -f .first-gate-ran ]; then echo LATER_GATE_FAILURE; exit 7; fi\n` +
+        `touch .first-gate-ran\nprintf '%s' '${'x'.repeat(16_384)}'\n`);
+      await git(repo, ['add', 'scripts/validate.sh']);
+      await git(repo, ['commit', '--quiet', '-m', 'gates'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const profile = await loadProfile(await profileIn(dir, { outputCap: 16_384 }, 16_384));
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job = jobFor(profile, remotes, base);
+      job.unitPolicy.acceptance.gates = [
+        { id: 'first', requiredOutcome: 'PASS' }, { id: 'later', requiredOutcome: 'PASS' }];
+      const credentials = async () => Object.entries(remotes).map(([storageName, remote]) =>
+        ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
+      const result = await executeJob(job, profile, credentials);
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'FAIL', gateResults: [
+        { gateId: 'first', outcome: 'PASS' }, { gateId: 'later', outcome: 'FAIL' }] });
+      expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(16_384);
+      expect(result.log).toContain('exit=7');
+      expect(result.log).toContain('LATER_GATE_FAILURE');
+    });
+  });
+
+  it('omits a supervisor variable outside the command profile environment', async () => {
+    await temporaryWork(async dir => {
+      await mkdir(join(dir, 'scripts'));
+      await writeFile(join(dir, 'scripts/validate.sh'), 'printf "%s" "$SystemRoot"\n');
+      const profile = await loadProfile(await profileIn(dir));
+      const job = { profileDigest: profile.digest, checkerId: profile.checkerId,
+        checkerDigest: profile.checkerDigest, oracleDigest: profile.oracleDigest,
+        toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+        timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes } as Job;
+      const previous = process.env.SystemRoot;
+      try {
+        process.env.SystemRoot = 'synthetic-supervisor-secret';
+        const checked = await pinnedCheck(profile, job, dir);
+        expect(checked.outcome).toBe('PASS');
+        expect(checked.log).toBe('exit=0\n');
+        expect(checked.log).not.toContain('synthetic-supervisor-secret');
+      } finally {
+        if (previous === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = previous;
+      }
+    });
+  });
+
   it('checks a composed checkout, then records a script failure with an authenticated result', async () => {
     await temporaryWork(async dir => {
       const repo = join(dir, 'repo');
