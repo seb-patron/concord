@@ -8,7 +8,7 @@ import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
 import { json } from '../../src/http';
 import type { ModuleContext, ModuleRoute } from '../../src/contracts';
-import { localFixtureConfig } from '../../src/state';
+import { loadTrustedConfig, localFixtureConfig, MAX_RESULT_OUTPUT_BYTES } from '../../src/state';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
 const fetchApi = (request: Request) => worker.fetch(request, env);
@@ -81,6 +81,21 @@ describe('local Worker and SQLite Durable Objects', () => {
     await expect(authenticate(apiRequest('/v1/repos/alpha', 'local-owner'), production, () => 0)).rejects.toMatchObject({ status: 401 });
     expect(() => localFixtureConfig('production')).toThrow('LOCAL_FIXTURE_FORBIDDEN');
     expect(clock({ CONCORD_MODE: 'local', CONCORD_TEST_NOW: '1234' })()).toBe(1234);
+  });
+
+  it('caps trusted runner output at 16 KB in fixtures and loaded profiles', () => {
+    const fixture = localFixtureConfig('local');
+    expect(fixture.profiles['local-demo'].maxOutputBytes).toBe(16 * 1024);
+    expect(MAX_RESULT_OUTPUT_BYTES).toBe(16 * 1024);
+    const trusted = JSON.parse(JSON.stringify(fixture)) as typeof fixture;
+    const env = { CONCORD_MODE: 'production', TRUSTED_CONFIG: JSON.stringify(trusted) } as Env;
+    expect(loadTrustedConfig(env).profiles['local-demo'].maxOutputBytes).toBe(MAX_RESULT_OUTPUT_BYTES);
+    trusted.profiles['local-demo'].maxOutputBytes = MAX_RESULT_OUTPUT_BYTES + 1;
+    expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(trusted) })).toThrow('TRUSTED_CONFIG_INVALID');
+    trusted.profiles['local-demo'].maxOutputBytes = 0;
+    expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(trusted) })).toThrow('TRUSTED_CONFIG_INVALID');
+    trusted.profiles['local-demo'].maxOutputBytes = 1.5;
+    expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(trusted) })).toThrow('TRUSTED_CONFIG_INVALID');
   });
 
   it('rejects conflicting bodies and stale versions, and leaves feature routes unavailable', async () => {

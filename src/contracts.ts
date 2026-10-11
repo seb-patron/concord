@@ -44,7 +44,9 @@ export interface Finding extends Versioned {
 }
 export interface Verdict extends Versioned {
   verdictId: Id; changeId: Id; reviewerId: Id; revision: number;
-  reviewManifestDigest: Digest; policyDigest: Digest; checkerDigest: Digest;
+  reviewManifestDigest: Digest; reviewManifest: ReviewManifest;
+  policyDigest: Digest; checkerDigest: Digest;
+  oracleDigest: Digest; toolchainDigest: Digest; deltaResultId: Id | null;
   findingSetVersion: number; decision: 'approve' | 'reject';
   evidenceDigest: Digest; parentVerdictId: Id | null;
 }
@@ -97,11 +99,15 @@ export interface IdempotentRequest {
   requestDigest: Digest; status: number; response: unknown;
 }
 
+export interface AcceptanceGate { id: string; requiredOutcome: 'MATCH' | 'PASS' }
+export type AcceptancePolicy =
+  | { kind: 'hard-gates'; gates: AcceptanceGate[] }
+  | { kind: 'score'; gates: AcceptanceGate[]; fixedDenominator: number };
 export interface TrustedPolicy {
   id: Id; digest: Digest; version: number;
   units: Record<string, { canonicalKey: string; file: string; resources: string[]; dependencyKeys: string[] }>;
   checkerId: string; checkerDigest: Digest;
-  acceptance: 'match' | 'pass' | 'no-regression';
+  acceptance: AcceptancePolicy;
 }
 export interface TrustedProfile {
   id: Id; digest: Digest; toolchainDigest: Digest; oracleDigest: Digest;
@@ -165,38 +171,63 @@ export type JobState = 'pending' | 'claimed' | 'completed' | 'expired' | 'blocke
 export interface JobBase extends Versioned {
   jobId: Id; repoId: Id; inputDigest: Digest; generation: number;
   profileDigest: Digest; policyId: Id; policyDigest: Digest;
-  unitPolicy: Pick<TrustedPolicy, 'version' | 'units'>; expectedRefs: Record<string, Oid | null>;
+  unitPolicy: TrustedPolicy; expectedRefs: Record<string, Oid | null>;
   storageRemotes: Record<string, string>; checkerId: string; checkerDigest: Digest;
   oracleDigest: Digest; toolchainDigest: Digest; environmentDigest: Digest;
   timeoutMs: number; maxOutputBytes: number;
   state: JobState; attempt: number; runnerId: Id | null; fence: number; expiresAt: number | null;
 }
-export interface CandidateInput { changeId: Id; revision: number; baseOid: Oid; headOid: Oid }
+export interface CandidateInput {
+  changeId: Id; revision: number; baseOid: Oid; headOid: Oid;
+  storageName: string; ref: string;
+}
 export interface SeedInput { changeId: Id; revision: number; baseOid: null; headOid: Oid; seedStorageName: string; seedRef: string }
 export interface InspectCandidateJob extends JobBase {
   kind: 'inspect-candidate'; changeId: Id; revision: number; candidate: CandidateInput | SeedInput;
 }
 export interface OrdinaryStackJob extends JobBase {
   kind: 'validate-stack'; canonicalBaseOid: Oid; candidates: CandidateInput[];
-  bootstrap: false; stackId: Id; scratchStorageName: string;
+  bootstrap: false; stackId: Id; scratchStorageName: string; scratchRef: string;
 }
 export interface BootstrapStackJob extends JobBase {
   kind: 'validate-stack'; canonicalBaseOid: null; candidates: [SeedInput];
-  bootstrap: true; ownerAuthorized: true; stackId: Id; scratchStorageName: string;
+  bootstrap: true; ownerAuthorized: true; stackId: Id; scratchStorageName: string; scratchRef: string;
 }
 export type ValidateStackJob = OrdinaryStackJob | BootstrapStackJob;
 export interface DeltaCheckJob extends JobBase {
   kind: 'delta-check'; changeId: Id; candidate: CandidateInput; oldManifestDigest: Digest; newBaseOid: Oid;
+  parentVerdictId: Id; findingSetVersion: number; oldReviewManifest: ReviewManifest;
 }
 export interface OrdinaryPromoteJob extends JobBase {
   kind: 'promote'; promotionId: Id; expectedOldOid: Oid; checkedNewOid: Oid; bootstrap: false;
+  scratchStorageName: string; scratchRef: string;
 }
 export interface BootstrapPromoteJob extends JobBase {
   kind: 'promote'; promotionId: Id; expectedOldOid: null; checkedNewOid: Oid; bootstrap: true; ownerAuthorized: true;
+  scratchStorageName: string; scratchRef: string;
 }
 export type PromoteJob = OrdinaryPromoteJob | BootstrapPromoteJob;
 export type Job = InspectCandidateJob | ValidateStackJob | DeltaCheckJob | PromoteJob;
 export type CheckOutcome = 'PASS' | 'FAIL' | 'MATCH' | 'MISMATCH' | 'COMPILE_ERROR' | 'UNVERIFIED_TARGET' | 'ENV_ERROR' | 'MERGE_CONFLICT' | 'TIMEOUT';
+export interface ChangedUnitEvidence {
+  unitKey: string; beforePath: string | null; afterPath: string | null;
+  beforeMode: string | null; afterMode: string | null;
+  beforeDigest: Digest | null; afterDigest: Digest | null;
+}
+export interface UnitDependencyScopeEntry {
+  kind: 'unit'; unitKey: string; path: string; mode: string; contentDigest: Digest;
+}
+export interface TreeDependencyScopeEntry { kind: 'tree'; treeOid: Oid }
+export type DependencyScopeEntry = UnitDependencyScopeEntry | TreeDependencyScopeEntry;
+export interface ReviewManifestBase {
+  changedUnits: ChangedUnitEvidence[];
+  policyVersion: number; policyDigest: Digest; checkerDigest: Digest;
+  oracleDigest: Digest; toolchainDigest: Digest;
+}
+export type ReviewManifest = ReviewManifestBase & (
+  | { coverage: 'complete'; dependencyScope: UnitDependencyScopeEntry[] }
+  | { coverage: 'unknown'; dependencyScope: [TreeDependencyScopeEntry] }
+);
 export interface ResultBase {
   jobId: Id; attempt: number; inputDigest: Digest; fence: number;
   sourceTreeOid: Oid | null; checkerDigest: Digest; toolchainDigest: Digest; oracleDigest: Digest;
@@ -204,10 +235,12 @@ export interface ResultBase {
 }
 export interface InspectionResult extends ResultBase {
   kind: 'inspect-candidate'; outcome: CheckOutcome; observedHeadOid: Oid;
-  unitKeys: string[]; reviewManifestDigest: Digest | null;
+  unitKeys: string[]; reviewManifestDigest: Digest | null; reviewManifest: ReviewManifest | null;
 }
 export interface StackResultBase extends ResultBase {
   kind: 'validate-stack'; outcome: CheckOutcome; composedOid: Oid | null;
+  composedTreeOid: Oid | null;
+  gateResults: Array<{ gateId: string; outcome: CheckOutcome }>;
   score: { matched: number; total: number } | null;
 }
 export type StackResult = StackResultBase & (
@@ -216,7 +249,8 @@ export type StackResult = StackResultBase & (
 );
 export interface DeltaResult extends ResultBase {
   kind: 'delta-check'; outcome: CheckOutcome; reviewManifestDigest: Digest | null;
-  dependencyScopeDigest: Digest | null;
+  reviewManifest: ReviewManifest | null;
+  dependencyScopeDigest: Digest | null; dependencyScope: DependencyScopeEntry[] | null;
 }
 export interface PromotionResult extends ResultBase {
   kind: 'promote'; outcome: 'APPLIED' | 'OLD_REF' | 'THIRD_REF' | 'ENV_ERROR';
