@@ -40,6 +40,7 @@ const beta2 = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
 const beta3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
 const gamma3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
 const gamma4 = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
+const gamma5 = { retry_limit: 5, timeout_ms: 1250, output: 6250 };
 const delta4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
 const delta5 = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
 const deltaE = { retry_limit: 4, timeout_ms: 1500, output: 6000 };
@@ -63,6 +64,7 @@ const requiredDispatchCases: NonNullable<LocalProfile['cases']> = {
   'i-only': { rows: { alpha: alpha3, beta: beta3, gamma: gamma4, delta: deltaE, epsilon: epsilon1 } },
   'j-common': { rows: { alpha: alpha3, beta: beta3, gamma: gamma4, delta: deltaE, epsilon: epsilonLow },
     epsilonChoices: [epsilonLow, epsilonHigh] },
+  'aw-only': { rows: { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE, epsilon: epsilonHigh } },
 };
 
 export async function loadProfile(filename: string): Promise<LocalProfile> {
