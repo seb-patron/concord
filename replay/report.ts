@@ -1,4 +1,4 @@
-import type { ReplayExport, DurationMetric } from './schema.ts';
+import { safeAggregateName, type ReplayExport, type DurationMetric } from './schema.ts';
 import { simulateReplay, type SimulationOptions, type SimulationResult } from './simulate.ts';
 
 export interface ReplayReport {
@@ -41,7 +41,7 @@ export function buildReplayReport(data: ReplayExport, options?: SimulationOption
   const terminal = new Set(events.filter(e => ['merged', 'task_finished', 'task_refused'].includes(e.type) && (e.outcome === 'landed' || e.outcome === 'refused')).map(e => e.taskId));
   const header = data.header;
   const ownerReportedAggregateContext = header.ownerReportedAggregates === undefined ? null : Object.fromEntries(
-    Object.entries(header.ownerReportedAggregates).map(([name, aggregate]) => [name, {
+    Object.entries(header.ownerReportedAggregates).filter(([name]) => safeAggregateName(name)).map(([name, aggregate]) => [name, {
       value: aggregate.value, ...(aggregate.denominator !== undefined ? { denominator: aggregate.denominator } : {}), sourceRef: aggregate.sourceRef,
     }]),
   );

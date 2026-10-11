@@ -82,6 +82,22 @@ describe('replay export provenance and report', () => {
     expect(JSON.stringify(buildReplayReport(data))).not.toContain('PRIVATE WINDOW CONTENT');
   });
 
+  it('rejects private aggregate names without echoing them in errors or reports', () => {
+    const data = parseReplayJsonl(historicalData([event('start', 'task_started', '2026-01-01T00:00:00Z')]));
+    const privateName = 'PRIVATE CHAT CONTENT';
+    data.header.ownerReportedAggregates = { [privateName]: { value: 2, sourceRef: 'redacted:aggregate' } };
+    const [header, ...events] = historicalData(data.events).split('\n');
+    const withAggregates = (aggregates: unknown) => [JSON.stringify({ ...JSON.parse(header), ownerReportedAggregates: aggregates }), ...events].join('\n');
+    for (const aggregate of [data.header.ownerReportedAggregates, { [privateName]: { value: 2, sourceRef: 'redacted:aggregate', rawChat: 'secret' } }]) {
+      let message = '';
+      try { parseReplayJsonl(withAggregates(aggregate)); } catch (error) { message = String(error); }
+      expect(message).toMatch(/aggregate/i);
+      expect(message).not.toContain(privateName);
+    }
+    expect(JSON.stringify(buildReplayReport(data))).not.toContain(privateName);
+    expect(parseReplayJsonl(withAggregates({ throughput_2026: { value: 2, sourceRef: 'redacted:aggregate' } })).header.ownerReportedAggregates).toHaveProperty('throughput_2026');
+  });
+
   it('models every recorded checker duration including a recheck', () => {
     const events = [
       event('work', 'duration_record', '2026-01-01T00:00:00.010Z', { durationMs: 10, durationMetric: 'work', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:work' } }),
@@ -105,6 +121,30 @@ describe('replay export provenance and report', () => {
     const result = simulateReplay(data);
     expect(result.tasks[0]).toMatchObject({ status: 'unknown', reason: expect.stringMatching(/recheck/) });
     expect(result.makespanMs).toBeNull();
+  });
+
+  it('does not use checker durations recorded before a later recheck', () => {
+    const data = parseReplayJsonl(historicalData([
+      event('work', 'duration_record', '2026-01-01T00:00:01Z', { durationMs: 10, durationMetric: 'work', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:work' } }),
+      event('check-1', 'duration_record', '2026-01-01T00:00:02Z', { durationMs: 50, durationMetric: 'checker', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:check-1' } }),
+      event('check-2', 'duration_record', '2026-01-01T00:00:03Z', { durationMs: 70, durationMetric: 'checker', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:check-2' } }),
+      event('recheck', 'recheck_requested', '2026-01-01T00:00:04Z'),
+    ]));
+    const result = simulateReplay(data);
+    expect(result.tasks[0]).toMatchObject({ status: 'unknown', reason: expect.stringMatching(/recheck/) });
+    expect(result.makespanMs).toBeNull();
+  });
+
+  it('uses paired check start times to associate a duration with a recheck', () => {
+    const data = parseReplayJsonl(historicalData([
+      event('work', 'duration_record', '2026-01-01T00:00:01Z', { durationMs: 10, durationMetric: 'work', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:work' } }),
+      event('check-1', 'duration_record', '2026-01-01T00:00:02Z', { durationMs: 50, durationMetric: 'checker', durationSource: { kind: 'source_field', sourceEventRef: 'redacted:check-1' } }),
+      event('paired-start', 'check_started', '2026-01-01T00:00:03Z'),
+      event('recheck', 'recheck_requested', '2026-01-01T00:00:04Z'),
+      event('paired-end', 'check_finished', '2026-01-01T00:00:05Z'),
+      event('check-2', 'duration_record', '2026-01-01T00:00:06Z', { durationMs: 2000, durationMetric: 'checker', durationSource: { kind: 'paired_events', startEventId: 'paired-start', endEventId: 'paired-end' } }),
+    ]));
+    expect(simulateReplay(data).tasks[0]).toMatchObject({ status: 'unknown', reason: expect.stringMatching(/recheck/) });
   });
 
   it('censors a finished task without an explicit known outcome', () => {

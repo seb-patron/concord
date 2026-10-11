@@ -40,9 +40,16 @@ export function simulateReplay(data: ReplayExport, options: SimulationOptions = 
   for (const taskId of order) {
     const events = rows.get(taskId)!;
     const work = events.find(e => e.durationMetric === 'work' && e.durationMs !== undefined);
+    const eventById = new Map(events.map(e => [e.eventId, e]));
+    const checkTime = (check: typeof events[number]): number => Date.parse(
+      check.durationSource?.kind === 'paired_events'
+        ? eventById.get(check.durationSource.startEventId)?.occurredAt ?? check.occurredAt
+        : check.occurredAt,
+    );
     const checks = events.filter(e => e.durationMetric === 'checker' && e.durationMs !== undefined)
+      .sort((a, b) => checkTime(a) - checkTime(b) || a.eventId.localeCompare(b.eventId));
+    const rechecks = events.filter(e => e.type === 'recheck_requested')
       .sort((a, b) => Date.parse(a.occurredAt) - Date.parse(b.occurredAt) || a.eventId.localeCompare(b.eventId));
-    const rechecks = events.filter(e => e.type === 'recheck_requested').length;
     const outcome = events.find(e => e.type === 'merged' || e.type === 'task_finished' || e.type === 'task_refused')?.outcome ??
       (events.some(e => e.type === 'merged') ? 'landed' : 'unknown');
     const dependencies = [...new Set(events.flatMap(e => e.dependencyTaskIds ?? []))];
@@ -57,7 +64,18 @@ export function simulateReplay(data: ReplayExport, options: SimulationOptions = 
       tasks.push({ taskId, status: 'unknown', outcome, reason: !work && checks.length === 0 ? 'work and checker durations missing' : !work ? 'work duration missing' : 'checker duration missing' });
       continue;
     }
-    if (checks.length <= rechecks) {
+    let nextCheck = 0;
+    let recheckTimingUnknown = false;
+    for (let index = 0; index < rechecks.length; index++) {
+      const requestedAt = Date.parse(rechecks[index].occurredAt);
+      if (index === 0 && checkTime(checks[0]) >= requestedAt) { recheckTimingUnknown = true; break; }
+      while (nextCheck < checks.length && checkTime(checks[nextCheck]) < requestedAt) nextCheck++;
+      const matchedAt = nextCheck < checks.length ? checkTime(checks[nextCheck]) : Infinity;
+      const nextRequestAt = index + 1 < rechecks.length ? Date.parse(rechecks[index + 1].occurredAt) : Infinity;
+      if (matchedAt <= requestedAt || matchedAt >= nextRequestAt || !Number.isFinite(matchedAt)) { recheckTimingUnknown = true; break; }
+      nextCheck++;
+    }
+    if (recheckTimingUnknown) {
       tasks.push({ taskId, status: 'unknown', outcome, reason: 'recheck duration missing' });
       continue;
     }

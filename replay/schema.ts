@@ -63,6 +63,7 @@ function utc(value: unknown): value is string {
 function redacted(value: unknown): value is string {
   return nonempty(value) && /^(redacted:|https:\/\/[^/]+\/redacted\/)/i.test(value) && !/(token|secret|password|@)/i.test(value);
 }
+export function safeAggregateName(value: string): boolean { return /^[a-z][a-z0-9_]{0,63}$/.test(value); }
 
 export function parseReplayJsonl(text: string, options: { allowSynthetic?: boolean } = {}): ReplayExport {
   const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
@@ -88,10 +89,11 @@ export function parseReplayJsonl(text: string, options: { allowSynthetic?: boole
   if (h.ownerReportedAggregates !== undefined) {
     if (!record(h.ownerReportedAggregates)) throw new Error('ownerReportedAggregates must be an object');
     for (const [name, raw] of Object.entries(h.ownerReportedAggregates)) {
-      if (record(raw) && Object.keys(raw).some(key => !['value', 'denominator', 'sourceRef'].includes(key))) throw new Error(`Owner aggregate ${name} has an unknown field`);
-      if (!nonempty(name) || !record(raw) || !(raw.value === null || (typeof raw.value === 'number' && Number.isFinite(raw.value))) ||
+      if (!safeAggregateName(name)) throw new Error('Owner aggregate name must be a safe identifier');
+      if (record(raw) && Object.keys(raw).some(key => !['value', 'denominator', 'sourceRef'].includes(key))) throw new Error('Owner aggregate has an unknown field');
+      if (!record(raw) || !(raw.value === null || (typeof raw.value === 'number' && Number.isFinite(raw.value))) ||
           (raw.denominator !== undefined && !(raw.denominator === null || (typeof raw.denominator === 'number' && Number.isFinite(raw.denominator) && raw.denominator >= 0))) ||
-          !redacted(raw.sourceRef)) throw new Error(`Owner aggregate ${name} requires value, valid denominator, and redacted sourceRef`);
+          !redacted(raw.sourceRef)) throw new Error('Owner aggregate requires value, valid denominator, and redacted sourceRef');
     }
   }
 
