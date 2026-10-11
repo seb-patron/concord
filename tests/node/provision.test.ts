@@ -1,13 +1,16 @@
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { demoPrincipals, provision } from '../../demo/provision';
 import { demoGitRemote, gitWithCredential } from '../../demo/scenarios';
 import { gitCredentialEnvironment } from '../../runner/git';
 
 const directories: string[] = [];
+const execFileAsync = promisify(execFile);
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
 describe('demo principal provisioning and remote Git transport', () => {
@@ -39,6 +42,29 @@ describe('demo principal provisioning and remote Git transport', () => {
     directories.push(root);
     await symlink(resolve('.'), join(root, 'checkout'));
     await expect(provision(join(root, 'checkout', 'private-output'))).rejects.toThrow('PROVISION_DIR_MUST_BE_OUTSIDE_REPO');
+  });
+
+  it('rejects an in-clone output when imported through a symlink with --preserve-symlinks', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'concord-provision-import-link-'));
+    directories.push(root);
+    const physical = join(root, 'physical');
+    await mkdir(join(physical, 'demo'), { recursive: true });
+    await copyFile(new URL('../../demo/provision.ts', import.meta.url), join(physical, 'demo', 'provision.mts'));
+    const alias = join(root, 'alias');
+    await symlink(physical, alias, 'dir');
+    const output = join(physical, 'private-output');
+    const script = `
+      import { pathToFileURL } from 'node:url';
+      const { provision } = await import(pathToFileURL(process.argv[1]).href);
+      try { await provision(process.argv[2]); console.log('ACCEPTED_INSIDE_CLONE'); }
+      catch (error) { console.log(error.message); }
+    `;
+    const { stdout } = await execFileAsync(process.execPath, [
+      '--preserve-symlinks', '--import', 'tsx', '--input-type=module', '--eval', script,
+      join(alias, 'demo', 'provision.mts'), output,
+    ], { cwd: resolve('.') });
+    expect(stdout.trim()).toBe('PROVISION_DIR_MUST_BE_OUTSIDE_REPO');
+    await expect(lstat(output)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('accepts HTTPS Artifacts remotes and passes Git bearer auth only in environment config', async () => {

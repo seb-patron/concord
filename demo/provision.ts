@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { mkdir, realpath, writeFile, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,18 +10,18 @@ export const demoPrincipals = {
   low: ['contest-agent-low', 'agent'], high: ['contest-agent-high', 'agent'], aw: ['mock-aw', 'agent'],
 } as const;
 
-const clone = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const clone = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 const inside = (root: string, path: string) => { const part = relative(root, path); return part === '' || (!part.startsWith('..') && !isAbsolute(part)); };
 
 /** Both outputs are operator secrets. Refuse symlink paths and existing files. */
 export async function provision(outDir: string): Promise<{ authTokensFile: string; tokensFile: string }> {
   if (!outDir || !isAbsolute(outDir)) throw new Error('PROVISION_DIR_MUST_BE_ABSOLUTE');
   const target = resolve(outDir);
-  if (inside(clone, target)) throw new Error('PROVISION_DIR_MUST_BE_OUTSIDE_REPO');
   let ancestor = target;
   for (;;) {
     try {
-      if (inside(clone, await realpath(ancestor))) throw new Error('PROVISION_DIR_MUST_BE_OUTSIDE_REPO');
+      const physicalTarget = resolve(await realpath(ancestor), relative(ancestor, target));
+      if (inside(clone, physicalTarget)) throw new Error('PROVISION_DIR_MUST_BE_OUTSIDE_REPO');
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
