@@ -32,11 +32,11 @@ Safe GET requests and keyed mutations retry transient transport failures, HTTP 4
 
 ```sh
 npm run concord -- principals mint --role agent --repo REPO_ID --ttl 2h --name worker-1
-npm run concord -- principals list
+npm run concord -- principals list [--cursor CURSOR]
 npm run concord -- principals revoke PRINCIPAL_ID
 ```
 
-Mint writes only the newly issued plaintext token followed by a newline to stdout, once. Store it securely at creation; list and revoke never show it. `--ttl` accepts positive seconds (`s`), minutes (`m`), or hours (`h`); the default is 24 hours. Omit `--repo` to inherit the caller's full repository scope. The server enforces role and repository subsets, parent expiry, the trusted TTL maximum, and a tenant cap. See [the principals API](api-principals.md) for authorization and response details.
+Mint writes only the newly issued plaintext token followed by a newline to stdout, once. Store it securely at creation; list and revoke never show it. `--ttl` accepts positive seconds (`s`), minutes (`m`), or hours (`h`); the default is 24 hours. Omit `--repo` to inherit the caller's full repository scope. The server enforces role and repository subsets, parent expiry, the trusted TTL maximum, 100 repository IDs per stored scope, and active and total tenant caps. `principals list` returns up to 25 items and a `nextCursor`; pass it with `--cursor` to continue. See [the principals API](api-principals.md) for authorization and response details.
 
 ## Repository commands
 

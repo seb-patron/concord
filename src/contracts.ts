@@ -127,7 +127,7 @@ export interface TrustedProfile {
 export interface TrustedConfiguration {
   policies: Record<string, TrustedPolicy>;
   profiles: Record<string, TrustedProfile>;
-  delegatedPrincipals?: { maxTtlMs?: number; activeLimit?: number };
+  delegatedPrincipals?: { maxTtlMs?: number; activeLimit?: number; totalLimit?: number };
 }
 
 export interface ApiSuccess<T> { data: T; version: number; eventSeq: number }

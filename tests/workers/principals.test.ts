@@ -57,6 +57,66 @@ describe('delegated principals', () => {
     expect((await mint({ roles: ['agent'] })).status).toBe(409);
   });
 
+  it('bounds stored repository scopes', async () => {
+    const repoIds = Array.from({ length: 100 }, (_, index) => `repo-${index}`);
+    const tooMany = await mint({ roles: ['agent'], repoIds: [...repoIds, 'repo-100'] });
+    expect(tooMany.status).toBe(400);
+    expect((await responseBody(tooMany)).error.code).toBe('INVALID_SCOPE');
+    const accepted = await mint({ roles: ['agent'], repoIds });
+    expect(accepted.status).toBe(201);
+    const item = (await responseBody(accepted)).data;
+    expect(item.repoIds).toEqual(repoIds);
+    expect((await fetchApi(apiRequest(`/v1/principals/${item.id}`, 'local-agent-a', { method: 'DELETE' }))).status).toBe(200);
+  });
+
+  it('paginates revoked history and enforces the total tenant cap', async () => {
+    const existingIds: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const pageResponse = await fetchApi(apiRequest(`/v1/principals${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`));
+      expect(pageResponse.status).toBe(200);
+      const page = (await responseBody(pageResponse)).data as { items: Array<{ id: string }>; nextCursor: string | null };
+      expect(page.items.length).toBeLessThanOrEqual(25);
+      existingIds.push(...page.items.map(item => item.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    runtime.TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'), delegatedPrincipals: { activeLimit: 1000, totalLimit: existingIds.length + 27 } });
+    const mintedIds: string[] = [];
+    for (let index = 0; index < 27; index++) {
+      const created = await mint({ roles: ['agent'], repoIds: [`history-${index}`] });
+      expect(created.status).toBe(201);
+      const item = (await responseBody(created)).data;
+      mintedIds.push(item.id);
+      const revoked = await fetchApi(apiRequest(`/v1/principals/${item.id}`, 'local-agent-a', { method: 'DELETE' }));
+      expect(revoked.status).toBe(200);
+    }
+    const rejected = await mint({ roles: ['agent'] });
+    expect(rejected.status).toBe(409);
+    expect((await responseBody(rejected)).error.code).toBe('PRINCIPAL_CAP');
+
+    const allIds: string[] = [];
+    cursor = null;
+    let pages = 0;
+    do {
+      const response = await fetchApi(apiRequest(`/v1/principals${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`));
+      expect(response.status).toBe(200);
+      const page = (await responseBody(response)).data as { items: Array<{ id: string; revokedAt: number | null }>; nextCursor: string | null };
+      expect(page.items.length).toBeLessThanOrEqual(25);
+      if (pages === 0) expect(page.items).toHaveLength(25);
+      allIds.push(...page.items.map(item => item.id));
+      cursor = page.nextCursor;
+      pages++;
+    } while (cursor);
+    expect(pages).toBeGreaterThan(1);
+    expect(allIds).toHaveLength(existingIds.length + 27);
+    expect(new Set(allIds).size).toBe(allIds.length);
+    expect(allIds).toEqual(expect.arrayContaining(mintedIds));
+    const malformed = await fetchApi(apiRequest('/v1/principals?cursor=bad!'));
+    expect(malformed.status).toBe(400);
+    expect((await responseBody(malformed)).error.code).toBe('INVALID_CURSOR');
+  });
+
   it('expires tokens and cascades revocation to descendants', async () => {
     const parent = (await responseBody(await mint({ roles: ['agent'], ttlSeconds: 600 }))).data;
     const child = (await responseBody(await mint({ roles: ['agent'], ttlSeconds: 300 }, crypto.randomUUID(), parent.token))).data;

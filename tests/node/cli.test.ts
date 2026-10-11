@@ -78,9 +78,10 @@ describe('Concord agent CLI client', () => {
       expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/principals', body: { roles: ['agent'], repoIds: ['alpha'], ttlSeconds: 7200, name: 'worker' } });
       const listed = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'list'], { cwd: process.cwd(), env });
       expect(JSON.parse(listed.stdout)).toMatchObject({ data: { items: [{ id: 'child' }] } });
+      await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'list', '--cursor', 'MjU'], { cwd: process.cwd(), env });
       const revoked = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'revoke', 'child'], { cwd: process.cwd(), env });
       expect(JSON.parse(revoked.stdout)).toMatchObject({ data: { revokedIds: ['child'] } });
-      expect(calls.map(call => `${call.method} ${call.path}`)).toEqual(['POST /v1/principals', 'GET /v1/principals', 'DELETE /v1/principals/child']);
+      expect(calls.map(call => `${call.method} ${call.path}`)).toEqual(['POST /v1/principals', 'GET /v1/principals', 'GET /v1/principals?cursor=MjU', 'DELETE /v1/principals/child']);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
   it('drives a complete fake transport lifecycle with JSON envelopes', async () => {

@@ -18,7 +18,7 @@ Commands and required fields:
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
   principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
-  principals list
+  principals list [--cursor CURSOR]
   principals revoke ID
   repo clone --repo ID --path PATH                 (read-only canonical clone)
   change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
@@ -81,7 +81,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   };
 
   if (noun === 'principals') {
-    if (verb === 'list') return print(await client.request('GET', '/principals'));
+    if (verb === 'list') return print(await client.request('GET', `/principals${query({ cursor: flags.cursor })}`));
     if (verb === 'revoke') {
       if (args.length !== 1 || !/^[A-Za-z0-9_-]{1,64}$/.test(args[0])) throw new ConcordError('principals revoke requires an ID', 'usage');
       return print(await client.request('DELETE', `/principals/${args[0]}`));

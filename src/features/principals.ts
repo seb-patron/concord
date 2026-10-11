@@ -1,11 +1,14 @@
 import type { DelegatedPrincipal, ModuleContext, Principal, Role, TrustedConfiguration } from '../contracts';
 import { requireTenant } from '../auth';
-import { HttpError, json, readJson } from '../http';
+import { encodeCursor, HttpError, json, parseCursor, readJson } from '../http';
 import { eventSequence } from '../state';
 
 const idPattern = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_ACTIVE_LIMIT = 100;
+const MAX_TOTAL_LIMIT = 1000;
+const PAGE_SIZE = 25;
+const MAX_REPO_IDS = 100;
 
 interface Row extends Record<string, SqlStorageValue> {
   id: string; token_digest: string; roles: string; repo_ids: string;
@@ -33,13 +36,15 @@ function publicRecord(row: Row): DelegatedPrincipal {
   };
 }
 
-function limits(config: TrustedConfiguration): { maxTtlMs: number; activeLimit: number } {
+function limits(config: TrustedConfiguration): { maxTtlMs: number; activeLimit: number; totalLimit: number } {
   const maxTtlMs = config.delegatedPrincipals?.maxTtlMs ?? DEFAULT_TTL_MS;
   const activeLimit = config.delegatedPrincipals?.activeLimit ?? DEFAULT_ACTIVE_LIMIT;
-  if (!Number.isSafeInteger(maxTtlMs) || maxTtlMs < 1000 || !Number.isSafeInteger(activeLimit) || activeLimit < 1) {
+  const totalLimit = config.delegatedPrincipals?.totalLimit ?? MAX_TOTAL_LIMIT;
+  if (!Number.isSafeInteger(maxTtlMs) || maxTtlMs < 1000 || !Number.isSafeInteger(activeLimit) || activeLimit < 1 ||
+    !Number.isSafeInteger(totalLimit) || totalLimit < 1 || totalLimit > MAX_TOTAL_LIMIT) {
     throw new HttpError(503, 'TRUSTED_CONFIG_INVALID', 'Invalid delegated principal limits');
   }
-  return { maxTtlMs, activeLimit };
+  return { maxTtlMs, activeLimit, totalLimit };
 }
 
 /** Only the catalog's internal lookup path calls this, after checking its tenant identity. */
@@ -55,8 +60,14 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
   const { principal, sql } = context;
   const now = context.now();
   if (path === '/v1/principals' && request.method === 'GET') {
-    const rows = sql.exec<Row>('SELECT * FROM principals_records ORDER BY created_at, id').toArray();
-    return json({ items: rows.map(publicRecord) }, context.version(), eventSequence(sql));
+    const cursor = parseCursor(new URL(request.url).searchParams.get('cursor'));
+    // Rows are never deleted, so SQLite rowids give stable, increasing page positions.
+    const rows = sql.exec<Row & { page_cursor: number }>(
+      'SELECT rowid AS page_cursor, * FROM principals_records WHERE rowid > ? ORDER BY rowid LIMIT ?', cursor, PAGE_SIZE + 1,
+    ).toArray();
+    const items = rows.slice(0, PAGE_SIZE);
+    const nextCursor = rows.length > PAGE_SIZE ? encodeCursor(items[items.length - 1].page_cursor) : null;
+    return json({ items: items.map(publicRecord), nextCursor }, context.version(), eventSequence(sql));
   }
   if (path === '/v1/principals' && request.method === 'POST') {
     if (!principal.roles.includes('owner') && !principal.roles.includes('agent')) {
@@ -72,13 +83,13 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
       throw new HttpError(403, 'SCOPE_ESCALATION', 'Roles exceed caller scope');
     }
     const repoIds = body.repoIds === undefined ? principal.repoIds : body.repoIds;
-    if (repoIds !== '*' && (!Array.isArray(repoIds) || repoIds.some(id => typeof id !== 'string' || !idPattern.test(id)) || new Set(repoIds).size !== repoIds.length)) {
+    if (repoIds !== '*' && (!Array.isArray(repoIds) || repoIds.length > MAX_REPO_IDS || repoIds.some(id => typeof id !== 'string' || !idPattern.test(id)) || new Set(repoIds).size !== repoIds.length)) {
       throw new HttpError(400, 'INVALID_SCOPE', 'Invalid repoIds');
     }
     if (principal.repoIds !== '*' && (repoIds === '*' || (repoIds as string[]).some(id => !principal.repoIds.includes(id)))) {
       throw new HttpError(403, 'SCOPE_ESCALATION', 'Repositories exceed caller scope');
     }
-    const { maxTtlMs, activeLimit } = limits(context.trusted);
+    const { maxTtlMs, activeLimit, totalLimit } = limits(context.trusted);
     const ttlSeconds = body.ttlSeconds === undefined ? Math.floor(Math.min(DEFAULT_TTL_MS, maxTtlMs) / 1000) : body.ttlSeconds;
     if (!Number.isSafeInteger(ttlSeconds) || (ttlSeconds as number) < 1 || (ttlSeconds as number) * 1000 > maxTtlMs) {
       throw new HttpError(400, 'INVALID_TTL', 'TTL exceeds trusted maximum');
@@ -105,6 +116,8 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
       }
       const count = sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM principals_records WHERE revoked_at IS NULL AND expires_at > ?', now).toArray()[0].count;
       if (count >= activeLimit) throw new HttpError(409, 'PRINCIPAL_CAP', 'Active principal cap reached');
+      const total = sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM principals_records').toArray()[0].count;
+      if (total >= totalLimit) throw new HttpError(409, 'PRINCIPAL_CAP', 'Total principal cap reached');
       sql.exec('INSERT INTO principals_records(id, token_digest, roles, repo_ids, expires_at, parent_id, created_at, revoked_at, name, idempotency_key) VALUES(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)',
         id, digest, JSON.stringify(roles), JSON.stringify(repoIds), expiresAt, principal.principalId, now, body.name ?? null, key);
       context.appendEvent('principal.minted', [id], { parentId: principal.principalId, roles, repoIds, expiresAt }, context.nextVersion());
