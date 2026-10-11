@@ -1,0 +1,275 @@
+#!/usr/bin/env node
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { parseArgs } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { ConcordClient, ConcordError, idempotencyKey, type RequestOptions } from './client.ts';
+import { assertCommit, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
+
+const HELP = `Concord agent CLI
+
+Usage: npm run concord -- <noun> <verb> [options]
+
+Connection: CONCORD_URL and CONCORD_TOKEN; alternatively --token-stdin reads one token from stdin.
+Common: --repo ID --json --idempotency-key KEY --expected-version N
+Mutations generate an idempotency key when omitted. Responses are JSON on stdout; errors are JSON on stderr.
+
+Commands and required fields:
+  repo create --name NAME --policy-id ID --profile-id ID
+  repo list [--cursor CURSOR]
+  repo clone --repo ID --path PATH                 (read-only canonical clone)
+  change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
+  change get --repo ID --id ID
+  change checkout --repo ID --id ID --worktree PATH
+  change publish --repo ID --id ID --worktree PATH --lease-fences JSON_OBJECT
+  change close --repo ID --id ID --expected-version N [--reason TEXT]
+  lease claim --repo ID --change-id ID --unit-keys JSON_ARRAY --intent-text TEXT --expected-version N [--ttl-seconds N]
+  lease list --repo ID
+  lease renew --repo ID --id ID --fence N --expected-version N [--ttl-seconds N]
+  lease release --repo ID --id ID --fence N --expected-version N
+  queue list --repo ID
+  queue enqueue --repo ID --change-id ID --verdict-id ID --lease-fences JSON_OBJECT --expected-version N
+  queue withdraw --repo ID --change-id ID --reason TEXT --expected-version N
+  finding list --repo ID --change-id ID
+  finding add --repo ID --change-id ID --revision N --unit-key KEY --text TEXT --evidence-digest sha256:... --expected-version N
+  repair submit --repo ID --change-id ID --revision N --finding-set-version N --dispositions JSON_ARRAY --expected-version N
+  repair review --repo ID --change-id ID --round-id ID --revision N --finding-set-version N --decision accept|reject --evidence-digest sha256:... --expected-version N
+  verdict add --repo ID --change-id ID --revision N --review-manifest-digest sha256:... --finding-set-version N --decision approve|reject --evidence-digest sha256:... --expected-version N
+  verdict carry --repo ID --change-id ID --parent-verdict-id ID --revision N --new-base-oid OID --expected-version N
+  events list --repo ID [--after SEQUENCE]
+  api METHOD PATH [--body-file PATH]                 (advanced API; mutations need --idempotency-key)
+
+Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UNAVAILABLE responses remain explicit server errors.
+`;
+
+type Flags = Record<string, string | boolean | undefined>;
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor'];
+
+export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
+  let parsed;
+  try {
+    const options: Record<string, { type: 'string' } | { type: 'boolean' }> = {};
+    for (const name of OPTION_NAMES) options[name] = { type: 'string' };
+    options.json = { type: 'boolean' };
+    options['token-stdin'] = { type: 'boolean' };
+    parsed = parseArgs({ args: argv, options, allowPositionals: true, strict: true });
+  } catch (error) { throw new ConcordError(`${error instanceof Error ? error.message : error}\n\n${HELP}`, 'usage'); }
+  const [noun, verb, ...args] = parsed.positionals;
+  const flags = parsed.values as Flags;
+  if (!noun || noun === 'help' || flags.help) { process.stdout.write(HELP); return; }
+  if (noun === 'api') {
+    const method = verb;
+    const path = args[0];
+    if (!method || !path) throw new ConcordError('api requires METHOD PATH', 'usage');
+    const client = await clientFor(flags);
+    const body = flags['body-file'] ? await bodyFile(String(flags['body-file'])) : undefined;
+    return print(await client.request(method, path, requestOptions(flags, body)));
+  }
+  const client = await clientFor(flags);
+  const repo = String(flags.repo ?? '');
+  const requireRepo = () => { if (!repo) throw new ConcordError(`${noun} ${verb ?? ''} requires --repo`, 'usage'); return encodeURIComponent(repo); };
+  const body = flags['body-file'] ? await bodyFile(String(flags['body-file'])) : undefined;
+  const send = (method: string, path: string, payload?: unknown) => client.request(method, path, requestOptions(flags, payload));
+  const mutateExisting = (path: string, payload: unknown) => {
+    const options = requestOptions(flags, payload);
+    if (options.expectedVersion === undefined) throw new ConcordError('--expected-version is required when mutating an existing resource', 'usage');
+    return client.request('POST', path, options);
+  };
+
+  if (noun === 'repo' && verb === 'list') return print(await send('GET', `/repos${query({ cursor: flags.cursor })}`));
+  if (noun === 'repo' && verb === 'create') {
+    const payload = body ?? requiredObject(flags, ['name', 'policy-id', 'profile-id'], { name: 'name', policyId: 'policy-id', profileId: 'profile-id' });
+    return print(await send('POST', '/repos', payload));
+  }
+  if (noun === 'repo' && verb === 'clone') {
+    const id = requireRepo();
+    const destination = required(flags, 'path');
+    const repoResult = unwrap(await send('GET', `/repos/${id}`)) as Record<string, unknown>;
+    const storageName = stringField(repoResult, 'canonicalStorageName');
+    const tokenResult = unwrap(await client.request('POST', `/repos/${id}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoResult, 'version')))) as Record<string, unknown>;
+    const remote = stringField(tokenResult, 'remote');
+    const token = tokenField(tokenResult);
+    await cloneRepo(remote, destination, token);
+    return print({ cloned: true, repoId: repo, path: destination, access: 'read-only' });
+  }
+
+  const rid = requireRepo();
+  const root = `/repos/${rid}`;
+  if (noun === 'change' && verb === 'create') {
+    const payload = body ?? requiredObject(flags, ['intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys'], {
+      intentKey: 'intent-key', intentText: 'intent-text', baseOid: ['base-oid', value => value === 'null' ? null : value], branch: 'branch', unitKeys: ['unit-keys', parseJson], dependencyChangeIds: ['dependency-change-ids', parseJson, []],
+    });
+    return print(await send('POST', `${root}/changes`, payload));
+  }
+  if (noun === 'change' && verb === 'get') return print(await send('GET', `${root}/changes/${encodeURIComponent(required(flags, 'id'))}`));
+  if (noun === 'change' && verb === 'close') {
+    const id = encodeURIComponent(required(flags, 'id'));
+    return print(await mutateExisting(`${root}/changes/${id}/close`, body ?? { reason: flags.reason ?? 'closed by agent' }));
+  }
+  if (noun === 'change' && verb === 'checkout') {
+    const id = encodeURIComponent(required(flags, 'id'));
+    const worktree = required(flags, 'worktree');
+    const change = unwrap(await send('GET', `${root}/changes/${id}`)) as Record<string, unknown>;
+    const repository = unwrap(await send('GET', `/repos/${rid}`)) as Record<string, unknown>;
+    const storageName = stringField(change, 'candidateStorageName');
+    const branch = stringField(change, 'branch');
+    const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
+    await fetchFork(worktree, stringField(access, 'remote'), branch, tokenField(access));
+    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, remote: redactRemote(stringField(access, 'remote')) });
+  }
+  if (noun === 'change' && verb === 'publish') {
+    const id = encodeURIComponent(required(flags, 'id'));
+    const worktree = required(flags, 'worktree');
+    const change = unwrap(await send('GET', `${root}/changes/${id}`)) as Record<string, unknown>;
+    const repository = unwrap(await send('GET', `/repos/${rid}`)) as Record<string, unknown>;
+    const storageName = stringField(change, 'candidateStorageName');
+    if (storageName === repository.canonicalStorageName) throw new ConcordError('Refusing to push: server assigned canonical storage as the candidate target', 'server');
+    const branch = stringField(change, 'branch');
+    const baseOid = stringField(change, 'baseOid');
+    if (baseOid === 'null') throw new ConcordError('Cannot publish a seed draft through change publish', 'usage');
+    const headOid = await resolveHead(worktree);
+    await assertCommit(worktree, baseOid);
+    const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'write', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
+    const remote = stringField(access, 'remote');
+    rejectCanonicalTarget(storageName, repository.canonicalStorageName, remote,
+      typeof repository.canonicalRemote === 'string' ? repository.canonicalRemote : typeof repository.remote === 'string' ? repository.remote : undefined);
+    await pushCandidate(worktree, remote, branch, tokenField(access));
+    const unitKeys = Array.isArray(change.unitKeys) ? change.unitKeys as string[] : [];
+    const fences = parseJson(required(flags, 'lease-fences')) as Record<string, number>;
+    const payload = body ?? { baseOid, headOid, branch, unitKeys, leaseFences: fences };
+    return print(await client.request('POST', `${root}/changes/${id}/publish`, requestOptions(flags, payload, numberField(change, 'version'))));
+  }
+
+  if (noun === 'lease' && verb === 'list') return print(await send('GET', `${root}/leases`));
+  if (noun === 'lease' && verb === 'claim') return print(await mutateExisting(`${root}/leases`, body ?? requiredObject(flags, ['change-id', 'unit-keys', 'intent-text'], {
+    changeId: 'change-id', unitKeys: ['unit-keys', parseJson], intentText: 'intent-text', ttlSeconds: ['ttl-seconds', numberValue, 120],
+  })));
+  if (noun === 'lease' && (verb === 'renew' || verb === 'release')) {
+    const id = encodeURIComponent(required(flags, 'id'));
+    const payload = body ?? { fence: numberFlag(flags, 'fence'), ...(verb === 'renew' ? { ttlSeconds: numberFlag(flags, 'ttl-seconds', 120) } : {}) };
+    return print(await mutateExisting(`${root}/leases/${id}/${verb}`, payload));
+  }
+  if (noun === 'queue' && verb === 'list') return print(await send('GET', `${root}/queue`));
+  if (noun === 'queue' && verb === 'enqueue') return print(await mutateExisting(`${root}/queue/enqueue`, body ?? requiredObject(flags, ['change-id', 'verdict-id', 'lease-fences'], {
+    changeId: 'change-id', verdictId: 'verdict-id', leaseFences: ['lease-fences', parseJson],
+  })));
+  if (noun === 'queue' && verb === 'withdraw') return print(await mutateExisting(`${root}/queue/withdraw`, body ?? requiredObject(flags, ['change-id', 'reason'], { changeId: 'change-id', reason: 'reason' })));
+
+  if (noun === 'finding' && (verb === 'list' || verb === 'add')) {
+    const changeId = encodeURIComponent(required(flags, 'change-id'));
+    if (verb === 'list') return print(await send('GET', `${root}/changes/${changeId}/findings`));
+    return print(await mutateExisting(`${root}/changes/${changeId}/findings`, body ?? requiredObject(flags, ['revision', 'unit-key', 'text', 'evidence-digest'], {
+      revision: ['revision', numberValue], unitKey: 'unit-key', text: 'text', evidenceDigest: 'evidence-digest',
+    })));
+  }
+  if (noun === 'repair' && (verb === 'submit' || verb === 'review')) {
+    const changeId = encodeURIComponent(required(flags, 'change-id'));
+    const path = `${root}/changes/${changeId}/repairs${verb === 'review' ? `/${encodeURIComponent(required(flags, 'round-id'))}/review` : ''}`;
+    if (verb === 'submit') return print(await mutateExisting(path, body ?? requiredObject(flags, ['revision', 'finding-set-version', 'dispositions'], {
+      revision: ['revision', numberValue], findingSetVersion: ['finding-set-version', numberValue], dispositions: ['dispositions', parseJson],
+    })));
+    return print(await mutateExisting(path, body ?? requiredObject(flags, ['revision', 'finding-set-version', 'decision', 'evidence-digest'], {
+      revision: ['revision', numberValue], findingSetVersion: ['finding-set-version', numberValue], decision: 'decision', evidenceDigest: 'evidence-digest',
+    })));
+  }
+  if (noun === 'verdict' && (verb === 'add' || verb === 'carry')) {
+    const changeId = encodeURIComponent(required(flags, 'change-id'));
+    const path = `${root}/changes/${changeId}/${verb === 'add' ? 'verdicts' : 'carry'}`;
+    if (verb === 'add') return print(await mutateExisting(path, body ?? requiredObject(flags, ['revision', 'review-manifest-digest', 'finding-set-version', 'decision', 'evidence-digest'], {
+      revision: ['revision', numberValue], reviewManifestDigest: 'review-manifest-digest', findingSetVersion: ['finding-set-version', numberValue], decision: 'decision', evidenceDigest: 'evidence-digest',
+    })));
+    return print(await mutateExisting(path, body ?? requiredObject(flags, ['parent-verdict-id', 'revision', 'new-base-oid'], {
+      parentVerdictId: 'parent-verdict-id', revision: ['revision', numberValue], newBaseOid: 'new-base-oid',
+    })));
+  }
+  if (noun === 'events' && verb === 'list') return print(await send('GET', `${root}/events${query({ after: flags.after })}`));
+  throw new ConcordError(`Unknown command: ${[noun, verb, ...args].filter(Boolean).join(' ')}\n\n${HELP}`, 'usage');
+}
+
+async function clientFor(flags: Flags): Promise<ConcordClient> {
+  const url = process.env.CONCORD_URL;
+  if (!url) throw new ConcordError('CONCORD_URL is required', 'usage');
+  let token = process.env.CONCORD_TOKEN;
+  if (flags['token-stdin']) {
+    if (process.stdin.isTTY) throw new ConcordError('--token-stdin requires piped stdin', 'usage');
+    token = (await stdinText()).trim();
+  }
+  if (!token) throw new ConcordError('CONCORD_TOKEN is required (or provide --token-stdin)', 'usage');
+  return new ConcordClient({ url, token });
+}
+function requestOptions(flags: Flags, body?: unknown, impliedVersion?: number): RequestOptions {
+  const methodHasBody = body !== undefined;
+  return {
+    ...(methodHasBody ? { body } : {}),
+    ...(methodHasBody ? { idempotencyKey: idempotencyKey(typeof flags['idempotency-key'] === 'string' ? flags['idempotency-key'] : undefined) } : {}),
+    ...(flags['expected-version'] !== undefined ? { expectedVersion: numberFlag(flags, 'expected-version') } : impliedVersion !== undefined ? { expectedVersion: impliedVersion } : {}),
+  };
+}
+async function bodyFile(path: string): Promise<unknown> {
+  try { return JSON.parse(await readFile(path, 'utf8')); }
+  catch (error) { throw new ConcordError(`Cannot read JSON body file: ${error instanceof Error ? error.message : error}`, 'usage'); }
+}
+function required(flags: Flags, name: string): string {
+  const value = flags[name];
+  if (typeof value !== 'string' || value.length === 0) throw new ConcordError(`--${name} is required`, 'usage');
+  return value;
+}
+function numberFlag(flags: Flags, name: string, fallback?: number): number {
+  const raw = flags[name];
+  if (raw === undefined && fallback !== undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) throw new ConcordError(`--${name} must be a non-negative integer`, 'usage');
+  return value;
+}
+function numberValue(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error('expected non-negative integer');
+  return parsed;
+}
+function requiredObject(flags: Flags, names: string[], mapping: Record<string, string | readonly [string, (value: string) => unknown, unknown?]>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [target, descriptor] of Object.entries(mapping)) {
+    let source: string;
+    let convert: ((value: string) => unknown) | undefined;
+    let fallback: unknown;
+    if (typeof descriptor === 'string') { source = descriptor; convert = undefined; fallback = undefined; }
+    else [source, convert, fallback] = descriptor;
+    const raw = flags[source];
+    if (raw === undefined && fallback !== undefined) { result[target] = fallback; continue; }
+    if (typeof raw !== 'string') {
+      if (names.includes(source)) throw new ConcordError(`--${source} is required`, 'usage');
+      continue;
+    }
+    try { result[target] = convert ? convert(raw) : raw; }
+    catch { throw new ConcordError(`--${source} has an invalid value`, 'usage'); }
+  }
+  return result;
+}
+function parseJson(value: string): unknown { return JSON.parse(value); }
+function query(values: Record<string, string | boolean | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) if (typeof value === 'string') params.set(key, value);
+  const encoded = params.toString(); return encoded ? `?${encoded}` : '';
+}
+function unwrap(value: unknown): unknown { return value && typeof value === 'object' && 'data' in value ? (value as { data: unknown }).data : value; }
+function stringField(value: Record<string, unknown>, name: string): string {
+  const found = value[name];
+  if (typeof found !== 'string' || !found) throw new ConcordError(`Server response is missing ${name}`, 'server', undefined, value);
+  return found;
+}
+function numberField(value: Record<string, unknown>, name: string): number | undefined { return typeof value[name] === 'number' ? value[name] as number : undefined; }
+function tokenField(value: Record<string, unknown>): string {
+  for (const key of ['token', 'secret', 'plaintext']) if (typeof value[key] === 'string') return value[key] as string;
+  throw new ConcordError('Git token response did not include a token', 'server', undefined, { ...value, token: undefined, secret: undefined, plaintext: undefined });
+}
+function redactRemote(remote: string): string { try { const url = new URL(remote); return `${url.origin}${url.pathname}`; } catch { return '[remote]'; } }
+async function stdinText(): Promise<string> { let value = ''; for await (const chunk of process.stdin) value += chunk; return value; }
+function print(value: unknown): void { process.stdout.write(`${JSON.stringify(value ?? null)}\n`); }
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) runCli().catch(error => {
+  const err = error instanceof ConcordError ? error : new ConcordError(error instanceof Error ? error.message : String(error), 'transport');
+  const diagnostic: Record<string, unknown> = { error: { kind: err.kind, message: err.message, ...(err.payload === undefined ? {} : { details: err.payload }), ...(err.status === undefined ? {} : { status: err.status }) } };
+  if (err.kind === 'conflict') diagnostic.nextAction = 'Inspect the current holder/version, then retry with a fresh idempotency key or renew your own active lease; leases are never stolen automatically.';
+  process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
+  process.exitCode = err.exitCode;
+});
