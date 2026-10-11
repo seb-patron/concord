@@ -37,11 +37,12 @@ npm run git-bridge
 In a second terminal with the same bridge token, start the local Worker with [Wrangler `--var` overrides](https://developers.cloudflare.com/workers/wrangler/commands/workers/):
 
 ```sh
-npm run dev -- --var 'STORAGE_BACKEND:bridge' \
+export CONCORD_WRANGLER_STATE=".wrangler/state/$(node -p 'require("node:crypto").createHash("sha256").update(process.env.CONCORD_BRIDGE_TOKEN).digest("hex").slice(0,12)')"
+npm run dev -- --persist-to "$CONCORD_WRANGLER_STATE" --var 'STORAGE_BACKEND:bridge' \
   --var "BRIDGE_URL:http://127.0.0.1:8788/?token=$CONCORD_BRIDGE_TOKEN"
 ```
 
-The checked-in local Wrangler configuration defaults to `fake`. Keep the data directory to persist repos and issued fake-token revocation state across bridge restarts. The Worker adapter uses HTTP only; Node Git and filesystem APIs stay in `local/git-bridge.ts`. Do not deploy the bridge URL: production storage selection accepts only Artifacts.
+The checked-in local Wrangler configuration defaults to `fake`. Keep the bridge data directory and the matching `.wrangler/state/` directory to persist repos and issued fake-token revocation state across restarts. A fresh bridge token gives each run separate Worker state. The Worker adapter uses HTTP only; Node Git and filesystem APIs stay in `local/git-bridge.ts`. Do not deploy the bridge URL: production storage selection accepts only Artifacts.
 
 ## Early live Artifacts gate (skipped by default)
 

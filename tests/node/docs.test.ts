@@ -1,7 +1,7 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, copyFile, mkdir, readFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readFile, readdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -101,6 +101,50 @@ afterEach(async () => {
 });
 
 describe('documented demo commands', () => {
+  it('keeps every documented Wrangler dev command persistent inside the clone', async () => {
+    async function markdownFiles(dir: string): Promise<string[]> {
+      const entries = await readdir(join(cwd, dir), { withFileTypes: true });
+      const nested = await Promise.all(entries.map(async entry => {
+        const path = join(dir, entry.name);
+        // Design records describe historical contracts, not runnable operator commands.
+        if (path === 'docs/ARCHITECTURE.md' || path === 'docs/JUDGING.md' || path === 'docs/specs') return [];
+        if (entry.isDirectory()) return markdownFiles(path);
+        return entry.isFile() && path.endsWith('.md') ? [path] : [];
+      }));
+      return nested.flat();
+    }
+
+    const files = ['README.md', ...await markdownFiles('docs')];
+    const checked: string[] = [];
+    for (const file of files) {
+      const document = await readFile(join(cwd, file), 'utf8');
+      const lines = document.replace(/\\\r?\n\s*/g, ' ').split(/\r?\n/);
+      for (const line of lines) {
+        if (!/\b(?:npm\s+run\s+dev|(?:npx\s+)?wrangler\s+dev)\b/.test(line)) continue;
+        checked.push(file);
+        const value = /--persist-to\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(line)?.slice(1).find(Boolean);
+        expect(value, `${file}: ${line}`).toBeDefined();
+        const statePath = value === '$CONCORD_WRANGLER_STATE'
+          ? /export CONCORD_WRANGLER_STATE="(\.wrangler\/state\/[^"\n]+)/.exec(document)?.[1]
+          : value;
+        expect(statePath, `${file}: ${line}`).toMatch(/^\.wrangler\/state\/[^\s]+/);
+      }
+    }
+    expect(checked.sort()).toEqual(['README.md', 'docs/api-repos.md', 'docs/dev.md', 'docs/ui.md']);
+
+    const guide = await readFile(join(cwd, 'docs/api-repos.md'), 'utf8');
+    const bridgeWorker = /In a second terminal[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1];
+    expect(bridgeWorker).toBeDefined();
+    const [stateExport, workerCommand] = bridgeWorker!.replace(/\\\r?\n\s*/g, ' ').split('\n');
+    for (const token of ['first-run-token', 'second-run-token']) {
+      const { args } = await capturedNpm([stateExport], workerCommand,
+        { ...process.env, CONCORD_BRIDGE_TOKEN: token });
+      const hash = createHash('sha256').update(token).digest('hex').slice(0, 12);
+      expect(args.slice(0, 5)).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${hash}`]);
+      expect(resolve(cwd, args[4])).toBe(join(cwd, '.wrangler', 'state', hash));
+    }
+  });
+
   it('keeps Wrangler persistence in the clone when TMPDIR is outside it', async () => {
     const root = await externalTempDir('concord-docs-paths-');
     const readme = await taggedBlocks('README.md');
