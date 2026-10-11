@@ -96,6 +96,8 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(trusted) })).toThrow('TRUSTED_CONFIG_INVALID');
     trusted.profiles['local-demo'].maxOutputBytes = 1.5;
     expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(trusted) })).toThrow('TRUSTED_CONFIG_INVALID');
+    const nullPolicy = { ...trusted, policies: { ...trusted.policies, 'local-demo': null } };
+    expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(nullPolicy) })).toThrow('TRUSTED_CONFIG_INVALID');
     const nullProfile = { ...trusted, profiles: { ...trusted.profiles, 'local-demo': null } };
     expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(nullProfile) })).toThrow('TRUSTED_CONFIG_INVALID');
   });
