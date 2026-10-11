@@ -110,7 +110,17 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     const actual = await git(directory, ['rev-parse', candidate.headOid + '^{commit}']);
     if (candidate.baseOid && !await isAncestor(directory, candidate.baseOid, actual)) throw new Error('CANDIDATE_ANCESTRY');
     const inspected = await inspectUnits(directory, candidate.baseOid, actual, job);
-    return { ...common, kind: 'inspect-candidate', outcome: 'PASS', observedHeadOid: actual,
+    // A command profile validates the inspected tree as well as composed stacks.
+    // Dispatch-lab inspection retains its existing manifest-only behavior.
+    let outcome: CheckOutcome = 'PASS';
+    let log = '';
+    if (profile?.kind === 'command') {
+      await git(directory, ['switch', '--detach', actual]);
+      const checked = await pinnedCheck(profile, job, directory);
+      outcome = checked.outcome;
+      log = checked.log;
+    }
+    return { ...common, kind: 'inspect-candidate', outcome, log, observedHeadOid: actual,
       sourceTreeOid: await treeOid(directory, actual), unitKeys: inspected.unitKeys,
       reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest };
   }
