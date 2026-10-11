@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import type { TenantCatalog } from '../../src/catalog';
 import type { RepoCoordinator } from '../../src/coordinator';
@@ -11,7 +11,7 @@ import { digest as canonicalDigest } from '../../src/http';
 import { ids, pendingInitialToken, type ProvisioningIntent } from '../../src/repos/model';
 import { FakeStorage } from '../../src/storage/fake';
 import { artifactsStorage } from '../../src/storage/artifacts';
-import { sqlState } from '../../src/state';
+import { localFixtureConfig, sqlState } from '../../src/state';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
 const fetchApi = (request: Request) => worker.fetch(request, env);
@@ -21,8 +21,11 @@ const c = 'c'.repeat(40);
 const d = 'd'.repeat(40);
 const digest = `sha256:${'0'.repeat(64)}` as const;
 
-async function create(name: string) {
-  const response = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, `create-${name}`));
+const originalTrustedConfig = (env as Env).TRUSTED_CONFIG;
+afterEach(() => { (env as Env).TRUSTED_CONFIG = originalTrustedConfig; });
+
+async function create(name: string, configuration = 'local-demo') {
+  const response = await fetchApi(mutation('/v1/repos', { name, policyId: configuration, profileId: configuration }, `create-${name}`));
   expect(response.status).toBe(201);
   return (await responseBody(response)).data;
 }
@@ -40,7 +43,7 @@ function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensur
 }
 
 describe('repository and change lifecycle', () => {
-  it('keeps ordinary intent keys owned while admitting only the matching contest pair', async () => {
+  it('keeps ordinary intent keys owned, including contest-shaped tasks and fixture authors', async () => {
     const repo = await create('intent_ownership_case');
     await fetchApi(apiRequest('/v1/repos/intent_ownership_case'));
     await fake('intent_ownership_case', provider => {
@@ -61,19 +64,57 @@ describe('repository and change lifecycle', () => {
 
     const contest = { ...ordinary, intentKey: 'J', intentText: 'epsilon-contest', unitKeys: ['row:families:epsilon'] };
     const low = await fetchApi(mutation(path, contest, 'contest-low', 'local-contest-low'));
-    const wrongChild = await fetchApi(mutation(path, contest, 'contest-wrong-child', 'local-agent-b'));
-    expect(wrongChild.status).toBe(409);
-    expect((await responseBody(wrongChild)).error.code).toBe('INTENT_OWNED');
     const high = await fetchApi(mutation(path, contest, 'contest-high', 'local-contest-high'));
     expect(low.status).toBe(201);
-    expect(high.status).toBe(201);
+    expect(high.status).toBe(409);
+    expect((await responseBody(high)).error.code).toBe('INTENT_OWNED');
     const lowId = (await responseBody(low)).data.changeId;
-    expect((await responseBody(high)).data.changeId).not.toBe(lowId);
     const lowRepeat = await fetchApi(mutation(path, contest, 'contest-low-repeat', 'local-contest-low'));
     expect((await responseBody(lowRepeat)).data.changeId).toBe(lowId);
     const third = await fetchApi(mutation(path, contest, 'contest-third', 'local-agent-a'));
     expect(third.status).toBe(409);
     expect((await responseBody(third)).error.code).toBe('INTENT_OWNED');
+  });
+
+  it('requires an owner-authorized contest for the exact dispatch-lab repo and intent', async () => {
+    const fixture = localFixtureConfig('local');
+    (env as Env).TRUSTED_CONFIG = JSON.stringify({
+      policies: { ...fixture.policies, 'dispatch-lab': { ...fixture.policies['local-demo'], id: 'dispatch-lab', checkerId: 'dispatch-lab' } },
+      profiles: { ...fixture.profiles, 'dispatch-lab': { ...fixture.profiles['local-demo'], id: 'dispatch-lab' } },
+    });
+    const makeReady = async (name: string) => {
+      const repo = await create(name, 'dispatch-lab');
+      await fetchApi(apiRequest(`/v1/repos/${name}`));
+      await fake(name, provider => {
+        provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+        provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+      });
+      return `/v1/repos/${name}`;
+    };
+    const task = { intentKey: 'J', intentText: 'epsilon-contest', baseOid: a, branch: 'refs/heads/demo',
+      unitKeys: ['row:families:epsilon'], dependencyChangeIds: [] };
+    const unapproved = await makeReady('dispatch_without_contest');
+    expect((await fetchApi(mutation(`${unapproved}/changes`, task, 'unapproved-first', 'local-contest-low'))).status).toBe(201);
+    const denied = await fetchApi(mutation(`${unapproved}/changes`, task, 'unapproved-second', 'local-contest-high'));
+    expect(denied.status).toBe(409);
+    expect((await responseBody(denied)).error.code).toBe('INTENT_OWNED');
+
+    const approved = await makeReady('dispatch_with_contest');
+    const detail = await responseBody(await fetchApi(apiRequest(approved)));
+    const authorization = { expectedVersion: detail.version, intentKey: 'J', childAuthorIds: ['contest-agent-low', 'contest-agent-high'] };
+    expect((await fetchApi(mutation(`${approved}/intent-contests`, authorization, 'agent-authorization', 'local-contest-low'))).status).toBe(403);
+    const authorized = await fetchApi(mutation(`${approved}/intent-contests`, authorization, 'owner-authorization'));
+    expect(authorized.status).toBe(201);
+    expect((await fetchApi(mutation(`${approved}/changes`, task, 'approved-first', 'local-contest-low'))).status).toBe(201);
+    expect((await fetchApi(mutation(`${approved}/changes`, task, 'approved-second', 'local-contest-high'))).status).toBe(201);
+    const third = await fetchApi(mutation(`${approved}/changes`, task, 'approved-third', 'local-agent-a'));
+    expect(third.status).toBe(409);
+    expect((await responseBody(third)).error.code).toBe('INTENT_OWNED');
+    const otherIntent = await fetchApi(mutation(`${approved}/changes`, { ...task, intentKey: 'K' }, 'wrong-intent', 'local-contest-low'));
+    expect(otherIntent.status).toBe(201);
+    const deniedOtherIntent = await fetchApi(mutation(`${approved}/changes`, { ...task, intentKey: 'K' }, 'wrong-intent-second', 'local-contest-high'));
+    expect(deniedOtherIntent.status).toBe(409);
+    expect((await responseBody(deniedOtherIntent)).error.code).toBe('INTENT_OWNED');
   });
 
   it('accepts trusted policy unit key syntax used by the demo', () => {

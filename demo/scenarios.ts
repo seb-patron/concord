@@ -531,6 +531,10 @@ export async function scene(options: Options, name: string): Promise<Manifest> {
   } else if (name === 'contest') {
     need('invalidate');
     const base = manifest.canonicalOid;
+    const contestRepo = ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}`), 'contest repository');
+    ok(await api(options, 'owner', 'POST', `/repos/${manifest.repoId}/intent-contests`, {
+      expectedVersion: contestRepo.version, intentKey: 'J', childAuthorIds: [principal.low, principal.high],
+    }), 'authorize contest intent');
     await createDraft(options, manifest, 'J-low', 'low', 'J', 'epsilon-contest', base, ['row:families:epsilon']);
     await createDraft(options, manifest, 'J-high', 'high', 'J', 'epsilon-contest', base, ['row:families:epsilon']);
     ok(await claim(options, manifest, 'J-low', 'low', ['row:families:epsilon']), 'claim J');

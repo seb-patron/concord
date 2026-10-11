@@ -38,6 +38,10 @@ const ownChange = (context: ModuleContext, change: Change) => {
 };
 const intentKey = (kind: 'ensure-repo' | 'fork', storageName: string) => `${kind}:${storageName}`;
 const intents = (context: ModuleContext) => context.state.get<Record<string, ProvisioningIntent>>('provisioning') ?? {};
+interface IntentContest {
+  repoId: string; intentKey: string; childAuthorIds: [string, string]; ownerId: string;
+}
+const intentContests = (context: ModuleContext) => context.state.get<IntentContest[]>('intent-contests') ?? [];
 const saveIntent = (context: ModuleContext, intent: ProvisioningIntent) => {
   const all = intents(context);
   all[intentKey(intent.kind, intent.storageName)] = intent;
@@ -238,6 +242,28 @@ function changeInput(body: CreateChangeBody) {
   return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt };
 }
 
+async function authorizeIntentContest(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
+  requireRole(context.principal, 'owner');
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  if (repo.policyId !== 'dispatch-lab' || repo.profileId !== 'dispatch-lab') {
+    fail(409, 'CONTEST_REPO_REQUIRED', 'Intent contests require the dispatch-lab repository configuration');
+  }
+  const key = text(body.intentKey, 'intentKey', 128);
+  const authors = ids(body.childAuthorIds, 'childAuthorIds');
+  if (authors.length !== 2 || authors.some(author => !/^[A-Za-z0-9_-]{1,64}$/.test(author))) {
+    fail(400, 'INVALID_CONTEST', 'Exactly two distinct child authors are required');
+  }
+  if (intentContests(context).some(item => item.intentKey === key)) {
+    fail(409, 'CONTEST_EXISTS', 'Intent contest already exists');
+  }
+  const contest: IntentContest = { repoId: repo.repoId, intentKey: key,
+    childAuthorIds: [authors[0], authors[1]], ownerId: context.principal.principalId };
+  context.state.put('intent-contests', [...intentContests(context), contest]);
+  versioned(context, 'repo.intent_contest_authorized', [repo.repoId, key], { childAuthorIds: authors });
+  return respond(context, contest, 201);
+}
+
 async function changeCreate(context: ModuleContext, body: CreateChangeBody): Promise<Response> {
   requireRole(context.principal, 'owner', 'agent');
   const repo = await catalogRepo(context);
@@ -250,15 +276,16 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const otherIntent = matchingIntents.find(item => all.some(change =>
     change.changeId === item.changeId && change.authorId !== context.principal.principalId));
   const otherChange = otherIntent ? getChange(context, otherIntent.changeId) : null;
-  // The dispatch-lab contest has exactly two independently owned, otherwise identical children.
-  const contestChild = !ownIntent && matchingIntents.length === 1 && input.intentKey === 'J' &&
-    input.intentText === 'epsilon-contest' && input.unitKeys.length === 1 &&
-    input.unitKeys[0] === 'row:families:epsilon' && input.dependencyChangeIds.length === 0 &&
-    input.attempt === 1 && otherIntent !== undefined && !otherIntent.terminal && otherChange !== null &&
-    otherChange.baseOid === input.baseOid && sameTask(otherChange, input) &&
-    ((otherChange.authorId === 'contest-agent-low' && context.principal.principalId === 'contest-agent-high') ||
-      (otherChange.authorId === 'contest-agent-high' && context.principal.principalId === 'contest-agent-low'));
-  if (otherIntent && !contestChild && !ownIntent) fail(409, 'INTENT_OWNED', 'Intent key belongs to another author');
+  const contest = intentContests(context).find(item => item.repoId === repo.repoId && item.intentKey === input.intentKey);
+  const contestChild = repo.policyId === 'dispatch-lab' && repo.profileId === 'dispatch-lab' &&
+    contest?.ownerId !== undefined && contest.childAuthorIds.includes(context.principal.principalId) &&
+    otherIntent !== undefined && !otherIntent.terminal && otherChange !== null &&
+    contest.childAuthorIds.includes(otherChange.authorId) &&
+    matchingIntents.every(item => {
+      const change = all.find(candidate => candidate.changeId === item.changeId);
+      return change && contest.childAuthorIds.includes(change.authorId);
+    }) && otherChange.baseOid === input.baseOid && sameTask(otherChange, input);
+  if (otherIntent && !contestChild) fail(409, 'INTENT_OWNED', 'Intent key belongs to another author');
   const priorIntent = ownIntent;
   if (priorIntent) {
     const prior = getChange(context, priorIntent.changeId);
@@ -604,6 +631,7 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/git-token$/, handle: (context, _request, _match, body) => gitToken(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes'), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
+    { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },

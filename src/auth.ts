@@ -75,7 +75,7 @@ export function requireTenant(principal: Principal, claimedTenant: unknown): voi
 /** Coarse role boundary. Feature handlers enforce author/reviewer and job fences. */
 export function requireRouteRole(principal: Principal, method: string, path: string): void {
   if (method === 'GET' || method === 'HEAD') return;
-  if (path === '/v1/repos' || /\/bootstrap$|\/contests$/.test(path)) return requireRole(principal, 'owner');
+  if (path === '/v1/repos' || /\/bootstrap$|\/(?:intent-)?contests$/.test(path)) return requireRole(principal, 'owner');
   if (/\/runner\/|\/jobs\//.test(path)) return requireRole(principal, 'checker', 'promoter');
   if (/\/findings$|\/verdicts$|\/carry$|\/repairs\/[^/]+\/review$/.test(path)) return requireRole(principal, 'reviewer');
   return requireRole(principal, 'agent', 'owner');
