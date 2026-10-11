@@ -57,6 +57,7 @@ Local mode has explicitly named fixture tokens: `local-owner`, `local-agent-a`, 
 The driver runs bounded checker/promoter jobs with `--pump-local`. To run them manually, use the values printed by seed in place of the placeholders below:
 
 ```sh
+export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-checker npm run runner -- --repo REPO_ID --role checker --profile "$CONCORD_RUN_DIR/dispatch-profile.json" --once
 CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-promoter npm run runner -- --repo REPO_ID --role promoter --profile-digest PROFILE_DIGEST_FROM_PREFLIGHT --once
 ```

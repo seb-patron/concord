@@ -65,6 +65,25 @@ async function capturedNpm(exports: string[], command: string, env: NodeJS.Proce
     values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
 }
 
+async function capturedBlock(block: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ args: string[]; values: string[] }[]> {
+  const script = [
+    'npm() {',
+    '  printf "CALL\\n"',
+    '  printf "ARG:%s\\n" "$@"',
+    '  printf "ENV:%s\\n" "$CONCORD_URL" "$CONCORD_TOKEN" "$CONCORD_SHOW_DECOMPILED_C" "$CONCORD_RUN_DIR"',
+    '}',
+    block,
+  ].join('\n');
+  const cleanEnv = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...extraEnv };
+  const { stdout } = await execFile('env', ['-i', ...Object.entries(cleanEnv).map(([key, value]) => `${key}=${value}`),
+    'sh', '-c', script], { cwd });
+  return stdout.split('CALL\n').slice(1).map(call => {
+    const lines = call.trimEnd().split('\n');
+    return { args: lines.filter(line => line.startsWith('ARG:')).map(line => line.slice(4)),
+      values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
+  });
+}
+
 async function run(command: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; data: any }> {
   const { stdout } = await execFile('sh', ['-c', command], { cwd, env, timeout: 120_000,
     maxBuffer: 8 * 1024 * 1024 });
@@ -109,6 +128,22 @@ afterEach(async () => {
 });
 
 describe('documented demo commands', () => {
+  it('runs every 12c-tagged block in written order from a clean shell', async () => {
+    for (const path of ['README.md', 'docs/DEMO.md', 'docs/deploy.md']) {
+      for (const block of await taggedBlocks(path)) {
+        const calls = await capturedBlock(block);
+        expect(calls, path).toHaveLength(commandLines(block).commands.length);
+        expect(calls.every(call => call.args.length > 0), path).toBe(true);
+      }
+    }
+    const deploy = (await taggedBlocks('docs/deploy.md'))[0];
+    const [seed] = await capturedBlock(deploy, {
+      CONCORD_URL: 'https://wrong-worker.example', CONCORD_TOKEN: 'wrong-token', CONCORD_SHOW_DECOMPILED_C: '1',
+    });
+    expect(seed.args.slice(0, 4)).toEqual(['run', 'demo', '--', 'seed']);
+    expect(seed.values).toEqual(['http://127.0.0.1:8787', 'local-owner', '0', '/tmp/concord-demo-01']);
+  });
+
   it('keeps every documented Wrangler dev command persistent inside the clone', async () => {
     async function markdownFiles(dir: string): Promise<string[]> {
       const entries = await readdir(join(cwd, dir), { withFileTypes: true });
@@ -181,7 +216,7 @@ describe('documented demo commands', () => {
       { cwd, env });
     expect(isAbsolute(runDir)).toBe(true);
     expect(runDir).toBe(join(resolve(env.TMPDIR), 'concord-demo-01'));
-    const firstDeploy = await capturedNpm([], commandLines(deploy[0]).commands[0], env);
+    const firstDeploy = await capturedNpm(commandLines(deploy[0]).exports, commandLines(deploy[0]).commands[0], env);
     expect(firstDeploy.args).toEqual(['run', 'demo', '--', 'seed', '--run', 'demo-01', '--state-dir', runDir]);
     await mkdir(runDir);
     await writeFile(join(runDir, 'trusted-config.json'), '{}\n');
@@ -226,16 +261,22 @@ describe('documented demo commands', () => {
 
     const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(await readFile(join(cwd, 'docs/DEMO.md'), 'utf8'))?.[1];
     expect(manual).toBeDefined();
-    const runnerCommands = commandLines(manual!).commands;
+    const { exports: runnerExports, commands: runnerCommands } = commandLines(manual!);
     expect(runnerCommands).toHaveLength(2);
-    const checker = await capturedNpm([], runnerCommands[0], { ...env, CONCORD_RUN_DIR: runDir });
+    const checker = await capturedNpm(runnerExports, runnerCommands[0], env);
     expect(checker.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'checker',
       '--profile', join(runDir, 'dispatch-profile.json'), '--once']);
     expect(checker.values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-checker']);
-    const promoter = await capturedNpm([], runnerCommands[1], { ...env, CONCORD_RUN_DIR: runDir });
+    const promoter = await capturedNpm(runnerExports, runnerCommands[1], env);
     expect(promoter.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'promoter',
       '--profile-digest', 'PROFILE_DIGEST_FROM_PREFLIGHT', '--once']);
     expect(promoter.values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-promoter']);
+
+    const missingRunDir = runnerExports.filter(line => !line.startsWith('export CONCORD_RUN_DIR='));
+    expect(missingRunDir).toHaveLength(runnerExports.length - 1);
+    await expect(execFile('sh', ['-c', [...missingRunDir, runnerCommands[0]].join('\n')],
+      { cwd, env: { ...env, TMPDIR: relative(cwd, root) }, timeout: 120_000 }))
+      .rejects.toMatchObject({ stderr: expect.stringMatching(/ENOENT.*\/dispatch-profile\.json/) });
 
     const release = await readFile(join(cwd, 'docs/deploy.md'), 'utf8');
     const productionRunners = release.split('\n').filter(line => line.includes('npm run runner --'));

@@ -20,11 +20,11 @@ With the [README local bridge and Worker](../README.md#five-minute-local-start) 
 
 <!-- verified-by: 12c -->
 ```sh
-npm run demo -- seed --run demo-01 --state-dir "$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 export CONCORD_URL=http://127.0.0.1:8787
 export CONCORD_TOKEN=local-owner
 export CONCORD_SHOW_DECOMPILED_C=0
+npm run demo -- seed --run demo-01 --state-dir "$CONCORD_RUN_DIR"
 npm run demo -- scene leases --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json

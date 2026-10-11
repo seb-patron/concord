@@ -36,7 +36,7 @@ function assertReviewedAccountWranglerCommand(command: string) {
 describe('deployment preflight', () => {
   it('runs deploy-owned local and dry-run docs commands and parses account commands', async () => {
     const instructions = await readFile('docs/deploy.md', 'utf8');
-    expect(instructions).toMatch(/<!-- verified-by: 12c -->\s*```sh\s*npm run demo /);
+    expect(instructions).toMatch(/<!-- verified-by: 12c -->\s*```sh\s*export CONCORD_RUN_DIR=[^\n]+\nexport CONCORD_URL=[^\n]+\nexport CONCORD_TOKEN=[^\n]+\nexport CONCORD_SHOW_DECOMPILED_C=0\nnpm run demo -- seed /);
     const commands = [...instructions.matchAll(/```sh\n([\s\S]*?)\n```/g)]
       .flatMap(match => match[1].split('\n'))
       .filter(line => /^(?:CONCORD_TOKEN="\$\w+" )?(?:npm run (?:deploy:check|mirror|runner) |npx wrangler )/.test(line));
