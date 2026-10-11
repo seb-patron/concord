@@ -118,6 +118,9 @@ describe('dispatch-lab local acceptance', () => {
     }
     expect(seeded.canonicalOid).toMatch(/^[a-f0-9]{40}$/);
     expect((await demo(['seed', ...flags], env)).canonicalOid).toBe(seeded.canonicalOid);
+    const prefixedRun = await demo(['seed', '--run', 'dispatch_a', '--state-dir', dir, '--pump-local'], env);
+    expect(prefixedRun.repoId).toBe('dispatch_dispatch_a');
+    expect(prefixedRun.canonicalOid).toMatch(/^[a-f0-9]{40}$/);
     for (const name of ['context', 'leases', 'stack', 'isolate', 'negative', 'repair', 'carry', 'invalidate', 'contest', 'dedupe']) {
       let result: any;
       try { result = await demo(['scene', name, ...flags], env); }

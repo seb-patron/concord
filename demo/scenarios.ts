@@ -43,8 +43,10 @@ function validatePath(options: Options): string {
 }
 
 async function api(options: Options, who: string, method: string, path: string, body?: unknown): Promise<Envelope> {
-  if (body && method === 'POST' && requiresExpectedVersion(method, '/v1' + path)) {
-    const current = await api(options, who, 'GET', `/repos/${options.run.startsWith('dispatch_') ? options.run : `dispatch_${options.run}`}/snapshot`);
+  if (body && method === 'POST' && path !== '/repos' && requiresExpectedVersion(method, '/v1' + path)) {
+    const repoId = /^\/repos\/([^/]+)\//.exec(path)?.[1];
+    if (!repoId) throw new Error('VERSION_REPO_ID_MISSING');
+    const current = await api(options, who, 'GET', `/repos/${repoId}/snapshot`);
     if (current.status !== 200 || !Number.isSafeInteger(current.version)) throw new Error('VERSION_READ_FAILED');
     body = { ...body as Record<string, unknown>, expectedVersion: current.version };
   }
@@ -226,8 +228,8 @@ export async function seed(options: Options): Promise<Manifest> {
   for (const name of ['families.tsv', 'dispatch.mjs', 'README.md']) await copyFile(join(root, 'dispatch-lab', name), join(checkout, name));
   const oid = await commitPush(options, manifest, 'seed', 'owner', 'Public dispatch-lab seed');
   manifest.seedOid = oid;
-  const current = ok(await api(options, 'owner', 'GET', `/repos/${repoId}`), 'repo detail');
-  ok(await api(options, 'owner', 'POST', `/repos/${repoId}/bootstrap`, { expectedVersion: current.version,
+  const current = ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}`), 'repo detail');
+  ok(await api(options, 'owner', 'POST', `/repos/${manifest.repoId}/bootstrap`, { expectedVersion: current.version,
     seedStorageName: manifest.changes.seed.storageName, seedRef: manifest.changes.seed.branch, headOid: oid,
     policyId: 'dispatch-lab', profileId: 'dispatch-lab' }), 'bootstrap');
   await pump({ ...options, pumpLocal: true }, manifest, view => view.queue?.finalCanonicalOid === oid, 'bootstrap');

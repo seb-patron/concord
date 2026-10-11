@@ -40,6 +40,42 @@ function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensur
 }
 
 describe('repository and change lifecycle', () => {
+  it('keeps ordinary intent keys owned while admitting only the matching contest pair', async () => {
+    const repo = await create('intent_ownership_case');
+    await fetchApi(apiRequest('/v1/repos/intent_ownership_case'));
+    await fake('intent_ownership_case', provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const path = '/v1/repos/intent_ownership_case/changes';
+    const ordinary = { intentKey: 'public-aw/task-17', intentText: 'Increase gamma retry budget safely',
+      baseOid: a, branch: 'refs/heads/demo', unitKeys: ['row:families:gamma'], dependencyChangeIds: [] };
+    const first = await fetchApi(mutation(path, ordinary, 'ordinary-first', 'local-agent-a'));
+    expect(first.status).toBe(201);
+    const firstId = (await responseBody(first)).data.changeId;
+    const repeated = await fetchApi(mutation(path, ordinary, 'ordinary-repeat', 'local-agent-a'));
+    expect((await responseBody(repeated)).data.changeId).toBe(firstId);
+    const stolen = await fetchApi(mutation(path, ordinary, 'ordinary-stolen', 'local-agent-b'));
+    expect(stolen.status).toBe(409);
+    expect((await responseBody(stolen)).error.code).toBe('INTENT_OWNED');
+
+    const contest = { ...ordinary, intentKey: 'J', intentText: 'epsilon-contest', unitKeys: ['row:families:epsilon'] };
+    const low = await fetchApi(mutation(path, contest, 'contest-low', 'local-contest-low'));
+    const wrongChild = await fetchApi(mutation(path, contest, 'contest-wrong-child', 'local-agent-b'));
+    expect(wrongChild.status).toBe(409);
+    expect((await responseBody(wrongChild)).error.code).toBe('INTENT_OWNED');
+    const high = await fetchApi(mutation(path, contest, 'contest-high', 'local-contest-high'));
+    expect(low.status).toBe(201);
+    expect(high.status).toBe(201);
+    const lowId = (await responseBody(low)).data.changeId;
+    expect((await responseBody(high)).data.changeId).not.toBe(lowId);
+    const lowRepeat = await fetchApi(mutation(path, contest, 'contest-low-repeat', 'local-contest-low'));
+    expect((await responseBody(lowRepeat)).data.changeId).toBe(lowId);
+    const third = await fetchApi(mutation(path, contest, 'contest-third', 'local-agent-a'));
+    expect(third.status).toBe(409);
+    expect((await responseBody(third)).error.code).toBe('INTENT_OWNED');
+  });
+
   it('accepts trusted policy unit key syntax used by the demo', () => {
     expect(ids(['file:dispatch.mjs', 'row:families:gamma'], 'unitKeys')).toEqual(['file:dispatch.mjs', 'row:families:gamma']);
   });
