@@ -29,6 +29,7 @@ export async function authenticate(request: Request, env: Env, now: () => number
   if (!match) throw new HttpError(401, 'UNAUTHORIZED', 'Bearer credential required');
   const secret = match[1];
   let principal: Principal | undefined;
+  let key: string | undefined;
   if (env.CONCORD_MODE === 'local') {
     const fixture = local[secret];
     if (fixture) principal = { ...fixture, expiresAt: Number.MAX_SAFE_INTEGER };
@@ -40,8 +41,24 @@ export async function authenticate(request: Request, env: Env, now: () => number
     try { mappings = JSON.parse(env.AUTH_TOKENS) as Record<string, Principal>; }
     catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
     const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
-    const key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+    key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
     principal = mappings[key];
+  }
+  if (!principal) {
+    const delegated = /^cct_([A-Za-z0-9_-]{1,64})_([a-f0-9]{64})$/.exec(secret);
+    if (delegated) {
+      if (!key) {
+        const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+        key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+      }
+      const tenantId = delegated[1];
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName(`tenant:${tenantId}`));
+      const lookup = await stub.fetch(new Request('https://concord.internal/internal/principals/lookup', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-concord-tenant': tenantId },
+        body: JSON.stringify({ digest: key }),
+      }));
+      if (lookup.ok) principal = (await lookup.json() as { data: Principal | null }).data ?? undefined;
+    }
   }
   const validId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
   const validRoles: Role[] = ['owner', 'agent', 'reviewer', 'checker', 'promoter', 'viewer'];
