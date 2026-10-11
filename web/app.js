@@ -177,7 +177,6 @@ async function refreshSnapshot() {
   if (body && typeof body.version === 'number') state.version = body.version;
   if (body && typeof body.eventSeq === 'number') {
     state.eventSeq = body.eventSeq;
-    if (state.lastEventSeq === 0) state.lastEventSeq = body.eventSeq;
   }
 }
 

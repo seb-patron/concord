@@ -51,8 +51,11 @@ export function mutationEvidence(change, leases, findingSetVersion, requireFence
   if (!change?.changeId) return { error: 'Select a change first.' };
   if (!Number.isSafeInteger(change.revision) || change.revision < 1) return { error: 'Current change revision is unavailable.' };
   if (!Number.isSafeInteger(findingSetVersion) || findingSetVersion < 0) return { error: 'Current finding-set version is unavailable.' };
+  if (requireFences && (!Array.isArray(change.unitKeys) || change.unitKeys.length === 0 || !change.unitKeys.every(key => typeof key === 'string' && key.length > 0))) {
+    return { error: 'Current change unit keys are unavailable.' };
+  }
   const fences = {};
-  for (const key of requireFences ? change.unitKeys ?? [] : []) {
+  for (const key of requireFences ? change.unitKeys : []) {
     const lease = leases.find(item => item?.changeId === change.changeId && item.unitKey === key && (item.state === 'active' || item.state === 'reserved'));
     if (!lease || !Number.isSafeInteger(lease.fence) || lease.fence < 1 || lease.expiresAt <= Date.now()) return { error: `Current lease fence is unavailable for ${key}.` };
     fences[key] = lease.fence;

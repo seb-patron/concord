@@ -226,6 +226,8 @@ describe('ui view helpers (fixtures)', () => {
     expect(mutationEvidence(change, [lease], 3)).toMatchObject({ revision: 2, findingSetVersion: 3, leaseFences: { 'row:a': 7 } });
     expect(mutationEvidence(null, [lease], 3).error).toMatch(/Select/);
     expect(mutationEvidence(change, [], 3).error).toMatch(/fence/);
+    expect(mutationEvidence({ changeId: 'x', revision: 2 }, [lease], 3).error).toMatch(/unit keys/);
+    expect(mutationEvidence({ ...change, unitKeys: [] }, [lease], 3).error).toMatch(/unit keys/);
     expect(mutationEvidence(change, [], 3, false)).toMatchObject({ revision: 2, findingSetVersion: 3 });
     expect(mutationEvidence(change, [lease], undefined).error).toMatch(/finding-set/);
   });
@@ -301,9 +303,10 @@ describe('app event handlers (full snapshot fixtures)', () => {
     let failSnapshot = false;
     let queue: any = { items: [{ changeId: 'x', state: 'blocked' }, { changeId: 'y', state: 'blocked' }], diagnosis: { classification: 'INTERACTION', failingSet: ['x', 'y'] } };
     let mutationFailure: string | null = null;
+    let omitUnitKeys = false;
     const snapshot = () => ({ data: { projections: {
       repos: { items: [{ repoId: 'demo', observedCanonicalOid: 'abc' }], changes: [
-        { changeId: 'x', intentText: 'first', status: 'ready', revision: 2, unitKeys: ['row:a'] },
+        { changeId: 'x', intentText: 'first', status: 'ready', revision: 2, ...(omitUnitKeys ? {} : { unitKeys: ['row:a'] }) },
         { changeId: 'y', intentText: 'second', status: 'blocked', revision: 1, unitKeys: ['row:a'] },
       ] },
       leases: { items: [{ leaseId: 'l1', changeId: 'x', unitKey: 'row:a', holderId: 'agent-a', intentText: 'first', fence: 7, expiresAt: Date.now() + 60_000, state: 'active' }] },
@@ -327,7 +330,10 @@ describe('app event handlers (full snapshot fixtures)', () => {
       } else if (url.endsWith('/snapshot')) {
         if (failSnapshot) { status = 503; body = { error: { code: 'PLATFORM_UNAVAILABLE', message: 'offline' } }; }
         else body = snapshot();
-      } else if (url.includes('/events?')) body = { data: { items: [{ sequence: 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: ['d9'] }] }, version: 2, eventSeq: 1 };
+      } else if (url.includes('/events?')) {
+        const after = Number(new URL(url, 'http://localhost').searchParams.get('after'));
+        body = { data: { items: after < 1 ? [{ sequence: 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: ['d9'] }] : [] }, version: 2, eventSeq: 1 };
+      }
       else {
         sent.push({ url, body: JSON.parse(String(init.body)) });
         if (mutationFailure === 'lease') { status = 409; body = { ...leaseConflictBody, error: { ...leaseConflictBody.error, details: { ...leaseConflictBody.error.details, conflictingKeys: ['row:a'] } } }; }
@@ -367,6 +373,7 @@ describe('app event handlers (full snapshot fixtures)', () => {
       expect(doc.activeElement).toBe(byId('change-list').querySelector('[aria-selected="true"]'));
       expect(byId('verdict-list').querySelector('a[href="#verdict-v1"]')).not.toBeNull();
       expect(byId('verdict-list').querySelector('a[href="#event-1"]')).not.toBeNull();
+      expect(byId('event-log').querySelector('#event-1')).not.toBeNull();
       (byId('role-select') as HTMLSelectElement).value = 'reviewer';
       byId('role-select').dispatchEvent(new dom.window.Event('change'));
       expect(byId('mutation-note').textContent).toContain('unverified');
@@ -389,6 +396,13 @@ describe('app event handlers (full snapshot fixtures)', () => {
       queue = { items: [], diagnosis: { classification: 'BASE_RED' } };
       (byId('repo-custom') as HTMLInputElement).value = 'demo'; byId('repo-use').click(); await flush();
       expect(byId('queue-tree').textContent).toContain('Baseline itself fails');
+      omitUnitKeys = true;
+      byId('repo-use').click(); await flush();
+      (byId('change-list').querySelector('[role="option"]') as HTMLElement).click();
+      const sentBeforeMissingUnits = sent.length;
+      submit('enqueue-form'); await flush();
+      expect(sent).toHaveLength(sentBeforeMissingUnits);
+      expect(byId('mutation-status').textContent).toContain('Current change unit keys are unavailable');
       byId('token-clear').click();
       expect(byId('detail-body').textContent).toBe('No change selected.');
       expect(byId('change-list').textContent).not.toContain('first');
