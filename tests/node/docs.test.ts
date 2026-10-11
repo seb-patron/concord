@@ -5,6 +5,7 @@ import { access, chmod, copyFile, mkdir, readFile, readdir, mkdtemp, rm, writeFi
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { wranglerStateDir } from '../../demo/scenarios';
 
@@ -12,6 +13,20 @@ const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
 const children: ChildProcess[] = [];
 const directories: string[] = [];
+
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Could not allocate a loopback port');
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  return port;
+}
+
+const bridgePort = await freePort();
+let workerPort = await freePort();
+while (workerPort === bridgePort) workerPort = await freePort();
 
 function freshShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const fresh = { ...env };
@@ -39,7 +54,8 @@ async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
   const document = await readFile(join(cwd, path), 'utf8');
   const marker = `<!-- verified-by: ${tag} -->`;
   const blocks = [...document.matchAll(new RegExp(`${marker}\\s*\`\`\`sh\\n([\\s\\S]*?)\\n\`\`\``, 'g'))]
-    .map(match => match[1]);
+    .map(match => match[1].replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort))
+      .replace(/npm run dev --/g, `npm run dev -- --port ${workerPort}`));
   expect(blocks).toHaveLength(document.split(marker).length - 1);
   return blocks;
 }
@@ -109,20 +125,20 @@ function assertCallEnvironment(calls: ShellCall[], block: string, runDir: string
     if (call.args[1] === 'git-bridge') {
       expect(call.env.CONCORD_BRIDGE_DATA_DIR).toBe(join(runDir, 'bridge'));
       expect(call.env.CONCORD_BRIDGE_TOKEN).toBe('local-bridge-fixture-2026');
-      expect(call.env.CONCORD_BRIDGE_PORT).toBe('8788');
+      expect(call.env.CONCORD_BRIDGE_PORT).toBe(String(bridgePort));
     }
     if (call.args[1] === 'dev') {
-      expect(call.args).toContain(`BRIDGE_URL:http://127.0.0.1:8788/?token=${call.env.CONCORD_BRIDGE_TOKEN}`);
+      expect(call.args).toContain(`BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=${call.env.CONCORD_BRIDGE_TOKEN}`);
       expect(call.args.some(arg => arg.startsWith('TRUSTED_CONFIG:{'))).toBe(true);
       expect(call.env.WRANGLER_SEND_METRICS).toBe('false');
     }
     if (call.args[1] === 'demo' && call.args[3] !== 'preflight') {
-      expect(call.env.CONCORD_URL).toBe('http://127.0.0.1:8787');
+      expect(call.env.CONCORD_URL).toBe(`http://127.0.0.1:${workerPort}`);
       expect(call.env.CONCORD_TOKEN).toBe('local-owner');
       expect(call.env.CONCORD_SHOW_DECOMPILED_C).toBe('0');
     }
     if (call.args[1] === 'runner') {
-      expect(call.env.CONCORD_URL).toBe('http://127.0.0.1:8787');
+      expect(call.env.CONCORD_URL).toBe(`http://127.0.0.1:${workerPort}`);
       expect(call.env.CONCORD_TOKEN).toBe(call.args.includes('checker') ? 'local-checker' : 'local-promoter');
     }
   }
@@ -175,6 +191,25 @@ async function stop(child: ChildProcess): Promise<void> {
 afterEach(async () => {
   await Promise.all(children.splice(0).map(stop));
   await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
+});
+
+describe('UI documentation', () => {
+  it('states that verdict records are unavailable until the UI calls the serving route', async () => {
+    const document = await readFile(join(cwd, 'docs/ui.md'), 'utf8');
+    const provenance = /- \*\*Approval provenance\*\*:([\s\S]*?)(?=\n- \*\*|\n## )/.exec(document)?.[1] ?? '';
+    const snapshotRow = document.split('\n').find(line => line.startsWith('| Approval provenance |')) ?? '';
+    const demoRow = document.split('\n').find(line => line.startsWith('| D carried approval, H invalidation |')) ?? '';
+
+    expect(provenance).toMatch(/no verdict records are available/i);
+    expect(provenance).toContain('`items: []`');
+    expect(provenance).toMatch(/renders verdicts from that snapshot only/i);
+    expect(provenance).toMatch(/per-change verdict GET route\s+exists, but the UI\s+does not call it yet/i);
+    expect(provenance).toMatch(/separate slice/i);
+    expect(snapshotRow).toContain('returns `items: []`');
+    expect(snapshotRow).toMatch(/GET \/v1\/repos\/:repoId\/changes\/:changeId\/verdicts.*UI does not call it/i);
+    expect(demoRow).toMatch(/shows no verdict records today/i);
+    expect(demoRow).not.toMatch(/panel reads verdict records/i);
+  });
 });
 
 describe('documented demo commands', () => {
@@ -231,9 +266,12 @@ describe('documented demo commands', () => {
     expect(checked.sort()).toEqual(['README.md', 'docs/api-repos.md', 'docs/dev.md', 'docs/ui.md']);
 
     const guide = await readFile(join(cwd, 'docs/api-repos.md'), 'utf8');
-    const bridgeWorker = /In a second terminal[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1];
+    const bridgeWorker = /In a second terminal[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1]
+      ?.replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort))
+      .replace(/npm run dev --/g, `npm run dev -- --port ${workerPort}`);
     expect(bridgeWorker).toBeDefined();
-    const bridgeBlock = /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1];
+    const bridgeBlock = /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1]
+      ?.replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort));
     expect(bridgeBlock).toBeDefined();
     for (const suffix of ['first', 'second']) {
       const root = await externalTempDir(`concord-${suffix}-`);
@@ -244,11 +282,11 @@ describe('documented demo commands', () => {
       const token = createHash('sha256').update(runDir + ':bridge').digest('hex');
       const hash = createHash('sha256').update(token).digest('hex').slice(0, 12);
       expect(bridge.args).toEqual(['run', 'git-bridge']);
-      expect(bridge.values.slice(0, 3)).toEqual([join(runDir, 'bridge'), token, '8788']);
-      expect(worker.args.slice(0, 5)).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${hash}`]);
-      expect(worker.args).toContain(`BRIDGE_URL:http://127.0.0.1:8788/?token=${token}`);
+      expect(bridge.values.slice(0, 3)).toEqual([join(runDir, 'bridge'), token, String(bridgePort)]);
+      expect(worker.args.slice(0, 7)).toEqual(['run', 'dev', '--', '--port', String(workerPort), '--persist-to', `.wrangler/state/${hash}`]);
+      expect(worker.args).toContain(`BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=${token}`);
       expect(worker.values[1]).toBe(token);
-      expect(resolve(cwd, worker.args[4])).toBe(join(cwd, '.wrangler', 'state', hash));
+      expect(resolve(cwd, worker.args[6])).toBe(join(cwd, '.wrangler', 'state', hash));
     }
     const missingToken = bridgeWorker!.replace(/^export CONCORD_BRIDGE_TOKEN=.*\n/m, '');
     await expect(capturedNpm([], missingToken, freshShellEnv(process.env))).rejects.toMatchObject({ stdout: '' });
@@ -290,20 +328,20 @@ describe('documented demo commands', () => {
         const { args, values } = await capturedNpm(exports, command, env);
         if (args[1] === 'dev') {
           workers++;
-          expect(args).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${runHash}`,
-            '--var', 'STORAGE_BACKEND:bridge', '--var', 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026',
+          expect(args).toEqual(['run', 'dev', '--', '--port', String(workerPort), '--persist-to', `.wrangler/state/${runHash}`,
+            '--var', 'STORAGE_BACKEND:bridge', '--var', `BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=local-bridge-fixture-2026`,
             '--var', `TRUSTED_CONFIG:${trusted}`]);
-          expect(resolve(cwd, args[4])).toBe(persistenceDir);
+          expect(resolve(cwd, args[6])).toBe(persistenceDir);
           expect(values[5]).toBe('false');
         } else if (args[1] === 'git-bridge') {
           bridges++;
           expect(args).toEqual(['run', 'git-bridge']);
-          expect(values.slice(0, 3)).toEqual([join(runDir, 'bridge'), 'local-bridge-fixture-2026', '8788']);
+          expect(values.slice(0, 3)).toEqual([join(runDir, 'bridge'), 'local-bridge-fixture-2026', String(bridgePort)]);
         } else {
           demos++;
           expect(args.slice(0, 3)).toEqual(['run', 'demo', '--']);
           if (args[3] !== 'preflight') {
-            expect(values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-owner']);
+            expect(values.slice(3, 5)).toEqual([`http://127.0.0.1:${workerPort}`, 'local-owner']);
           }
           const stateFlags = args.flatMap((arg, index) => arg === '--state-dir' ? [args[index + 1]] : []);
           expect(stateFlags, command).toEqual([runDir]);
@@ -314,18 +352,19 @@ describe('documented demo commands', () => {
     }
     expect([workers, bridges, demos]).toEqual([1, 1, 18]);
 
-    const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(await readFile(join(cwd, 'docs/DEMO.md'), 'utf8'))?.[1];
+    const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(await readFile(join(cwd, 'docs/DEMO.md'), 'utf8'))?.[1]
+      ?.replaceAll('8787', String(workerPort));
     expect(manual).toBeDefined();
     const { exports: runnerExports, commands: runnerCommands } = commandLines(manual!);
     expect(runnerCommands).toHaveLength(2);
     const checker = await capturedNpm(runnerExports, runnerCommands[0], env);
     expect(checker.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'checker',
       '--profile', join(runDir, 'dispatch-profile.json'), '--once']);
-    expect(checker.values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-checker']);
+    expect(checker.values.slice(3, 5)).toEqual([`http://127.0.0.1:${workerPort}`, 'local-checker']);
     const promoter = await capturedNpm(runnerExports, runnerCommands[1], env);
     expect(promoter.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'promoter',
       '--profile-digest', 'PROFILE_DIGEST_FROM_PREFLIGHT', '--once']);
-    expect(promoter.values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-promoter']);
+    expect(promoter.values.slice(3, 5)).toEqual([`http://127.0.0.1:${workerPort}`, 'local-promoter']);
 
     const missingRunDir = runnerExports.filter(line => !line.startsWith('export CONCORD_RUN_DIR='));
     expect(missingRunDir).toHaveLength(runnerExports.length - 1);
@@ -357,7 +396,7 @@ describe('documented demo commands', () => {
     const env = { ...freshShellEnv(process.env), TMPDIR: relative(cwd, root), XDG_CONFIG_HOME: root,
       CONCORD_DOCS_ABS_TMPDIR: root, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
     };
-    const workerUrl = 'http://127.0.0.1:8787';
+    const workerUrl = `http://127.0.0.1:${workerPort}`;
     expect(relative(cwd, resolve(env.TMPDIR)).startsWith('..')).toBe(true);
     const readme = await taggedBlocks('README.md');
     const demo = await taggedBlocks('docs/DEMO.md');
@@ -384,8 +423,10 @@ describe('documented demo commands', () => {
 
     const [preflight] = await runDocumentedBlock(readme[1], env);
     expect(preflight.status).toBe('ready');
+    const occupiedDefaultPort = start(`node -e 'const s=require("node:net").createServer(); s.on("error",e=>{if(e.code!=="EADDRINUSE") throw e; console.log("held 8788 (existing process)")}); s.listen(8788,"127.0.0.1",()=>console.log("held 8788"))'`, env);
+    await waitFor('default bridge port held', async () => occupiedDefaultPort.output().includes('held 8788'), occupiedDefaultPort.output);
     const bridge = start(readme[2], env);
-    await waitFor('bridge', async () => bridge.output().includes('listening on 127.0.0.1:8788'), bridge.output);
+    await waitFor('bridge', async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`), bridge.output);
     const worker = start(readme[3], env);
     await waitFor('Worker health', async () => (await fetch(workerUrl + '/health')).ok, worker.output);
     expect((await (await fetch(workerUrl + '/health')).json() as any).data.storageBackend).toBe('bridge');
