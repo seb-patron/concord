@@ -194,6 +194,91 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
+  it('never emits a bare Git token printed by an authenticated child process', async () => {
+    const secret = 'git-plaintext-credential-unique';
+    const root = await tempDir('git-stderr-secret');
+    const shimDir = join(root, 'bin');
+    await mkdir(shimDir);
+    await writeFile(join(shimDir, 'git'), '#!/bin/sh\nprintf "%s\\n" "${GIT_CONFIG_VALUE_0#Authorization: Bearer }" >&2\nexit 17\n');
+    await chmod(join(shimDir, 'git'), 0o755);
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 } }));
+      else response.end(JSON.stringify({ data: { remote: 'https://git.invalid/repo.git', plaintext: secret } }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    try {
+      try {
+        await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', join(root, 'clone')], {
+          cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token', PATH: `${shimDir}:${process.env.PATH ?? ''}` },
+        });
+        throw new Error('expected Git failure');
+      } catch (error) {
+        expect(error).toMatchObject({ code: 5, stdout: '', stderr: expect.stringContaining('Git failed: exit (exit code 17)') });
+        expect((error as { stderr: string }).stderr).not.toContain(secret);
+      }
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('redacts a known credential on every command error path and on stdout', async () => {
+    const secret = 'known+credential/unique=123';
+    const common = ['--repo', 'repo-1'];
+    const version = ['--expected-version', '1'];
+    const change = ['--change-id', 'change-1'];
+    const commands: string[][] = [
+      ['repo', 'create', '--name', 'name', '--policy-id', 'policy', '--profile-id', 'profile'],
+      ['repo', 'list'], ['repo', 'clone', ...common, '--path', '/unused'],
+      ['change', 'create', ...common, '--intent-key', 'key', '--intent-text', 'text', '--base-oid', 'null', '--branch', 'agent/a', '--unit-keys', '[]'],
+      ['change', 'get', ...common, '--id', 'change-1'], ['change', 'checkout', ...common, '--id', 'change-1', '--worktree', '/unused'],
+      ['change', 'publish', ...common, '--id', 'change-1', '--worktree', '/unused', '--lease-fences', '{}'],
+      ['change', 'close', ...common, '--id', 'change-1', ...version],
+      ['lease', 'claim', ...common, ...change, '--unit-keys', '[]', '--intent-text', 'text', ...version],
+      ['lease', 'list', ...common], ['lease', 'renew', ...common, '--id', 'lease-1', '--fence', '1', ...version],
+      ['lease', 'release', ...common, '--id', 'lease-1', '--fence', '1', ...version],
+      ['queue', 'list', ...common], ['queue', 'enqueue', ...common, ...change, '--verdict-id', 'v1', '--lease-fences', '{}', ...version],
+      ['queue', 'withdraw', ...common, ...change, '--reason', 'reason', ...version],
+      ['finding', 'list', ...common, ...change],
+      ['finding', 'add', ...common, ...change, '--revision', '1', '--unit-key', 'unit:a', '--text', 'text', '--evidence-digest', 'sha256:abc', ...version],
+      ['repair', 'submit', ...common, ...change, '--revision', '1', '--finding-set-version', '1', '--dispositions', '[]', ...version],
+      ['repair', 'review', ...common, ...change, '--round-id', 'round-1', '--revision', '1', '--finding-set-version', '1', '--decision', 'accept', '--evidence-digest', 'sha256:abc', ...version],
+      ['verdict', 'add', ...common, ...change, '--revision', '1', '--review-manifest-digest', 'sha256:abc', '--finding-set-version', '1', '--decision', 'approve', '--evidence-digest', 'sha256:abc', ...version],
+      ['verdict', 'carry', ...common, ...change, '--parent-verdict-id', 'v1', '--revision', '2', '--new-base-oid', 'abc', ...version],
+      ['events', 'list', ...common], ['api', 'GET', '/repos'],
+    ];
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      if (request.url === '/v1/echo-success') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ data: { echo: secret, embedded: `https://host.invalid/${encodeURIComponent(secret)}`, generic: 'ghp_abcdefghijklmnop' } }));
+        return;
+      }
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { code: 'FAIL', message: `Bearer ${secret} https://host.invalid/${encodeURIComponent(secret)}`, details: { echo: secret } } }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: secret };
+    try {
+      for (const command of commands) {
+        try {
+          await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', ...command], { cwd: process.cwd(), env });
+          throw new Error(`expected ${command.join(' ')} to fail`);
+        } catch (error) {
+          expect(error, command.join(' ')).toMatchObject({ code: 5, stdout: '' });
+          const output = error as { stdout: string; stderr: string };
+          expect(output.stdout + output.stderr, command.join(' ')).not.toContain(secret);
+          expect(output.stdout + output.stderr, command.join(' ')).not.toContain(encodeURIComponent(secret));
+        }
+      }
+      const success = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/echo-success'], { cwd: process.cwd(), env });
+      expect(success.stdout + success.stderr).not.toContain(secret);
+      expect(success.stdout).not.toContain('ghp_abcdefghijklmnop');
+      expect(JSON.parse(success.stdout).data.echo).toBe('[REDACTED]');
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  }, 60_000);
+
   it('rejects a mismatched publication identity before requesting Git write access', async () => {
     const root = await tempDir('publish-identity');
     const worktree = join(root, 'worktree');

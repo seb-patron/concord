@@ -17,9 +17,10 @@ export async function git(args: string[], options: GitOptions = {}, cwd?: string
     const result = await execFile('git', args, { cwd, env, timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
     return result.stdout.trim();
   } catch (error) {
-    const e = error as NodeJS.ErrnoException & { stderr?: string };
-    const message = (e.stderr || e.message || 'Git command failed').replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-    throw new ConcordError(`Git failed: ${message.trim()}`, 'transport');
+    const e = error as NodeJS.ErrnoException & { killed?: boolean };
+    const category = e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn';
+    const exitCode = typeof e.code === 'number' && Number.isSafeInteger(e.code) && e.code >= 0 && e.code <= 255 ? e.code : 'unknown';
+    throw new ConcordError(`Git failed: ${category} (exit code ${exitCode})`, 'transport');
   }
 }
 

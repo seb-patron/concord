@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { ConcordClient, ConcordError, idempotencyKey, type RequestOptions } from './client.ts';
+import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential, type RequestOptions } from './client.ts';
 import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 
 const HELP = `Concord agent CLI
@@ -197,6 +197,7 @@ async function clientFor(flags: Flags): Promise<ConcordClient> {
   if (flags['token-stdin']) {
     if (process.stdin.isTTY) throw new ConcordError('--token-stdin requires piped stdin', 'usage');
     token = (await stdinText()).trim();
+    rememberCredential(token);
   }
   if (!token) throw new ConcordError('CONCORD_TOKEN is required (or provide --token-stdin)', 'usage');
   return new ConcordClient({ url, token });
@@ -263,7 +264,7 @@ function stringField(value: Record<string, unknown>, name: string, tokenResponse
 }
 function numberField(value: Record<string, unknown>, name: string): number | undefined { return typeof value[name] === 'number' ? value[name] as number : undefined; }
 function tokenField(value: Record<string, unknown>): string {
-  for (const key of ['token', 'secret', 'plaintext']) if (typeof value[key] === 'string') return value[key] as string;
+  for (const key of ['token', 'secret', 'plaintext']) if (typeof value[key] === 'string') { rememberCredential(value[key] as string); return value[key] as string; }
   throw new ConcordError('Git token response did not include a token', 'server');
 }
 function safeResponseDiagnostic(value: Record<string, unknown>): Record<string, unknown> {
@@ -296,12 +297,17 @@ function validatePublishPayload(value: unknown, expected: { baseOid: string; hea
 }
 function redactRemote(remote: string): string { try { const url = new URL(remote); return `${url.origin}${url.pathname}`; } catch { return '[remote]'; } }
 async function stdinText(): Promise<string> { let value = ''; for await (const chunk of process.stdin) value += chunk; return value; }
-function print(value: unknown): void { process.stdout.write(`${JSON.stringify(value ?? null)}\n`); }
+function writeOutput(stream: NodeJS.WriteStream, value: unknown): void { stream.write(redactOutput(`${JSON.stringify(value ?? null)}\n`)); }
+function print(value: unknown): void { writeOutput(process.stdout, value); }
+
+for (const [name, value] of Object.entries(process.env)) {
+  if (value && /(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API[_-]?KEY|AUTHORIZATION)/i.test(name)) rememberCredential(value);
+}
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) runCli().catch(error => {
   const err = error instanceof ConcordError ? error : new ConcordError(error instanceof Error ? error.message : String(error), 'transport');
   const diagnostic: Record<string, unknown> = { error: { kind: err.kind, message: err.message, ...(err.payload === undefined ? {} : { details: err.payload }), ...(err.status === undefined ? {} : { status: err.status }) } };
   if (err.kind === 'conflict') diagnostic.nextAction = 'Inspect the current holder/version, then retry with a fresh idempotency key or renew your own active lease; leases are never stolen automatically.';
-  process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
+  writeOutput(process.stderr, diagnostic);
   process.exitCode = err.exitCode;
 });

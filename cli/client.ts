@@ -32,6 +32,32 @@ export interface RequestOptions {
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
+const credentials = new Set<string>();
+export function rememberCredential(value: string): void { if (value) credentials.add(value); }
+export function rememberCredentialsIn(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) { for (const item of value) rememberCredentialsIn(item); return; }
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'string' && /(?:token|secret|plaintext|password|credential|api[_-]?key|authorization)/i.test(key)) rememberCredential(item);
+    else rememberCredentialsIn(item);
+  }
+}
+// The CLI calls this once for each complete JSON line, after serialization.
+export function redactOutput(line: string): string {
+  let result = line;
+  for (const secret of [...credentials].sort((a, b) => b.length - a.length)) {
+    for (const form of new Set([secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)])) {
+      if (form) result = result.split(form).join('[REDACTED]');
+    }
+  }
+  return result
+    .replace(/Bearer\s+[A-Za-z0-9._~+/%=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/(https?:\/\/)[^\s"'@/]+:[^\s"'@/]+@/gi, '$1[REDACTED]@')
+    .replace(/([?&](?:access_token|token|api_key|secret|password)=)[^&\s"']+/gi, '$1[REDACTED]')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]');
+}
+
 export class ConcordClient {
   readonly baseUrl: string;
   private readonly options: ConcordClientOptions;
@@ -40,6 +66,7 @@ export class ConcordClient {
 
   constructor(options: ConcordClientOptions) {
     this.options = options;
+    if (options.token) rememberCredential(options.token);
     try { this.baseUrl = new URL(options.url).toString().replace(/\/$/, ''); }
     catch { throw new ConcordError('CONCORD_URL must be a valid absolute URL', 'usage'); }
     this.fetcher = options.fetch ?? globalThis.fetch;
@@ -72,6 +99,7 @@ export class ConcordClient {
         const text = await response.text();
         let payload: unknown = text;
         if (text) { try { payload = JSON.parse(text); } catch { /* preserve plain server text */ } }
+        rememberCredentialsIn(payload);
         if (response.ok) return payload as T;
         if (retryable && attempt < 2 && (response.status === 429 || response.status >= 500)) {
           const wait = this.retryDelay(response.headers.get('retry-after'), attempt);
