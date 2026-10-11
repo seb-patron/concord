@@ -2,35 +2,38 @@ import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
 import { trustedDependencyKeys } from '../src/verdicts/manifest';
+import { patternRow, tableForFile, type TsvTable } from '../src/leases/units';
 import { command, git, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
-const rowId = (unit: string) => /^row:families:([a-z]+)$/.exec(unit)?.[1] ?? null;
+const legacyTable: TsvTable = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keyPattern: '^[a-z]+$' };
+const rowId = (unit: string, table: TsvTable) => unit.startsWith(`row:${table.name}:`) ? unit.slice(`row:${table.name}:`.length) : null;
 const decode = (bytes: Buffer): string | null => {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
   catch { return null; }
 };
 
-export function parseTsv(text: string): Map<string, string> {
+export function parseTsv(text: string, table: TsvTable = legacyTable): Map<string, string> {
   if (text.includes('\r')) throw new Error('INVALID_TSV_LINE_ENDING');
   const lines = (text.endsWith('\n') ? text.slice(0, -1) : text).split(/\r?\n/);
   const header = lines.shift();
-  if (header !== 'family\tretry_limit\ttimeout_ms') throw new Error('INVALID_TSV_HEADER');
+  if (header !== table.header.join('\t')) throw new Error('INVALID_TSV_HEADER');
   const rows = new Map<string, string>();
   for (const line of lines) {
     const cells = line.split('\t');
-    if (cells.length !== 3 || !/^[a-z]+$/.test(cells[0]) || rows.has(cells[0])) throw new Error('INVALID_TSV_ROW');
-    rows.set(cells[0], line);
+    const key = cells[table.header.indexOf(table.keyColumn)];
+    if (cells.length !== table.header.length || !key || !new RegExp(table.keyPattern).test(key) || rows.has(key)) throw new Error('INVALID_TSV_ROW');
+    rows.set(key, line);
   }
   return rows;
 }
 
-export function mergeTsv(base: string, ours: string, theirs: string): string {
-  const b = parseTsv(base);
-  const o = parseTsv(ours);
-  const t = parseTsv(theirs);
+export function mergeTsv(base: string, ours: string, theirs: string, table: TsvTable = legacyTable): string {
+  const b = parseTsv(base, table);
+  const o = parseTsv(ours, table);
+  const t = parseTsv(theirs, table);
   const keys = [...new Set([...b.keys(), ...o.keys(), ...t.keys()])];
-  const output = ['family\tretry_limit\ttimeout_ms'];
+  const output = [table.header.join('\t')];
   for (const key of keys) {
     const before = b.get(key);
     const left = o.get(key);
@@ -74,28 +77,31 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     const beforeMode = await mode(repo, base, path);
     const afterMode = await mode(repo, head, path);
     const units = Object.entries(policy.units).filter(([, value]) => value.file === path);
-    const rowUnits = units.filter(([key]) => rowId(key));
+    const table = tableForFile(policy, path) ?? (path === 'families.tsv' && units.some(([key]) => rowId(key, legacyTable)) ? legacyTable : undefined);
+    const rowUnits = table ? units.filter(([key]) => rowId(key, table)) : [];
     const beforeText = before && decode(before);
     const afterText = after && decode(after);
-    if (path === 'families.tsv' && rowUnits.length && beforeText !== null && afterText !== null && beforeMode === afterMode) {
+    if (table && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode) {
       let oldRows: Map<string, string> | null = null;
       let newRows: Map<string, string> | null = null;
-      try { oldRows = parseTsv(beforeText); newRows = parseTsv(afterText); } catch { coverage = 'unknown'; }
+      try { oldRows = parseTsv(beforeText, table); newRows = parseTsv(afterText, table); } catch { coverage = 'unknown'; }
       if (oldRows && newRows) {
       const changed = [...new Set([...oldRows.keys(), ...newRows.keys()])].filter(key => oldRows.get(key) !== newRows.get(key));
-      if (changed.length > 0 && changed.every(row => rowUnits.some(([key]) => rowId(key) === row))) {
+      if (changed.length > 0 && changed.every(row => rowUnits.some(([key]) => rowId(key, table) === row) || !!patternRow(policy, `row:${table.name}:${row}`))) {
         for (const row of changed) {
-          const known = rowUnits.find(([key]) => rowId(key) === row)!;
-        evidence.push({ unitKey: known[1].canonicalKey, beforePath: path, afterPath: path,
-          beforeMode, afterMode, beforeDigest: oldRows.has(row) ? hash(oldRows.get(row)!) : null,
+          const known = rowUnits.find(([key]) => rowId(key, table) === row);
+        evidence.push({ unitKey: known?.[1].canonicalKey ?? `row:${table.name}:${row}`,
+          beforePath: oldRows.has(row) ? path : null, afterPath: newRows.has(row) ? path : null,
+          beforeMode: oldRows.has(row) ? beforeMode : null, afterMode: newRows.has(row) ? afterMode : null,
+          beforeDigest: oldRows.has(row) ? hash(oldRows.get(row)!) : null,
           afterDigest: newRows.has(row) ? hash(newRows.get(row)!) : null });
         }
         continue;
       }
       }
     }
-    const fileUnit = units.find(([key]) => key.startsWith('file:'));
-    if (!fileUnit) coverage = 'unknown';
+    const fileUnit = units.find(([key]) => key === 'file:' + path);
+    if (!fileUnit && !table) coverage = 'unknown';
     evidence.push({ unitKey: fileUnit?.[1].canonicalKey ?? 'file:' + path,
       beforePath: before === null ? null : path, afterPath: after === null ? null : path,
       beforeMode, afterMode, beforeDigest: before === null ? null : hash(before), afterDigest: after === null ? null : hash(after) });
@@ -107,16 +113,17 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     try { dependencies = trustedDependencyKeys(policy, evidence.map(item => item.unitKey)); }
     catch { coverage = 'unknown'; }
     for (const key of dependencies) {
-      const unit = policy.units[key];
+      const unit = policy.units[key] ?? patternRow(policy, key);
       if (!unit) { coverage = 'unknown'; break; }
       const bytes = await content(repo, head, unit.file);
       const fileMode = await mode(repo, head, unit.file);
       if (bytes === null || fileMode === null) { coverage = 'unknown'; break; }
-      const row = rowId(key);
+      const dependencyTable = tableForFile(policy, unit.file) ?? (unit.file === 'families.tsv' ? legacyTable : undefined);
+      const row = dependencyTable && rowId(key, dependencyTable);
       const decoded = row ? decode(bytes) : null;
       let evidenceBytes: string | Buffer | undefined = row ? undefined : bytes;
       if (row && decoded !== null) {
-        try { evidenceBytes = parseTsv(decoded).get(row); } catch { /* Unknown scope below. */ }
+        try { evidenceBytes = parseTsv(decoded, dependencyTable!).get(row); } catch { /* Unknown scope below. */ }
       }
       if (evidenceBytes === undefined) { coverage = 'unknown'; break; }
       dependencyScope.push({ kind: 'unit', unitKey: unit.canonicalKey, path: unit.file, mode: fileMode, contentDigest: hash(evidenceBytes) });

@@ -7,6 +7,7 @@
     "gates": [{ "id": "all", "requiredOutcome": "PASS" }],
     "fixedDenominator": 4
   },
+  "tables": [{ "name": "families", "file": "families.tsv", "header": ["family", "retry_limit", "timeout_ms"], "keyColumn": "family", "keyPattern": "^[a-z]+$" }],
   "units": {
     "row:families:alpha": { "canonicalKey": "row:families:alpha", "file": "families.tsv", "resources": ["families.tsv#alpha"], "dependencyKeys": ["row:families:beta"] },
     "row:families:beta": { "canonicalKey": "row:families:beta", "file": "families.tsv", "resources": ["families.tsv#beta"], "dependencyKeys": [] },

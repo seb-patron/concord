@@ -3,6 +3,7 @@ import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '
 import { digest } from '../src/http';
 import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
+import { tableForFile } from '../src/leases/units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
@@ -25,7 +26,7 @@ async function fetchInput(directory: string, job: Job, name: string, oid: string
   await fetchOid(directory, item.remote, oid, await gitCredentialEnvironment(directory, item.secret));
 }
 
-async function compose(directory: string, base: string, inputs: CandidateInput[]): Promise<string> {
+async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
   await git(directory, ['switch', '--detach', base]);
   const env = childEnvironment({ GIT_AUTHOR_NAME: 'Concord Runner', GIT_AUTHOR_EMAIL: 'runner@concord.invalid',
     GIT_COMMITTER_NAME: 'Concord Runner', GIT_COMMITTER_EMAIL: 'runner@concord.invalid',
@@ -37,15 +38,22 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
       'merge', '--no-edit', '--no-ff', candidate.headOid], directory, 60_000, env);
     if (result.code === 0) continue;
     const conflicts = (await git(directory, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
-    if (conflicts.length !== 1 || conflicts[0] !== 'families.tsv') throw new Error('MERGE_CONFLICT');
-    const readStage = async (stage: number) => {
-      const value = await command('git', ['show', ':' + stage + ':families.tsv'], directory, 30_000);
-      if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
-      return value.stdout;
-    };
-    const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3));
-    await writeFile(directory + '/families.tsv', merged);
-    await git(directory, ['add', '--', 'families.tsv']);
+    if (!conflicts.length) throw new Error('MERGE_CONFLICT');
+    for (const path of conflicts) {
+      const table = tableForFile(job.unitPolicy, path);
+      if (!table) throw new Error('MERGE_CONFLICT');
+      const stages = await git(directory, ['ls-files', '--stage', '--', path]);
+      const modes = stages.split('\n').filter(Boolean).map(line => line.split(' ')[0]);
+      if (modes.length !== 3 || new Set(modes).size !== 1) throw new Error('MERGE_CONFLICT');
+      const readStage = async (stage: number) => {
+        const value = await command('git', ['show', ':' + stage + ':' + path], directory, 30_000);
+        if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
+        return value.stdout;
+      };
+      const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3), table);
+      await writeFile(directory + '/' + path, merged);
+      await git(directory, ['add', '--', path]);
+    }
     await git(directory, ['commit', '--no-edit'], 60_000, env);
   }
   return git(directory, ['rev-parse', 'HEAD']);
@@ -134,7 +142,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
         await fetchInput(directory, job, candidate.storageName, candidate.baseOid, fetchTokens);
         await fetchInput(directory, job, candidate.storageName, candidate.headOid, fetchTokens);
       }
-      composed = await compose(directory, job.canonicalBaseOid, job.candidates);
+      composed = await compose(directory, job.canonicalBaseOid, job.candidates, job);
       if (job.baseCheck && composed !== job.canonicalBaseOid) throw new Error('BASE_CHECK_IDENTITY');
     }
     composed = await reconcileScratch(directory, job, composed, provide);
@@ -160,7 +168,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     await fetchInput(directory, job, baseName, job.newBaseOid, fetchTokens);
     await fetchInput(directory, job, job.candidate.storageName, job.candidate.baseOid, fetchTokens);
     await fetchInput(directory, job, job.candidate.storageName, job.candidate.headOid, fetchTokens);
-    const composed = await compose(directory, job.newBaseOid, [job.candidate]);
+    const composed = await compose(directory, job.newBaseOid, [job.candidate], job);
     const inspected = await inspectUnits(directory, job.newBaseOid, composed, job);
     const checked = inspected.manifest.coverage === 'complete' ? await runAffected(profile, job, directory, inspected.unitKeys) :
       { outcome: 'UNVERIFIED_TARGET' as CheckOutcome, log: 'Unknown review dependency scope' };

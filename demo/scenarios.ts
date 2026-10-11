@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -343,8 +343,8 @@ async function approve(options: Options, manifest: Manifest, alias: string): Pro
 async function enqueue(options: Options, manifest: Manifest, alias: string): Promise<void> {
   const item = manifest.changes[alias];
   const current = await api(options, 'owner', 'GET', `/repos/${manifest.repoId}/queue`);
-  ok(await api(options, alias === 'A' || alias === 'D' || alias === 'H' ? 'A' :
-    alias === 'B' || alias === 'I' ? 'B' : alias === 'C' || alias === 'E' ? 'C' : 'owner',
+  ok(await api(options, alias === 'A' || alias === 'D' || alias === 'H' || alias === 'RZ' ? 'A' :
+    alias === 'B' || alias === 'I' || alias === 'RE' ? 'B' : alias === 'C' || alias === 'E' || alias === 'RR' ? 'C' : 'owner',
   'POST', `/repos/${manifest.repoId}/queue/enqueue`, { expectedVersion: current.version,
     changeId: item.changeId, verdictId: item.verdictId, leaseFences: item.leaseFences }), `enqueue ${alias}`);
 }
@@ -666,6 +666,69 @@ export async function scene(options: Options, name: string): Promise<Manifest> {
       leaseFences: mapping.leaseFences, phases: outputs.map(value => value.phase),
       verdictId: manifest.changes.AW.verdictId, checkerJobId: checkJob.jobId, checkerOutcome: check.outcome,
       queueEntryId: entry.entryId, queueState: entry.state, canonicalOid: manifest.canonicalOid };
+  } else if (name === 'rows') {
+    need('aw');
+    const base = manifest.canonicalOid;
+    const plans = [
+      { alias: 'RZ', who: 'A', intent: 'rows-zeta', unit: 'row:families:zeta' },
+      { alias: 'RE', who: 'B', intent: 'rows-eta', unit: 'row:families:eta' },
+      { alias: 'RR', who: 'C', intent: 'rows-retire', unit: 'row:families:epsilon' },
+    ];
+    for (const plan of plans) {
+      await createDraft(options, manifest, plan.alias, plan.who, plan.intent, `${plan.alias} table row`, base, [plan.unit]);
+      await prepareCheckout(options, manifest, plan.alias, plan.who, base);
+      const path = join(manifest.changes[plan.alias].worktree, 'families.tsv');
+      const before = await readFile(path, 'utf8');
+      const after = plan.alias === 'RR' ? before.split('\n').filter(line => !line.startsWith('epsilon\t')).join('\n') :
+        before + (plan.alias === 'RZ' ? 'zeta\t2\t750\n' : 'eta\t3\t750\n');
+      await writeFile(path, after);
+      await commitPush(options, manifest, plan.alias, plan.who, `${plan.alias} row change`);
+    }
+    const left = join(manifest.changes.RZ.worktree, 'families.tsv');
+    const ancestor = join(manifest.workDir, 'rows-base.tsv');
+    await writeFile(ancestor, await git(manifest.changes.RZ.worktree, 'show', `${base}:families.tsv`) + '\n');
+    const right = join(manifest.changes.RE.worktree, 'families.tsv');
+    let gitConflict = '';
+    try { await execFile('git', ['merge-file', '-p', left, ancestor, right], { timeout: 30_000 }); }
+    catch (error) { gitConflict = (error as { stdout?: string }).stdout ?? ''; }
+    finally { await unlink(ancestor); }
+    if (!gitConflict.includes('<<<<<<<') || !gitConflict.includes('zeta') || !gitConflict.includes('eta'))
+      throw new Error('PLAIN_GIT_CONFLICT_NOT_SHOWN');
+    for (const plan of plans) ok(await claim(options, manifest, plan.alias, plan.who, [plan.unit]), `claim ${plan.alias}`);
+    await createDraft(options, manifest, 'RX', 'C', 'rows-rival', 'rival zeta append', base, ['row:families:zeta']);
+    const refusal = await claim(options, manifest, 'RX', 'C', ['row:families:zeta']);
+    if (refusal.status !== 409 || refusal.error?.code !== 'LEASE_CONFLICT') throw new Error('NEW_ROW_LEASE_CONFLICT_MISSING');
+    for (const plan of plans) {
+      await publish(options, manifest, plan.alias, plan.who, [plan.unit]);
+      await approve(options, manifest, plan.alias);
+    }
+    for (const plan of plans) await enqueue(options, manifest, plan.alias);
+    const landed = await pump(options, manifest, view => plans.every(plan => view.queue?.entries?.some((entry: any) =>
+      entry.changeId === manifest.changes[plan.alias].changeId && entry.state === 'landed')), 'rows landed', 24, 8);
+    manifest.canonicalOid = landed.queue.finalCanonicalOid;
+    const composedJob = (landed.runners?.jobs ?? []).find((job: any) => job.kind === 'validate-stack' &&
+      job.state === 'completed' && ['RZ', 'RE'].every(alias => job.candidates?.some((candidate: any) =>
+        candidate.changeId === manifest.changes[alias].changeId)));
+    if (!composedJob) throw new Error('ROWS_STACK_NOT_COMPOSED');
+    const checked = ok(await api(options, 'reviewer', 'GET', `/repos/${manifest.repoId}/jobs/${composedJob.jobId}/result`), 'rows checker').result;
+    if (checked.outcome !== 'PASS') throw new Error('ROWS_COMPOSED_CHECK_FAILED');
+    const finalJob = (landed.runners?.jobs ?? []).find((job: any) => job.kind === 'validate-stack' &&
+      job.state === 'completed' && job.caseId === 'rows-all');
+    if (!finalJob) throw new Error('ROWS_FINAL_CASE_MISSING');
+    const finalCheck = ok(await api(options, 'reviewer', 'GET', `/repos/${manifest.repoId}/jobs/${finalJob.jobId}/result`), 'rows final checker').result;
+    if (finalCheck.outcome !== 'PASS') throw new Error('ROWS_FINAL_CHECK_FAILED');
+    const repo = ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}`), 'repo detail');
+    const token = ok(await api(options, 'owner', 'POST', `/repos/${manifest.repoId}/git-token`, {
+      storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 600 }), 'rows canonical token');
+    await gitWithCredential(manifest.changes.RZ.worktree, options.target === 'remote' ? token.secret : undefined,
+      'fetch', '--quiet', demoGitRemote(options, token.remote), manifest.canonicalOid);
+    const finalTable = await git(manifest.changes.RZ.worktree, 'show', `${manifest.canonicalOid}:families.tsv`);
+    if (!finalTable.includes('zeta\t2\t750') || !finalTable.includes('eta\t3\t750') || finalTable.includes('epsilon\t'))
+      throw new Error('ROWS_COMPOSITION_MISMATCH');
+    manifest.evidence.rows = { plainGitConflict: gitConflict, refusal: refusal.error,
+      units: plans.map(plan => plan.unit), finalTable, baseOid: base, canonicalOid: manifest.canonicalOid,
+      checkerCaseId: finalJob.caseId, checkerJobId: finalJob.jobId, checkerOutcome: finalCheck.outcome,
+      composedJobId: composedJob.jobId };
   } else throw new Error('UNKNOWN_SCENE: ' + name);
   manifest.scenes.push(name);
   manifest.audit.push(...pendingAudit.splice(0));

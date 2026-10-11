@@ -214,6 +214,19 @@ function dispatchCase(state: QueueState, entries: Entry[], bootstrap: boolean): 
     entries[0].intentKey.startsWith('aw-mock:') && entries[0].unitKeys.length === 1 &&
     entries[0].unitKeys[0] === 'row:families:gamma' ? 'aw' :
     entries.map(entry => entry.intentKey).sort().join('+');
+  if (stage === 'aw-only' || stage.startsWith('rows-')) {
+    const allowed = new Set(['rows-zeta', 'rows-eta', 'rows-retire']);
+    const incoming = entries.map(entry => entry.intentKey);
+    if (incoming.length && incoming.every(key => allowed.has(key))) {
+      const landed = stage === 'aw-only' ? [] : stage === 'rows-all' ? [...allowed] :
+        stage.slice(5).split('-').map(key => `rows-${key}`);
+      const keys = new Set([...landed, ...incoming]);
+      if (keys.size === landed.length + incoming.length) {
+        const suffix = ['zeta', 'eta', 'retire'].filter(key => keys.has(`rows-${key}`));
+        return suffix.length === 3 ? 'rows-all' : 'rows-' + suffix.join('-');
+      }
+    }
+  }
   const planned: Record<string, Record<string, string>> = {
     seed: { A: 'a-only', B: 'b-only', C: 'c-only', 'A+B': 'a-b', 'A+C': 'a-c-survivors',
       'B+C': 'b-c', 'A+B+C': 'a-b-c' },

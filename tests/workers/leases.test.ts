@@ -5,7 +5,7 @@ import worker from '../../src/worker';
 import { leases } from '../../src/features/leases';
 import { repos } from '../../src/features/repos';
 import type { Change, Event, ModuleContext, Principal, Repo, TrustedConfiguration } from '../../src/contracts';
-import { appendEvent, eventSequence, localFixtureConfig, sqlState } from '../../src/state';
+import { appendEvent, eventSequence, loadTrustedConfig, localFixtureConfig, sqlState } from '../../src/state';
 import { changedUnitsForFile, normalizeUnits, overlaps, resolveUnit, unitRegistry } from '../../src/leases/units';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
@@ -21,7 +21,7 @@ const trusted: TrustedConfiguration = { policies: { 'local-demo': policy }, prof
 const previousTrustedConfig = (env as Env).TRUSTED_CONFIG;
 const previousChangeView = repos.changeView;
 
-afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; });
+afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; });
 
 function setupPolicy(): void {
   (env as Env).TRUSTED_CONFIG = JSON.stringify(trusted);
@@ -110,6 +110,59 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('validates owner TSV declarations and maps only matching new keys', () => {
+    const declared = structuredClone(policy);
+    declared.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],
+      keyColumn: 'job', keyPattern: '^[a-z]+$' }];
+    const registry = unitRegistry(declared);
+    expect(resolveUnit(registry, 'row:jobs:zeta')).toMatchObject({ file: 'data/jobs.tsv', resources: ['data/jobs.tsv#zeta'] });
+    expect(() => resolveUnit(registry, 'row:jobs:zeta7')).toThrow('Unit key is not registered');
+    expect(() => resolveUnit(registry, 'row:other:zeta')).toThrow('Unit key is not registered');
+    expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nalpha\told\n',
+      'job\tvalue\nalpha\told\nzeta\tnew\n').map(unit => unit.key)).toEqual(['row:jobs:zeta']);
+    expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nalpha\told\n',
+      'job\tvalue\nalpha\told\nzeta7\tnew\n').map(unit => unit.key)).toEqual(['file:data/jobs.tsv']);
+    expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nalpha\told\n',
+      'job\tchanged\nalpha\told\n').map(unit => unit.key)).toEqual(['file:data/jobs.tsv']);
+    const config = { policies: { 'local-demo': declared }, profiles: trusted.profiles };
+    expect(loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify(config) }).policies['local-demo'].tables).toEqual(declared.tables);
+    for (const keyPattern of ['[a-z]+', '^([a-z]+)+$', '^x'.repeat(100)]) {
+      declared.tables[0].keyPattern = keyPattern;
+      if (keyPattern === '^([a-z]+)+$') continue;
+      expect(() => loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify(config) })).toThrow('TRUSTED_CONFIG_INVALID');
+    }
+  });
+
+  it('claims and reserves distinct new rows while refusing the same key with holder intent', async () => {
+    policy.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],
+      keyColumn: 'job', keyPattern: '^[a-z]+$' }];
+    setupPolicy();
+    const repo = 'lease_pattern_rows';
+    const zeta = await claim(repo, 'local-agent-a', 'zeta-change', ['row:jobs:zeta'], 'zeta');
+    const eta = await claim(repo, 'local-agent-b', 'eta-change', ['row:jobs:eta'], 'eta');
+    expect([zeta.status, eta.status]).toEqual([201, 201]);
+    const rival = await claim(repo, 'local-agent-b', 'rival', ['row:jobs:zeta'], 'rival');
+    expect(rival.status).toBe(409);
+    expect((await responseBody(rival)).error).toMatchObject({ code: 'LEASE_CONFLICT', details: { intentText: 'Work by local-agent-a' } });
+    for (const [index, key] of ['row:jobs:zeta7', 'row:other:zeta'].entries()) {
+      const denied = await claim(repo, 'local-agent-b', 'unknown-' + index, [key], 'unknown-' + index);
+      expect(denied.status).toBe(422);
+      expect((await responseBody(denied)).error.code).toBe('UNKNOWN_UNIT');
+    }
+    const zetaLease = (await responseBody(zeta)).data.leases[0];
+    const etaLease = (await responseBody(eta)).data.leases[0];
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      for (const [id, actor, unit, lease] of [
+        ['zeta-change', 'agent-a', 'row:jobs:zeta', zetaLease],
+        ['eta-change', 'agent-b', 'row:jobs:eta', etaLease],
+      ] as const) {
+        const change = fakeReadyChange(repo, id, actor, [unit]);
+        addVerified(state, change);
+        const context = contextFor(state, repo, actor, Date.now);
+        expect(context.transaction(() => leases.hooks['leases.reserve']!(context, id, { [unit]: lease.fence }))).toMatchObject({ status: 'eligible' });
+      }
+    });
+  });
   it('normalizes aliases, contains file footprints, and lets distinct rows coexist', () => {
     const registry = unitRegistry(policy);
     const aliases = normalizeUnits(registry, ['declaration:old_callee_alpha', 'declaration:callee_alpha']);

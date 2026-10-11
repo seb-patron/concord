@@ -1,4 +1,5 @@
 import type { Event, FeatureModule, Migration, ModuleContext, PromotionFreezeProvider, TrustedConfiguration } from './contracts';
+import { unitRegistry } from './leases/units';
 
 /** Queue's slice-01 placeholder until its promotion ticket state exists. */
 export const unfrozenPromotion: PromotionFreezeProvider = () => ({ frozen: false });
@@ -105,6 +106,7 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   for (const [id, policy] of Object.entries(config.policies)) {
     if (!policy || typeof policy !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
     if (id !== policy.id || !/^sha256:[a-f0-9]{64}$/.test(policy.digest) || !/^sha256:[a-f0-9]{64}$/.test(policy.checkerDigest) || !policy.units || typeof policy.units !== 'object' || Array.isArray(policy.units)) throw new Error('TRUSTED_CONFIG_INVALID');
+    try { unitRegistry(policy); } catch { throw new Error('TRUSTED_CONFIG_INVALID'); }
     const acceptance = policy.acceptance;
     if (!acceptance || !['hard-gates', 'score'].includes(acceptance.kind) || !Array.isArray(acceptance.gates) || acceptance.gates.length === 0 || !acceptance.gates.every(gate => gate && typeof gate.id === 'string' && gate.id.length > 0 && ['MATCH', 'PASS'].includes(gate.requiredOutcome))) throw new Error('TRUSTED_CONFIG_INVALID');
     if (acceptance.kind === 'score' && (!Number.isSafeInteger(acceptance.fixedDenominator) || acceptance.fixedDenominator <= 0)) throw new Error('TRUSTED_CONFIG_INVALID');

@@ -83,7 +83,7 @@ npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-
 npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 ```
 
-`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The docs-command test executes these exact blocks and checks their state barriers.
+`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The rows scene in the demo guide captures plain Git append conflict and Concord checked composition. The docs-command test executes these exact blocks and checks their state barriers.
 
 ## Status and safety
 

@@ -90,6 +90,15 @@ describe('local runner Git and checker execution', () => {
         'i-only': { rows: rows(a3, b3, g4, e4) },
         'j-common': { rows: rows(a3, b3, g4, e4, jLow), epsilonChoices: [jLow, jHigh] },
         'aw-only': { rows: rows(a3, b3, g5, e4, jHigh) },
+        'rows-zeta': { rows: { ...rows(a3, b3, g5, e4, jHigh), zeta: { retry_limit: 2, timeout_ms: 750, output: 1500 } } },
+        'rows-eta': { rows: { ...rows(a3, b3, g5, e4, jHigh), eta: { retry_limit: 3, timeout_ms: 750, output: 2250 } } },
+        'rows-retire': { rows: { alpha: a3, beta: b3, gamma: g5, delta: e4 } },
+        'rows-zeta-eta': { rows: { ...rows(a3, b3, g5, e4, jHigh), zeta: { retry_limit: 2, timeout_ms: 750, output: 1500 },
+          eta: { retry_limit: 3, timeout_ms: 750, output: 2250 } } },
+        'rows-zeta-retire': { rows: { alpha: a3, beta: b3, gamma: g5, delta: e4, zeta: { retry_limit: 2, timeout_ms: 750, output: 1500 } } },
+        'rows-eta-retire': { rows: { alpha: a3, beta: b3, gamma: g5, delta: e4, eta: { retry_limit: 3, timeout_ms: 750, output: 2250 } } },
+        'rows-all': { rows: { alpha: a3, beta: b3, gamma: g5, delta: e4,
+          zeta: { retry_limit: 2, timeout_ms: 750, output: 1500 }, eta: { retry_limit: 3, timeout_ms: 750, output: 2250 } } },
       };
       const path = join(dir, 'dispatch-profile.json');
       const write = async (matrix: NonNullable<LocalProfile['cases']>) => {
@@ -185,6 +194,39 @@ export function attemptBudget(family) {
     const beta = base.replace('beta\t2', 'beta\t3');
     expect(mergeTsv(base, alpha, beta)).toContain('alpha\t2\t1000\nbeta\t3\t1000');
     expect(() => mergeTsv(base, alpha, base.replace('alpha\t1', 'alpha\t3'))).toThrow('TSV_COLLISION');
+  });
+
+  it('merges declared tables with nonfirst keys, additions, deletions and collisions', () => {
+    const table = { name: 'jobs', file: 'data/jobs.tsv', header: ['value', 'job'], keyColumn: 'job', keyPattern: '^[a-z]+$' };
+    const base = 'value\tjob\nold\talpha\nretired\tomega\n';
+    const ours = base + 'left\tzeta\n';
+    const theirs = 'value\tjob\nold\talpha\nright\teta\n';
+    expect(mergeTsv(base, ours, theirs, table)).toBe('value\tjob\nold\talpha\nleft\tzeta\nright\teta\n');
+    expect(() => mergeTsv(base, ours, base + 'other\tzeta\n', table)).toThrow('TSV_COLLISION');
+    expect(() => mergeTsv(base, ours, theirs.replace('value\tjob', 'job\tvalue'), table)).toThrow('INVALID_TSV_HEADER');
+    expect(() => mergeTsv(base, ours + 'again\tzeta\n', theirs, table)).toThrow('INVALID_TSV_ROW');
+  });
+
+  it('inspects an appended pattern row from a declared non-demo table', async () => {
+    await gitFixture(async ({ repo }) => {
+      const baseText = 'value\tjob\nold\talpha\n';
+      await writeFile(join(repo, 'jobs.tsv'), baseText);
+      await git(repo, ['add', 'jobs.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'jobs base'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await writeFile(join(repo, 'jobs.tsv'), baseText + 'new\tzeta\n');
+      await git(repo, ['add', 'jobs.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'append zeta'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const rowPolicy: TrustedPolicy = { ...policy, tables: [{ name: 'jobs', file: 'jobs.tsv', header: ['value', 'job'],
+        keyColumn: 'job', keyPattern: '^[a-z]+$' }], units: { 'file:jobs.tsv': {
+        canonicalKey: 'file:jobs.tsv', file: 'jobs.tsv', resources: [], dependencyKeys: [],
+      } } };
+      const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: rowPolicy } as Job);
+      expect(inspected.unitKeys).toEqual(['row:jobs:zeta']);
+      expect(inspected.manifest.coverage).toBe('complete');
+      expect(normalizeManifest(inspected.manifest, rowPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
+    });
   });
 
   it('derives actual row writes and the trusted dependency digest from Git bytes', async () => {
@@ -441,7 +483,9 @@ export function attemptBudget(family) {
       const run = async (otherName: string, otherRemote: string, otherHead: string, scratchPath: string) => {
         const remotes = Object.fromEntries(Object.entries({ canonical, first, [otherName]: otherRemote, scratch: scratchPath })
           .map(([name, path]) => [name, pathToFileURL(path).href]));
-        const job: Job = { ...jobBase(remotes), kind: 'validate-stack', canonicalBaseOid: base,
+        const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, tables: [{ name: 'families', file: 'families.tsv',
+          header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keyPattern: '^[a-z]+$' }] },
+          kind: 'validate-stack', canonicalBaseOid: base,
           candidates: [
             { changeId: 'alpha', revision: 1, baseOid: base, headOid: firstHead, storageName: 'first', ref: 'refs/heads/main' },
             { changeId: otherName, revision: 1, baseOid: base, headOid: otherHead, storageName: otherName, ref: 'refs/heads/main' },

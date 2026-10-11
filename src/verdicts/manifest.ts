@@ -1,8 +1,16 @@
 import type { DependencyScopeEntry, Digest, ReviewManifest, TrustedPolicy } from '../contracts';
+import { patternRow, tableForFile } from '../leases/units';
 
 const sha256 = /^sha256:[a-f0-9]{64}$/;
 const oid = /^[a-f0-9]{40,64}$/;
 const compareKeys = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+const unitSpec = (policy: TrustedPolicy, key: string) => policy.units[key] ?? (() => {
+  if (key.startsWith('file:') && tableForFile(policy, key.slice(5))) return {
+    canonicalKey: key, file: key.slice(5), resources: [], dependencyKeys: [],
+  };
+  const row = patternRow(policy, key);
+  return row && { canonicalKey: row.key, file: row.file, resources: [...row.resources], dependencyKeys: [] };
+})();
 
 /** JSON with object keys and review evidence arrays in a fixed order. No Worker imports. */
 export function canonicalJson(value: unknown): string {
@@ -69,20 +77,22 @@ function validMode(value: unknown): value is string { return typeof value === 's
 export function trustedDependencyKeys(policy: TrustedPolicy, changedKeys: readonly string[]): string[] {
   const visited = new Set<string>();
   const pending = [...changedKeys];
-  for (const key of changedKeys) if (!policy.units[key]) throw new Error(`UNKNOWN_UNIT:${key}`);
+  for (const key of changedKeys) if (!unitSpec(policy, key)) throw new Error(`UNKNOWN_UNIT:${key}`);
   while (pending.length) {
     const key = pending.pop()!;
-    const unit = policy.units[key];
+    const unit = unitSpec(policy, key);
     if (!unit || !Array.isArray(unit.dependencyKeys)) throw new Error(`UNKNOWN_DEPENDENCY:${key}`);
     const row = /^row:families:([a-z]+)$/.exec(key)?.[1];
-    const reviewedRowFootprint = row && unit.file === 'families.tsv' &&
+    const generated = patternRow(policy, key);
+    const reviewedRowFootprint = generated ? unit.file === generated.file &&
+      JSON.stringify(unit.resources) === JSON.stringify(generated.resources) : row && unit.file === 'families.tsv' &&
       JSON.stringify(unit.resources) === JSON.stringify([`families.tsv#${row}`]);
     if (unit.canonicalKey !== key || !validPath(unit.file) || !Array.isArray(unit.resources) ||
       unit.resources.length > 0 && !reviewedRowFootprint) {
       throw new Error(`UNKNOWN_RESOURCE_SCOPE:${key}`);
     }
     for (const dependency of unit.dependencyKeys) {
-      if (!policy.units[dependency]) throw new Error(`UNKNOWN_DEPENDENCY:${dependency}`);
+      if (!unitSpec(policy, dependency)) throw new Error(`UNKNOWN_DEPENDENCY:${dependency}`);
       if (!visited.has(dependency)) {
         visited.add(dependency);
         pending.push(dependency);
@@ -99,16 +109,16 @@ export function normalizeManifest(input: ReviewManifest, policy: TrustedPolicy, 
     !validDigest(input.oracleDigest) || !validDigest(input.toolchainDigest)) throw new Error('MANIFEST_PIN_MISMATCH');
   if (Object.keys(input).sort().join(',') !== 'changedUnits,checkerDigest,coverage,dependencyScope,oracleDigest,policyDigest,policyVersion,toolchainDigest') throw new Error('MANIFEST_EXTRA_FIELDS');
   const keys = [...expectedKeys].sort();
-  if (new Set(keys).size !== keys.length || !keys.length || !keys.every(key => policy.units[key])) throw new Error('UNKNOWN_UNIT_SCOPE');
+  if (new Set(keys).size !== keys.length || !keys.length || !keys.every(key => unitSpec(policy, key))) throw new Error('UNKNOWN_UNIT_SCOPE');
   const changedUnits = input.changedUnits.map(unit => {
     if (!unit || Object.keys(unit).sort().join(',') !== 'afterDigest,afterMode,afterPath,beforeDigest,beforeMode,beforePath,unitKey' ||
-      typeof unit.unitKey !== 'string' || !policy.units[unit.unitKey] ||
+      typeof unit.unitKey !== 'string' || !unitSpec(policy, unit.unitKey) ||
       !((unit.afterPath === null && unit.afterMode === null && unit.afterDigest === null) ||
         (validPath(unit.afterPath) && validMode(unit.afterMode) && validDigest(unit.afterDigest))) ||
       !((unit.beforePath === null && unit.beforeMode === null && unit.beforeDigest === null) ||
         (validPath(unit.beforePath) && validMode(unit.beforeMode) && validDigest(unit.beforeDigest))) ||
       (unit.beforePath === null && unit.afterPath === null)) throw new Error('MANIFEST_CHANGED_UNIT_INVALID');
-    if (unit.afterPath !== null && unit.afterPath !== policy.units[unit.unitKey].file) throw new Error('MANIFEST_PATH_MISMATCH');
+    if (unit.afterPath !== null && unit.afterPath !== unitSpec(policy, unit.unitKey)!.file) throw new Error('MANIFEST_PATH_MISMATCH');
     return { unitKey: unit.unitKey, beforePath: unit.beforePath, afterPath: unit.afterPath,
       beforeMode: unit.beforeMode, afterMode: unit.afterMode, beforeDigest: unit.beforeDigest, afterDigest: unit.afterDigest };
   }).sort((a, b) => compareKeys(a.unitKey, b.unitKey));
@@ -123,7 +133,7 @@ export function normalizeManifest(input: ReviewManifest, policy: TrustedPolicy, 
   if (input.coverage !== 'complete') throw new Error('MANIFEST_COVERAGE_INVALID');
   const dependencies = input.dependencyScope.map(entry => {
     if (!entry || entry.kind !== 'unit' || Object.keys(entry).sort().join(',') !== 'contentDigest,kind,mode,path,unitKey' ||
-      typeof entry.unitKey !== 'string' || !policy.units[entry.unitKey] || entry.path !== policy.units[entry.unitKey].file ||
+      typeof entry.unitKey !== 'string' || !unitSpec(policy, entry.unitKey) || entry.path !== unitSpec(policy, entry.unitKey)!.file ||
       !validMode(entry.mode) || !validDigest(entry.contentDigest)) throw new Error('MANIFEST_DEPENDENCY_INVALID');
     return { kind: 'unit' as const, unitKey: entry.unitKey, path: entry.path, mode: entry.mode, contentDigest: entry.contentDigest };
   }).sort((a, b) => compareKeys(a.unitKey, b.unitKey));
