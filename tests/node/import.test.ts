@@ -130,20 +130,19 @@ afterEach(async () => {
 });
 
 describe('adopted root import', () => {
-  it('keeps the source index and refs byte-identical with inherited Git repository settings', async () => {
+  it('keeps source objects, index and refs byte-identical when the filtered tree already exists', async () => {
     const root = await temporary();
     const { source } = await fixture(root);
     const index = join(source, '.git', 'index');
-    const head = join(source, '.git', 'HEAD');
-    const main = join(source, '.git', 'refs', 'heads', 'main');
-    const before = await Promise.all([index, head, main].map(path => readFile(path)));
+    const before = await sourceState(source);
     const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import',
       '--source', source, '--ref', 'main', '--repo', 'adopted', '--exclude', 'private/**', '--print-tree'], {
       cwd, env: { ...gitEnv, GIT_DIR: join(source, '.git'), GIT_INDEX_FILE: index }, timeout: 30_000,
     });
-    expect(JSON.parse(result.stdout)).toMatchObject({ fileCount: 3, excludedPathCount: 1 });
-    const after = await Promise.all([index, head, main].map(path => readFile(path)));
-    expect(after).toEqual(before);
+    const tree = JSON.parse(result.stdout);
+    expect(tree).toMatchObject({ fileCount: 3, excludedPathCount: 1 });
+    expect(await git(source, 'cat-file', '-t', String(tree.treeOid))).toBe('tree');
+    expect(await sourceState(source)).toEqual(before);
     expect(await git(source, 'status', '--short')).toBe('');
   });
 
@@ -172,12 +171,16 @@ describe('adopted root import', () => {
     await writeFile(join(source, 'added.txt'), 'new included file\n');
     await git(source, 'add', 'added.txt');
     await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'added');
+    const before = await sourceState(source);
+    vi.stubEnv('GIT_DIR', join(source, '.git'));
+    vi.stubEnv('GIT_INDEX_FILE', join(source, '.git', 'index'));
     const fetcher = vi.fn(() => { throw new Error('API contacted during dry run'); });
     vi.stubGlobal('fetch', fetcher);
     const options = { source, ref: 'main', repo: 'adopted', excludes: ['private/**'], printTree: true };
     const tree = await importRepo(options);
     expect(tree).toMatchObject({ fileCount: 4, excludedPathCount: 1 });
     await expect(git(source, 'cat-file', '-e', String(tree.treeOid))).rejects.toThrow();
+    expect(await sourceState(source)).toEqual(before);
     expect(JSON.stringify(tree)).not.toContain('secret.txt');
     expect(fetcher).not.toHaveBeenCalled();
     await expect(importRepo({ ...options, excludeFile: join(root, 'missing') })).rejects.toThrow(/exclude-file/);
