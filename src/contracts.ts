@@ -199,6 +199,8 @@ export interface InspectCandidateJob extends JobBase {
 }
 export interface OrdinaryStackJob extends JobBase {
   kind: 'validate-stack'; canonicalBaseOid: Oid; candidates: CandidateInput[];
+  /** Explicit canonical-base-only diagnostic; ordinary stacks require candidates. */
+  baseCheck?: true;
   bootstrap: false; stackId: Id; scratchStorageName: string; scratchRef: string;
 }
 export interface BootstrapStackJob extends JobBase {

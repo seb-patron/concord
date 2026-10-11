@@ -249,7 +249,8 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
     ? { ...base, bootstrap: true as const, ownerAuthorized: true as const, canonicalBaseOid: null,
       candidates: [{ changeId: `seed-${stackId}`, revision: 1, baseOid: null, headOid: seed!.headOid,
         seedStorageName: seed!.seedStorageName, seedRef: seed!.seedRef }] as [SeedInput] }
-    : { ...base, bootstrap: false as const, canonicalBaseOid: state.observedMain!, candidates };
+    : { ...base, bootstrap: false as const, canonicalBaseOid: state.observedMain!, candidates,
+      ...(candidates.length === 0 ? { baseCheck: true as const } : {}) };
   const inputDigest = await digest(jobInput(immutable));
   return { ...immutable, inputDigest } as ValidateStackJob;
 }

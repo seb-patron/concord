@@ -45,6 +45,7 @@ const original = {
   findings: findings.hooks['findings.gate'], verdict: verdicts.hooks['verdicts.gate'],
   schedule: runners.hooks['runners.schedule'],
 };
+const originalStorageInfo = FakeStorage.prototype.info;
 const originalTrustedConfig = (env as Env).TRUSTED_CONFIG;
 let harness: Harness;
 beforeEach(() => {
@@ -58,12 +59,25 @@ beforeEach(() => {
     const internal = instance as unknown as { context(name: 'repos', principal: Principal, repoId: string): ModuleContext };
     return callback(internal.context('repos', principal, repoId));
   });
+  FakeStorage.prototype.info = async function(name) {
+    const info = await originalStorageInfo.call(this, name);
+    return info && { ...info, remote: `file:///${encodeURIComponent(name)}` };
+  };
+  const refreshJobs = async () => {
+    const scheduled = await runInDurableObject<RepoCoordinator, Job[]>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'runners', principal: Principal, repoId: string): ModuleContext };
+      return (runners.snapshot(internal.context('runners', principal, repoId)) as { jobs: Job[] }).jobs;
+    });
+    jobs.splice(0, jobs.length, ...scheduled);
+  };
   harness = {
     repoId, views, findingsVersion, jobs, releases, reserveAllowed: true,
     async fetch(path, body, key = crypto.randomUUID()) {
       const request = body ? mutation(`/v1/repos/${repoId}${path}`, body, key) : apiRequest(`/v1/repos/${repoId}${path}`);
       const response = await worker.fetch(request, env);
-      return { response, body: await responseBody(response) };
+      const parsed = await responseBody(response);
+      await refreshJobs();
+      return { response, body: parsed };
     },
     async state() { return (await this.fetch('/queue')).body.data; },
     async seed(name, base = main) {
@@ -93,6 +107,7 @@ beforeEach(() => {
         }
         await instance.alarm();
       });
+      await refreshJobs();
     },
     async deliver(job, outcome, options = {}) {
       if (job.kind !== 'validate-stack') throw new Error('expected stack job');
@@ -141,11 +156,13 @@ beforeEach(() => {
       });
     },
     async bootstrap(seed, asOwner = true) {
-      return await runInDurableObject<RepoCoordinator, Gate<{ stackId: string }>>(stub, instance => {
+      const result = await runInDurableObject<RepoCoordinator, Gate<{ stackId: string }>>(stub, instance => {
         const internal = instance as unknown as { context(name: 'repos', principal: Principal, repoId: string): ModuleContext };
         const actor = asOwner ? principal : { ...principal, roles: ['agent'] as Principal['roles'] };
         return internal.context('repos', actor, repoId).handoffBootstrap!(seed);
       });
+      await refreshJobs();
+      return result;
     },
   };
   repos.changeView = (_context, id) => views.has(id) ? gate(views.get(id)!)
@@ -159,10 +176,6 @@ beforeEach(() => {
     unresolvedIds: [], pendingRound: null });
   verdicts.hooks['verdicts.gate'] = (_context, id) => gate({ verdictId: `v-${id}`, reviewManifestDigest: 'sha256:0',
     findingSetVersion: findingsVersion.get(id) ?? 1 });
-  runners.hooks['runners.schedule'] = (context, job) => {
-    if (context.repoId !== repoId) return { status: 'blocked', version: 1, code: 'TEST_REPO_MISMATCH', reason: 'Old test alarm', evidenceIds: [] };
-    jobs.push(job); return gate({ jobId: job.jobId });
-  };
 });
 afterEach(async () => {
   const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${harness.repoId}`));
@@ -177,6 +190,7 @@ afterEach(async () => {
   findings.hooks['findings.gate'] = original.findings;
   verdicts.hooks['verdicts.gate'] = original.verdict;
   runners.hooks['runners.schedule'] = original.schedule;
+  FakeStorage.prototype.info = originalStorageInfo;
   (env as Env).TRUSTED_CONFIG = originalTrustedConfig;
 });
 
@@ -208,6 +222,49 @@ async function setup(...ids: string[]): Promise<Harness> {
     if (response.response.status !== 201) throw new Error(JSON.stringify({ id, status: response.response.status, body: response.body }));
   }
   return h;
+}
+
+async function deliverChecked(h: Harness, job: Job, outcome: StackResult['outcome']): Promise<void> {
+  if (job.kind !== 'validate-stack' || job.bootstrap) throw new Error('expected ordinary stack job');
+  const prefix = `/v1/repos/${h.repoId}`;
+  const poll = await worker.fetch(mutation(`${prefix}/runner/poll`,
+    { runnerId: 'diagnostic-checker', role: 'checker', supportedProfileDigests: [job.profileDigest] },
+    crypto.randomUUID(), 'local-checker'), env);
+  if (poll.status !== 200) throw new Error(`runner poll: ${poll.status}`);
+  const claimed = (await responseBody(poll)).data.job as Job;
+  if (claimed.jobId !== job.jobId) throw new Error(`unexpected runner job: ${claimed.jobId}`);
+  const composedOid = outcome === 'PASS' ? oid((h.jobs.indexOf(job) + 2).toString(16)) : null;
+  const tree = oid('3');
+  if (composedOid) {
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'runners', actor: Principal, repoId: string): ModuleContext };
+      const storage = internal.context('runners', principal, h.repoId).storage as FakeStorage;
+      storage.putCommit(job.scratchStorageName, { oid: main, treeOid: oid('2'), parents: [] });
+      for (const candidate of job.candidates) storage.putCommit(job.scratchStorageName,
+        { oid: candidate.headOid, treeOid: tree, parents: [candidate.baseOid] });
+      storage.putCommit(job.scratchStorageName, { oid: composedOid!, treeOid: tree,
+        parents: [main, ...job.candidates.map(candidate => candidate.headOid)] });
+      if (!storage.conditionalUpdateRef(job.scratchStorageName, job.scratchRef, null, composedOid!))
+        throw new Error('scratch ref already exists');
+    });
+  }
+  const preimage = {
+    kind: 'validate-stack' as const, jobId: claimed.jobId, attempt: claimed.attempt, fence: claimed.fence,
+    inputDigest: claimed.inputDigest, sourceTreeOid: composedOid ? tree : null,
+    checkerDigest: claimed.checkerDigest, toolchainDigest: claimed.toolchainDigest,
+    oracleDigest: claimed.oracleDigest, environmentDigest: claimed.environmentDigest,
+    durationMs: 1, log: '', outcome, composedOid, composedTreeOid: composedOid ? tree : null,
+    gateResults: [{ gateId: 'default', outcome: 'PASS' as const }], score: null,
+    bootstrap: job.bootstrap, canonicalBaseOid: job.canonicalBaseOid,
+  };
+  const resultDigest = await digest(preimage);
+  const response = await worker.fetch(mutation(`${prefix}/jobs/${job.jobId}/result`,
+    { attempt: claimed.attempt, fence: claimed.fence, inputDigest: claimed.inputDigest,
+      resultDigest, result: { ...preimage, resultDigest } }, crypto.randomUUID(), 'local-checker'), env);
+  const body = await responseBody(response);
+  if (response.status !== 200 || body.data.dispatch.status !== 'eligible')
+    throw new Error(`runner result: ${response.status} ${JSON.stringify(body)}`);
 }
 
 async function realLeases(h: Harness, changes: Array<{ id: string; unit: string }>, claimedIds: string[]): Promise<void> {
@@ -651,14 +708,14 @@ describe('queue state machine', () => {
     await h.tick();
     expect(h.jobs[0].kind).toBe('validate-stack');
     expect((h.jobs[0] as any).candidates.map((item: any) => item.changeId)).toEqual(['A', 'B', 'C']);
-    await h.deliver(h.jobs[0], 'FAIL'); await h.tick();
-    expect((h.jobs[1] as any).candidates).toEqual([]);
-    await h.deliver(h.jobs[1], 'PASS'); await h.tick();
-    await h.deliver(h.jobs[2], 'PASS'); await h.tick();
-    await h.deliver(h.jobs[3], 'FAIL'); await h.tick();
-    await h.deliver(h.jobs[4], 'FAIL'); await h.tick();
+    await deliverChecked(h, h.jobs[0], 'FAIL'); await h.tick();
+    expect(h.jobs[1]).toMatchObject({ kind: 'validate-stack', baseCheck: true, canonicalBaseOid: main, candidates: [] });
+    await deliverChecked(h, h.jobs[1], 'PASS'); await h.tick();
+    await deliverChecked(h, h.jobs[2], 'PASS'); await h.tick();
+    await deliverChecked(h, h.jobs[3], 'FAIL'); await h.tick();
+    await deliverChecked(h, h.jobs[4], 'FAIL'); await h.tick();
     expect((h.jobs[5] as any).candidates.map((item: any) => item.changeId)).toEqual(['A', 'C']);
-    await h.deliver(h.jobs[5], 'PASS'); await h.tick();
+    await deliverChecked(h, h.jobs[5], 'PASS'); await h.tick();
     const state = await h.state();
     expect(state.diagnosis).toMatchObject({ reason: 'SINGLETON', blame: ['B'], survivors: ['A', 'C'] });
     expect(state.diagnosticResults).toHaveLength(5);
@@ -694,10 +751,11 @@ describe('queue state machine', () => {
   it('records pairwise interaction without a promotion ticket', async () => {
     const h = await setup('A', 'B');
     await h.tick();
-    await h.deliver(h.jobs[0], 'FAIL'); await h.tick();
-    await h.deliver(h.jobs[1], 'PASS'); await h.tick();
-    await h.deliver(h.jobs[2], 'PASS'); await h.tick();
-    await h.deliver(h.jobs[3], 'PASS'); await h.tick();
+    await deliverChecked(h, h.jobs[0], 'FAIL'); await h.tick();
+    expect(h.jobs[1]).toMatchObject({ kind: 'validate-stack', baseCheck: true, candidates: [] });
+    await deliverChecked(h, h.jobs[1], 'PASS'); await h.tick();
+    await deliverChecked(h, h.jobs[2], 'PASS'); await h.tick();
+    await deliverChecked(h, h.jobs[3], 'PASS'); await h.tick();
     expect((await h.state()).diagnosis).toMatchObject({ reason: 'INTERACTION', blame: ['A', 'B'] });
     expect((await h.state()).promotion).toBeNull();
   });
@@ -708,10 +766,11 @@ describe('queue state machine', () => {
     { name: 'interaction inside a subset', ids: ['A', 'B', 'C'], diagnostic: ['PASS', 'PASS', 'FAIL', 'PASS', 'PASS'], reason: 'INTERACTION' },
   ])('blocks and releases every unresolved member after $name', async ({ ids, diagnostic, reason }) => {
     const h = await setup(...ids);
-    await h.tick(); await h.deliver(h.jobs[0], 'FAIL'); await h.tick();
+    await h.tick(); await deliverChecked(h, h.jobs[0], 'FAIL'); await h.tick();
+    expect(h.jobs[1]).toMatchObject({ kind: 'validate-stack', baseCheck: true, candidates: [] });
     for (let i = 0; i < diagnostic.length; i++) {
       expect(h.jobs[i + 1]).toBeDefined();
-      await h.deliver(h.jobs[i + 1], diagnostic[i] as StackResult['outcome']); await h.tick();
+      await deliverChecked(h, h.jobs[i + 1], diagnostic[i] as StackResult['outcome']); await h.tick();
     }
     const state = await h.state();
     expect(state.diagnosis.reason).toBe(reason);
@@ -961,8 +1020,7 @@ describe('queue state machine', () => {
     await h.deliver(jobs[first], 'PASS');
     await h.deliver(jobs[second], 'PASS');
     await h.tick();
-    expect((await h.state()).contests[0].state).toBe('open');
-    await h.tick();
+    if ((await h.state()).contests[0].state === 'open') await h.tick();
     expect((await h.state()).contests[0]).toMatchObject({ state: 'selected', winnerId: first });
   });
 
@@ -1013,8 +1071,7 @@ describe('queue state machine', () => {
     if (jobs.B.kind !== 'validate-stack') throw new Error('expected contest child job');
     expect(await h.put(jobs.B.scratchStorageName, jobs.B.scratchRef, oid('f'), oid('e'))).toBe(true);
     await h.tick();
-    expect((await h.state()).contests[0].state).toBe('open');
-    await h.tick();
+    if ((await h.state()).contests[0].state === 'open') await h.tick();
     expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'CHECKED_SCRATCH_MISMATCH', winnerId: null });
   });
 

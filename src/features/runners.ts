@@ -143,7 +143,9 @@ function validJob(c: ModuleContext, job: Job): boolean {
     const canonical = Object.entries(job.expectedRefs).filter(([name]) => name !== job.scratchStorageName && !candidateNames.has(name));
     if (canonical.length !== 1 || canonical[0][1] !== job.canonicalBaseOid) return false;
     if (job.bootstrap) return job.ownerAuthorized === true && job.canonicalBaseOid === null && job.candidates.length === 1 && job.candidates[0].baseOid === null;
-    return !!job.canonicalBaseOid && job.candidates.length > 0 && job.candidates.every(candidate => !!candidate.baseOid);
+    return !!job.canonicalBaseOid &&
+      (job.baseCheck === true ? job.candidates.length === 0 : job.baseCheck === undefined && job.candidates.length > 0) &&
+      job.candidates.every(candidate => !!candidate.baseOid);
   }
   if (job.kind === 'delta-check') return !!job.candidate.baseOid && !!job.storageRemotes[job.candidate.storageName] &&
     Object.entries(job.expectedRefs).filter(([name, oid]) => name !== job.candidate.storageName && oid === job.newBaseOid).length === 1;
