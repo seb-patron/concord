@@ -12,6 +12,7 @@
     "test:target": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
     "dev": "wrangler dev --config wrangler.local.jsonc",
     "concord": "tsx cli/main.ts",
+    "mcp": "node --import tsx mcp/server.ts",
     "runner": "tsx runner/main.ts",
     "git-bridge": "tsx local/git-bridge.ts",
     "aw-mock": "tsx adapters/aw-mock.ts",
@@ -29,5 +30,8 @@
     "typescript": "5.9.3",
     "vitest": "4.1.0",
     "wrangler": "4.149.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
   }
 }

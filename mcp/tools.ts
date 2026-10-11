@@ -1,0 +1,157 @@
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredentialsIn } from '../cli/client.ts';
+import { assertCommit, assertHeadBasedOn, git, rejectCanonicalTarget, resolveHead, validateRemote } from '../cli/git.ts';
+
+type Args = Record<string, unknown>;
+type Shape = Record<string, Record<string, unknown>>;
+const s = { type: 'string' };
+const n = { type: 'integer', minimum: 0 };
+const strings = { type: 'array', items: s };
+const fences = { type: 'object', additionalProperties: { type: 'integer', minimum: 1 } };
+function tool(name: string, description: string, properties: Shape, required: string[] = []): Tool {
+  return { name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false } };
+}
+const repo = { repoId: s };
+const change = { ...repo, changeId: s };
+export const tools: Tool[] = [
+  tool('repo_list', 'List authorized repositories.', { cursor: s }),
+  tool('repo_get', 'Get repository detail and canonical head.', repo, ['repoId']),
+  tool('repo_context', 'Get repository snapshot, policy state, changes, leases, queue and findings.', repo, ['repoId']),
+  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys: strings, dependencyChangeIds: strings, attempt: n, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
+  tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
+  tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result.', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 300 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
+  tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
+  tool('lease_list', 'List active leases and recent refusals.', { ...repo, cursor: s }, ['repoId']),
+  tool('change_checkout', 'Fetch the assigned candidate branch into a local Git worktree with a short-lived, process-local Git credential.', { ...change, worktree: s }, ['repoId', 'changeId', 'worktree']),
+  tool('change_publish', 'Verify and push local HEAD to the assigned candidate fork, then publish the revision.', { ...change, worktree: s, leaseFences: fences, idempotencyKey: s }, ['repoId', 'changeId', 'worktree', 'leaseFences']),
+  tool('findings_list', 'List findings for a change.', { ...change, cursor: s }, ['repoId', 'changeId']),
+  tool('review_verdict_submit', 'Submit an independent reviewer verdict for the inspected revision.', { ...change, revision: n, reviewManifestDigest: s, findingSetVersion: n, decision: { type: 'string', enum: ['approve', 'reject'] }, evidenceDigest: s, idempotencyKey: s }, ['repoId', 'changeId', 'revision', 'reviewManifestDigest', 'findingSetVersion', 'decision', 'evidenceDigest']),
+  tool('queue_enqueue', 'Enqueue an approved change with its live lease fences.', { ...change, verdictId: s, leaseFences: fences, idempotencyKey: s }, ['repoId', 'changeId', 'verdictId', 'leaseFences']),
+  tool('queue_status', 'Get queue entries, generation and result status.', repo, ['repoId']),
+  tool('events_since', 'Read repository events after a sequence cursor.', { ...repo, after: n, cursor: s }, ['repoId']),
+];
+
+function value(args: Args, key: string): string {
+  const item = args[key];
+  if (typeof item !== 'string' || !item || !/^[A-Za-z0-9_-]{1,128}$/.test(item)) throw new ConcordError(`${key} must be an ID`, 'usage');
+  return encodeURIComponent(item);
+}
+function root(args: Args): string { return `/repos/${value(args, 'repoId')}`; }
+function path(args: Args): string { return `${root(args)}/changes/${value(args, 'changeId')}`; }
+function query(name: string, item: unknown): string { return typeof item === 'string' && item ? `?${name}=${encodeURIComponent(item)}` : ''; }
+function data(response: unknown): Record<string, unknown> {
+  const item = (response as { data?: unknown })?.data;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) throw new ConcordError('Concord returned an invalid data envelope', 'server');
+  return item as Record<string, unknown>;
+}
+function version(response: unknown): number {
+  const result = (response as { version?: unknown })?.version;
+  if (!Number.isSafeInteger(result)) throw new ConcordError('Concord did not return a version', 'server');
+  return result as number;
+}
+function field(object: Record<string, unknown>, key: string): string {
+  const result = object[key];
+  if (typeof result !== 'string' || !result) throw new ConcordError(`Concord did not return ${key}`, 'server');
+  return result;
+}
+function accessToken(object: Record<string, unknown>): string {
+  const token = object.token ?? object.secret ?? object.plaintext;
+  if (typeof token !== 'string' || !token) throw new ConcordError('Concord did not return a Git token', 'server');
+  return token;
+}
+function mutation(client: ConcordClient, url: string, body: Args, expectedVersion?: number, key?: unknown): Promise<unknown> {
+  return client.request('POST', url, { body, expectedVersion, idempotencyKey: idempotencyKey(typeof key === 'string' ? key : undefined) });
+}
+async function currentVersion(client: ConcordClient, args: Args): Promise<number> {
+  return version(await client.request('GET', `${root(args)}/snapshot`));
+}
+async function gitAccess(client: ConcordClient, args: Args, storageName: string, scope: 'read' | 'write', repoVersion: number): Promise<{ remote: string; token: string }> {
+  const access = data(await mutation(client, `${root(args)}/git-token`, { storageName, scope, ttlSeconds: 300 }, repoVersion));
+  const remote = field(access, 'remote');
+  const token = accessToken(access);
+  // The local bridge issues file remotes; only accept them when the API itself is loopback.
+  const server = new URL(client.baseUrl);
+  const local = ['localhost', '127.0.0.1', '::1'].includes(server.hostname);
+  const parsed = new URL(remote);
+  if (local && parsed.protocol === 'file:' && !parsed.hostname && !parsed.username && !parsed.password && !parsed.search && !parsed.hash) {
+    return { remote, token };
+  }
+  validateRemote(remote);
+  return { remote, token };
+}
+function safeRemote(remote: string): string {
+  const url = new URL(remote);
+  return `${url.protocol}//${url.host}${url.pathname}`;
+}
+
+export async function callTool(client: ConcordClient, name: string, args: Args): Promise<unknown> {
+  rememberCredentialsIn(args);
+  const r = name === 'repo_list' ? '' : root(args);
+  const p = () => path(args);
+  let result: unknown;
+  switch (name) {
+    case 'repo_list': result = await client.request('GET', `/repos${query('cursor', args.cursor)}`); break;
+    case 'repo_get': result = await client.request('GET', r); break;
+    case 'repo_context': result = await client.request('GET', `${r}/snapshot`); break;
+    case 'change_create': {
+      const { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds = [], attempt } = args;
+      result = await mutation(client, `${r}/changes`, { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds, ...(attempt === undefined ? {} : { attempt }) }, undefined, args.idempotencyKey);
+      break;
+    }
+    case 'change_status': result = await client.request('GET', p()); break;
+    case 'lease_claim': {
+      const body = { changeId: args.changeId, unitKeys: args.unitKeys, intentText: args.intentText, ttlSeconds: args.ttlSeconds ?? 120 };
+      try { result = await mutation(client, `${r}/leases`, body, await currentVersion(client, args), args.idempotencyKey); }
+      catch (error) {
+        if (error instanceof ConcordError && error.status === 409 && (error.payload as { error?: { code?: string } } | undefined)?.error?.code === 'LEASE_CONFLICT') {
+          result = { conflict: true, ...(error.payload as object) };
+          break;
+        }
+        throw error;
+      }
+      break;
+    }
+    case 'lease_release': result = await mutation(client, `${r}/leases/${value(args, 'leaseId')}/release`, { fence: args.fence }, await currentVersion(client, args), args.idempotencyKey); break;
+    case 'lease_list': result = await client.request('GET', `${r}/leases${query('cursor', args.cursor)}`); break;
+    case 'change_checkout': {
+      const change = data(await client.request('GET', p()));
+      const repository = await client.request('GET', r);
+      const access = await gitAccess(client, args, field(change, 'candidateStorageName'), 'read', version(repository));
+      const branch = field(change, 'branch');
+      const worktree = field(args, 'worktree');
+      await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/concord/${branch.replace(/^refs\/heads\//, '')}`], { token: access.token }, worktree);
+      result = { fetched: true, changeId: args.changeId, worktree, branch, remote: safeRemote(access.remote) };
+      break;
+    }
+    case 'change_publish': {
+      const change = data(await client.request('GET', p()));
+      const repository = await client.request('GET', r);
+      const repoData = data(repository);
+      const storageName = field(change, 'candidateStorageName');
+      if (storageName === repoData.canonicalStorageName) throw new ConcordError('Refusing canonical Git target', 'server');
+      const baseOid = field(change, 'baseOid');
+      const branch = field(change, 'branch');
+      const worktree = field(args, 'worktree');
+      const headOid = await resolveHead(worktree);
+      await assertCommit(worktree, baseOid);
+      await assertHeadBasedOn(worktree, baseOid, headOid);
+      const access = await gitAccess(client, args, storageName, 'write', version(repository));
+      rejectCanonicalTarget(storageName, repoData.canonicalStorageName, access.remote, repoData.canonicalRemote);
+      await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', access.remote, `${headOid}:${branch}`], { token: access.token }, worktree);
+      await mutation(client, `${r}/branches`, { storageName, ref: branch, observedHead: headOid, ownerId: field(change, 'authorId') }, await currentVersion(client, args));
+      result = await mutation(client, `${p()}/publish`, { baseOid, headOid, branch, unitKeys: change.unitKeys, leaseFences: args.leaseFences }, version(await client.request('GET', p())), args.idempotencyKey);
+      break;
+    }
+    case 'findings_list': result = await client.request('GET', `${p()}/findings${query('cursor', args.cursor)}`); break;
+    case 'review_verdict_submit': {
+      const { revision, reviewManifestDigest, findingSetVersion, decision, evidenceDigest } = args;
+      result = await mutation(client, `${p()}/verdicts`, { revision, reviewManifestDigest, findingSetVersion, decision, evidenceDigest }, await currentVersion(client, args), args.idempotencyKey);
+      break;
+    }
+    case 'queue_enqueue': result = await mutation(client, `${r}/queue/enqueue`, { changeId: args.changeId, verdictId: args.verdictId, leaseFences: args.leaseFences }, await currentVersion(client, args), args.idempotencyKey); break;
+    case 'queue_status': result = await client.request('GET', `${r}/queue`); break;
+    case 'events_since': result = await client.request('GET', `${r}/events${args.after === undefined ? query('cursor', args.cursor) : `?after=${args.after}`}`); break;
+    default: throw new ConcordError('Unknown MCP tool', 'usage');
+  }
+  return redactOutput(result);
+}
