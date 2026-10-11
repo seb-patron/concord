@@ -17,6 +17,68 @@ import { apiRequest, mutation, responseBody } from '../helpers';
 const fetchApi = (request: Request) => worker.fetch(request, env);
 
 describe('cross-module coordinator hooks', () => {
+  it('rejects a mutation whose body finishes after promotion freezes the repository', async () => {
+    const repoId = 'hooks_freeze_race';
+    const mutatePath = `/v1/repos/${repoId}/test-mutate`;
+    const freezePath = `/v1/repos/${repoId}/test-freeze`;
+    const prior = queue.promotionFreeze;
+    const nativeJson = Request.prototype.json;
+    let signalReading!: () => void;
+    const reading = new Promise<void>(resolve => { signalReading = resolve; });
+    let releaseBody: (() => void) | undefined;
+    const mutate: ModuleRoute = {
+      method: 'POST', pattern: /^\/v1\/repos\/hooks_freeze_race\/test-mutate$/,
+      handle: context => {
+        context.state.put('mutation', true);
+        return json({ accepted: true });
+      },
+    };
+    const inspect: ModuleRoute = {
+      method: 'GET', pattern: /^\/v1\/repos\/hooks_freeze_race\/test-mutate$/,
+      handle: context => json({ mutated: context.state.get<boolean>('mutation') === true }),
+    };
+    const freeze: ModuleRoute = {
+      method: 'POST', pattern: /^\/v1\/repos\/hooks_freeze_race\/test-freeze$/,
+      handle: context => {
+        context.state.put('frozen', true);
+        return json({ frozen: true });
+      },
+    };
+    repos.routes.unshift(mutate, inspect);
+    queue.routes.unshift(freeze);
+    queue.promotionFreeze = context => ({ frozen: context.state.get<boolean>('frozen') === true });
+    Request.prototype.json = async function () {
+      if (new URL(this.url).pathname === mutatePath) {
+        await new Promise<void>(resolve => {
+          releaseBody = resolve;
+          signalReading();
+        });
+      }
+      return nativeJson.call(this);
+    };
+    try {
+      const pending = fetchApi(mutation(mutatePath, { expectedVersion: 0, tenantId: 'local' }, 'slow-body'));
+      await reading;
+      const frozen = await fetchApi(mutation(freezePath, { tenantId: 'local', expectedVersion: 0 }, 'start-freeze'));
+      expect(frozen.status).toBe(200);
+      expect((await responseBody(frozen)).data).toEqual({ frozen: true });
+      releaseBody?.();
+      const blocked = await pending;
+      expect(blocked.status).toBe(409);
+      const state = await fetchApi(apiRequest(mutatePath));
+      expect((await responseBody(state)).data).toEqual({ mutated: false });
+      const stillFrozen = await fetchApi(mutation(mutatePath, { expectedVersion: 0, tenantId: 'local' }, 'after-freeze'));
+      expect((await responseBody(stillFrozen)).error.code).toBe('PROMOTION_IN_PROGRESS');
+    } finally {
+      releaseBody?.();
+      Request.prototype.json = nativeJson;
+      queue.promotionFreeze = prior;
+      repos.routes.splice(repos.routes.indexOf(mutate), 1);
+      repos.routes.splice(repos.routes.indexOf(inspect), 1);
+      queue.routes.splice(queue.routes.indexOf(freeze), 1);
+    }
+  });
+
   it('blocks mutations across all modules while frozen and permits reads and the trusted result path', async () => {
     const prior = queue.promotionFreeze;
     const routes = new Map<FeatureModule, ModuleRoute[]>();
