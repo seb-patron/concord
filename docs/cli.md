@@ -28,6 +28,16 @@ CLI stdout and stderr are redacted as structured values before JSON serializatio
 
 Safe GET requests and keyed mutations retry transient transport failures, HTTP 429, and server errors for at most three attempts. A retry reuses the same request body and idempotency key and honors `Retry-After` (bounded to 30 seconds). Other requests are not retried.
 
+## Delegated principals
+
+```sh
+npm run concord -- principals mint --role agent --repo REPO_ID --ttl 2h --name worker-1
+npm run concord -- principals list
+npm run concord -- principals revoke PRINCIPAL_ID
+```
+
+Mint writes only the newly issued plaintext token followed by a newline to stdout, once. Store it securely at creation; list and revoke never show it. `--ttl` accepts positive seconds (`s`), minutes (`m`), or hours (`h`); the default is 24 hours. Omit `--repo` to inherit the caller's full repository scope. The server enforces role and repository subsets, parent expiry, the trusted TTL maximum, and a tenant cap. See [the principals API](api-principals.md) for authorization and response details.
+
 ## Repository commands
 
 ```sh

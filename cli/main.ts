@@ -17,6 +17,9 @@ Mutations generate an idempotency key when omitted. Responses are JSON on stdout
 Commands and required fields:
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
+  principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
+  principals list
+  principals revoke ID
   repo clone --repo ID --path PATH                 (read-only canonical clone)
   change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
   change get --repo ID --id ID
@@ -49,7 +52,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   let parsed;
   try {
     const options: Record<string, { type: 'string' } | { type: 'boolean' }> = {};
-    for (const name of OPTION_NAMES) options[name] = { type: 'string' };
+    for (const name of [...OPTION_NAMES, 'role', 'ttl']) options[name] = { type: 'string' };
     options.json = { type: 'boolean' };
     options.help = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
@@ -76,6 +79,34 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     if (options.expectedVersion === undefined) throw new ConcordError('--expected-version is required when mutating an existing resource', 'usage');
     return client.request('POST', path, options);
   };
+
+  if (noun === 'principals') {
+    if (verb === 'list') return print(await client.request('GET', '/principals'));
+    if (verb === 'revoke') {
+      if (args.length !== 1 || !/^[A-Za-z0-9_-]{1,64}$/.test(args[0])) throw new ConcordError('principals revoke requires an ID', 'usage');
+      return print(await client.request('DELETE', `/principals/${args[0]}`));
+    }
+    if (verb === 'mint') {
+      const role = required(flags, 'role');
+      if (!['agent', 'reviewer', 'viewer'].includes(role)) throw new ConcordError('--role must be agent, reviewer, or viewer', 'usage');
+      const payload: Record<string, unknown> = { roles: [role] };
+      if (repo) payload.repoIds = [repo];
+      if (flags.name !== undefined) payload.name = flags.name;
+      if (flags.ttl !== undefined) {
+        const match = /^([1-9][0-9]*)([smh])$/.exec(String(flags.ttl));
+        if (!match) throw new ConcordError('--ttl must use positive seconds, minutes, or hours (for example 2h)', 'usage');
+        const seconds = Number(match[1]) * ({ s: 1, m: 60, h: 3600 } as const)[match[2] as 's' | 'm' | 'h'];
+        if (!Number.isSafeInteger(seconds)) throw new ConcordError('--ttl is too large', 'usage');
+        payload.ttlSeconds = seconds;
+      }
+      const result = unwrap(await client.request('POST', '/principals', requestOptions(flags, payload)));
+      if (!result || typeof result !== 'object' || typeof (result as { token?: unknown }).token !== 'string' || !/^cct_[A-Za-z0-9_-]+_[a-f0-9]{64}$/.test((result as { token: string }).token)) {
+        throw new ConcordError('Mint response did not include a valid token', 'server');
+      }
+      process.stdout.write(`${(result as { token: string }).token}\n`);
+      return;
+    }
+  }
 
   if (noun === 'repo' && verb === 'list') return print(await send('GET', `/repos${query({ cursor: flags.cursor })}`));
   if (noun === 'repo' && verb === 'create') {
