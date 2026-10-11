@@ -1,6 +1,7 @@
 import type { FeatureModule, Gate, Job, JobResult, ModuleContext, RepoStorage, ReviewManifest, RunnerPollBody, JobHeartbeatBody, JobCredentialsBody, JobResultBody } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, HttpError, json, stableJson } from '../http';
+import { reserveTokenMint } from './repos';
 
 const CLAIM_MS = 60_000;
 // The bridge, like Artifacts, issues Git credentials for at least 60 seconds.
@@ -233,6 +234,7 @@ async function credentials(c: ModuleContext, id: string, body: JobCredentialsBod
       const ttlSeconds = Math.min(c.env?.STORAGE_BACKEND === 'bridge' ? 60 : 59,
         Math.floor((live.job.expiresAt! - c.now() - 1000) / 1000));
       if (ttlSeconds < 1) conflict('STALE_JOB');
+      await reserveTokenMint(c);
       const issued = await c.storage.mintToken(name, body.operation === 'fetch' ? 'read' : 'write', ttlSeconds);
       if (issued.expiresAt > live.job.expiresAt!) {
         await c.storage.revokeToken(name, issued.secret);

@@ -148,6 +148,8 @@ The `--force-with-lease` commands above are **only** for the disposable stale-re
 
 ## Provision secrets and deploy
 
+Review the [cost guards and owner billing steps](cost.md) before deployment.
+
 First upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
 
 ```sh

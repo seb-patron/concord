@@ -9,5 +9,6 @@
     { "name": "REPO_COORDINATOR", "class_name": "RepoCoordinator" }
   ] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCatalog", "RepoCoordinator"] }],
+  "ratelimits": [{ "name": "AUTH_RATE_LIMIT", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }],
   "vars": { "CONCORD_MODE": "local", "STORAGE_BACKEND": "fake" }
 }
