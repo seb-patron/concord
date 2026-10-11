@@ -225,7 +225,11 @@ describe('ui view helpers (fixtures)', () => {
     const lease = { changeId: 'x', unitKey: 'row:a', fence: 7, expiresAt: Date.now() + 60_000, state: 'active' };
     expect(mutationEvidence(change, [lease], 3)).toMatchObject({ revision: 2, findingSetVersion: 3, leaseFences: { 'row:a': 7 } });
     expect(mutationEvidence(null, [lease], 3).error).toMatch(/Select/);
+    expect(mutationEvidence({ ...change, changeId: 42 }, [lease], 3).error).toMatch(/Select/);
     expect(mutationEvidence(change, [], 3).error).toMatch(/fence/);
+    expect(mutationEvidence(change, [{ ...lease, expiresAt: undefined }], 3).error).toMatch(/fence/);
+    expect(mutationEvidence(change, [{ ...lease, expiresAt: 'tomorrow' }], 3).error).toMatch(/fence/);
+    expect(mutationEvidence(change, [{ ...lease, expiresAt: Number.NaN }], 3).error).toMatch(/fence/);
     expect(mutationEvidence({ changeId: 'x', revision: 2 }, [lease], 3).error).toMatch(/unit keys/);
     expect(mutationEvidence({ ...change, unitKeys: [] }, [lease], 3).error).toMatch(/unit keys/);
     expect(mutationEvidence(change, [], 3, false)).toMatchObject({ revision: 2, findingSetVersion: 3 });
@@ -293,7 +297,8 @@ describe('app event handlers (full snapshot fixtures)', () => {
     const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
     Object.assign(globalThis, { document: dom.window.document, window: dom.window });
     dom.window.HTMLElement.prototype.scrollIntoView = () => {};
-    dom.window.setInterval = (() => 1) as any;
+    let pollTick: (() => Promise<void>) | undefined;
+    dom.window.setInterval = ((callback: () => Promise<void>) => { pollTick = callback; return 1; }) as any;
     const doc = dom.window.document;
     const byId = (id: string) => doc.getElementById(id)!;
     const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -304,38 +309,57 @@ describe('app event handlers (full snapshot fixtures)', () => {
     let queue: any = { items: [{ changeId: 'x', state: 'blocked' }, { changeId: 'y', state: 'blocked' }], diagnosis: { classification: 'INTERACTION', failingSet: ['x', 'y'] } };
     let mutationFailure: string | null = null;
     let omitUnitKeys = false;
-    const snapshot = () => ({ data: { projections: {
+    let holdSnapshot: Promise<void> | null = null;
+    let holdCatalog: Promise<void> | null = null;
+    let holdEvents: Promise<void> | null = null;
+    let holdMutation: Promise<void> | null = null;
+    let holdHealth: Promise<void> | null = null;
+    let health = { mode: 'local', storageBackend: 'fake' };
+    let events = [{ sequence: 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: ['d9'] }];
+    let eventVersion = 2;
+    const snapshot = (repoId = 'demo') => ({ data: { projections: {
       repos: { items: [{ repoId: 'demo', observedCanonicalOid: 'abc' }], changes: [
-        { changeId: 'x', intentText: 'first', status: 'ready', revision: 2, ...(omitUnitKeys ? {} : { unitKeys: ['row:a'] }) },
+        { changeId: 'x', intentText: repoId === 'other' ? 'other repo' : 'first', status: 'ready', revision: 2, ...(omitUnitKeys ? {} : { unitKeys: ['row:a'] }) },
         { changeId: 'y', intentText: 'second', status: 'blocked', revision: 1, unitKeys: ['row:a'] },
       ] },
       leases: { items: [{ leaseId: 'l1', changeId: 'x', unitKey: 'row:a', holderId: 'agent-a', intentText: 'first', fence: 7, expiresAt: Date.now() + 60_000, state: 'active' }] },
       queue, runners: { items: [] },
       findings: { items: [{ findingId: 'f1', changeId: 'x', status: 'open' }], rounds: [{ roundId: 'r1', changeId: 'x', status: 'pending' }], findingSetVersions: { x: 3, y: 8 } },
       verdicts: { items: [
-        { verdictId: 'v1', changeId: 'x', decision: 'approve' },
-        { verdictId: 'v2', changeId: 'x', decision: 'approve', parentVerdictId: 'v1', deltaResultId: 'd9' },
+        { verdictId: 'v0', changeId: 'y', decision: 'approve', revision: 1, findingSetVersion: 8 },
+        { verdictId: 'v1', changeId: 'x', decision: 'approve', revision: 2, findingSetVersion: 3 },
+        { verdictId: 'v2', changeId: 'x', decision: 'approve', revision: 2, findingSetVersion: 3, parentVerdictId: 'v1', deltaResultId: 'd9' },
+        { verdictId: 'v3', changeId: 'x', decision: 'approve', revision: 2, findingSetVersion: 3, parentVerdictId: 'v0', deltaResultId: 'd9' },
       ] },
-    } }, version: 2, eventSeq: 1 });
+    } }, version: 2, eventSeq: events.length });
     globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
       const headers = new Headers(init.headers);
       let status = 200;
       let body: any;
-      if (url === '/health') body = { data: { mode: 'local', storageBackend: 'fake' } };
+      if (url === '/health') {
+        const response = health;
+        if (holdHealth) { const wait = holdHealth; holdHealth = null; await wait; }
+        body = { data: response };
+      }
       else if (url === '/v1/repos') {
         catalogCalls++;
+        if (holdCatalog) { const wait = holdCatalog; holdCatalog = null; await wait; }
         if (headers.get('authorization') === 'Bearer bad') {
           status = 401; body = { error: { code: 'UNAUTHORIZED', message: 'invalid' } };
         } else body = { data: { items: [{ repoId: 'demo', displayName: 'Demo' }] } };
       } else if (url.endsWith('/snapshot')) {
+        const response = snapshot(url.includes('/other/') ? 'other' : 'demo');
+        if (holdSnapshot) { const wait = holdSnapshot; holdSnapshot = null; await wait; }
         if (failSnapshot) { status = 503; body = { error: { code: 'PLATFORM_UNAVAILABLE', message: 'offline' } }; }
-        else body = snapshot();
+        else body = response;
       } else if (url.includes('/events?')) {
+        if (holdEvents) { const wait = holdEvents; holdEvents = null; await wait; }
         const after = Number(new URL(url, 'http://localhost').searchParams.get('after'));
-        body = { data: { items: after < 1 ? [{ sequence: 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: ['d9'] }] : [] }, version: 2, eventSeq: 1 };
+        body = { data: { items: events.filter(item => item.sequence > after).slice(0, 100) }, version: eventVersion, eventSeq: events.length };
       }
       else {
         sent.push({ url, body: JSON.parse(String(init.body)) });
+        if (holdMutation) { const wait = holdMutation; holdMutation = null; await wait; }
         if (mutationFailure === 'lease') { status = 409; body = { ...leaseConflictBody, error: { ...leaseConflictBody.error, details: { ...leaseConflictBody.error.details, conflictingKeys: ['row:a'] } } }; }
         else if (mutationFailure === 'stale') { status = 409; body = { error: { code: 'STALE_VERSION', message: 'stale' } }; }
         else body = { data: {}, version: 3, eventSeq: 2 };
@@ -372,6 +396,8 @@ describe('app event handlers (full snapshot fixtures)', () => {
       byId('change-list').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
       expect(doc.activeElement).toBe(byId('change-list').querySelector('[aria-selected="true"]'));
       expect(byId('verdict-list').querySelector('a[href="#verdict-v1"]')).not.toBeNull();
+      expect(byId('verdict-list').querySelector('a[href="#verdict-v0"]')).not.toBeNull();
+      expect(byId('verdict-list').querySelector('#verdict-v0')).not.toBeNull();
       expect(byId('verdict-list').querySelector('a[href="#event-1"]')).not.toBeNull();
       expect(byId('event-log').querySelector('#event-1')).not.toBeNull();
       (byId('role-select') as HTMLSelectElement).value = 'reviewer';
@@ -382,16 +408,28 @@ describe('app event handlers (full snapshot fixtures)', () => {
       (byId('verdict-evidence') as HTMLInputElement).value = 'sha256:evidence';
       submit('verdict-form'); await flush();
       expect(sent.at(-1)?.body).toMatchObject({ revision: 2, findingSetVersion: 3, expectedVersion: 2 });
+      (byId('verdict-evidence') as HTMLInputElement).value = '';
+      const beforeMissingDigest = sent.length;
+      submit('verdict-form'); await flush();
+      expect(sent).toHaveLength(beforeMissingDigest);
+      expect(byId('mutation-status').textContent).toContain('both evidence digests');
       (byId('role-select') as HTMLSelectElement).value = 'agent';
       byId('role-select').dispatchEvent(new dom.window.Event('change'));
       (byId('enqueue-verdict') as HTMLInputElement).value = 'v1';
       submit('enqueue-form'); await flush();
       expect(sent.at(-1)?.body.leaseFences).toEqual({ 'row:a': 7 });
+      byId('withdraw-submit').click(); await flush();
+      expect(sent.at(-1)?.url).toContain('/queue/withdraw');
+      expect(sent.at(-1)?.body).toMatchObject({ changeId: 'x', expectedVersion: 2 });
       mutationFailure = 'lease'; submit('claim-form'); await flush();
       expect(byId('mutation-status').textContent).toContain('agent-a');
       expect(byId('mutation-status').querySelector('a')?.getAttribute('href')).toBe('#lease-l1');
       mutationFailure = 'stale'; failSnapshot = true; submit('enqueue-form'); await flush();
       expect(byId('mutation-status').textContent).toContain('refresh failed');
+      const beforeUnrefreshed = sent.length;
+      submit('enqueue-form'); await flush();
+      expect(sent).toHaveLength(beforeUnrefreshed);
+      expect(byId('mutation-status').textContent).toContain('current snapshot evidence is unavailable');
       failSnapshot = false; mutationFailure = null;
       queue = { items: [], diagnosis: { classification: 'BASE_RED' } };
       (byId('repo-custom') as HTMLInputElement).value = 'demo'; byId('repo-use').click(); await flush();
@@ -403,9 +441,90 @@ describe('app event handlers (full snapshot fixtures)', () => {
       submit('enqueue-form'); await flush();
       expect(sent).toHaveLength(sentBeforeMissingUnits);
       expect(byId('mutation-status').textContent).toContain('Current change unit keys are unavailable');
+      omitUnitKeys = false;
+      events = Array.from({ length: 101 }, (_, index) => ({ sequence: index + 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: index === 0 ? ['d9'] : [] }));
+      byId('repo-use').click(); await flush();
+      (byId('change-list').querySelector('[role="option"]') as HTMLElement).click();
+      expect(byId('event-log').children).toHaveLength(100);
+      expect(byId('event-log').querySelector('#event-1')).toBeNull();
+      expect(byId('verdict-list').querySelector('a[href="#event-1"]')).not.toBeNull();
+      expect(byId('event-evidence').querySelector('#event-1')).not.toBeNull();
+
+      const beforeInvalid = sent.length;
+      (byId('enqueue-verdict') as HTMLInputElement).value = 'missing';
+      submit('enqueue-form'); await flush();
+      expect(sent).toHaveLength(beforeInvalid);
+      expect(byId('mutation-status').textContent).toContain('approved verdict evidence');
+      (byId('claim-units') as HTMLInputElement).value = 'row:other';
+      submit('claim-form'); await flush();
+      expect(sent).toHaveLength(beforeInvalid);
+      expect(byId('mutation-status').textContent).toContain('do not include');
+
+      eventVersion = 3;
+      await pollTick!();
+      submit('enqueue-form'); await flush();
+      expect(sent).toHaveLength(beforeInvalid);
+      expect(byId('mutation-status').textContent).toContain('current snapshot evidence is unavailable');
+      eventVersion = 2;
+      byId('repo-use').click(); await flush();
+
+      let releaseOldRepo!: () => void;
+      holdSnapshot = new Promise(resolve => { releaseOldRepo = resolve; });
+      byId('repo-use').click(); await flush();
+      (byId('repo-custom') as HTMLInputElement).value = 'other';
+      byId('repo-use').click(); await flush();
+      releaseOldRepo(); await flush();
+      expect(byId('change-list').textContent).toContain('other repo');
+      expect(byId('change-x').querySelector('strong')?.textContent).toBe('other repo');
+      (byId('repo-custom') as HTMLInputElement).value = 'demo';
+      byId('repo-use').click(); await flush();
+
+      let releaseSnapshot!: () => void;
+      holdSnapshot = new Promise(resolve => { releaseSnapshot = resolve; });
+      byId('repo-use').click(); await flush();
       byId('token-clear').click();
+      releaseSnapshot(); await flush();
       expect(byId('detail-body').textContent).toBe('No change selected.');
       expect(byId('change-list').textContent).not.toContain('first');
+      expect(byId('token-state').textContent).toBe('No token stored.');
+
+      let releaseCatalog!: () => void;
+      holdCatalog = new Promise(resolve => { releaseCatalog = resolve; });
+      (byId('token-input') as HTMLInputElement).value = 'local-viewer'; submit('token-form'); await flush();
+      byId('token-clear').click();
+      releaseCatalog(); await flush();
+      expect(byId('repo-select').textContent).toContain('Enter a session token');
+      expect(byId('change-list').textContent).not.toContain('first');
+
+      (byId('token-input') as HTMLInputElement).value = 'local-viewer'; submit('token-form'); await flush(); await flush();
+      (byId('change-list').querySelector('[role="option"]') as HTMLElement).click();
+      (byId('claim-units') as HTMLInputElement).value = 'row:a';
+      let releaseMutation!: () => void;
+      holdMutation = new Promise(resolve => { releaseMutation = resolve; });
+      submit('claim-form'); await flush();
+      byId('token-clear').click();
+      releaseMutation(); await flush();
+      expect(byId('mutation-status').textContent).toBe('');
+      expect(byId('change-list').textContent).not.toContain('first');
+
+      (byId('token-input') as HTMLInputElement).value = 'local-viewer'; submit('token-form'); await flush(); await flush();
+      let releaseEvents!: () => void;
+      holdEvents = new Promise(resolve => { releaseEvents = resolve; });
+      void pollTick!(); await flush();
+      byId('token-clear').click();
+      releaseEvents(); await flush();
+      expect(byId('change-list').textContent).not.toContain('first');
+      expect(byId('event-log').children).toHaveLength(0);
+
+      let releaseHealth!: () => void;
+      holdHealth = new Promise(resolve => { releaseHealth = resolve; });
+      health = { mode: 'production', storageBackend: 'artifacts' };
+      (byId('token-input') as HTMLInputElement).value = 'local-viewer'; submit('token-form'); await flush();
+      health = { mode: 'local', storageBackend: 'fake' };
+      byId('token-clear').click();
+      releaseHealth(); await flush();
+      expect(byId('env-badge').textContent).toContain('local fake');
+      expect(byId('env-badge').textContent).not.toContain('live Artifacts');
     } finally {
       clearSessionToken();
       dom.window.close();

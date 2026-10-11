@@ -48,7 +48,7 @@ export function snapshotCollections(envelope) {
 }
 
 export function mutationEvidence(change, leases, findingSetVersion, requireFences = true) {
-  if (!change?.changeId) return { error: 'Select a change first.' };
+  if (typeof change?.changeId !== 'string' || !change.changeId.trim()) return { error: 'Select a change first.' };
   if (!Number.isSafeInteger(change.revision) || change.revision < 1) return { error: 'Current change revision is unavailable.' };
   if (!Number.isSafeInteger(findingSetVersion) || findingSetVersion < 0) return { error: 'Current finding-set version is unavailable.' };
   if (requireFences && (!Array.isArray(change.unitKeys) || change.unitKeys.length === 0 || !change.unitKeys.every(key => typeof key === 'string' && key.length > 0))) {
@@ -57,7 +57,10 @@ export function mutationEvidence(change, leases, findingSetVersion, requireFence
   const fences = {};
   for (const key of requireFences ? change.unitKeys : []) {
     const lease = leases.find(item => item?.changeId === change.changeId && item.unitKey === key && (item.state === 'active' || item.state === 'reserved'));
-    if (!lease || !Number.isSafeInteger(lease.fence) || lease.fence < 1 || lease.expiresAt <= Date.now()) return { error: `Current lease fence is unavailable for ${key}.` };
+    if (!lease || !Number.isSafeInteger(lease.fence) || lease.fence < 1 ||
+      !Number.isFinite(lease.expiresAt) || lease.expiresAt <= Date.now()) {
+      return { error: `Current lease fence is unavailable for ${key}.` };
+    }
     fences[key] = lease.fence;
   }
   return { revision: change.revision, findingSetVersion, leaseFences: fences };

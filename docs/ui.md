@@ -37,7 +37,8 @@ Worker serves `web/` directly; `/health` reports the backend badge.
   Keyboard: Tab to the list, arrows to move, Enter to open details.
 - **Change details**: base/head OIDs, revision, next action, and the
   claim / enqueue-withdraw / verdict forms allowed for the acting role.
-  Every mutation sends `Idempotency-Key` plus `expectedVersion`. A stale
+  Every mutation sends `Idempotency-Key`; versioned actions also send
+  `expectedVersion` (the claim creation route has no version field). A stale
   409 refreshes the snapshot and asks for a retry; it never reports
   success.
 - **Findings round**: open vs resolved findings and the repair-round state.
@@ -91,3 +92,27 @@ review evidence. Lease fences come from `leases.items`. Missing evidence blocks
 mutation with a visible message. These additive fields are the expected shape
 for the feature slices when they land; the current placeholders remain
 `{ status: 'unavailable', items: [] }`.
+
+## UI evidence and response audit
+
+Every asynchronous UI path captures the current session and repository
+generation. Changing tokens, forgetting a token, or switching repositories
+advances a generation; an older completion is ignored. A snapshot whose
+version falls below the latest observed event version is also ignored. A
+failed refresh after observed version movement disables mutation controls
+with a visible reason.
+
+| Call site | Protection | Test in `tests/node/ui.test.ts` |
+| --- | --- | --- |
+| `refreshBadge` health request | Generation guard before updating the badge; repo switches request a new badge | Delayed health response after Forget |
+| `refreshRepos` catalog request and token form continuation | Generation guard before catalog/error rendering; false result stops the form continuation | Delayed catalog response after Forget |
+| `refreshSnapshot` from repo switch, periodic tick, and mutation refresh | Generation and observed-version guards before storing or rendering; a missing current snapshot disables mutations | Delayed snapshot after Forget; delayed old repo response after switch; stale 409 refresh failure; event version ahead of snapshot |
+| `pollOnce` event pages and `tick` recovery/error paths | Generation guard on every page and after awaits; nonadvancing pages stop pagination | Delayed poll after Forget; 101 event pages |
+| `runMutation` success, failure, and refresh paths | Generation guard after mutation and refresh; accepted responses keep controls blocked until a fresh snapshot arrives | Delayed mutation response after Forget; stale 409 and lease conflict fixtures |
+| Lease holder links in change details and conflict status | Link only when a matching lease card is rendered | DOM lease conflict links |
+| Parent verdict links | Referenced parent is included in the rendered verdict set | DOM carried verdict parent link |
+| Delta evidence links | Events are indexed by related ID across pages; referenced events evicted from the 100-row visible log get an archive anchor; the index clears on repo/session change | DOM 101-event boundary and Forget assertions |
+| Claim body | Selected change and requested registered unit keys must be present; input count and intent are checked | DOM missing selection and unknown unit key assertions |
+| Enqueue body | Current snapshot version, matching approved verdict/revision/finding set, complete change unit keys, and live finite lease expiries/fences are required | DOM current enqueue and missing verdict/unit tests; helper missing/invalid expiry tests |
+| Withdraw body | Current snapshot, selected change, and valid version are required | DOM withdraw request assertion |
+| Verdict body | Current snapshot, revision, finding set, decision, and both digests are required | DOM verdict request and missing digest assertions |
