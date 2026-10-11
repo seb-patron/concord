@@ -22,6 +22,11 @@ const principal: Record<string, string> = { owner: 'owner', A: 'agent-a', B: 'ag
 const sleep = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 const fileHash = async (path: string) => `sha256:${createHash('sha256').update(await readFile(path)).digest('hex')}`;
 
+export function wranglerStateDir(stateDir: string): string {
+  const runHash = createHash('sha256').update(resolve(stateDir)).digest('hex').slice(0, 12);
+  return resolve(root, '..', '.wrangler', 'state', runHash);
+}
+
 export interface Options { run: string; stateDir: string; url: string; pumpLocal: boolean; json: boolean }
 interface Envelope { status: number; data?: any; version?: number; error?: { code: string; message: string } }
 export interface Manifest {

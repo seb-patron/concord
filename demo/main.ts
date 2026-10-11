@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { inspect, prepareLocal, scene, seed, type Options } from './scenarios';
+import { inspect, prepareLocal, scene, seed, wranglerStateDir, type Options } from './scenarios';
 
 function parse(args: string[]): { command: string; sceneName?: string; options: Options; local: boolean } {
   const [command, ...rest] = args;
@@ -33,7 +33,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const { profile, trustedConfig } = await prepareLocal(options.stateDir);
     process.stdout.write(JSON.stringify({ status: 'ready', profilePath: profile.sourcePath, profileDigest: profile.digest,
       trustedConfigPath: resolve(options.stateDir, 'trusted-config.json'),
-      workerCommand: `npm run dev -- --var STORAGE_BACKEND:bridge --var BRIDGE_URL:http://127.0.0.1:8788/?token=<bridge-token> --var TRUSTED_CONFIG:'${trustedConfig}'`,
+      workerCommand: `npm run dev -- --persist-to ${wranglerStateDir(options.stateDir)} --var STORAGE_BACKEND:bridge --var BRIDGE_URL:http://127.0.0.1:8788/?token=<bridge-token> --var TRUSTED_CONFIG:'${trustedConfig}'`,
       remoteDeployment: 'unavailable until owner provisions an account' }, null, 2) + '\n');
     return;
   }

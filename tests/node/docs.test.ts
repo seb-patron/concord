@@ -1,10 +1,10 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { access, copyFile, mkdir, readFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
+import { wranglerStateDir } from '../../demo/scenarios';
 
 const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
@@ -119,8 +119,7 @@ describe('documented demo commands', () => {
             expect(path.startsWith(root + '/'), `${command}: ${path}`).toBe(true);
           } else {
             expect(flag).toBe('--persist-to');
-            const runHash = createHash('sha256').update(runDir).digest('hex').slice(0, 12);
-            expect(resolve(cwd, path), `${command}: ${path}`).toBe(join(cwd, '.wrangler/state', runHash));
+            expect(resolve(cwd, path), `${command}: ${path}`).toBe(wranglerStateDir(runDir));
           }
           checked++;
         }

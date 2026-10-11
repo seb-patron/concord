@@ -2,15 +2,30 @@ import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:chi
 import { createServer } from 'node:net';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
+import { wranglerStateDir } from '../../demo/scenarios';
 
 const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
 const wrangler = join(cwd, 'node_modules/.bin/wrangler');
 const children: ChildProcess[] = [];
 const dirs: string[] = [];
+
+async function externalTempDir(prefix: string): Promise<string> {
+  for (const base of [tmpdir(), join(cwd, '..', 'sandbox-home', 'tmp'), '/tmp']) {
+    if (!relative(cwd, resolve(base)).startsWith('..')) continue;
+    try {
+      const dir = await mkdtemp(join(base, prefix));
+      dirs.push(dir);
+      return dir;
+    } catch (error) {
+      if (!['EACCES', 'EPERM', 'ENOENT'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+    }
+  }
+  throw new Error('No writable temporary directory outside the clone');
+}
 
 async function port(): Promise<number> {
   const server = createServer();
@@ -55,6 +70,17 @@ afterEach(async () => {
 });
 
 describe('dispatch-lab local acceptance', () => {
+  it('uses a distinct ignored Worker state path for each external demo run', async () => {
+    const firstRun = await externalTempDir('concord-demo-path-');
+    const secondRun = await externalTempDir('concord-demo-path-');
+    expect(relative(cwd, firstRun).startsWith('..')).toBe(true);
+    const firstState = wranglerStateDir(firstRun);
+    expect(firstState.startsWith(join(cwd, '.wrangler', 'state') + '/')).toBe(true);
+    expect(wranglerStateDir(secondRun)).not.toBe(firstState);
+    const { stdout } = await execFile('git', ['check-ignore', firstState], { cwd });
+    expect(stdout.trim()).toBe(firstState);
+  });
+
   it('pins literal outputs and rejects malformed, unintended, and wrong executable results', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'concord-checker-'));
     dirs.push(dir);
@@ -88,8 +114,8 @@ describe('dispatch-lab local acceptance', () => {
   });
 
   it('runs bridge, Worker, bounded runners, and scenario driver through all local barriers', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'concord-demo-'));
-    dirs.push(dir);
+    const dir = await externalTempDir('concord-demo-');
+    expect(relative(cwd, dir).startsWith('..')).toBe(true);
     const bridgePort = await port();
     const workerPort = await port();
     const bridgeToken = 'local-bridge-fixture-2026';
@@ -98,14 +124,19 @@ describe('dispatch-lab local acceptance', () => {
       CONCORD_URL: url, CONCORD_SHOW_DECOMPILED_C: '0' };
     const preflight = await demo(['preflight', '--local', '--state-dir', dir], env);
     expect(preflight.status).toBe('ready');
+    const persistenceDir = wranglerStateDir(dir);
+    expect(persistenceDir.startsWith(join(cwd, '.wrangler', 'state') + '/')).toBe(true);
+    expect(preflight.workerCommand).toContain(`--persist-to ${persistenceDir}`);
     const trusted = (await readFile(join(dir, 'trusted-config.json'), 'utf8')).trim();
     const bridge = start(process.execPath, ['--import', 'tsx', 'local/git-bridge.ts'], { ...env, CONCORD_BRIDGE_DATA_DIR: join(dir, 'bridge'),
       CONCORD_BRIDGE_TOKEN: bridgeToken, CONCORD_BRIDGE_PORT: String(bridgePort) });
     await waitFor('bridge', async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`), bridge.output);
-    const worker = start(wrangler, ['dev', '--config', 'wrangler.local.jsonc', '--port', String(workerPort),
-      '--persist-to', join(dir, 'wrangler'), '--var', 'STORAGE_BACKEND:bridge',
+    const workerArgs = ['dev', '--config', 'wrangler.local.jsonc', '--port', String(workerPort),
+      '--persist-to', persistenceDir, '--var', 'STORAGE_BACKEND:bridge',
       '--var', `BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=${bridgeToken}`,
-      '--var', `TRUSTED_CONFIG:${trusted}`], { ...env, WRANGLER_SEND_METRICS: 'false' });
+      '--var', `TRUSTED_CONFIG:${trusted}`];
+    expect(workerArgs[workerArgs.indexOf('--persist-to') + 1]).toBe(persistenceDir);
+    const worker = start(wrangler, workerArgs, { ...env, WRANGLER_SEND_METRICS: 'false' });
     await waitFor('Worker health', async () => (await fetch(url + '/health')).ok, worker.output);
     expect((await (await fetch(url + '/health')).json() as any).data.storageBackend).toBe('bridge');
     const run = 'acceptance';
