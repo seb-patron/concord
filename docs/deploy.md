@@ -16,7 +16,7 @@ sh scripts/validate.sh
 
 `--local` checks the production and local Wrangler configurations, safe content and credential settings, Node/Git, and local program availability. It reports `remote deployment unavailable: owner credentials required` without failing the local check. The production Worker accepts no `local-*` bearer tokens and selects Artifacts only. The [repo API guide](api-repos.md) documents the local bridge; its `file://` repositories are not deployed evidence.
 
-With the [README local bridge and Worker](../README.md#five-minute-local-start) running, these commands recheck the seeded fixture and its first barriers. They use the README's `CONCORD_RUN_DIR` and local URL, and do not constitute deployed smoke evidence.
+With the [README local bridge and Worker](../README.md#five-minute-local-start) running, these commands recheck the seeded fixture and its first barriers. They use the README's absolute `CONCORD_RUN_DIR` and local URL, and do not constitute deployed smoke evidence.
 
 <!-- verified-by: 12c -->
 ```sh

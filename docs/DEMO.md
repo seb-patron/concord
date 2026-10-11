@@ -81,7 +81,7 @@ Run the commands after the README quickstart in its driver terminal. Every `scen
 | 7:00–8:00 | aw, replay | Show seven public AW mock retries mapping to one task/change ID, a real published commit and verdict, and the queue's observed state. Show approved historical replay if available, otherwise the unavailable-data panel. |
 | 8:00–9:00 | inspect | Walk through landed SHAs, finding history, verdicts, lease intents, queue state, and the account evidence. A local run alone does not prove Artifacts hosting. |
 
-The driver also implements **negative** (declared bad row and executable edits rejected by the checker) and **dedupe** (the low-level seven-request intent reservation) as optional local checks. Run them in the order below when rehearsing all implemented scenes. The AW scene is owned by slice 12c2 and is listed separately; this docs test skips that tag.
+The driver also implements **negative** (declared bad row and executable edits rejected by the checker) and **dedupe** (the low-level seven-request intent reservation) as optional local checks. Run them in the order below when rehearsing all implemented scenes. The AW scene uses the same absolute `CONCORD_RUN_DIR` as the other scenes.
 
 <!-- verified-by: 12c -->
 ```sh
@@ -92,10 +92,6 @@ npm run demo -- scene carry --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-
 npm run demo -- scene invalidate --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 npm run demo -- scene contest --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 npm run demo -- scene dedupe --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
-```
-
-<!-- verified-by: 12c2 -->
-```sh
 npm run demo -- scene aw --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 ```
 

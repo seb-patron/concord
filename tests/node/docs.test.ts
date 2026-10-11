@@ -1,7 +1,7 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
 import { access, copyFile, mkdir, readFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -70,6 +70,40 @@ afterEach(async () => {
 });
 
 describe('documented demo commands', () => {
+  it('passes absolute state and Wrangler paths even when TMPDIR is relative', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'concord-docs-paths-'));
+    directories.push(root);
+    const readme = await taggedBlocks('README.md');
+    const blocks = [...readme, ...await taggedBlocks('docs/DEMO.md'), ...await taggedBlocks('docs/deploy.md')];
+    const env = { ...process.env, TMPDIR: relative(cwd, root) };
+    const { stdout: runDir } = await execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
+      { cwd, env });
+    expect(isAbsolute(runDir)).toBe(true);
+    expect(runDir).toBe(join(resolve(env.TMPDIR), 'concord-demo-01'));
+    await mkdir(runDir);
+    await writeFile(join(runDir, 'trusted-config.json'), '{}\n');
+
+    let checked = 0;
+    for (const block of blocks) {
+      const { exports, commands } = commandLines(block);
+      for (const command of commands) {
+        const script = [
+          'npm() { previous=; for arg do',
+          '  if [ "$previous" = --state-dir ] || [ "$previous" = --persist-to ]; then printf "%s\\n" "$arg"; fi',
+          '  previous=$arg',
+          'done; }',
+          ...exports, command,
+        ].join('\n');
+        const { stdout } = await execFile('sh', ['-c', script], { cwd, env: { ...env, CONCORD_RUN_DIR: runDir } });
+        const paths = stdout.trim() ? stdout.trim().split('\n') : [];
+        expect(paths).toHaveLength((command.match(/--(?:state-dir|persist-to)\b/g) ?? []).length);
+        for (const path of paths) expect(isAbsolute(path), `${command}: ${path}`).toBe(true);
+        checked += paths.length;
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
   it('runs every 12c-tagged local command against the real bridge and Worker', async () => {
     const root = await mkdtemp(join(tmpdir(), 'concord-docs-'));
     directories.push(root);
@@ -87,11 +121,11 @@ describe('documented demo commands', () => {
     expect(readme).toHaveLength(5);
     expect(demo).toHaveLength(1);
     expect(deploy).toHaveLength(1);
-    expect((await taggedBlocks('docs/DEMO.md', '12c2'))[0]).toContain('scene aw');
+    expect(demo[0]).toContain('scene aw');
 
     const implemented = [...(await readFile(join(cwd, 'demo/scenarios.ts'), 'utf8'))
       .matchAll(/\bname === '([^']+)'/g)].map(match => match[1]);
-    const documented = [...readme, ...demo, ...(await taggedBlocks('docs/DEMO.md', '12c2'))]
+    const documented = [...readme, ...demo]
       .flatMap(block => [...block.matchAll(/npm run demo -- scene (\w+)/g)].map(match => match[1]));
     expect([...new Set(documented)].sort()).toEqual([...new Set(implemented)].sort());
 
@@ -147,8 +181,10 @@ describe('documented demo commands', () => {
     expect(later[4].evidence.carried).toBe(false);
     expect(later[5].evidence.scores.map((score: any) => score.score.matched).sort()).toEqual([2, 4]);
     expect(later[6].evidence.attempts).toBe(7);
+    expect(later[7].evidence).toMatchObject({ attempts: 7, taskId: 'task-17', checkerOutcome: 'PASS', queueState: 'landed' });
+    expect(new Set(later[7].evidence.changeIds).size).toBe(1);
     const deployed = await execute(deploy[0]);
-    expect(deployed[0].canonicalOid).toBe(later[6].canonicalOid);
+    expect(deployed[0].canonicalOid).toBe(later[7].canonicalOid);
     expect(deployed[3].evidence['wrong-exec'].checkerOutcomes).toContain('FAIL');
     expect(deployed[3].queue.finalCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
   }, 600_000);
