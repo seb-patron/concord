@@ -21,3 +21,5 @@ The 201 response uses the standard `{data, version, eventSeq}` envelope. `data` 
 `GET /v1/principals` returns `{data:{items:[...]},version,eventSeq}` for the caller's tenant. Each item has `id`, `roles`, `repoIds`, `expiresAt`, `parentId`, `createdAt`, `revokedAt`, and optional `name`. Neither tokens nor digests appear.
 
 `DELETE /v1/principals/:id` revokes the principal and every descendant; it returns `{data:{revokedIds:[...]},version,eventSeq}`. Owners can revoke any principal in their tenant; agents can revoke themselves or a direct child. Revocation records a `principal.revoked` catalog event with affected IDs and no secrets. A revoked or expired token receives 401 on its next request, including existing repository routes. Tokens are never renewable; mint a replacement before expiry.
+
+Status: validated against main 5b558e0 (the docs-test port-8788 fix).
