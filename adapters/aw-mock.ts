@@ -21,7 +21,7 @@ interface Change { changeId: string; authorId: string; intentKey: string; intent
 interface Repo { canonicalStorageName: string; observedCanonicalOid: string | null; version: number; status: string }
 interface Lease { changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }
 interface Verdict { verdictId: string; revision: number; decision: string }
-interface QueueEntry { entryId: string; changeId: string; revision: number; state: string; blockedReason: string | null }
+interface QueueEntry { entryId: string; changeId: string; revision: number; state: string; blockedReason: string | null; sequence?: number }
 interface ServerState { change: Change; attempt: number; queue: QueueEntry[] | null }
 type ReconcileDecision = { kind: 'reuse'; queued: boolean } | { kind: 'refuse'; block: Block };
 const workerPrincipal = 'mock-aw';
@@ -82,18 +82,22 @@ export function reconcile(serverState: ServerState, fixture: AwMockFixture, iden
   if (attempt !== fixture.explicitAttempt)
     return refuse('ATTEMPT_CONFLICT', 'Explicit attempt differs from the server intent', { serverAttempt: attempt, explicitAttempt: fixture.explicitAttempt });
   if (terminal.has(change.status)) return refuse('ATTEMPT_REQUIRED', 'Terminal change requires the next explicitAttempt.');
-  const active = queue?.find(entry => entry.changeId === change.changeId && entry.revision === change.revision);
-  if (active?.state === 'blocked') return refuse('QUEUE_BLOCKED', 'Concord queue blocked the active revision.', active);
+  const matching = queue?.filter(entry => entry.changeId === change.changeId && entry.revision === change.revision);
+  const activeMatches = matching?.filter(entry => ['admitted', 'reserved', 'checking'].includes(entry.state));
+  const candidates = activeMatches?.length ? activeMatches : matching;
+  const selected = candidates?.reduce<QueueEntry | undefined>((latest, entry) =>
+    !latest || (entry.sequence ?? -1) >= (latest.sequence ?? -1) ? entry : latest, undefined);
+  if (selected?.state === 'blocked') return refuse('QUEUE_BLOCKED', 'Concord queue blocked the active revision.', selected);
   if (change.status === 'blocked') return refuse('CHECKER_BLOCKED', 'Concord marked the candidate blocked; inspect the change and checker evidence.');
   if (change.status === 'queued' || change.status === 'checking') {
     if (!queue) return refuse('QUEUE_UNAVAILABLE', 'Queue state is unavailable for an admitted change.');
-    if (!active) return refuse('QUEUE_REVISION_MISMATCH', 'No queue entry matches the active revision.',
+    if (!selected) return refuse('QUEUE_REVISION_MISMATCH', 'No queue entry matches the active revision.',
       { revision: change.revision, entries: queue.filter(entry => entry.changeId === change.changeId) });
-    if (!['admitted', 'reserved', 'checking'].includes(active.state))
-      return refuse('QUEUE_STATE_CONFLICT', 'Queue entry is not awaiting admission or checking.', active);
+    if (!['admitted', 'reserved', 'checking'].includes(selected.state))
+      return refuse('QUEUE_STATE_CONFLICT', 'Queue entry is not awaiting admission or checking.', selected);
     return { kind: 'reuse', queued: true };
   }
-  return { kind: 'reuse', queued: active !== undefined && ['admitted', 'reserved', 'checking'].includes(active.state) };
+  return { kind: 'reuse', queued: selected !== undefined && ['admitted', 'reserved', 'checking'].includes(selected.state) };
 }
 
 function refusalError(block: Block): ConcordError {

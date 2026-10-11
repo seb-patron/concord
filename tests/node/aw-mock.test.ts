@@ -212,6 +212,11 @@ describe('AW mock adapter', () => {
       { name: 'active reserved', queue: [entry], expected: { kind: 'reuse', queued: true } },
       { name: 'active admitted', queue: [{ ...entry, state: 'admitted' }], expected: { kind: 'reuse', queued: true } },
       { name: 'active checking', queue: [{ ...entry, state: 'checking' }], expected: { kind: 'reuse', queued: true } },
+      { name: 'withdrawn then reserved', queue: [{ ...entry, entryId: 'queue-old', state: 'withdrawn', sequence: 1 }, { ...entry, entryId: 'queue-new', sequence: 2 }], expected: { kind: 'reuse', queued: true } },
+      { name: 'reserved then withdrawn', queue: [{ ...entry, entryId: 'queue-new', sequence: 2 }, { ...entry, entryId: 'queue-old', state: 'withdrawn', sequence: 1 }], expected: { kind: 'reuse', queued: true } },
+      { name: 'landed then readmitted', queue: [{ ...entry, entryId: 'queue-old', state: 'landed', sequence: 1 }, { ...entry, entryId: 'queue-new', sequence: 2 }], expected: { kind: 'reuse', queued: true } },
+      { name: 'newest inactive admission', change: { status: 'queued' }, queue: [{ ...entry, entryId: 'queue-new', state: 'landed', sequence: 2 }, { ...entry, entryId: 'queue-old', state: 'withdrawn', sequence: 1 }],
+        expected: { kind: 'refuse', block: { code: 'QUEUE_STATE_CONFLICT', details: { entryId: 'queue-new' } } } },
       { name: 'active blocked', queue: [{ ...entry, state: 'blocked', blockedReason: 'dependency failed' }], expected: { kind: 'refuse', block: { code: 'QUEUE_BLOCKED', details: { blockedReason: 'dependency failed' } } } },
       { name: 'blocked change with queue evidence', change: { status: 'blocked' }, queue: [{ ...entry, state: 'blocked', blockedReason: 'dependency failed' }],
         expected: { kind: 'refuse', block: { code: 'QUEUE_BLOCKED', details: { blockedReason: 'dependency failed' } } } },
@@ -250,6 +255,19 @@ describe('AW mock adapter', () => {
     expect(result.blocked).toBeUndefined();
     expect(h.api.enqueues).toBe(1);
     expect(h.api.queue.at(-1)).toMatchObject({ revision: 2, state: 'reserved' });
+  });
+
+  it('does not enqueue again when a withdrawn admission precedes an active one', async () => {
+    const h = await harness();
+    await h.run();
+    h.changes[0].status = 'ready';
+    h.api.verdicts.push({ verdictId: 'reviewer-verdict', revision: 1, decision: 'approve' });
+    h.api.queue.push(
+      { entryId: 'queue-old', changeId: 'change-1', revision: 1, state: 'withdrawn', blockedReason: null },
+      { entryId: 'queue-new', changeId: 'change-1', revision: 1, state: 'reserved', blockedReason: null },
+    );
+    expect(await h.run()).toMatchObject({ phase: 'queued', changeId: 'change-1' });
+    expect(h.api.enqueues).toBe(0);
   });
 
   it('preserves an active blocked queue entry as a structured refusal', async () => {
