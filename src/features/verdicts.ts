@@ -108,6 +108,9 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
   const pending = context.state.get<CarryRequest>(`carry:${result.jobId}`);
   if (!pending) return reject(context, 'REVIEW_REQUIRED', 'No scheduled delta check matches this result');
   if (pending.status === 'carried' && pending.resultDigest === result.resultDigest && pending.derivedVerdictId) {
+    if (context.state.get<Id>(`active:${pending.job.changeId}`) !== pending.derivedVerdictId) {
+      return reject(context, 'REVIEW_REQUIRED', 'Carried approval is no longer active');
+    }
     return { status: 'eligible', version: context.version(), evidenceIds: [pending.derivedVerdictId], value: { verdictId: pending.derivedVerdictId } };
   }
   if (pending.status !== 'pending') return reject(context, 'REVIEW_REQUIRED', pending.reason ?? 'Delta check already decided');
@@ -129,6 +132,7 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
     context.appendEvent('verdict.carry-review-required', [parent.verdictId, job.jobId], { reason }, version);
     return reject(context, 'REVIEW_REQUIRED', reason, [parent.verdictId, job.jobId]);
   };
+  if (context.state.get<Id>(`active:${job.changeId}`) !== parent.verdictId) return fail('Parent approval was superseded');
   if (result.checkerDigest !== job.checkerDigest) return fail('Checker pin changed');
   if (result.oracleDigest !== job.oracleDigest) return fail('Oracle pin changed');
   if (result.toolchainDigest !== job.toolchainDigest) return fail('Toolchain pin changed');
@@ -274,6 +278,9 @@ export const verdicts: FeatureModule = {
         findingSetVersion: findings.value.findingSetVersion, oldReviewManifest: structuredClone(parent.reviewManifest),
       };
       job.inputDigest = deltaInputDigest(job, parent.version);
+      if (context.state.get<Id>(`active:${changeId}`) !== parent.verdictId) {
+        throw new HttpError(409, 'REVIEW_REQUIRED', 'Parent approval was superseded');
+      }
       const scheduled = context.call('runners.schedule', structuredClone(job));
       if (scheduled.status === 'blocked') throw new HttpError(409, scheduled.code, scheduled.reason);
       if (scheduled.value.jobId !== jobId) throw new HttpError(409, 'SCHEDULE_MISMATCH', 'Runner accepted another job identity');

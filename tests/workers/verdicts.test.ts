@@ -153,6 +153,64 @@ describe('content-bound verdicts', () => {
     expect(h.state.get(`verdict:${parent.verdictId}`)).toEqual(parent);
   });
 
+  it('refuses to schedule carry from an approval superseded by a current verdict', async () => {
+    const h = harness();
+    const parent = await h.approve();
+    h.advance();
+    const newer = await h.approve();
+    await expect(h.carry(parent)).rejects.toMatchObject({ code: 'REVIEW_REQUIRED' });
+    expect(h.jobs).toHaveLength(0);
+    expect(h.state.get('active:change')).toBe(newer.verdictId);
+    expect(h.gate().status).toBe('eligible');
+  });
+
+  it('rechecks the active approval after resolving carry storage', async () => {
+    const h = harness();
+    const parent = await h.approve();
+    h.advance();
+    let newer: Verdict | undefined;
+    h.context.storage.resolveRef = async () => {
+      newer = await h.approve();
+      return oid('1');
+    };
+    await expect(h.carry(parent)).rejects.toMatchObject({ code: 'REVIEW_REQUIRED' });
+    expect(h.jobs).toHaveLength(0);
+    expect(h.state.get('active:change')).toBe(newer?.verdictId);
+  });
+
+  it('preserves a rejection made while carry is pending', async () => {
+    const h = harness();
+    const parent = await h.approve();
+    h.advance();
+    expect((await h.carry(parent)).status).toBe(202);
+    const rejected = (await h.route('POST', 'verdicts', {
+      revision: 2, findingSetVersion: 0, reviewManifestDigest: parent.reviewManifestDigest,
+      decision: 'reject', evidenceDigest: d('rejection'),
+    })).payload.data as Verdict;
+    const green = h.result();
+    expect(h.evaluate(green)).toMatchObject({ status: 'blocked', code: 'REVIEW_REQUIRED' });
+    expect(h.evaluate(green)).toMatchObject({ status: 'blocked', code: 'REVIEW_REQUIRED' });
+    expect(h.state.get('active:change')).toBe(rejected.verdictId);
+    expect(h.gate()).toMatchObject({ status: 'blocked', code: 'REVIEW_REQUIRED' });
+    expect((await h.route('GET', 'verdicts')).payload.data.items).toHaveLength(2);
+    expect(h.state.get(`verdict:${parent.verdictId}`)).toEqual(parent);
+  });
+
+  it('does not report a superseded carried verdict as eligible on replay', async () => {
+    const h = harness();
+    const parent = await h.approve();
+    h.advance();
+    await h.carry(parent);
+    const green = h.result();
+    const carried = h.evaluate(green);
+    expect(carried.status).toBe('eligible');
+    expect(h.evaluate(green)).toMatchObject({ status: 'eligible' });
+    const newer = await h.approve();
+    expect(h.evaluate(green)).toMatchObject({ status: 'blocked', code: 'REVIEW_REQUIRED' });
+    expect(h.state.get('active:change')).toBe(newer.verdictId);
+    expect((await h.route('GET', 'verdicts')).payload.data.items).toHaveLength(3);
+  });
+
   it('rejects dependent-row base advancement and preserves parent history', async () => {
     const h = harness('row:gamma');
     const parent = await h.approve();
