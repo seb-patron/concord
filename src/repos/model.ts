@@ -36,7 +36,8 @@ export interface BootstrapPending {
   seedRef: string;
   seedStorageName: string;
   jobId: string;
-  status: 'requested' | 'blocked';
+  scratchStorageName?: string;
+  status: 'provisioning' | 'requested' | 'blocked';
 }
 
 export const terminal = (change: Change): boolean => ['merged', 'superseded', 'closed'].includes(change.status);

@@ -394,14 +394,28 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (existing) {
     if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
     if (existing.status === 'requested') return respond(context, { jobId: existing.jobId, state: 'requested' }, 202);
-    const pendingJob = context.state.get<ValidateStackJob>('bootstrap-job');
-    if (!pendingJob) return fail(503, 'BOOTSTRAP_JOB_MISSING', 'Bootstrap job intent missing');
-    return scheduleBootstrap(context, existing, pendingJob);
+    if (existing.status === 'blocked') {
+      const pendingJob = context.state.get<ValidateStackJob>('bootstrap-job');
+      if (!pendingJob) return fail(503, 'BOOTSTRAP_JOB_MISSING', 'Bootstrap job intent missing');
+      return scheduleBootstrap(context, existing, pendingJob);
+    }
   }
-  const jobId = crypto.randomUUID();
-  const scratchStorageName = `concord-s-${jobId}`;
-  const scratchRemote = (await context.storage.ensureRepo(scratchStorageName)).remote;
-  if (!scratchRemote) fail(409, 'STORAGE_NOT_READY', 'Scratch storage remote is not ready');
+  const jobId = existing?.jobId ?? crypto.randomUUID();
+  const scratchStorageName = existing?.scratchStorageName ?? `concord-s-${jobId}`;
+  if (!existing) {
+    const requestDigest = await digest({ kind: 'ensure-repo', storageName: scratchStorageName });
+    context.transaction(() => {
+      if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
+      context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
+      saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'pending', retryAt: context.now(), polls: 0 });
+    });
+  }
+  const scratchIntent = intents(context)[intentKey('ensure-repo', scratchStorageName)];
+  if (!scratchIntent) fail(503, 'PROVISIONING_INTENT_MISSING', 'Scratch provisioning intent missing');
+  const scratch = await reconcile(context, scratchIntent, true);
+  if (intents(context)[intentKey('ensure-repo', scratchStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Scratch provisioning failed; retry the same request');
+  if (scratch?.status !== 'ready') return respond(context, { jobId, state: 'provisioning' }, 202);
+  const scratchRemote = scratch.remote;
   const job: ValidateStackJob = {
     kind: 'validate-stack', bootstrap: true, ownerAuthorized: true, jobId, repoId: repo.repoId,
     canonicalBaseOid: null, candidates: [{ changeId: change.changeId, revision: 1, baseOid: null, headOid, seedStorageName, seedRef }],
@@ -417,8 +431,9 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   job.inputDigest = await jobDigest(job);
   if (await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main')) fail(409, 'ALREADY_INITIALIZED', 'Canonical main appeared');
   context.transaction(() => {
-    if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
-    context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, jobId, status: 'requested' } satisfies BootstrapPending);
+    const pending = context.state.get<BootstrapPending>('bootstrap');
+    if (!pending || pending.jobId !== jobId || pending.status !== 'provisioning') fail(409, 'BOOTSTRAP_PENDING', 'Bootstrap provisioning was superseded');
+    context.state.put('bootstrap', { ...pending!, status: 'requested' } satisfies BootstrapPending);
     context.state.put('bootstrap-job', job);
     versioned(context, 'repo.bootstrap.requested', [repo.repoId, change.changeId], { headOid, jobId });
   });

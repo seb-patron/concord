@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import type { RepoCoordinator } from '../../src/coordinator';
 import type { InspectionResult, ModuleContext } from '../../src/contracts';
@@ -28,6 +28,13 @@ async function create(name: string) {
 async function fake(name: string, action: (provider: FakeStorage) => void) {
   const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
   await runInDurableObject(stub, (_instance, state) => action(new FakeStorage(sqlState(state.storage.sql))));
+}
+
+function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensure-repo' | 'fork') {
+  const state = (storage as unknown as { state: { get: <T>(key: string) => T | null } }).state;
+  const intents = state.get<Record<string, { storageName: string }>>('module:repos:provisioning');
+  expect(intents?.[`${kind}:${name}`]?.storageName).toBe(name);
+  return state;
 }
 
 describe('repository and change lifecycle', () => {
@@ -134,6 +141,68 @@ describe('repository and change lifecycle', () => {
     const snapshot = await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/snapshot'));
     const bootstrap = (await responseBody(snapshot)).data.projections.repos.bootstrap;
     expect(drafts.map(draft => draft.changeId)).toContain(bootstrap.changeId);
+  });
+
+  it('keeps one scratch intent and job while bootstrap storage is provisioning', async () => {
+    const repoId = 'slow_scratch_case';
+    await create(repoId);
+    await fetchApi(apiRequest(`/v1/repos/${repoId}`));
+    const created = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'seed', intentText: 'initial tree', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'slow-scratch-change'));
+    const change = (await responseBody(created)).data;
+    await fake(repoId, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, a);
+    });
+    expect((await fetchApi(mutation(`/v1/repos/${repoId}/branches`, {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: a, ownerId: 'owner',
+    }, 'slow-scratch-branch'))).status).toBe(201);
+
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const names: string[] = [];
+    let ready = false;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      if (name.startsWith('concord-s-')) {
+        const state = provisioningAtProvider(this, name, 'ensure-repo');
+        expect(state.get<{ jobId: string; scratchStorageName: string; status: string }>('module:repos:bootstrap'))
+          .toMatchObject({ scratchStorageName: name, jobId: name.slice('concord-s-'.length), status: 'provisioning' });
+        names.push(name);
+      }
+      const result = await originalEnsure.call(this, name);
+      return name.startsWith('concord-s-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const result = await originalInfo.call(this, name);
+      return result && name.startsWith('concord-s-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    try {
+      const body = { expectedVersion: 2, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a,
+        policyId: 'local-demo', profileId: 'local-demo' };
+      const first = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-first'));
+      expect(first.status).toBe(202);
+      const pending = (await responseBody(first)).data;
+      expect(pending.state).toBe('provisioning');
+      const second = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-second'));
+      expect(second.status).toBe(202);
+      expect((await responseBody(second)).data).toEqual(pending);
+      const snapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos;
+      expect(snapshot.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'provisioning' });
+      expect(snapshot.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'pending' }));
+      expect(names).toEqual([`concord-s-${pending.jobId}`]);
+      ready = true;
+      const third = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-ready'));
+      expect(third.status).toBe(409);
+      expect((await responseBody(third)).error.code).toBe('INVALID_JOB');
+      const finished = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos;
+      expect(finished.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'blocked' });
+      expect(finished.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'observed' }));
+      expect(names).toEqual([`concord-s-${pending.jobId}`]);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
   });
 
   it('rejects a closed owner seed even when its registered root ref remains current', async () => {
@@ -315,6 +384,84 @@ describe('repository and change lifecycle', () => {
     expect(retried.provisioning.state).toBe('observed');
     const listing = await fetchApi(apiRequest('/v1/repos/retry_case/changes'));
     expect((await responseBody(listing)).data.items).toHaveLength(1);
+  });
+
+  it('reuses one candidate fork while the provider is provisioning it', async () => {
+    const repoId = 'slow_fork_case';
+    await create(repoId);
+    await fetchApi(apiRequest(`/v1/repos/${repoId}`));
+    const originalFork = FakeStorage.prototype.fork;
+    const originalInfo = FakeStorage.prototype.info;
+    const names: string[] = [];
+    let ready = false;
+    const fork = vi.spyOn(FakeStorage.prototype, 'fork').mockImplementation(async function (this: FakeStorage, source, name) {
+      provisioningAtProvider(this, name, 'fork');
+      names.push(name);
+      const result = await originalFork.call(this, source, name);
+      return ready ? result : { name, remote: '', status: 'provisioning' };
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const result = await originalInfo.call(this, name);
+      return result && name.startsWith('concord-f-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    try {
+      const body = { intentKey: 'slow-task', intentText: 'seed later', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [] };
+      const first = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-first'));
+      expect(first.status).toBe(202);
+      const pending = (await responseBody(first)).data;
+      expect(pending.provisioning.state).toBe('pending');
+      const second = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-second'));
+      expect(second.status).toBe(202);
+      expect((await responseBody(second)).data.changeId).toBe(pending.changeId);
+      expect(names).toEqual([pending.candidateStorageName]);
+      ready = true;
+      const third = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-ready'));
+      expect(third.status).toBe(200);
+      expect((await responseBody(third)).data).toMatchObject({ changeId: pending.changeId, candidateStorageName: pending.candidateStorageName,
+        provisioning: { state: 'observed' } });
+      expect(names).toEqual([pending.candidateStorageName]);
+    } finally {
+      info.mockRestore();
+      fork.mockRestore();
+    }
+  });
+
+  it('reuses one canonical repository while the provider is provisioning it', async () => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const names: string[] = [];
+    let ready = false;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      if (name.startsWith('concord-r-')) {
+        provisioningAtProvider(this, name, 'ensure-repo');
+        names.push(name);
+      }
+      const result = await originalEnsure.call(this, name);
+      return name.startsWith('concord-r-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const result = await originalInfo.call(this, name);
+      return result && name.startsWith('concord-r-') && !ready ? { name, remote: '', status: 'provisioning' } : result;
+    });
+    try {
+      const body = { name: 'slow_canonical_case', policyId: 'local-demo', profileId: 'local-demo' };
+      const first = await fetchApi(mutation('/v1/repos', body, 'slow-canonical-first'));
+      expect(first.status).toBe(202);
+      const pending = (await responseBody(first)).data;
+      expect(pending.status).toBe('provisioning');
+      const second = await fetchApi(mutation('/v1/repos', body, 'slow-canonical-second'));
+      expect(second.status).toBe(202);
+      expect((await responseBody(second)).data.canonicalStorageName).toBe(pending.canonicalStorageName);
+      expect(names).toEqual([pending.canonicalStorageName]);
+      ready = true;
+      const third = await fetchApi(mutation('/v1/repos', body, 'slow-canonical-ready'));
+      expect(third.status).toBe(201);
+      expect((await responseBody(third)).data).toMatchObject({ canonicalStorageName: pending.canonicalStorageName, status: 'ready' });
+      expect(names).toEqual([pending.canonicalStorageName]);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
   });
 
   it('records repository provisioning before work and retries a failed provider call by storage name', async () => {
