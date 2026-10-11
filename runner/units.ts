@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
+import { trustedDependencyKeys } from '../src/verdicts/manifest';
 import { command, git, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
@@ -102,8 +103,10 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
   evidence.sort((a, b) => a.unitKey.localeCompare(b.unitKey));
   const dependencyScope: UnitDependencyScopeEntry[] = [];
   if (coverage === 'complete') {
-    const dependencies = new Set(evidence.flatMap(item => Object.values(policy.units).find(unit => unit.canonicalKey === item.unitKey)?.dependencyKeys ?? []));
-    for (const key of [...dependencies].sort()) {
+    let dependencies: string[] = [];
+    try { dependencies = trustedDependencyKeys(policy, evidence.map(item => item.unitKey)); }
+    catch { coverage = 'unknown'; }
+    for (const key of dependencies) {
       const unit = policy.units[key];
       if (!unit) { coverage = 'unknown'; break; }
       const bytes = await content(repo, head, unit.file);
