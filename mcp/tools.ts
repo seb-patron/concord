@@ -1,4 +1,6 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { mkdir } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredentialsIn } from '../cli/client.ts';
 import { assertCommit, assertHeadBasedOn, git, rejectCanonicalTarget, resolveHead, validateRemote } from '../cli/git.ts';
 
@@ -84,6 +86,34 @@ function safeRemote(remote: string): string {
   return `${url.protocol}//${url.host}${url.pathname}`;
 }
 
+function changeBranch(changeId: string, branch: string): string {
+  const name = branch.replace(/^refs\/heads\//, '');
+  if (!name || name.startsWith('-') || name.includes('..') || name.includes('@{') || name.includes('\\') || name.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) {
+    throw new ConcordError('Server supplied an invalid candidate branch', 'server');
+  }
+  return `concord/${changeId}/${name}`;
+}
+
+async function changeWorktree(root: string, changeId: string, localBranch: string, mustExist: boolean): Promise<{ root: string; worktree: string; exists: boolean }> {
+  const top = resolve(await git(['rev-parse', '--show-toplevel'], {}, root));
+  if (top !== resolve(root)) throw new ConcordError('worktree must be the root of the shared Git repository', 'usage');
+  const worktree = join(top, '.concord', 'changes', changeId);
+  let exists = false;
+  try {
+    const actualTop = resolve(await git(['rev-parse', '--show-toplevel'], {}, worktree));
+    exists = actualTop === worktree;
+  } catch { /* The change worktree has not been created. */ }
+  if (mustExist && !exists) throw new ConcordError('Change worktree is missing; run change_checkout first', 'usage');
+  if (exists) {
+    const common = resolve(worktree, await git(['rev-parse', '--git-common-dir'], {}, worktree));
+    const rootCommon = resolve(root, await git(['rev-parse', '--git-common-dir'], {}, root));
+    if (common !== rootCommon || await git(['symbolic-ref', 'HEAD'], {}, worktree) !== `refs/heads/${localBranch}`) {
+      throw new ConcordError('Change worktree is not on its assigned branch', 'usage');
+    }
+  }
+  return { root: top, worktree, exists };
+}
+
 export async function callTool(client: ConcordClient, name: string, args: Args): Promise<unknown> {
   rememberCredentialsIn(args);
   const r = name === 'repo_list' ? '' : root(args);
@@ -119,32 +149,34 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
       const access = await gitAccess(client, args, field(change, 'candidateStorageName'), 'read', version(repository));
       const branch = field(change, 'branch');
       const worktree = field(args, 'worktree');
-      const localBranch = `concord/${value(args, 'changeId')}/${branch.replace(/^refs\/heads\//, '')}`;
+      const localBranch = changeBranch(value(args, 'changeId'), branch);
+      const target = await changeWorktree(worktree, value(args, 'changeId'), localBranch, false);
       const existing = change.headOid === null
         ? await git(['ls-remote', '--heads', '--', access.remote, branch], { token: access.token }, worktree)
         : branch;
-      if (change.headOid === null && !existing.split('\n').some(line => line.endsWith(`\t${branch}`))) {
+      const forkExists = change.headOid !== null || existing.split('\n').some(line => line.endsWith(`\t${branch}`));
+      let startRef = field(change, 'baseOid');
+      const gitCwd = target.exists ? target.worktree : worktree;
+      if (!forkExists) {
         const baseOid = field(change, 'baseOid');
         try {
-          await git(['fetch', '--no-tags', '--', access.remote, baseOid], { token: access.token }, worktree);
+          await git(['fetch', '--no-tags', '--', access.remote, baseOid], { token: access.token }, gitCwd);
         } catch {
           const canonical = await gitAccess(client, args, field(data(repository), 'canonicalStorageName'), 'read', version(repository));
-          await git(['fetch', '--no-tags', '--', canonical.remote, baseOid], { token: canonical.token }, worktree);
+          await git(['fetch', '--no-tags', '--', canonical.remote, baseOid], { token: canonical.token }, gitCwd);
         }
-        await assertCommit(worktree, baseOid);
-        const localRef = `refs/heads/${localBranch}`;
-        const local = await git(['for-each-ref', '--format=%(refname)', localRef], {}, worktree);
-        if (local.split('\n').includes(localRef)) {
-          const localOid = await git(['rev-parse', '--verify', `${localRef}^{commit}`], {}, worktree);
-          await assertHeadBasedOn(worktree, baseOid, localOid);
-          await git(['switch', localBranch], {}, worktree);
-        } else {
-          await git(['switch', '-c', localBranch, baseOid], {}, worktree);
-        }
+        await assertCommit(gitCwd, baseOid);
       } else {
-        await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/${localBranch}`], { token: access.token }, worktree);
+        await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/${localBranch}`], { token: access.token }, gitCwd);
+        startRef = `refs/remotes/${localBranch}`;
+        await assertHeadBasedOn(gitCwd, field(change, 'baseOid'), await git(['rev-parse', '--verify', `${startRef}^{commit}`], {}, gitCwd));
       }
-      result = { fetched: true, changeId: args.changeId, worktree, branch, remote: safeRemote(access.remote) };
+      if (!target.exists) {
+        await mkdir(join(target.root, '.concord', 'changes'), { recursive: true });
+        await git(['worktree', 'add', '-b', localBranch, '--', target.worktree, startRef], {}, worktree);
+      }
+      await assertHeadBasedOn(target.worktree, field(change, 'baseOid'), await resolveHead(target.worktree));
+      result = { fetched: true, changeId: args.changeId, worktree: target.worktree, branch, remote: safeRemote(access.remote) };
       break;
     }
     case 'change_publish': {
@@ -156,12 +188,14 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
       const baseOid = field(change, 'baseOid');
       const branch = field(change, 'branch');
       const worktree = field(args, 'worktree');
-      const headOid = await resolveHead(worktree);
-      await assertCommit(worktree, baseOid);
-      await assertHeadBasedOn(worktree, baseOid, headOid);
+      const localBranch = changeBranch(value(args, 'changeId'), branch);
+      const target = await changeWorktree(worktree, value(args, 'changeId'), localBranch, true);
+      const headOid = await resolveHead(target.worktree);
+      await assertCommit(target.worktree, baseOid);
+      await assertHeadBasedOn(target.worktree, baseOid, headOid);
       const access = await gitAccess(client, args, storageName, 'write', version(repository));
       rejectCanonicalTarget(storageName, repoData.canonicalStorageName, access.remote, repoData.canonicalRemote);
-      await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', access.remote, `${headOid}:${branch}`], { token: access.token }, worktree);
+      await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', access.remote, `${headOid}:${branch}`], { token: access.token }, target.worktree);
       await mutation(client, `${r}/branches`, { storageName, ref: branch, observedHead: headOid, ownerId: field(change, 'authorId') }, await currentVersion(client, args));
       result = await mutation(client, `${p()}/publish`, { baseOid, headOid, branch, unitKeys: change.unitKeys, leaseFences: args.leaseFences }, version(await client.request('GET', p())), args.idempotencyKey);
       break;
