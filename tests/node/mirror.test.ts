@@ -3,11 +3,36 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
-import { mirrorGit, validateDemoRemote } from '../../deploy/mirror.ts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { main, mirrorGit, validateDemoRemote } from '../../deploy/mirror.ts';
 
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })));
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+
+function mockMirrorApi(onToken: (body: Record<string, unknown>, key: string | null) => Response) {
+  vi.stubEnv('CONCORD_URL', 'https://concord.test');
+  vi.stubEnv('CONCORD_TOKEN', 'owner-token');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/v1/repos/demo' && init?.method === 'GET') return Response.json({ version: 17, data: {
+      status: 'ready', version: 4, canonicalStorageName: 'canonical', observedCanonicalOid: 'a'.repeat(40),
+    } });
+    if (path === '/v1/repos/demo/git-token' && init?.method === 'POST') {
+      return onToken(JSON.parse(String(init.body)) as Record<string, unknown>, new Headers(init.headers).get('idempotency-key'));
+    }
+    throw new Error(`unexpected request ${path}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  return fetcher;
+}
+
+const mirrorArgs = ['--repo', 'demo', '--remote', 'https://github.com/example/demo.git', '--dry-run'];
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: {
@@ -35,6 +60,36 @@ async function fixture() {
 }
 
 describe('one-way mirror', () => {
+  it('requests a Git token with the coordinator envelope version, not the catalog repo version', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    mockMirrorApi((body) => {
+      bodies.push(body);
+      return body.expectedVersion === 17
+        ? Response.json({ data: { remote: 'file:///nonexistent/concord-mirror-test.git', secret: 'read-token' } })
+        : Response.json({ error: { code: 'STALE_VERSION' } }, { status: 409 });
+    });
+    await main(mirrorArgs);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({ storageName: 'canonical', scope: 'read', ttlSeconds: 300, expectedVersion: 17 });
+  });
+
+  it('uses a fresh token request key for each invocation and retains it across a retry', async () => {
+    const keys: (string | null)[] = [];
+    mockMirrorApi((_body, key) => {
+      keys.push(key);
+      return keys.length % 2 === 1
+        ? Response.json({ error: { code: 'TEMPORARY' } }, { status: 503 })
+        : Response.json({ data: { remote: 'file:///nonexistent/concord-mirror-test.git', secret: 'read-token' } });
+    });
+    await main(mirrorArgs);
+    await main(mirrorArgs);
+    expect(keys).toHaveLength(4);
+    expect(keys[0]).toMatch(/^mirror-read-demo-[0-9a-f-]{36}$/);
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[2]).toBe(keys[3]);
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+
   it('requires an owner-supplied credential-free GitHub demo URL', () => {
     expect(validateDemoRemote('https://github.com/example/dispatch-lab.git')).toBe('https://github.com/example/dispatch-lab.git');
     for (const value of ['https://token@github.com/a/b.git', 'https://github.com/a/b.git?token=x', 'https://evil.example/a/b.git', 'git@github.com:a/b.git', 'https://github.com/a/../b.git']) {

@@ -172,8 +172,10 @@ export CONCORD_REPO_ID='<runtime repo ID>'
 export CHECKED_SHA='<promoted full Git SHA>'
 export CHECKER_TOKEN='<production checker bearer token>'
 export PROMOTER_TOKEN='<production promoter bearer token>'
+PROFILE_ID="$(curl -fsS -H "Authorization: Bearer $CONCORD_TOKEN" "$CONCORD_URL/v1/repos/$CONCORD_REPO_ID" | jq -er '.data.profileId')"
+PROFILE_DIGEST="$(jq -er --arg id "$PROFILE_ID" '.profiles[$id].digest | select(test("^sha256:[0-9a-f]{64}$"))' "$TRUSTED_CONFIG_FILE")"
 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role checker --profile demo/profile.json --once
-CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role promoter --once
+CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role promoter --profile-digest "$PROFILE_DIGEST" --once
 npm run concord -- api GET "/repos/$CONCORD_REPO_ID" --json | jq -e --arg sha "$CHECKED_SHA" '.data.observedCanonicalOid == $sha'
 npm run concord -- repo clone --repo "$CONCORD_REPO_ID" --path "$CONCORD_RUN_DIR/canonical" --json
 test "$(git -C "$CONCORD_RUN_DIR/canonical" rev-parse HEAD)" = "$CHECKED_SHA"

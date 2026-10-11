@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { checkLocal, checkRemote, main } from '../../deploy/preflight.ts';
 
 describe('deployment preflight', () => {
+  it('documents the production profile pin required by the promoter smoke command', async () => {
+    const instructions = await readFile('docs/deploy.md', 'utf8');
+    expect(instructions).toMatch(/PROFILE_ID="\$\(curl[^\n]+\/v1\/repos\/\$CONCORD_REPO_ID" \| jq -er '\.data\.profileId'\)"/);
+    expect(instructions).toMatch(/PROFILE_DIGEST="\$\(jq -er --arg id "\$PROFILE_ID" '\.profiles\[\$id\]\.digest[^\n]+"\$TRUSTED_CONFIG_FILE"\)"/);
+    expect(instructions).toMatch(/--role promoter --profile-digest "\$PROFILE_DIGEST" --once/);
+  });
+
   it('accepts the checked-in local and production configurations without account credentials', async () => {
     const result = await checkLocal(process.cwd(), { ...process.env, CLOUDFLARE_ACCOUNT_ID: undefined, CLOUDFLARE_API_TOKEN: undefined });
     expect(result).toMatchObject({ status: 'ready', reason: 'remote deployment unavailable: owner credentials required' });

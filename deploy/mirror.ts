@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
@@ -100,12 +101,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (!apiUrl || !apiToken) throw new Error('CONCORD_URL and CONCORD_TOKEN are required');
     const client = new ConcordClient({ url: apiUrl, token: apiToken });
     const repoId = parsed.values.repo;
-    const response = await client.request<{ data: { status: string; version: number; canonicalStorageName: string; observedCanonicalOid: string | null } }>('GET', `/repos/${repoId}`);
+    const response = await client.request<{ version: number; data: { status: string; canonicalStorageName: string; observedCanonicalOid: string | null } }>('GET', `/repos/${repoId}`);
     const repo = response.data;
     if (repo.status !== 'ready' || !repo.observedCanonicalOid || !oidPattern.test(repo.observedCanonicalOid)) throw new Error('canonical main is not confirmed');
     const access = await client.request<{ data: { remote: string; secret: string } }>('POST', `/repos/${repoId}/git-token`, {
       body: { storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 300 },
-      expectedVersion: repo.version, idempotencyKey: `mirror-read-${repoId}-${repo.observedCanonicalOid}`,
+      expectedVersion: response.version, idempotencyKey: `mirror-read-${repoId}-${randomUUID()}`,
     });
     const plan = await mirrorGit({ sourceRemote: access.data.remote, sourceToken: access.data.secret,
       sourceOid: repo.observedCanonicalOid, destinationRemote, destinationToken: process.env.CONCORD_MIRROR_TOKEN,
