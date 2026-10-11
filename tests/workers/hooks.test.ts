@@ -268,6 +268,7 @@ describe('cross-module coordinator hooks', () => {
           authorId: 'owner', headOid: null, revision: 0, status: 'draft', unitKeys: [], frozen: false,
           baseOid: null, candidateStorageName: change.candidateStorageName, branch: 'refs/heads/seed',
           dependencyChangeIds: ['dependency-a'], canonicalStorageName: repo.canonicalStorageName,
+          scratchStorageName: `concord-s-${repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'seed',
         } },
         missing: { status: 'blocked', version: 1, code: 'CHANGE_NOT_FOUND', reason: 'Change not found', evidenceIds: [] },
         writable: false, writableUnit: false, writableDependency: false, ownState: null,

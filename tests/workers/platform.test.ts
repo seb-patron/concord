@@ -62,8 +62,8 @@ describe('local Worker and SQLite Durable Objects', () => {
     const snapshot = await fetchApi(apiRequest('/v1/repos/alpha/snapshot'));
     expect(snapshot.status).toBe(200);
     expect((await responseBody(snapshot)).data.projections).toMatchObject({
-      repos: { repo: null, branches: [], changes: [], bootstrap: null }, leases: { status: 'unavailable' },
-      queue: { status: 'unavailable' }, runners: { status: 'unavailable' },
+      repos: { repo: null, branches: [], changes: [], provisioning: [], bootstrap: null }, leases: { status: 'unavailable' },
+      queue: { status: 'ready', entries: [], bootstrap: null, promotion: null }, runners: { status: 'unavailable' },
       findings: { status: 'unavailable' }, verdicts: { status: 'ready' },
     });
     expect((await fetchApi(apiRequest('/v1/repos/alpha/snapshot', 'local-viewer'))).status).toBe(200);
@@ -104,14 +104,15 @@ describe('local Worker and SQLite Durable Objects', () => {
 
   it('rejects conflicting bodies, stale versions, and verdicts without a change', async () => {
     const path = '/v1/repos/beta/queue/enqueue';
-    const first = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'one' }, 'same-key'));
-    expect(first.status).toBe(501);
-    expect((await responseBody(first)).error.code).toBe('MODULE_UNAVAILABLE');
-    const retry = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'one' }, 'same-key'));
-    expect(retry.status).toBe(501);
-    const conflict = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'two' }, 'same-key'));
+    const first = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'one', verdictId: 'approval', leaseFences: {} }, 'same-key'));
+    expect(first.status).toBe(409);
+    expect((await responseBody(first)).error.code).toBe('CHANGE_NOT_FOUND');
+    const retry = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'one', verdictId: 'approval', leaseFences: {} }, 'same-key'));
+    expect(retry.status).toBe(409);
+    expect((await responseBody(retry)).error.code).toBe('CHANGE_NOT_FOUND');
+    const conflict = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'two', verdictId: 'approval', leaseFences: {} }, 'same-key'));
     expect(conflict.status).toBe(409);
-    expect((await responseBody(conflict)).error.code).toBe('IDEMPOTENCY_CONFLICT');
+    expect((await responseBody(conflict)).error.code).toBe('CHANGE_NOT_FOUND');
     const stale = await fetchApi(mutation(path, { expectedVersion: 99, changeId: 'three' }, 'new-key'));
     expect(stale.status).toBe(409);
     expect((await responseBody(stale)).error.code).toBe('STALE_VERSION');
@@ -129,6 +130,7 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect(catalog.status).toBe(201);
     const catalogConflict = await fetchApi(mutation('/v1/repos', { name: 'different', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key'));
     expect(catalogConflict.status).toBe(409);
+    expect((await responseBody(catalogConflict)).error.code).toBe('IDEMPOTENCY_CONFLICT');
   });
 
   it('pages persisted events by cursor and keeps transaction rollback atomic', async () => {

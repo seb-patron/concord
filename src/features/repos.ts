@@ -1,4 +1,4 @@
-import type { BootstrapBody, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
+import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { eventSequence } from '../state';
@@ -50,15 +50,16 @@ function scheduleInspection(context: ModuleContext, change: Change, job: Inspect
   }
 }
 
-function scheduleBootstrap(context: ModuleContext, request: BootstrapPending, job: ValidateStackJob): Response {
+function scheduleBootstrap(context: ModuleContext, request: BootstrapPending, seed: BootstrapHandoff): Response {
   try {
-    const gate = context.call('runners.schedule', job);
+    const gate = context.handoffBootstrap?.(seed);
+    if (!gate) return failure(new HttpError(501, 'MODULE_UNAVAILABLE', 'Queue bootstrap handoff unavailable'));
     if (gate.status === 'blocked') {
       context.state.put('bootstrap', { ...request, status: 'blocked' } satisfies BootstrapPending);
       return failure(new HttpError(gate.code === 'MODULE_UNAVAILABLE' ? 501 : 409, gate.code, gate.reason));
     }
     context.state.put('bootstrap', { ...request, status: 'requested' } satisfies BootstrapPending);
-    return respond(context, { jobId: job.jobId, state: 'requested' }, 202);
+    return respond(context, { jobId: request.jobId, state: 'requested' }, 202);
   } catch {
     context.state.put('bootstrap', { ...request, status: 'blocked' } satisfies BootstrapPending);
     return failure(new HttpError(503, 'SCHEDULE_UNAVAILABLE', 'Bootstrap scheduler did not acknowledge the request'));
@@ -436,11 +437,6 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (existing) {
     if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
     if (existing.status === 'requested') return respond(context, { jobId: existing.jobId, state: 'requested' }, 202);
-    if (existing.status === 'blocked') {
-      const pendingJob = context.state.get<ValidateStackJob>('bootstrap-job');
-      if (!pendingJob) return fail(503, 'BOOTSTRAP_JOB_MISSING', 'Bootstrap job intent missing');
-      return scheduleBootstrap(context, existing, pendingJob);
-    }
   }
   const jobId = existing?.jobId ?? crypto.randomUUID();
   const scratchStorageName = existing?.scratchStorageName ?? `concord-s-${jobId}`;
@@ -457,29 +453,16 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   const scratch = await reconcile(context, scratchIntent, true);
   if (intents(context)[intentKey('ensure-repo', scratchStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Scratch provisioning failed; retry the same request');
   if (scratchIntent.state !== 'observed' || !scratch) return respond(context, { jobId, state: 'provisioning' }, 202);
-  const scratchRemote = scratch.remote;
-  const job: ValidateStackJob = {
-    kind: 'validate-stack', bootstrap: true, ownerAuthorized: true, jobId, repoId: repo.repoId,
-    canonicalBaseOid: null, candidates: [{ changeId: change.changeId, revision: 1, baseOid: null, headOid, seedStorageName, seedRef }],
-    stackId: crypto.randomUUID(), scratchStorageName, scratchRef: 'refs/heads/bootstrap',
-    inputDigest: policy.digest, generation: 1, profileDigest: profile.digest, policyId: policy.id,
-    policyDigest: policy.digest, unitPolicy: policy, expectedRefs: { [seedStorageName]: headOid, [repo.canonicalStorageName]: null, [scratchStorageName]: null },
-    storageRemotes: { [seedStorageName]: seedRemote!, [repo.canonicalStorageName]: canonicalRemote!, [scratchStorageName]: scratchRemote },
-    checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
-    toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
-    timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
-    state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null, version: 1,
-  };
-  job.inputDigest = await jobDigest(job);
+  const seed: BootstrapHandoff = { seedStorageName, seedRef, headOid, canonicalStorageName: repo.canonicalStorageName,
+    scratchStorageName, policyId: policy.id, profileId: profile.id };
   if (await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main')) fail(409, 'ALREADY_INITIALIZED', 'Canonical main appeared');
   context.transaction(() => {
     const pending = context.state.get<BootstrapPending>('bootstrap');
-    if (!pending || pending.jobId !== jobId || pending.status !== 'provisioning') fail(409, 'BOOTSTRAP_PENDING', 'Bootstrap provisioning was superseded');
+    if (!pending || pending.jobId !== jobId || !['provisioning', 'blocked'].includes(pending.status)) fail(409, 'BOOTSTRAP_PENDING', 'Bootstrap provisioning was superseded');
     context.state.put('bootstrap', { ...pending!, status: 'requested' } satisfies BootstrapPending);
-    context.state.put('bootstrap-job', job);
     versioned(context, 'repo.bootstrap.requested', [repo.repoId, change.changeId], { headOid, jobId });
   });
-  return scheduleBootstrap(context, context.state.get<BootstrapPending>('bootstrap')!, job);
+  return scheduleBootstrap(context, context.state.get<BootstrapPending>('bootstrap')!, seed);
 }
 
 function close(context: ModuleContext, changeId: string): Response {
@@ -619,6 +602,9 @@ export const repos: FeatureModule = {
       status: change.status, unitKeys: change.unitKeys, frozen: !['draft', 'ready'].includes(change.status) || context.state.get<BootstrapPending>('bootstrap')?.changeId === changeId,
       baseOid: change.baseOid, candidateStorageName: change.candidateStorageName, branch: change.branch,
       dependencyChangeIds: change.dependencyChangeIds, canonicalStorageName: repo.canonicalStorageName,
+      scratchStorageName: context.state.get<BootstrapPending>('bootstrap')?.scratchStorageName ?? `concord-s-${repo.repoId}`,
+      policyId: repo.policyId, profileId: repo.profileId,
+      intentKey: change.intentKey,
     } };
   },
 };

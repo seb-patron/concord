@@ -235,9 +235,9 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
     kind: 'validate-stack' as const, version: 1, jobId: crypto.randomUUID(), repoId: context.repoId,
     generation: state.generation, profileDigest: profile.digest, policyId, policyDigest: policy.digest,
     unitPolicy: policy, expectedRefs: Object.fromEntries([
-      [canonicalName + ':refs/heads/main', state.observedMain],
-      ...entries.map(entry => [entry.storageName + ':' + entry.ref, entry.headOid] as const),
-      ...(bootstrap ? [[seed!.seedStorageName + ':' + seed!.seedRef, seed!.headOid] as const] : []),
+      [canonicalName, state.observedMain], [scratchName, null],
+      ...entries.map(entry => [entry.storageName, entry.headOid] as const),
+      ...(bootstrap ? [[seed!.seedStorageName, seed!.headOid] as const] : []),
     ]), storageRemotes: remotes, checkerId: policy.checkerId, checkerDigest: policy.checkerDigest,
     oracleDigest: profile.oracleDigest, toolchainDigest: profile.toolchainDigest,
     environmentDigest: profile.environmentDigest, timeoutMs: profile.timeoutMs,
@@ -249,7 +249,7 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
       candidates: [{ changeId: `seed-${stackId}`, revision: 1, baseOid: null, headOid: seed!.headOid,
         seedStorageName: seed!.seedStorageName, seedRef: seed!.seedRef }] as [SeedInput] }
     : { ...base, bootstrap: false as const, canonicalBaseOid: state.observedMain!, candidates };
-  const { jobId: _jobId, version: _version, state: _state, attempt: _attempt,
+  const { version: _version, state: _state, attempt: _attempt,
     runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, ...input } = immutable;
   const inputDigest = await digest(input);
   return { ...immutable, inputDigest } as ValidateStackJob;
