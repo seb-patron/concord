@@ -3,15 +3,143 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Concord local shell</title>
+  <title>Concord fleet coordination</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main>
-    <h1>Concord</h1>
-    <p id="mode" role="status">Checking local platform…</p>
-    <p>Repository workflows are being built. The API currently exposes health, authenticated snapshots, and events.</p>
+  <a class="skip" href="#boards">Skip to fleet boards</a>
+  <header class="topbar">
+    <div>
+      <h1>Concord</h1>
+      <p class="subtitle">Fleet coordination: repo to landing</p>
+    </div>
+    <p id="env-badge" class="badge" role="status" aria-live="polite">Backend: checking…</p>
+  </header>
+
+  <section class="session" aria-labelledby="session-heading">
+    <h2 id="session-heading">Session</h2>
+    <form id="token-form">
+      <label for="token-input">Session token (kept in memory only)</label>
+      <input id="token-input" name="token" type="password" autocomplete="off" spellcheck="false"
+             placeholder="local-viewer, local-agent-a, …" aria-describedby="token-note">
+      <button type="submit" id="token-save">Use token</button>
+      <button type="button" id="token-clear">Forget</button>
+      <span id="token-state" role="status" aria-live="polite">No token stored.</span>
+      <small id="token-note">Viewer can browse without mutation controls. The token never enters the URL or browser storage.</small>
+    </form>
+    <div class="session-row">
+      <label for="role-select">Requested role (unverified; server authorizes each action)</label>
+      <select id="role-select">
+        <option value="viewer" selected>viewer — browse only</option>
+        <option value="agent">agent — claim, enqueue, withdraw</option>
+        <option value="owner">owner — claim, enqueue, withdraw</option>
+        <option value="reviewer">reviewer — submit verdicts</option>
+      </select>
+      <label for="repo-select">Repository</label>
+      <select id="repo-select" aria-describedby="repo-note"></select>
+      <label for="repo-custom">Or repo ID</label>
+      <input id="repo-custom" type="text" placeholder="demo" size="12">
+      <button type="button" id="repo-use">Switch</button>
+      <span id="repo-note" class="hint">Repo switcher. Polls incrementally every second.</span>
+    </div>
+    <p id="session-error" class="error" role="alert" hidden></p>
+  </section>
+
+  <main id="boards" class="layout">
+    <div class="column">
+      <section class="panel" aria-labelledby="leases-heading">
+        <h2 id="leases-heading">Lease board</h2>
+        <p class="hint">Semantic units, holder, intent, countdown. Conflicts name the holder.</p>
+        <ul id="lease-list" class="cards" aria-live="polite"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="changes-heading">
+        <h2 id="changes-heading">Changes</h2>
+        <p class="hint">Arrow keys move, Enter opens details. Each card shows intent, agent, unit, state, next action.</p>
+        <ul id="change-list" class="cards" role="listbox" aria-label="Changes" tabindex="0"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="queue-heading">
+        <h2 id="queue-heading">Queue and bisection</h2>
+        <p class="hint">Membership, progress, result. Failures highlight only the supported culprit or set.</p>
+        <div id="queue-tree"></div>
+        <ul id="queue-list" class="cards" aria-live="polite"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="runners-heading">
+        <h2 id="runners-heading">Runner health</h2>
+        <ul id="runner-list" class="cards" aria-live="polite"></ul>
+      </section>
+    </div>
+
+    <div class="column">
+      <section class="panel detail" aria-labelledby="detail-heading">
+        <h2 id="detail-heading">Change details</h2>
+        <div id="detail-body" aria-live="polite"><p>No change selected.</p></div>
+        <div id="mutation-zone">
+          <h3>Actions</h3>
+          <form id="claim-form" hidden>
+            <h4>Claim a registered unit</h4>
+            <label for="claim-units">Unit keys (comma separated, max 16)</label>
+            <input id="claim-units" type="text" placeholder="row:families:gamma">
+            <label for="claim-intent">Intent text</label>
+            <input id="claim-intent" type="text" placeholder="Increase gamma retry budget safely">
+            <button type="submit">Claim</button>
+          </form>
+          <form id="enqueue-form" hidden>
+            <h4>Enqueue / withdraw</h4>
+            <label for="enqueue-verdict">Verdict ID (for enqueue)</label>
+            <input id="enqueue-verdict" type="text">
+            <button type="submit" id="enqueue-submit">Enqueue selected change</button>
+            <button type="button" id="withdraw-submit">Withdraw selected change</button>
+          </form>
+          <form id="verdict-form" hidden>
+            <h4>Submit review verdict with evidence</h4>
+            <label for="verdict-decision">Decision</label>
+            <select id="verdict-decision"><option value="approve">approve</option><option value="reject">reject</option></select>
+            <label for="verdict-manifest">Review manifest digest</label>
+            <input id="verdict-manifest" type="text" placeholder="sha256:…">
+            <label for="verdict-evidence">Evidence digest</label>
+            <input id="verdict-evidence" type="text" placeholder="sha256:…">
+            <button type="submit">Submit verdict</button>
+          </form>
+          <p id="mutation-note" class="hint">Mutations send Idempotency-Key and expectedVersion. A stale 409 refreshes context instead of pretending success.</p>
+          <p id="mutation-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="findings-heading">
+        <h2 id="findings-heading">Findings round</h2>
+        <ul id="finding-list" class="cards" aria-live="polite"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="verdicts-heading">
+        <h2 id="verdicts-heading">Approval provenance</h2>
+        <p class="hint">Carried verdicts link the original review and delta evidence.</p>
+        <ul id="verdict-list" class="cards" aria-live="polite"></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="tip-heading">
+        <h2 id="tip-heading">Canonical tip</h2>
+        <div id="canonical-tip" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="replay-heading">
+        <h2 id="replay-heading">History</h2>
+        <div id="replay-body" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="events-heading">
+        <h2 id="events-heading">Events</h2>
+        <ol id="event-log" class="events" aria-live="polite"></ol>
+        <ol id="event-evidence" class="events" aria-label="Referenced older events"></ol>
+      </section>
+    </div>
   </main>
+
+  <footer>
+    <p>Static, framework-free UI over the frozen snapshot/events contract. See <a href="https://github.com/seb-patron/concord">docs/ui.md</a> for the owner walkthrough.</p>
+  </footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
