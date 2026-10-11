@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
 import { ConcordClient } from '../../cli/client.ts';
+import { gitEnvironment } from '../../cli/git.ts';
 import { importRepo } from '../../cli/import.ts';
 
 const execFile = promisify(execFileCallback);
@@ -79,9 +80,46 @@ afterEach(async () => {
   await Promise.all(children.splice(0).map(stop));
   await Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true })));
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe('adopted root import', () => {
+  it('keeps the source index and refs byte-identical with inherited Git repository settings', async () => {
+    const root = await temporary();
+    const { source } = await fixture(root);
+    const index = join(source, '.git', 'index');
+    const head = join(source, '.git', 'HEAD');
+    const main = join(source, '.git', 'refs', 'heads', 'main');
+    const before = await Promise.all([index, head, main].map(path => readFile(path)));
+    const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import',
+      '--source', source, '--ref', 'main', '--repo', 'adopted', '--exclude', 'private/**', '--print-tree'], {
+      cwd, env: { ...gitEnv, GIT_DIR: join(source, '.git'), GIT_INDEX_FILE: index }, timeout: 30_000,
+    });
+    expect(JSON.parse(result.stdout)).toMatchObject({ fileCount: 3, excludedPathCount: 1 });
+    const after = await Promise.all([index, head, main].map(path => readFile(path)));
+    expect(after).toEqual(before);
+    expect(await git(source, 'status', '--short')).toBe('');
+  });
+
+  it('removes inherited Git variables before adding importer owned settings', () => {
+    for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+      'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CONFIG_COUNT',
+      'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_GLOBAL', 'GIT_AUTHOR_NAME']) {
+      vi.stubEnv(name, 'inherited');
+    }
+    const clean = gitEnvironment();
+    expect(Object.keys(clean).filter(name => /^GIT_/i.test(name)).sort()).toEqual([
+      'GIT_CONFIG_NOSYSTEM', 'GIT_NO_REPLACE_OBJECTS', 'GIT_TERMINAL_PROMPT']);
+    const configured = gitEnvironment({ token: 'test-token', alternateObjectDirectory: '/scratch/objects',
+      indexFile: '/scratch/index', identity: true });
+    expect(configured).toMatchObject({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: 'Authorization: Bearer test-token', GIT_ALTERNATE_OBJECT_DIRECTORIES: '/scratch/objects',
+      GIT_INDEX_FILE: '/scratch/index', GIT_AUTHOR_NAME: 'Concord Import' });
+    expect(configured.GIT_DIR).toBeUndefined();
+    expect(configured.GIT_WORK_TREE).toBeUndefined();
+    expect(configured.GIT_OBJECT_DIRECTORY).toBeUndefined();
+  });
+
   it('builds a filtered tree offline, rejects missing exclusions and symlinks', async () => {
     const root = await temporary();
     const { source } = await fixture(root);

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { ConcordClient, ConcordError, idempotencyKey, rememberCredential } from './client.ts';
-import { git, pushCandidate, rejectCanonicalTarget } from './git.ts';
+import { git, gitEnvironment, pushCandidate, rejectCanonicalTarget } from './git.ts';
 
 const execFile = promisify(execFileCallback);
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
@@ -44,8 +44,7 @@ async function treeEntries(source: string, tree: string, alternateObjectDirector
   try {
     const result = await execFile('git', ['-C', source, 'ls-tree', '-r', '-z', '-l', tree], {
       encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, timeout: 120_000,
-      env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0',
-        ...(alternateObjectDirectory ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjectDirectory } : {}) },
+      env: gitEnvironment({ alternateObjectDirectory }),
     });
     raw = result.stdout;
   } catch { throw new ConcordError('Cannot inspect source Git tree', 'usage'); }
@@ -140,7 +139,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
   const scratch = await mkdtemp(join(tmpdir(), 'concord-import-'));
   try {
     await git(['init', '--quiet'], {}, scratch);
-    const plumbing = { alternateObjectDirectory: objectDirectory };
+    const plumbing = { alternateObjectDirectory: objectDirectory, indexFile: join(scratch, '.git', 'index') };
     await git(['read-tree', '--empty'], plumbing, scratch);
     for (let i = 0; i < included.length; i += 100) {
       await git(['update-index', '--add', ...included.slice(i, i + 100).flatMap(item =>

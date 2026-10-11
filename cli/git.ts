@@ -3,12 +3,17 @@ import { promisify } from 'node:util';
 import { ConcordError } from './client.ts';
 
 const execFile = promisify(execFileCallback);
-export interface GitOptions { token?: string; timeoutMs?: number; alternateObjectDirectory?: string; identity?: boolean }
+export interface GitOptions { token?: string; timeoutMs?: number; alternateObjectDirectory?: string; identity?: boolean; indexFile?: string }
 
-export async function git(args: string[], options: GitOptions = {}, cwd?: string): Promise<string> {
-  if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1' };
+// Never let a caller's Git context redirect an importer command into its source repository.
+export function gitEnvironment(options: GitOptions = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !/^GIT_/i.test(name)));
+  env.GIT_TERMINAL_PROMPT = '0';
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_NO_REPLACE_OBJECTS = '1';
   if (options.alternateObjectDirectory) env.GIT_ALTERNATE_OBJECT_DIRECTORIES = options.alternateObjectDirectory;
+  if (options.indexFile) env.GIT_INDEX_FILE = options.indexFile;
   if (options.identity) Object.assign(env, { GIT_AUTHOR_NAME: 'Concord Import', GIT_AUTHOR_EMAIL: 'import@concord.invalid',
     GIT_COMMITTER_NAME: 'Concord Import', GIT_COMMITTER_EMAIL: 'import@concord.invalid',
     GIT_AUTHOR_DATE: '@0 +0000', GIT_COMMITTER_DATE: '@0 +0000' });
@@ -17,8 +22,13 @@ export async function git(args: string[], options: GitOptions = {}, cwd?: string
     env.GIT_CONFIG_KEY_0 = 'http.extraHeader';
     env.GIT_CONFIG_VALUE_0 = `Authorization: Bearer ${options.token}`;
   }
+  return env;
+}
+
+export async function git(args: string[], options: GitOptions = {}, cwd?: string): Promise<string> {
+  if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
   try {
-    const result = await execFile('git', args, { cwd, env, timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+    const result = await execFile('git', args, { cwd, env: gitEnvironment(options), timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
     return result.stdout.trim();
   } catch (error) {
     const e = error as NodeJS.ErrnoException & { killed?: boolean };
