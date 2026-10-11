@@ -42,8 +42,12 @@ async function harness() {
   await saveFixture();
   type Change = { changeId: string; intentKey: string; intentText: string; branch: string; unitKeys: string[]; baseOid: string; headOid: string | null; revision: number; status: string; version: number; candidateStorageName: string };
   const changes: Change[] = [];
-  const api = { creates: 0, claims: 0, publishes: 0, enqueues: 0, leaseConflict: false, queueUnavailable: false,
-    verdicts: [] as Array<{ verdictId: string; revision: number; decision: string }>, lastAttempt: 0, globalVersion: 1, canonicalOid: baseOid };
+  const api = { creates: 0, claims: 0, publishes: 0, enqueues: 0, registers: 0, leaseConflict: false, queueUnavailable: false, publishPreparationUnavailable: false, publishUnavailable: false,
+    leases: [] as Array<{ changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }>,
+    branches: [] as Array<{ storageName: string; ref: string; observedHead: string }>,
+    queue: [] as Array<{ changeId: string; state: string }>,
+    lastEnqueueFences: null as Record<string, number> | null,
+    verdicts: [] as Array<{ verdictId: string; revision: number; decision: string }>, lastAttempt: 0, globalVersion: 1, nextFence: 7, canonicalOid: baseOid };
   const createBodies = new Map<string, string>();
   const ok = (data: unknown, status = 200) => new Response(JSON.stringify({ data, version: api.globalVersion }), { status, headers: { 'content-type': 'application/json' } });
   const fail = (code: string, status = 409, details?: unknown) => new Response(JSON.stringify({ error: { code, message: code, details } }), { status });
@@ -81,25 +85,33 @@ async function harness() {
       api.claims++;
       if (api.leaseConflict) return fail('LEASE_CONFLICT', 409, { holderId: 'other-agent', intentText: 'Other work', keys: ['unit:a'], nextAction: 'Wait for holder' });
       api.globalVersion++;
-      return ok({ leases: [{ changeId: body.changeId, unitKey: 'unit:a', fence: 7, state: 'active', expiresAt: Date.now() + 120_000 }] }, 201);
+      const lease = { changeId: String(body.changeId), unitKey: 'unit:a', fence: api.nextFence++, state: 'active', expiresAt: Date.now() + 120_000 };
+      api.leases.push(lease);
+      return ok({ leases: [lease] }, 201);
     }
-    if (path === '/v1/repos/demo/leases' && method === 'GET') return ok({ items: changes.map(item => ({ changeId: item.changeId, unitKey: 'unit:a', fence: 7, state: 'active', expiresAt: Date.now() + 120_000 })) });
+    if (path === '/v1/repos/demo/leases' && method === 'GET') return ok({ items: api.leases, nextCursor: null });
+    if (path === '/v1/repos/demo/branches' && method === 'GET') return ok({ items: api.branches, nextCursor: null });
     if (path === '/v1/repos/demo/git-token' && method === 'POST') {
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
+      if (body.scope === 'write' && api.publishPreparationUnavailable) return fail('MODULE_UNAVAILABLE', 501);
       const remote = await storage.info(String(body.storageName));
       if (!remote) return fail('STORAGE_NOT_FOUND', 404);
       return ok({ remote: remote.remote, secret: 'bridge-issued-test-secret' });
     }
     if (path === '/v1/repos/demo/branches' && method === 'POST') {
+      api.registers++;
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
       const head = await storage.resolveRef(String(body.storageName), String(body.ref));
       if (body.ownerId !== 'mock-aw' || head !== body.observedHead) return fail('BRANCH_NOT_REGISTERED');
+      api.branches.push({ storageName: String(body.storageName), ref: String(body.ref), observedHead: head! });
       api.globalVersion++; return ok({ observedHead: head });
     }
     const publishMatch = /^\/v1\/repos\/demo\/changes\/(change-\d+)\/publish$/.exec(path);
     if (publishMatch && method === 'POST') {
       api.publishes++;
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
+      if (api.publishUnavailable) return fail('MODULE_UNAVAILABLE', 501);
+      if ((body.leaseFences as Record<string, number>)['unit:a'] !== api.leases.find(item => item.changeId === publishMatch[1])?.fence) return fail('LEASE_STALE');
       const change = changes.find(item => item.changeId === publishMatch[1])!;
       const commit = await storage.readCommit(change.candidateStorageName, String(body.headOid));
       if (!commit || commit.parents[0] !== baseOid || await storage.resolveRef(change.candidateStorageName, change.branch) !== body.headOid) return fail('HEAD_NOT_FOUND', 422);
@@ -107,10 +119,15 @@ async function harness() {
     }
     const verdictMatch = /^\/v1\/repos\/demo\/changes\/(change-\d+)\/verdicts$/.exec(path);
     if (verdictMatch && method === 'GET') return ok({ items: api.verdicts });
+    if (path === '/v1/repos/demo/queue' && method === 'GET') return ok({ items: api.queue, nextCursor: null });
     if (path === '/v1/repos/demo/queue/enqueue' && method === 'POST') {
       api.enqueues++;
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
       if (api.queueUnavailable) return fail('MODULE_UNAVAILABLE', 501);
+      api.lastEnqueueFences = body.leaseFences as Record<string, number>;
+      if (api.lastEnqueueFences['unit:a'] !== api.leases.find(item => item.changeId === body.changeId)?.fence) return fail('LEASE_STALE');
+      api.queue.push({ changeId: String(body.changeId), state: 'waiting' });
+      changes.find(item => item.changeId === body.changeId)!.status = 'queued';
       return ok({ entryId: 'queue-1', state: 'waiting' }, 202);
     }
     return fail('NOT_FOUND', 404);
@@ -164,11 +181,55 @@ describe('AW mock adapter', () => {
     const restarted = await execFile(process.execPath, ['--import', 'tsx', 'adapters/aw-mock.ts', '--fixture', h.fixturePath, '--run-state', h.statePath], {
       cwd: process.cwd(), timeout: 20_000, env: { ...process.env, CONCORD_URL: url, CONCORD_TOKEN: 'local-mock-aw' },
     });
-    expect(JSON.parse(restarted.stdout).changeId).toBe(first.changeId);
+    expect(JSON.parse(restarted.stdout)).toMatchObject({ changeId: first.changeId, phase: 'awaiting_review', headOid: first.headOid });
     expect(h.changes).toHaveLength(1);
     expect(h.api).toMatchObject({ claims: 1, publishes: 1, enqueues: 0 });
     expect(h.api.creates).toBe(2);
     expect(JSON.parse(await readFile(h.statePath, 'utf8')).mappings['demo/task-7/1'].changeId).toBe(first.changeId);
+  });
+
+  it.each([
+    ['opened', 'awaiting_review', 2, 1, 0],
+    ['leased', 'awaiting_review', 1, 1, 0],
+    ['registered', 'awaiting_review', 1, 4, 0],
+    ['published', 'awaiting_review', 1, 1, 0],
+    ['ready', 'awaiting_review', 1, 1, 0],
+    ['approved', 'queued', 1, 1, 1],
+    ['approved-without-lease', 'queued', 2, 1, 1],
+    ['queued', 'queued', 1, 1, 1],
+    ['checking', 'queued', 1, 1, 1],
+    ['queue-entry', 'queued', 1, 1, 0],
+    ['blocked', 'blocked', 1, 1, 0],
+    ['merged', 'blocked', 1, 1, 0],
+  ] as const)('resumes after state loss from %s', async (stage, phase, claims, publishes, enqueues) => {
+    const h = await harness();
+    if (stage === 'opened') h.api.leaseConflict = true;
+    if (stage === 'leased') h.api.publishPreparationUnavailable = true;
+    if (stage === 'registered') h.api.publishUnavailable = true;
+    const first = await h.run();
+    h.api.leaseConflict = false;
+    h.api.publishPreparationUnavailable = false;
+    h.api.publishUnavailable = false;
+    if (['approved', 'approved-without-lease', 'queued', 'checking'].includes(stage)) h.api.verdicts.push({ verdictId: 'reviewer-verdict', revision: 1, decision: 'approve' });
+    if (stage === 'ready') h.changes[0].status = 'ready';
+    if (stage === 'approved') h.api.leases[0].fence = 9;
+    if (stage === 'approved-without-lease') h.api.leases.length = 0;
+    if (stage === 'queued' || stage === 'checking') await h.run();
+    if (stage === 'checking') h.changes[0].status = 'checking';
+    if (stage === 'queue-entry') h.api.queue.push({ changeId: first.changeId, state: 'waiting' });
+    if (stage === 'blocked' || stage === 'merged') h.changes[0].status = stage;
+    await rm(h.statePath);
+    const resumed = await h.run();
+    expect(resumed).toMatchObject({ changeId: first.changeId, phase });
+    if (stage === 'opened' || stage === 'leased' || stage === 'registered') expect(resumed.headOid).toMatch(/^[a-f0-9]{40}$/);
+    if (stage === 'registered') expect(h.api.registers).toBe(1);
+    if (stage === 'blocked') expect(resumed.blocked).toMatchObject({ code: 'CHECKER_BLOCKED' });
+    if (stage === 'merged') expect(resumed.blocked).toMatchObject({ code: 'ATTEMPT_REQUIRED' });
+    if (stage === 'approved') expect(h.api.lastEnqueueFences).toEqual({ 'unit:a': 9 });
+    if (stage === 'approved-without-lease') expect(h.api.lastEnqueueFences).toEqual({ 'unit:a': 8 });
+    expect(h.changes).toHaveLength(1);
+    expect(h.api).toMatchObject({ claims, publishes, enqueues, creates: 2 });
+    expect(JSON.parse(await readFile(h.statePath, 'utf8')).mappings['demo/task-7/1']).toMatchObject({ changeId: first.changeId, phase });
   });
 
   it('rejects conflicting intent for the same key, even after local state is lost', async () => {

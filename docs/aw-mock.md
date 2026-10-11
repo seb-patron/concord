@@ -29,7 +29,7 @@ CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-mock-aw \
   npm run aw-mock -- --fixture demo/aw-task.json --run-state demo/aw-run-state.json
 ```
 
-The run-state path must be a separate file in the fixture's directory. It is atomically replaced after each phase. It stores the task-to-change mapping, lease fences, real head OID, and any structured refusal. Keep that directory outside any AW installation. The adapter does not create the directory. If the file is lost, the adapter posts the same stable intent to Concord and retrieves its active mapping; it does not infer identity from a base or head OID.
+The run-state path must be a separate file in the fixture's directory. It is atomically replaced after each phase. It stores the task-to-change mapping, lease fences, real head OID, and any structured refusal. Keep that directory outside any AW installation. The adapter does not create the directory. If the file is lost, the adapter posts the same stable intent to Concord and retrieves its active mapping; it does not infer identity from a base or head OID. It then reads the server change, live leases, registered branch, verdicts, and queue entry to resume the next action. A draft without live leases claims them; a leased draft publishes its registered branch or prepares a new candidate; a published change waits for an approval or enqueues, reclaiming expired leases before enqueue when possible; an admitted change stays queued. Terminal and checker-blocked changes remain blocked.
 
 ## Mapping and outputs
 
@@ -44,7 +44,7 @@ The run-state path must be a separate file in the fixture's directory. It is ato
 
 The JSON output includes `mock: true`, `identity`, `changeId`, `phase`, real `headOid` when available, and URLs for the change, verdicts, and queue request. It names all four launcher concepts. A `blocked` object carries the Concord code, reason, HTTP status, and conflict details when supplied. No refusal is represented as a successful launch. A blocked run is sticky on retry; an operator must inspect the refusal and use an explicit new task attempt after the server change becomes terminal. The shared client may retry a keyed transient server response up to three times within one invocation.
 
-The server's intent reservation is the durable source of truth. The local key is `project/taskId/explicitAttempt`; the server intent key is a stable digest of `project/taskId` and its `attempt` field carries `explicitAttempt`. The digest and branch are independent of base and head OIDs. On an active retry, the adapter returns the mapped change before claiming a lease, creating another commit, or publishing. A different intent or unit set under the same task key is a conflict. A terminal change requires the next explicit attempt, as checked by Concord.
+The server's intent reservation is the durable source of truth. The local key is `project/taskId/explicitAttempt`; the server intent key is a stable digest of `project/taskId` and its `attempt` field carries `explicitAttempt`. The digest and branch are independent of base and head OIDs. On an active retry, the adapter reads the server phase before acting, so a published change does not create another commit and a draft can continue after an interrupted run. A different intent or unit set under the same task key is a conflict. A terminal change requires the next explicit attempt, as checked by Concord.
 
 ## Slice 12 handoff
 

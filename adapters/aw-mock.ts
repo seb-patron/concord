@@ -20,6 +20,7 @@ interface Change { changeId: string; intentKey: string; intentText: string; bran
 interface Repo { canonicalStorageName: string; observedCanonicalOid: string | null; version: number; status: string }
 interface Lease { changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }
 interface Verdict { verdictId: string; revision: number; decision: string }
+interface QueueEntry { changeId: string; state: string }
 type Envelope<T> = { data: T; version: number };
 const terminal = new Set(['merged', 'superseded', 'closed']);
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -92,31 +93,73 @@ async function getChangeEnvelope(client: ConcordClient, fixture: AwMockFixture, 
 async function currentVersion(client: ConcordClient, fixture: AwMockFixture): Promise<number> {
   return (await client.request<Envelope<Repo>>('GET', path(fixture.project))).version;
 }
-async function findIntent(client: ConcordClient, fixture: AwMockFixture): Promise<Change | undefined> {
+async function findIntent(client: ConcordClient, fixture: AwMockFixture): Promise<{ change: Change; attempt: number } | undefined> {
   let cursor: string | null = null;
   let latest: Change | undefined;
+  let attempt = 0;
   const seen = new Set<string>();
   do {
     const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
     const page: { items: Change[]; nextCursor: string | null } = (await client.request<Envelope<{ items: Change[]; nextCursor: string | null }>>('GET', `${path(fixture.project)}/changes${query}`)).data;
-    for (const item of page.items) if (item.intentKey === intentKey(fixture)) latest = item;
+    for (const item of page.items) if (item.intentKey === intentKey(fixture)) { latest = item; attempt++; }
     cursor = page.nextCursor;
     if (cursor && seen.has(cursor)) throw new Error('INVALID_CHANGE_CURSOR');
     if (cursor) seen.add(cursor);
   } while (cursor);
-  return latest;
+  return latest ? { change: latest, attempt } : undefined;
 }
 
 async function leaseFences(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping): Promise<Record<string, number> | null> {
-  if (mapping.leaseFences) return mapping.leaseFences;
-  const data = (await client.request<Envelope<{ items: Lease[] }>>('GET', `${path(fixture.project)}/leases`)).data;
+  let cursor: string | null = null;
+  const seen = new Set<string>();
   const fences: Record<string, number> = {};
-  for (const key of fixture.unitKeys) {
-    const lease = data.items.find(item => item.changeId === mapping.changeId && item.unitKey === key && item.state === 'active' && item.expiresAt > Date.now());
-    if (!lease) return null;
-    fences[key] = lease.fence;
+  do {
+    const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    const data: { items: Lease[]; nextCursor?: string | null } = (await client.request<Envelope<{ items: Lease[]; nextCursor?: string | null }>>('GET', `${path(fixture.project)}/leases${query}`)).data;
+    for (const lease of data.items) if (lease.changeId === mapping.changeId && fixture.unitKeys.includes(lease.unitKey) &&
+      (lease.state === 'active' || lease.state === 'reserved') && lease.expiresAt > Date.now()) fences[lease.unitKey] = lease.fence;
+    cursor = data.nextCursor ?? null;
+    if (cursor && seen.has(cursor)) throw new Error('INVALID_LEASE_CURSOR');
+    if (cursor) seen.add(cursor);
+  } while (cursor && Object.keys(fences).length < fixture.unitKeys.length);
+  return fixture.unitKeys.every(key => fences[key] !== undefined) ? fences : null;
+}
+
+async function alreadyQueued(client: ConcordClient, fixture: AwMockFixture, change: Change): Promise<boolean> {
+  if (change.status === 'queued' || change.status === 'checking') return true;
+  try {
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    do {
+      const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+      const queue: { items: QueueEntry[]; nextCursor?: string | null } = (await client.request<Envelope<{ items: QueueEntry[]; nextCursor?: string | null }>>('GET', `${path(fixture.project)}/queue${query}`)).data;
+      if (queue.items.some(item => item.changeId === change.changeId && ['waiting', 'checking', 'blocked'].includes(item.state))) return true;
+      cursor = queue.nextCursor ?? null;
+      if (cursor && seen.has(cursor)) throw new Error('INVALID_QUEUE_CURSOR');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return false;
+  } catch (error) {
+    // The optional queue module has no readable state until it is installed.
+    if (error instanceof ConcordError && error.status === 501) return false;
+    throw error;
   }
-  return fences;
+}
+
+async function registeredHead(client: ConcordClient, fixture: AwMockFixture, change: Change): Promise<string | null> {
+  let cursor: string | null = null;
+  const seen = new Set<string>();
+  do {
+    const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    const page: { items: Array<{ storageName: string; ref: string; observedHead: string | null }>; nextCursor: string | null } =
+      (await client.request<Envelope<{ items: Array<{ storageName: string; ref: string; observedHead: string | null }>; nextCursor: string | null }>>('GET', `${path(fixture.project)}/branches${query}`)).data;
+    const branch = page.items.find(item => item.storageName === change.candidateStorageName && item.ref === change.branch);
+    if (branch?.observedHead) return branch.observedHead;
+    cursor = page.nextCursor;
+    if (cursor && seen.has(cursor)) throw new Error('INVALID_BRANCH_CURSOR');
+    if (cursor) seen.add(cursor);
+  } while (cursor);
+  return null;
 }
 
 /** Produces an actual descendant commit using only a local bridge-backed Git remote. */
@@ -182,19 +225,74 @@ async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, 
     mapping.phase = 'blocked'; mapping.block = { code: 'CHECKER_BLOCKED', reason: 'Concord marked the candidate blocked; inspect the change and checker evidence.' };
     return change;
   }
-  if (terminal.has(change.status) || change.status === 'queued' || change.status === 'checking') return change;
+  if (terminal.has(change.status)) return change;
+  if (change.status === 'queued' || change.status === 'checking') { mapping.phase = 'queued'; return change; }
   if (!change.headOid) return change;
   const verdicts = (await client.request<Envelope<{ items: Verdict[] }>>('GET', `${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/verdicts`)).data;
   const approval = verdicts.items.find(item => item.revision === change.revision && item.decision === 'approve');
   if (!approval) { mapping.phase = 'awaiting_review'; return change; }
-  const fences = await leaseFences(client, fixture, mapping);
+  let fences = await leaseFences(client, fixture, mapping);
+  if (!fences && (change.status === 'draft' || change.status === 'ready')) {
+    const claim = (await client.request<Envelope<{ leases: Lease[] }>>('POST', `${path(fixture.project)}/leases`, {
+      body: { changeId: change.changeId, unitKeys: fixture.unitKeys, intentText: fixture.intent, ttlSeconds: 120 },
+      expectedVersion: await currentVersion(client, fixture), idempotencyKey: keyFor(mapping.identity, `reclaim:${change.revision}:${crypto.randomUUID()}`),
+    })).data;
+    fences = Object.fromEntries(claim.leases.map(item => [item.unitKey, item.fence]));
+  }
   if (!fences) { mapping.phase = 'blocked'; mapping.block = { code: 'LEASE_STALE', reason: 'Active lease fences are unavailable; an operator must renew or reclaim before enqueue.' }; return change; }
+  mapping.leaseFences = fences;
   await client.request('POST', `${path(fixture.project)}/queue/enqueue`, {
     body: { changeId: mapping.changeId, verdictId: approval.verdictId, leaseFences: fences },
     expectedVersion: await currentVersion(client, fixture), idempotencyKey: keyFor(mapping.identity, `enqueue:${approval.verdictId}`),
   });
   mapping.phase = 'queued';
   return change;
+}
+
+async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, remember: () => Promise<void>, recovered: boolean): Promise<Change> {
+  ensureTask(change, fixture);
+  mapping.headOid = change.headOid ?? undefined;
+  if (terminal.has(change.status)) {
+    mapping.phase = 'blocked'; mapping.block = { code: 'ATTEMPT_REQUIRED', reason: 'Terminal change requires the next explicitAttempt.' };
+    return change;
+  }
+  if (change.status === 'blocked') {
+    mapping.phase = 'blocked'; mapping.block = { code: 'CHECKER_BLOCKED', reason: 'Concord marked the candidate blocked; inspect the change and checker evidence.' };
+    return change;
+  }
+  if (change.status === 'queued' || change.status === 'checking' || recovered && change.headOid && await alreadyQueued(client, fixture, change)) {
+    mapping.phase = 'queued'; mapping.block = undefined;
+    return change;
+  }
+  if (change.headOid) {
+    mapping.phase = 'awaiting_review'; mapping.block = undefined;
+    mapping.leaseFences = await leaseFences(client, fixture, mapping) ?? undefined;
+    return pollAndMaybeQueue(client, fixture, mapping);
+  }
+  let fences = await leaseFences(client, fixture, mapping);
+  if (!fences) {
+    const claim = (await client.request<Envelope<{ leases: Lease[] }>>('POST', `${path(fixture.project)}/leases`, {
+      body: { changeId: change.changeId, unitKeys: fixture.unitKeys, intentText: fixture.intent, ttlSeconds: 120 },
+      expectedVersion: change.version, idempotencyKey: keyFor(mapping.identity, 'claim'),
+    })).data;
+    fences = Object.fromEntries(claim.leases.map(item => [item.unitKey, item.fence]));
+  }
+  mapping.leaseFences = fences;
+  mapping.phase = 'leased'; mapping.block = undefined; await remember();
+  const latestRepo = (await client.request<Envelope<Repo>>('GET', path(fixture.project))).data;
+  const latestChange = await getChange(client, fixture, change.changeId);
+  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, remember, recovered);
+  const head = await registeredHead(client, fixture, latestChange);
+  if (head) {
+    const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
+    await client.request('POST', `${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/publish`, {
+      body: { baseOid: viewed.data.baseOid, headOid: head, branch: viewed.data.branch, unitKeys: viewed.data.unitKeys, leaseFences: fences },
+      expectedVersion: viewed.version, idempotencyKey: keyFor(mapping.identity, 'publish'),
+    });
+    mapping.headOid = head;
+  } else mapping.headOid = await publishCandidate(client, fixture, mapping, latestRepo, latestChange);
+  mapping.phase = 'awaiting_review'; await remember();
+  return pollAndMaybeQueue(client, fixture, mapping);
 }
 
 export async function runAwMock(fixturePath: string, statePath: string, client: ConcordClient): Promise<ReturnType<typeof output>> {
@@ -216,42 +314,36 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
         await remember();
         return output(fixture, mapping, client, change);
       }
-      const change = await pollAndMaybeQueue(client, fixture, mapping);
-      if (terminal.has(change.status)) { mapping.phase = 'blocked'; mapping.block = { code: 'ATTEMPT_REQUIRED', reason: 'Terminal change requires the next explicitAttempt.' }; }
+      const change = await getChange(client, fixture, mapping.changeId);
+      const resumed = await resume(client, fixture, mapping, change, remember, false);
       await remember();
-      return output(fixture, mapping, client, change);
+      return output(fixture, mapping, client, resumed);
     } catch (error) { mapping.phase = 'blocked'; mapping.block = blockFor(error); await remember(); return output(fixture, mapping, client); }
   }
   const root = path(fixture.project);
-  const existing = await findIntent(client, fixture);
+  const found = await findIntent(client, fixture);
+  const existing = found?.change;
   if (existing) ensureTask(existing, fixture);
   const repo = (await client.request<Envelope<Repo>>('GET', root)).data;
   if (repo.status !== 'ready' || !repo.observedCanonicalOid) throw new Error('READY_CANONICAL_REPO_REQUIRED');
-  const created = (await client.request<Envelope<Change>>('POST', `${root}/changes`, {
-    body: { intentKey: intentKey(fixture), intentText: fixture.intent, baseOid: existing && !terminal.has(existing.status) ? existing.baseOid : repo.observedCanonicalOid,
-      branch: branch(fixture), unitKeys: [...fixture.unitKeys].sort(), dependencyChangeIds: [], attempt: fixture.explicitAttempt },
-    idempotencyKey: keyFor(identity, 'create'),
-  })).data;
+  let created: Change;
+  try {
+    created = (await client.request<Envelope<Change>>('POST', `${root}/changes`, {
+      body: { intentKey: intentKey(fixture), intentText: fixture.intent, baseOid: existing && !terminal.has(existing.status) ? existing.baseOid : repo.observedCanonicalOid,
+        branch: branch(fixture), unitKeys: [...fixture.unitKeys].sort(), dependencyChangeIds: [], attempt: fixture.explicitAttempt },
+      idempotencyKey: keyFor(identity, 'create'),
+    })).data;
+  } catch (error) {
+    if (!(error instanceof ConcordError) || !existing || !terminal.has(existing.status) || found?.attempt !== fixture.explicitAttempt ||
+      (error.payload as { error?: { code?: string } } | undefined)?.error?.code !== 'ATTEMPT_REQUIRED') throw error;
+    created = existing;
+  }
   ensureTask(created, fixture);
   mapping = { identity, intentKey: intentKey(fixture), fingerprint: fingerprint(fixture), changeId: created.changeId,
     phase: 'opened', observedBaseOid: fixture.observedBaseOid };
   await remember();
-  if (existing && existing.changeId === created.changeId) {
-    if (terminal.has(created.status)) { mapping.phase = 'blocked'; mapping.block = { code: 'ATTEMPT_REQUIRED', reason: 'Terminal change requires the next explicitAttempt.' }; await remember(); }
-    return output(fixture, mapping, client, created);
-  }
   try {
-    const claim = (await client.request<Envelope<{ leases: Lease[] }>>('POST', `${root}/leases`, {
-      body: { changeId: created.changeId, unitKeys: fixture.unitKeys, intentText: fixture.intent, ttlSeconds: 120 },
-      expectedVersion: created.version, idempotencyKey: keyFor(identity, 'claim'),
-    })).data;
-    mapping.leaseFences = Object.fromEntries(claim.leases.map(item => [item.unitKey, item.fence]));
-    mapping.phase = 'leased'; await remember();
-    const latestRepo = (await client.request<Envelope<Repo>>('GET', root)).data;
-    const latestChange = await getChange(client, fixture, created.changeId);
-    mapping.headOid = await publishCandidate(client, fixture, mapping, latestRepo, latestChange);
-    mapping.phase = 'awaiting_review'; await remember();
-    const change = await pollAndMaybeQueue(client, fixture, mapping);
+    const change = await resume(client, fixture, mapping, created, remember, !!existing && existing.changeId === created.changeId);
     await remember();
     return output(fixture, mapping, client, change);
   } catch (error) {
