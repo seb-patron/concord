@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "concord-local",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-10",
+  "assets": { "directory": "./web", "binding": "ASSETS", "run_worker_first": ["/v1/*", "/health"] },
+  "durable_objects": { "bindings": [
+    { "name": "TENANT_CATALOG", "class_name": "TenantCatalog" },
+    { "name": "REPO_COORDINATOR", "class_name": "RepoCoordinator" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCatalog", "RepoCoordinator"] }],
+  "vars": { "CONCORD_MODE": "local", "STORAGE_BACKEND": "fake" }
+}

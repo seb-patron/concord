@@ -1,0 +1,98 @@
+import type { Event, FeatureModule, Migration, ModuleContext, TrustedConfiguration } from './contracts';
+
+export interface StateStore {
+  get<T>(key: string): T | null;
+  put<T>(key: string, value: T): void;
+  delete(key: string): void;
+}
+
+export function initialize(sql: SqlStorage): void {
+  sql.exec(`CREATE TABLE IF NOT EXISTS concord_migrations (namespace TEXT PRIMARY KEY, version INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS concord_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS concord_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, actor_id TEXT NOT NULL, timestamp INTEGER NOT NULL, version INTEGER NOT NULL, related_ids TEXT NOT NULL, payload TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS concord_requests (principal_id TEXT NOT NULL, route TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(principal_id, route, idempotency_key));`);
+}
+
+export function applyMigrations(storage: DurableObjectStorage, module: FeatureModule): void {
+  for (const migration of [...module.migrations].sort((a, b) => a.version - b.version)) {
+    applyMigration(storage, module.name, migration);
+  }
+}
+
+function applyMigration(storage: DurableObjectStorage, namespace: string, migration: Migration): void {
+  storage.transactionSync(() => {
+    const row = storage.sql.exec<{ version: number }>('SELECT version FROM concord_migrations WHERE namespace = ?', namespace).toArray()[0];
+    if ((row?.version ?? 0) >= migration.version) return;
+    for (const statement of migration.statements) {
+      // Feature-owned tables and indexes are namespaced, so independent slices cannot collide.
+      if (statement.trim().replace(/;$/, '').includes(';')) throw new Error(`Invalid ${namespace} migration statement`);
+      const match = /^\s*CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w]+)/i.exec(statement);
+      if (!match || !match[1].startsWith(`${namespace}_`)) throw new Error(`Invalid ${namespace} migration namespace`);
+      if (/^\s*CREATE\s+(?:UNIQUE\s+)?INDEX/i.test(statement) && !new RegExp(`\\bON\\s+${namespace}_[\\w]+\\b`, 'i').test(statement)) throw new Error(`Invalid ${namespace} migration index`);
+      storage.sql.exec(statement);
+    }
+    storage.sql.exec('INSERT INTO concord_migrations(namespace, version) VALUES(?, ?) ON CONFLICT(namespace) DO UPDATE SET version = excluded.version', namespace, migration.version);
+  });
+}
+
+export function sqlState(sql: SqlStorage): StateStore {
+  return {
+    get<T>(key: string): T | null {
+      const row = sql.exec<{ value: string }>('SELECT value FROM concord_state WHERE key = ?', key).toArray()[0];
+      return row ? JSON.parse(row.value) as T : null;
+    },
+    put<T>(key: string, value: T): void {
+      sql.exec('INSERT INTO concord_state(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, JSON.stringify(value));
+    },
+    delete(key: string): void { sql.exec('DELETE FROM concord_state WHERE key = ?', key); },
+  };
+}
+
+export function appendEvent(context: Pick<ModuleContext, 'sql' | 'principal' | 'now'>, kind: string, relatedIds: string[], payload: Record<string, unknown>, version: number): Event {
+  const timestamp = context.now();
+  context.sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)', kind, context.principal.principalId, timestamp, version, JSON.stringify(relatedIds), JSON.stringify(payload));
+  const row = context.sql.exec<{ sequence: number }>('SELECT last_insert_rowid() AS sequence').toArray()[0];
+  return { sequence: row.sequence, kind, actorId: context.principal.principalId, timestamp, version, relatedIds, payload };
+}
+
+export function eventSequence(sql: SqlStorage): number {
+  return sql.exec<{ sequence: number }>('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM concord_events').toArray()[0].sequence;
+}
+
+export function eventsAfter(sql: SqlStorage, after: number, limit = 100): Event[] {
+  return sql.exec<{ sequence: number; kind: string; actor_id: string; timestamp: number; version: number; related_ids: string; payload: string }>(
+    'SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload FROM concord_events WHERE sequence > ? ORDER BY sequence LIMIT ?', after, Math.min(101, limit),
+  ).toArray().map(row => ({ sequence: row.sequence, kind: row.kind, actorId: row.actor_id, timestamp: row.timestamp, version: row.version, relatedIds: JSON.parse(row.related_ids) as string[], payload: JSON.parse(row.payload) as Record<string, unknown> }));
+}
+
+const fixtureDigest = `sha256:${'0'.repeat(64)}` as const;
+export function localFixtureConfig(mode: Env['CONCORD_MODE']): TrustedConfiguration {
+  if (mode !== 'local') throw new Error('LOCAL_FIXTURE_FORBIDDEN');
+  return {
+    policies: {
+      'local-demo': { id: 'local-demo', digest: fixtureDigest, version: 1, units: {}, checkerId: 'local-demo', checkerDigest: fixtureDigest, acceptance: 'pass' },
+    },
+    profiles: {
+      'local-demo': { id: 'local-demo', digest: fixtureDigest, toolchainDigest: fixtureDigest, oracleDigest: fixtureDigest, environmentDigest: fixtureDigest, timeoutMs: 120000, maxOutputBytes: 65536 },
+    },
+  };
+}
+
+export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFIG'>): TrustedConfiguration {
+  if (!env.TRUSTED_CONFIG) {
+    if (env.CONCORD_MODE === 'local') return localFixtureConfig(env.CONCORD_MODE);
+    throw new Error('TRUSTED_CONFIG_REQUIRED');
+  }
+  let value: unknown;
+  try { value = JSON.parse(env.TRUSTED_CONFIG); } catch { throw new Error('TRUSTED_CONFIG_INVALID'); }
+  if (!value || typeof value !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
+  const config = value as TrustedConfiguration;
+  if (!config.policies || !config.profiles || typeof config.policies !== 'object' || typeof config.profiles !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
+  for (const [id, policy] of Object.entries(config.policies)) {
+    if (id !== policy.id || !/^sha256:[a-f0-9]{64}$/.test(policy.digest) || !/^sha256:[a-f0-9]{64}$/.test(policy.checkerDigest) || !policy.units || typeof policy.units !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
+  }
+  for (const [id, profile] of Object.entries(config.profiles)) {
+    if (id !== profile.id || ![profile.digest, profile.toolchainDigest, profile.oracleDigest, profile.environmentDigest].every(digest => /^sha256:[a-f0-9]{64}$/.test(digest))) throw new Error('TRUSTED_CONFIG_INVALID');
+  }
+  return config;
+}

@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 3rem 1.5rem; }
+main { max-width: 44rem; margin: auto; }
+h1 { font-size: 2.5rem; }
+#mode { display: inline-block; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: .3rem; }

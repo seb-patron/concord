@@ -1,0 +1,100 @@
+import { DurableObject } from 'cloudflare:workers';
+import type { HookName, ModuleContext, Principal, Repo, ServiceHooks } from './contracts';
+import { clock, requireTenant } from './auth';
+import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
+import { appendEvent, applyMigrations, eventSequence, initialize, loadTrustedConfig, sqlState } from './state';
+import { selectStorage } from './coordinator';
+import { repos } from './features/repos';
+
+/** Tenant-scoped index. Landing authorization remains in RepoCoordinator. */
+export class TenantCatalog extends DurableObject<Env> {
+  private readonly now: () => number;
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.now = clock(env);
+    initialize(ctx.storage.sql);
+    applyMigrations(ctx.storage, repos);
+  }
+
+  private context(principal: Principal): ModuleContext {
+    const sql = this.ctx.storage.sql;
+    const base = sqlState(sql);
+    const prefix = 'module:repos:';
+    const context: ModuleContext = {
+      repoId: '', tenantId: principal.tenantId, principal, env: this.env,
+      storage: selectStorage(this.env, sql, this.now),
+      trusted: loadTrustedConfig(this.env), now: this.now, sql,
+      transaction: <T>(run: () => T) => this.ctx.storage.transactionSync(run),
+      version: () => base.get<number>('catalog:version') ?? 0,
+      nextVersion: () => { const next = (base.get<number>('catalog:version') ?? 0) + 1; base.put('catalog:version', next); return next; },
+      appendEvent: (kind, relatedIds, payload, version) => appendEvent(context, kind, relatedIds, payload, version),
+      state: {
+        get: <T>(key: string) => base.get<T>(prefix + key),
+        put: <T>(key: string, value: T) => base.put(prefix + key, value),
+        delete: (key: string) => base.delete(prefix + key),
+      },
+      call: <K extends HookName>(_name: K, ..._args: Parameters<ServiceHooks[K]> extends [ModuleContext, ...infer A] ? A : never): ReturnType<ServiceHooks[K]> => {
+        throw new HttpError(501, 'MODULE_UNAVAILABLE', 'Catalog hook unavailable');
+      },
+    };
+    return context;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    try {
+      const principal = JSON.parse(request.headers.get('x-concord-principal') ?? 'null') as Principal | null;
+      if (!principal) throw new HttpError(401, 'UNAUTHORIZED', 'Identity missing');
+      requireTenant(principal, request.headers.get('x-concord-tenant') ?? undefined);
+      const identityStore = sqlState(this.ctx.storage.sql);
+      const identity = identityStore.get<string>('catalog:tenantId');
+      if (identity && identity !== principal.tenantId) throw new HttpError(403, 'TENANT_MISMATCH', 'Catalog identity mismatch');
+      if (!identity) identityStore.put('catalog:tenantId', principal.tenantId);
+      const context = this.context(principal);
+      const path = new URL(request.url).pathname;
+      if (path !== '/v1/repos') throw new HttpError(404, 'NOT_FOUND', 'Unknown catalog route');
+      if (request.method === 'GET') {
+        const repos = (context.state.get<Repo[]>('catalog:index') ?? []).filter(repo => repo.tenantId === principal.tenantId && (principal.repoIds === '*' || principal.repoIds.includes(repo.repoId)));
+        const offset = parseCursor(new URL(request.url).searchParams.get('cursor'));
+        const items = repos.slice(offset, offset + 100);
+        const nextCursor = offset + items.length < repos.length ? encodeCursor(offset + items.length) : null;
+        return json({ items, nextCursor }, context.version(), eventSequence(context.sql));
+      }
+      if (request.method !== 'POST') throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+      const key = request.headers.get('idempotency-key');
+      if (!key || key.length > 128) throw new HttpError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key required');
+      const body = await readJson(request);
+      requireTenant(principal, body.tenantId);
+      const requestDigest = await digest(body);
+      const previous = context.sql.exec<{ request_digest: string; status: number; body: string }>(
+        'SELECT request_digest, status, body FROM concord_requests WHERE principal_id = ? AND route = ? AND idempotency_key = ?',
+        principal.principalId, 'POST /v1/repos', key,
+      ).toArray()[0];
+      if (previous) {
+        if (previous.request_digest !== requestDigest) throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency key was used with another body');
+        return new Response(previous.body, { status: previous.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+      }
+      const route = repos.routes.find(route => route.pattern.test(path) && (route.method === '*' || route.method === request.method));
+      if (!route) throw new HttpError(501, 'MODULE_UNAVAILABLE', 'Repository module unavailable');
+      const response = await route.handle(context, request, path.match(route.pattern)!, body);
+      const responseBody = await response.clone().text();
+      context.sql.exec('INSERT INTO concord_requests(principal_id, route, idempotency_key, request_digest, status, body) VALUES(?, ?, ?, ?, ?, ?)',
+        principal.principalId, 'POST /v1/repos', key, requestDigest, response.status, responseBody);
+      const deadline = repos.nextDeadline(context);
+      const alarm = await this.ctx.storage.getAlarm();
+      if (deadline !== null && (alarm === null || deadline < alarm)) await this.ctx.storage.setAlarm(Math.max(this.now() + 1, deadline));
+      return response;
+    } catch (error) {
+      return failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'));
+    }
+  }
+
+  async alarm(): Promise<void> {
+    const tenantId = sqlState(this.ctx.storage.sql).get<string>('catalog:tenantId');
+    if (!tenantId) return;
+    const principal: Principal = { tenantId, principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+    const context = this.context(principal);
+    await repos.onAlarm(context);
+    const deadline = repos.nextDeadline(context);
+    if (deadline !== null) await this.ctx.storage.setAlarm(Math.max(this.now() + 1, deadline));
+  }
+}
