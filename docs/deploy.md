@@ -1,0 +1,205 @@
+# Concord deployment and one-way demo mirror
+
+The local bridge is a development fake. A public deployment uses the `concord-demo` Artifacts namespace and `wrangler.jsonc`; it never uses `wrangler.local.jsonc` or `BRIDGE_URL`. No Cloudflare account or GitHub destination is provisioned by this repository. The owner must authorize account creation, deployment, and any mirror push. Keep `CONCORD_SHOW_DECOMPILED_C=0`; this release contains only the original public synthetic fixture.
+
+## Local acceptance and release inputs
+
+From a clean clone with Node 22+, npm, and Git:
+
+```sh
+npm ci
+npm run typecheck
+npm run test:target -- tests/node/mirror.test.ts tests/node/deploy.test.ts
+npm run deploy:check -- --local
+sh scripts/validate.sh
+```
+
+`--local` checks the production and local Wrangler configurations, safe content and credential settings, Node/Git, and local program availability. It reports `remote deployment unavailable: owner credentials required` without failing the local check. The production Worker accepts no `local-*` bearer tokens and selects Artifacts only. The [repo API guide](api-repos.md) documents the local bridge; its `file://` repositories are not deployed evidence.
+
+The owner supplies `CLOUDFLARE_ACCOUNT_ID` (32 hex characters), `CLOUDFLARE_API_TOKEN` with Workers and Artifacts permissions, and an existing `concord-demo` namespace. Keep credentials in the operator environment or a secret manager. Never commit them or pass them in URLs. Set `AUTH_TOKENS_FILE` and `TRUSTED_CONFIG_FILE` to operator-owned files **outside this clone**. `AUTH_TOKENS` is the production JSON map from SHA-256 bearer token digests to scoped principal records; `TRUSTED_CONFIG` contains only owner-approved policy and profile records. Do not put local fixture identities in either file. See [auth and trust](ARCHITECTURE.md#auth-and-trust).
+
+```sh
+export CLOUDFLARE_ACCOUNT_ID='<owner account ID>'
+export CLOUDFLARE_API_TOKEN='<owner provisioned API token>'
+export AUTH_TOKENS_FILE='<absolute private path>'
+export TRUSTED_CONFIG_FILE='<absolute private path>'
+npm run deploy:check -- --remote
+npx wrangler deploy --dry-run --config wrangler.jsonc
+```
+
+`--remote` makes a read-only authenticated request for the configured Artifacts namespace. If credentials or namespace access are absent, it reports unavailable and exits nonzero; it does not affect local acceptance. A dry run builds the Worker without publishing it. Record the pinned Git commit, Wrangler version (`npx wrangler --version`), and dry-run output in the operator's release record.
+
+## Early Artifacts bootstrap gate, repeated before release
+
+The [slice 02 gate](api-repos.md#early-live-artifacts-gate-skipped-by-default) and [architecture contract](ARCHITECTURE.md#durable-object-layout-and-consistency) require an actual provider experiment. The owner first creates an **empty disposable** Artifacts repo, tries to fork it, pushes a first commit to the fork's returned Git remote, and reads back the SHA. If the empty fork fails, create a **separate** disposable seed repo, push/read back its first commit, then fork that seeded repo and read back the same SHA on the fork. Do not treat a success response without a ready fork and SHA readback as success. Record redacted API responses, remote URLs, fork status, provider version, and OIDs. The exact REST routes are in the [Artifacts API](https://developers.cloudflare.com/artifacts/api/rest-api/) and Git bearer-token transport is in the [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/).
+
+The following POSIX shell commands run only after owner authorization. They use disposable names, a temporary work directory, and environment-delivered Git headers. `jq` and `curl` are required. Output contains no token. Run in an operator shell with history/log capture disabled for secret input.
+
+```sh
+set -eu
+: "${CLOUDFLARE_ACCOUNT_ID:?}" "${CLOUDFLARE_API_TOKEN:?}"
+ARTIFACTS_BASE="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/artifacts/namespaces/concord-demo"
+RUN_ID="$(date -u +%Y%m%d%H%M%S)-$$"
+EMPTY="concord-gate-empty-$RUN_ID"
+SEED="concord-gate-seed-$RUN_ID"
+FORK="concord-gate-fork-$RUN_ID"
+GATE_DIR="$(mktemp -d)"
+api() { curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' "$@"; }
+create() { api -X POST "$ARTIFACTS_BASE/repos" --data "$(jq -nc --arg name "$1" '{name:$name,default_branch:"main",read_only:false}')"; }
+fork() { api -X POST "$ARTIFACTS_BASE/repos/$1/fork" --data "$(jq -nc --arg name "$2" '{name:$name,read_only:false,default_branch_only:false}')"; }
+head() { api "$ARTIFACTS_BASE/repos/$1/log?ref=main&limit=1" | jq -r '.result[0].hash // empty'; }
+ready() {
+  n=0
+  while [ "$n" -lt 30 ]; do
+    if api "$ARTIFACTS_BASE/repos/$1" | jq -e '.success == true and (.result.remote | startswith("https://"))' >/dev/null; then return 0; fi
+    n=$((n + 1)); sleep 1
+  done
+  return 1
+}
+mint() { api -X POST "$ARTIFACTS_BASE/tokens" --data "$(jq -nc --arg repo "$1" --arg scope "$2" '{repo:$repo,scope:$scope,ttl:600}')"; }
+git_artifacts() {
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
+    GIT_CONFIG_VALUE_0="Authorization: Bearer $GIT_TOKEN" GIT_TERMINAL_PROMPT=0 git "$@"
+}
+create "$EMPTY" | jq 'del(.result.token)'
+ready "$EMPTY"
+if EMPTY_FORK_RESPONSE="$(fork "$EMPTY" "$FORK")" && printf '%s' "$EMPTY_FORK_RESPONSE" | jq -e '.success == true' >/dev/null; then
+  printf '%s' "$EMPTY_FORK_RESPONSE" | jq 'del(.result.token)'
+  ready "$FORK"
+  SOURCE="$FORK"
+  GATE_PATH=empty-fork
+else
+  create "$SEED" | jq 'del(.result.token)'
+  ready "$SEED"
+  SOURCE="$SEED"
+  GATE_PATH=seeded-repo-fallback
+fi
+SOURCE_REMOTE="$(api "$ARTIFACTS_BASE/repos/$SOURCE" | jq -r '.result.remote')"
+GIT_TOKEN="$(mint "$SOURCE" write | jq -r '.result.plaintext')"
+git init -q -b main "$GATE_DIR/work"
+printf 'public disposable Artifacts gate\n' > "$GATE_DIR/work/README.md"
+git -C "$GATE_DIR/work" add README.md
+GIT_AUTHOR_NAME=Concord GIT_AUTHOR_EMAIL=gate@example.test \
+GIT_COMMITTER_NAME=Concord GIT_COMMITTER_EMAIL=gate@example.test \
+  git -C "$GATE_DIR/work" -c core.hooksPath=/dev/null commit -q -m 'seed Artifacts gate'
+SEED_OID="$(git -C "$GATE_DIR/work" rev-parse HEAD)"
+git_artifacts -C "$GATE_DIR/work" push "$SOURCE_REMOTE" HEAD:refs/heads/main
+test "$(head "$SOURCE")" = "$SEED_OID"
+if [ "$GATE_PATH" = seeded-repo-fallback ]; then
+  fork "$SEED" "$FORK" | jq 'del(.result.token)'
+  ready "$FORK"
+  test "$(head "$FORK")" = "$SEED_OID"
+fi
+printf 'gate=%s source=%s fork=%s sha=%s\n' "$GATE_PATH" "$SOURCE" "$FORK" "$SEED_OID"
+```
+
+Keep the disposable resources until the following tests finish. Revoke their initial and minted tokens using `GET /repos/:name/tokens?state=active` and `DELETE /tokens/:id` after recording results; then remove `"$GATE_DIR"` on the operator machine. A failed create, first push, seeded fork, or readback is a stop for Artifacts-dependent deployment. The fallback is specifically a new seed repository that receives its first commit **before** forking.
+
+### Stale expected-old and token isolation on disposable repos
+
+The first push above establishes `SEED_OID`. Make two different descendants of it in the temporary checkout. The first conditional push succeeds; the second uses the now stale expected-old SHA and must fail. Never perform this test on Concord's canonical repo.
+
+```sh
+git -C "$GATE_DIR/work" checkout -q -b first "$SEED_OID"
+printf 'first\n' > "$GATE_DIR/work/first.txt"
+git -C "$GATE_DIR/work" add first.txt
+GIT_AUTHOR_NAME=Concord GIT_AUTHOR_EMAIL=gate@example.test GIT_COMMITTER_NAME=Concord GIT_COMMITTER_EMAIL=gate@example.test \
+  git -C "$GATE_DIR/work" -c core.hooksPath=/dev/null commit -q -m first
+FIRST_OID="$(git -C "$GATE_DIR/work" rev-parse HEAD)"
+git_artifacts -C "$GATE_DIR/work" push "--force-with-lease=refs/heads/main:$SEED_OID" "$SOURCE_REMOTE" HEAD:refs/heads/main
+test "$(head "$SOURCE")" = "$FIRST_OID"
+git -C "$GATE_DIR/work" checkout -q -b stale "$SEED_OID"
+printf 'stale\n' > "$GATE_DIR/work/stale.txt"
+git -C "$GATE_DIR/work" add stale.txt
+GIT_AUTHOR_NAME=Concord GIT_AUTHOR_EMAIL=gate@example.test GIT_COMMITTER_NAME=Concord GIT_COMMITTER_EMAIL=gate@example.test \
+  git -C "$GATE_DIR/work" -c core.hooksPath=/dev/null commit -q -m stale
+if git_artifacts -C "$GATE_DIR/work" push "--force-with-lease=refs/heads/main:$SEED_OID" "$SOURCE_REMOTE" HEAD:refs/heads/main; then
+  echo 'FAIL: stale expected-old push unexpectedly succeeded' >&2; exit 1
+fi
+test "$(head "$SOURCE")" = "$FIRST_OID"
+```
+
+For token isolation, use the fork-scoped token to try a write to the **different** empty repo. The Git server must reject it, and `EMPTY` must remain without `main`. If `SOURCE` is the fork, `GIT_TOKEN` is already fork scoped; otherwise mint a new token for `FORK` and assign it to `GIT_TOKEN` before this check.
+
+```sh
+if [ "$SOURCE" != "$FORK" ]; then GIT_TOKEN="$(mint "$FORK" write | jq -r '.result.plaintext')"; fi
+EMPTY_REMOTE="$(api "$ARTIFACTS_BASE/repos/$EMPTY" | jq -r '.result.remote')"
+if git_artifacts -C "$GATE_DIR/work" push "$EMPTY_REMOTE" HEAD:refs/heads/main; then
+  echo 'FAIL: fork token wrote to another repo' >&2; exit 1
+fi
+test -z "$(head "$EMPTY")"
+```
+
+The `--force-with-lease` commands above are **only** for the disposable stale-ref experiment. Concord promotion uses its own frozen checked ticket and expected-old readback. The optional GitHub mirror uses a normal fast-forward push and never forces a ref.
+
+## Provision secrets and deploy
+
+First upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
+
+```sh
+test -s "$AUTH_TOKENS_FILE" && test -s "$TRUSTED_CONFIG_FILE"
+npx wrangler versions upload --config wrangler.jsonc
+npx wrangler versions secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"
+npx wrangler versions secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"
+npx wrangler deploy --config wrangler.jsonc
+```
+
+If versioned secret provisioning reports that no Worker/version exists, stop and resolve that account state with the owner; do not publish a fixture-authenticated substitute. A production secret change is a release action too. Do not run these commands during an account-free local rehearsal.
+
+## Deployed smoke and evidence
+
+Set `CONCORD_URL` to the **deployed** URL printed by Wrangler and `CONCORD_TOKEN` to an owner bearer credential from the production `AUTH_TOKENS` mapping. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. Then run the integrated public scenario driver against the deployed URL using its production identities and an operator temporary state directory. Do not use `local-*` tokens or `--pump-local` with a fake bridge as evidence of Artifacts hosting.
+
+```sh
+export CONCORD_URL='<Wrangler deployed HTTPS URL>'
+export CONCORD_TOKEN='<owner production bearer token>'
+export CONCORD_SHOW_DECOMPILED_C=0
+export CONCORD_RUN_DIR="$(mktemp -d)"
+curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "production" and .storageBackend == "artifacts"'
+npm run deploy:check -- --remote
+npm run demo -- seed --run remote-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene leases --run remote-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene stack --run remote-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- inspect --run remote-01 --state-dir "$CONCORD_RUN_DIR" --json
+```
+
+Continue the checked landing through the driver's documented scene commands and trusted checker/promoter processes (see [demo contract](DEMO.md)). The owner must observe one checker `PASS` for the exact pinned job, one promotion ticket with expected-old, a canonical `main` readback equal to the ticket's checked new SHA, and the same immutable SHA in `inspect`, the API repo detail, and a fresh Git fetch of Artifacts. Record the Worker URL/version, Artifacts namespace and repo remote, job/result/promotion IDs, expected-old and new OIDs, and timestamps. No screenshot badge, local fake, or pre-rendered card replaces these checks. If the remote driver/profile is unavailable, record that as missing deployed evidence; do not claim a checked landing.
+
+Set `CONCORD_REPO_ID` to the runtime ID printed by `seed`; set `CHECKED_SHA` to the promoted SHA shown by the ticket and `inspect`. The separately provisioned production checker and promoter tokens have distinct roles. Run their bounded jobs as the scene requests, then verify the API and a fresh read-only Git clone:
+
+```sh
+export CONCORD_REPO_ID='<runtime repo ID>'
+export CHECKED_SHA='<promoted full Git SHA>'
+export CHECKER_TOKEN='<production checker bearer token>'
+export PROMOTER_TOKEN='<production promoter bearer token>'
+CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role checker --profile demo/profile.json --once
+CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role promoter --once
+npm run concord -- api GET "/repos/$CONCORD_REPO_ID" --json | jq -e --arg sha "$CHECKED_SHA" '.data.observedCanonicalOid == $sha'
+npm run concord -- repo clone --repo "$CONCORD_REPO_ID" --path "$CONCORD_RUN_DIR/canonical" --json
+test "$(git -C "$CONCORD_RUN_DIR/canonical" rev-parse HEAD)" = "$CHECKED_SHA"
+```
+
+## Optional GitHub human mirror
+
+Only after a confirmed canonical landing, the owner may supply a **new demo-only** `https://github.com/OWNER/REPO.git` destination. `CONCORD_MIRROR_TOKEN` is an optional GitHub token passed through the environment; the URL must contain no credential. The mirror requests a read-only canonical Git token, verifies the API's observed SHA against remote `main`, checks that destination `main` is absent or its ancestor, and prints the planned SHA update. It has no reverse sync, PR API, tags, force push, or Concord rollback path.
+
+```sh
+export CONCORD_MIRROR_REMOTE='https://github.com/OWNER/REPO.git'
+export CONCORD_MIRROR_TOKEN='<owner GitHub token for that demo repo>'
+npm run mirror -- --repo '<CONCORD_REPO_ID>' --remote "$CONCORD_MIRROR_REMOTE" --dry-run
+# Only with separate owner authorization:
+npm run mirror -- --repo '<CONCORD_REPO_ID>' --remote "$CONCORD_MIRROR_REMOTE" --execute
+```
+
+Omitting `--dry-run` also stays in dry-run mode. Divergence, a moved canonical ref, a moved destination ref, or readback mismatch stops the mirror. A mirror error cannot undo the already confirmed Concord merge.
+
+## Rollback
+
+Record the prior Worker version ID before deployment. For an authorized Worker rollback, use that exact ID, then repeat `/health` and the read-only canonical SHA check. This rolls back Worker code; it does **not** rewrite Artifacts Git history or a GitHub mirror. If schema or API compatibility prevents rollback, stop traffic and have the owner decide the recovery version; do not force Git refs.
+
+```sh
+npx wrangler deployments list --config wrangler.jsonc
+npx wrangler rollback '<PRIOR_WORKER_VERSION_ID>' --config wrangler.jsonc --message 'rollback Concord Worker'
+curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .storageBackend == "artifacts"'
+npm run concord -- api GET "/repos/$CONCORD_REPO_ID" --json | jq -e --arg sha "$CHECKED_SHA" '.data.observedCanonicalOid == $sha'
+```
