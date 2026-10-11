@@ -1,31 +1,80 @@
 # Concord
 
-Git conflicts on lines. Agents collide on meaning.
+Git conflicts on lines. Agents collide on meaning. Concord is a Git platform for agents working concurrently on one repository: an owner-defined unit policy lets them reserve semantic work, publish real commits to isolated forks, and earn a checked place in canonical history. The local demo uses a Cloudflare Worker with a fake Git bridge and an original retry-policy fixture.
 
-Concord is a git platform for many agents working at once, built on Cloudflare Workers and
-Artifacts. It is an entry to Cloudflare's "Build the Next-Gen Git Platform" competition.
+## What is novel
 
-Status: design only. The implementation is split into twelve bounded slices; there is no deployed
-service or runnable product yet. Nothing in the existing agent fleet switches hosting for the demo.
+- **Semantic leases** refuse overlapping intents before agents edit, while independent rows of one file can proceed together.
+- **A checker-arbitrated speculative queue** composes candidates, checks their actual content, and bisects a failed stack to keep safe survivors moving.
+- **Content-bound verdicts** can carry across a mechanical base move only after a trusted delta check; changed dependencies invalidate them.
+- **A findings ledger** keeps review objections and repair dispositions tied to change revisions rather than transient comments.
 
-- [Architecture](docs/ARCHITECTURE.md): verified Cloudflare capability boundary, semantic leases,
-  checker-backed landing, content-bound review, APIs, authentication, and local runners.
-- [Implementation slices](docs/specs/README.md): dependencies, file ownership, parallel workers,
-  cut list, and schedule targeting Tuesday, October 13, 2026 at 6 pm CT.
-- [Nine-minute demo](docs/DEMO.md): an owned synthetic repo, real checker, exact proposed scene
-  commands, and provenance requirements for historical replay.
-- [Judging map](docs/JUDGING.md): feature evidence against the 50% / 25% / 25% criteria.
+The [architecture](docs/ARCHITECTURE.md) explains the Worker, Git storage, runner, trust boundaries, and limits. The [nine-minute demo](docs/DEMO.md) shows each local scene; the [judging map](docs/JUDGING.md) maps evidence to the competition criteria.
 
-Validate the current documentation-phase repository:
-
-```sh
-sh scripts/validate.sh
+```mermaid
+flowchart LR
+  A[Agents and CLI] --> W[Worker: leases, changes, review, queue]
+  W --> B[Local Git bridge]
+  W --> C[Cloudflare Artifacts when deployed]
+  W --> R[Trusted checker and promoter runner]
+  R --> W
 ```
 
-Slice 01 replaces that lightweight gate with typecheck and local tests. The demo's npm commands
-are implementation contracts until the slices land. Local development will use a labelled storage
-fake; deployed Workers + Artifacts evidence remains gated on the owner's Cloudflare account.
+## Five-minute local start
 
-The public demo excludes ROM bytes, proprietary compilers/inputs, and decompiled C by default.
-Historical improvement claims require sanitized recorded timelines; the supplied aggregate numbers
-are motivation, not a fabricated replay benchmark. Licensed under [MIT](LICENSE).
+Prerequisites: Node 22+, npm, and native Git. In a clean clone, install the pinned dependencies first:
+
+<!-- verified-by: 12c -->
+```sh
+npm ci
+```
+
+Use four terminals for the remaining commands. They share one temporary run directory; use a fresh name for another rehearsal. No Cloudflare account or paid model is needed for this local path.
+
+Terminal 1, preflight:
+
+<!-- verified-by: 12c -->
+```sh
+export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
+npm run demo -- preflight --local --state-dir "$CONCORD_RUN_DIR"
+```
+
+Terminal 2, local Git bridge (leave running):
+
+<!-- verified-by: 12c -->
+```sh
+export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
+export CONCORD_BRIDGE_DATA_DIR="$CONCORD_RUN_DIR/bridge"
+CONCORD_BRIDGE_TOKEN=local-bridge-fixture-2026 CONCORD_BRIDGE_PORT=8788 npm run git-bridge
+```
+
+Terminal 3, local API Worker (leave running):
+
+<!-- verified-by: 12c -->
+```sh
+export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
+WRANGLER_SEND_METRICS=false npm run dev -- --persist-to "$CONCORD_RUN_DIR/wrangler" --var STORAGE_BACKEND:bridge --var 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026' --var "TRUSTED_CONFIG:$(cat "$CONCORD_RUN_DIR/trusted-config.json")"
+```
+
+Terminal 4, seed and the first three scenes:
+
+<!-- verified-by: 12c -->
+```sh
+export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
+export CONCORD_URL=http://127.0.0.1:8787
+export CONCORD_TOKEN=local-owner
+export CONCORD_SHOW_DECOMPILED_C=0
+npm run demo -- seed --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene context --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene leases --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
+```
+
+`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The docs-command test executes these exact blocks and checks their state barriers.
+
+## Status and safety
+
+The local Worker, bridge, fixture checker, runner, scenario driver, CLI, and browser UI run without an account. Cloudflare Artifacts hosting, a public deployment, and any mirror require the owner's account, credentials, authorization, and the live evidence in the [deployment runbook](docs/deploy.md); a local bridge run is not that evidence. The AW scene uses a public mock adapter, not the private launcher. Historical improvement claims require an approved sanitized timeline and are not inferred from the supplied aggregates.
+
+The default is `CONCORD_SHOW_DECOMPILED_C=0`. The public fixture contains no ROM bytes, proprietary compiler inputs, or decompiled C. Licensed under [MIT](LICENSE).

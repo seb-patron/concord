@@ -1,12 +1,12 @@
 # Concord demo: nine minutes from intent to checked history
 
-This is the implementation and filming contract, not a claim that the commands already exist. Slice 12 reconciles it with the finished build. Target video length: 9:00, with a 30-second margin below the competition's ten-minute ceiling. Use a 1280x720 browser plus a readable terminal; record the application and real checker output.
+This is the local rehearsal and filming guide. Target video length: 9:00, with a 30-second margin below the competition's ten-minute ceiling. Use a 1280x720 browser plus a readable terminal; record the application and real checker output. Scene durations are editing targets for the video, not measured command runtimes.
 
 The public demonstration repository is **dispatch-lab**, a tiny original MIT retry-policy registry inspired by an agent launcher. It contains no private AW code. Three scripted agent identities make actual API requests and Git commits concurrently; label them scripted agents, not live model sessions. The owner can reproduce it without a paid model, ROM, proprietary toolchain, or decompiled C.
 
 ## Exact public fixture
 
-Slice 12 owns `demo/dispatch-lab/families.tsv` with literal tab separators:
+The delivered `demo/dispatch-lab/families.tsv` has literal tab separators:
 
 ```text
 family	retry_limit	timeout_ms
@@ -42,46 +42,19 @@ The AW fixture is schemaVersion=1, project=`public-aw`, taskId=`task-17`, explic
 | I | agent-b / beta-dependency | beta retry_limit 2 → 3 | Changes H's declared dependency |
 | J-low | contest-agent-low / epsilon-contest | epsilon retry_limit 1 → 2; timeout_ms stays 500 | Valid candidate, synthetic score 2/4 |
 | J-high | contest-agent-high / same contest | epsilon retry_limit 1 → 2; timeout_ms 500 → 1000 | Valid candidate, synthetic score 4/4 |
-| AW-task | mock-aw / public-aw/task-17/attempt-1 | gamma retry_limit 4 → 5 | Same task retried seven times; remains awaiting review |
+| AW-task | mock-aw / public-aw/task-17/attempt-1 | gamma retry_limit 4 → 5 | Same task retried seven times; verdict and queue state read from the Worker |
 
 A/B/C originate from the same seed commit. Later scenes start from the current observed canonical tip. The manifest stores actual repo IDs, candidate forks, change IDs, lease fences, request versions, full OIDs, job IDs, and result digests. Friendly aliases are not server IDs or fabricated SHAs. Scene steps read current versions and wait for explicit state predicates with a 60-second maximum. On timeout, print the actual blocked state and stop; do not force progress.
 
 ## Rehearsal setup
 
-Prerequisites after implementation: Node 22+, npm, native Git, four terminals, and the published repository. `npm ci` installs the pinned toolchain. No Cloudflare account is needed for the local path. The final competition capture additionally needs the provisioned deployment described below.
+Follow the four-terminal [README quickstart](../README.md#five-minute-local-start) for exact preflight, bridge, Worker, seed, and first-scene commands. The bridge must use `CONCORD_BRIDGE_DATA_DIR="$CONCORD_RUN_DIR/bridge"`; preflight alone does not start it. Prerequisites are Node 22+, installed lockfile dependencies, and native Git. No Cloudflare account is needed for the local path. A new rehearsal uses a fresh run ID and state directory. The final competition capture additionally needs the provisioned deployment described below.
 
-Terminal 1, API Worker (keep foreground):
-
-```sh
-npm ci
-sh scripts/validate.sh
-export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
-npm run demo -- preflight --local --state-dir "$CONCORD_RUN_DIR"
-npm run dev -- --var STORAGE_BACKEND:bridge --var 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026' --var "TRUSTED_CONFIG:$(cat "$CONCORD_RUN_DIR/trusted-config.json")"
-```
-
-Terminal 2, local fake Git backend (keep foreground; choose an empty directory):
-
-```sh
-export CONCORD_BRIDGE_DATA_DIR="$(mktemp -d)"
-CONCORD_BRIDGE_TOKEN=local-bridge-fixture-2026 CONCORD_BRIDGE_PORT=8788 npm run git-bridge
-```
-
-Terminal 3, scenario driver:
-
-```sh
-export CONCORD_URL=http://127.0.0.1:8787
-export CONCORD_TOKEN=local-owner
-export CONCORD_SHOW_DECOMPILED_C=0
-export CONCORD_RUN_DIR="${TMPDIR:-/tmp}/concord-demo-01"
-npm run demo -- seed --run demo-01 --state-dir "$CONCORD_RUN_DIR"
-```
-
-`seed` creates a new logical repo and seed draft fork, pushes the public seed there, requests owner-only bootstrap validation and conditional initial promotion, and captures the checked seed OID. It pumps the local checker/promoter for bootstrap in local mode, then allocates draft changes A/B/C/X, prepares A/B/C worktrees, and prints the repo URL. Bootstrap is allowed only for empty main; all main writes, including initialization, use stored promoter tickets. `seed` repeated with the same run ID returns the same manifest; it never deletes existing history. A fresh rehearsal uses `demo-02` plus a fresh state directory.
+`seed` creates a new logical repo and seed draft fork, pushes the public seed there, requests owner-only bootstrap validation and conditional initial promotion, and captures the checked seed OID. It pumps the local checker/promoter for bootstrap in local mode, then allocates draft changes A/B/C/X, prepares A/B/C worktrees, and prints the repo URL. Bootstrap is allowed only for empty main; all main writes, including initialization, use stored promoter tickets. `seed` repeated with the same run ID returns the same manifest; it never deletes existing history.
 
 Local mode has explicitly named fixture tokens: `local-owner`, `local-agent-a`, `local-agent-b`, `local-agent-c`, `local-reviewer`, `local-checker`, `local-promoter`, `local-viewer`, `local-contest-low`, `local-contest-high`, and `local-mock-aw`. They are accepted only with local configuration. The scenario driver switches between fixture principals for scripted actions and prints each actor. Production requires operator-supplied scoped tokens and rejects all `local-*` tokens.
 
-Terminal 4 executes bounded runner commands printed by each scene, or use the driver's `--pump-local` option, which spawns the same commands, waits, and stops them. Conceptual invocation (REPO_ID is printed by seed):
+The driver runs bounded checker/promoter jobs with `--pump-local`. To run them manually, use the values printed by seed in place of the placeholders below:
 
 ```sh
 CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN=local-checker npm run runner -- --repo REPO_ID --role checker --profile "$CONCORD_RUN_DIR/dispatch-profile.json" --once
@@ -94,25 +67,45 @@ Open the printed repo URL in the browser, select the local viewer identity, and 
 
 ## Minute-by-minute capture
 
-All commands below run in Terminal 3 using the setup environment. Every `scene` command is an idempotent sequence of documented HTTP/CLI actions, logs the actual requests and evidence IDs with secrets redacted, and pauses on its stated end condition. It must not seed DO rows or fabricate checker outcomes. The scenario implementation belongs to 12; the underlying CLI and API belong to 02–09.
+Run the commands after the README quickstart in its driver terminal. Every `scene` command resumes from its recorded end condition, logs actual requests and evidence IDs with secrets redacted, and waits for its stated barrier. The local driver must not seed Durable Object rows or fabricate checker outcomes.
 
-| Video time | Exact action / command | On-screen evidence and narration |
+| Video time | Scene | On-screen evidence and narration |
 | --- | --- | --- |
-| 0:00–1:00 | `npm run demo -- scene context --run demo-01 --state-dir "$CONCORD_RUN_DIR"` | Title and three supplied aggregates: 111/122 shared-header PRs, 726 land-blocked functions, 3/9 approvals becoming conflicted. Label “owner-reported aggregates, 2026-10-10; not a replay result.” Show public table and three agent intents. Say the thesis, then point to the live backend badge. |
-| 1:00–2:00 | `npm run demo -- scene leases --run demo-01 --state-dir "$CONCORD_RUN_DIR"` | Concurrent A/X alpha claims produce exactly one grant and one 409 with holder/intent. Driver accepts either winner: if X wins, close/release X and let A reacquire; never fake the race outcome. X closes, B claims gamma, C claims delta. Three distinct rows of the same file are active together. Subsequent scenes renew unexpired claims before work, or reacquire with new fences after expiry; the stack scene maintains heartbeats while publishing. |
-| 2:00–3:00 | `npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local` | Publish A/B/C and inspect exact heads; independent scripted reviewer approves all three. Narrate that review missed B's invalid policy values. Enqueue them in one coalescing window. Real checker fails the composed stack. Stop before diagnostic jobs and show pinned base, ordered candidates, runner profile, and actual failure output. |
-| 3:00–4:00 | `npm run demo -- scene isolate --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local` | Resume diagnostics. Show same-base splits, B failing alone, A+C recomposed green, conditional promotion, and canonical readback. B is blocked; A/C are merged. Shared-file row composition is visible. Do not claim bisection finds every interaction. |
-| 4:00–5:00 | `npm run demo -- scene repair --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local` | Withdraw blocked B and reacquire gamma to replace its queue reservation with an editable lease. Reviewer creates F-1 (gamma retry limit) and F-2 (gamma timeout). Submit an intentionally incomplete repair disposition covering only F-1: one 409, both stay open. Publish the complete B-repair revision and both dispositions; reviewer delta review resolves the round, new verdict plus full check lands it. Show stable finding IDs across heads. |
-| 5:00–6:00 | `npm run demo -- scene carry --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local` | Approve D, then land E ahead of it. Mechanically rebuild D against current main, request carry, run real delta check. Show different commit IDs, equal review manifests, parent verdict, and green full-stack check before landing D. Display measured delta duration without a promised speedup. |
-| 6:00–7:00 | `npm run demo -- scene invalidate --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local` then `npm run demo -- scene contest --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local` | H is approved; I advances its dependency beta; H's carry is refused. Close H and release its claims. Owner opens the explicit epsilon contest; independent reviewer approves both child manifests, checker selects J-high at 4/4 over J-low at 2/4, both hard-safe, and normal full-stack validation gates landing. State this is a synthetic quality score; real decomp would use byte-match pins. |
-| 7:00–8:00 | `npm run demo -- scene aw --run demo-01 --state-dir "$CONCORD_RUN_DIR"` then the replay command below | Show seven AW mock retries mapping to one task/change ID, including a changed observed base value in retry input. Stop at awaiting_review. Show approved historical replay if available, otherwise the unavailable-data panel. Narrate that a mock adapter does not migrate the real launcher. |
-| 8:00–9:00 | `npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json` and `npm run deploy:check -- --local` | Browser walkthrough: all landed SHAs, B's findings history, original/derived verdicts, lease intents, and account/Artifacts evidence. Show clean-clone run commands and MIT LICENSE. Close with the three demonstrated behaviors and an honest list of cuts. Include live deployment URL and repo link only once they exist. |
+| 0:00–1:00 | context | Title and three supplied aggregates: 111/122 shared-header PRs, 726 land-blocked functions, 3/9 approvals becoming conflicted. Label “owner-reported aggregates, 2026-10-10; not a replay result.” Show public table and three agent intents. |
+| 1:00–2:00 | leases | Concurrent A/X alpha claims produce one grant and one 409; gamma and delta remain independently claimable in the same file. |
+| 2:00–3:00 | stack | Publish A/B/C and inspect exact heads and independent scripted verdicts. The real checker fails their composed stack before diagnostics. |
+| 3:00–4:00 | isolate | Show same-base splits, B failing alone, A+C recomposed green, conditional promotion, and canonical readback. B is blocked; A/C land. |
+| 4:00–5:00 | repair | Reviewer records two gamma findings. An incomplete disposition gets 409; a complete B revision, disposition, verdict, and full check land. |
+| 5:00–6:00 | carry | Land E before approved D, rebuild D, run the real delta check, and show its derived verdict and full-stack check. Do not promise a speedup. |
+| 6:00–7:00 | invalidate, contest | A changed beta dependency refuses H's carry. Both J children pass the same hard gate; the synthetic 4/4 option beats 2/4 and lands after validation. |
+| 7:00–8:00 | aw, replay | Show seven public AW mock retries mapping to one task/change ID, a real published commit and verdict, and the queue's observed state. Show approved historical replay if available, otherwise the unavailable-data panel. |
+| 8:00–9:00 | inspect | Walk through landed SHAs, finding history, verdicts, lease intents, queue state, and the account evidence. A local run alone does not prove Artifacts hosting. |
+
+The driver also implements **negative** (declared bad row and executable edits rejected by the checker) and **dedupe** (the low-level seven-request intent reservation) as optional local checks. Run them in the order below when rehearsing all implemented scenes. The AW scene is owned by slice 12c2 and is listed separately; this docs test skips that tag.
+
+<!-- verified-by: 12c -->
+```sh
+npm run demo -- scene isolate --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene negative --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene repair --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene carry --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene invalidate --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene contest --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene dedupe --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+```
+
+<!-- verified-by: 12c2 -->
+```sh
+npm run demo -- scene aw --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+```
+
+Inspect the final state with the README command. The nine-minute capture uses selected evidence from this rehearsal; the optional checks can run before recording.
 
 For a ten-minute finalist presentation, retain this script and use the extra minute for one audience-chosen failed carry or collision case. Do not add a live private-project dependency.
 
 ## Historical replay: optional evidence, never invented numbers
 
-No timelines were supplied to this design run. The available facts also include decomp progress from 2,309 matches on 09-29 to 5,768 on 10-10 out of about 18,390, and 515 merges on 10-10; nine batches/3+ hours with zero commits; 44 declaration conflicts; 7–8 minute rechecks; mwcc-rs six review rounds; AW four repairs/five reviews; Mother Base three rounds; and seven duplicate tasks. They may be labelled owner-reported context, not converted into fake event timestamps or a percentage saved by Concord.
+No approved historical timeline is bundled. The available facts also include decomp progress from 2,309 matches on 09-29 to 5,768 on 10-10 out of about 18,390, and 515 merges on 10-10; nine batches/3+ hours with zero commits; 44 declaration conflicts; 7–8 minute rechecks; mwcc-rs six review rounds; AW four repairs/five reviews; Mother Base three rounds; and seven duplicate tasks. They may be labelled owner-reported context, not converted into fake event timestamps or a percentage saved by Concord.
 
 Before filming, the owner may provide a sanitized JSONL export from DBOS and PR history. Required provenance header: schemaVersion=1, exportId, sourceType, redacted sourceRef, SHA-256 sourceDigest, exportedAt UTC, anonymizationVersion, selected time window/cohort, and owner release approval reference. Events need eventId, taskId, anonymized unitKeys, event type, UTC occurredAt, and sourceEventRef; durations must cite paired events or the source duration field. Types include task_started, claim_attempted, review_approved, conflict_observed, check_started, check_finished, repair_submitted, and merged. Missing data stays missing. Export no raw code, proprietary paths, compiler bytes, credentials, or chat text.
 
@@ -135,11 +128,11 @@ Show “Historical comparison unavailable: owner export pending.” Continue the
 
 ## Live Cloudflare evidence and mirror
 
-Local fake mode is sufficient for development and rehearsals, but cannot prove the competition's Workers + Artifacts requirement. The owner must create the account and authorize the early Artifacts gate as soon as it exists (by Sun noon CT at the latest). The operator creates an empty disposable repo through the live API, attempts its empty-source fork, pushes the first commit to that fork and reads it back, and records actual responses and OIDs. If an empty-source fork fails, create a separate seed repo, push/read back its first commit, then fork the seeded repo and verify the seed. Use the seeded fork for checked absent-ref bootstrap once integrated. See [the Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) and [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/). `docs/deploy.md` will contain exact configured deployment and secret commands; the planned commands are `npm run deploy:check -- --remote`, `npx wrangler deploy --dry-run --config wrangler.jsonc`, and then the separately authorized `npx wrangler deploy --config wrangler.jsonc`.
+Local fake mode is sufficient for development and rehearsals, but cannot prove the competition's Workers + Artifacts requirement. The owner must create the account and authorize the early Artifacts gate. The operator creates an empty disposable repo through the live API, attempts its empty-source fork, pushes the first commit to that fork and reads it back, and records actual responses and OIDs. If an empty-source fork fails, create a separate seed repo, push/read back its first commit, then fork the seeded repo and verify the seed. Use the seeded fork for checked absent-ref bootstrap once integrated. See [the Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) and [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/). The [deployment runbook](deploy.md) has the configured deployment and secret commands. Its checked-landing gate remains missing because the current scenario driver accepts only local bridge remotes and fixture principals.
 
 Record the deployed Worker URL, `storageBackend=artifacts`, namespace/repo metadata, a normal Git fetch of the canonical ref, and one real checked promotion whose SHA equals the UI. A metadata badge alone is insufficient. The early create/first-push/fork gate is a prerequisite; before filming, repeat it alongside the disposable-repo stale-push/token-isolation smoke in the runbook. If either gate fails, stop the deployed segment and report the actual limitation; no fake-to-live relabelling.
 
-An optional human mirror is one-way canonical-main publication to a new owner-supplied GitHub demo repo. The future command `npm run mirror -- --repo REPO_ID --remote "$CONCORD_MIRROR_REMOTE" --dry-run` prints exact source/destination SHA and expected update. Only an explicitly authorized operator may rerun with `--execute`. A diverged destination blocks; never force it or push tags/private forks. The mirror is outside the landing critical path and is not the source of truth.
+An optional human mirror is one-way canonical-main publication to a new owner-supplied GitHub demo repo. The command `npm run mirror -- --repo REPO_ID --remote "$CONCORD_MIRROR_REMOTE" --dry-run` prints exact source/destination SHA and expected update. Only an explicitly authorized operator may rerun with `--execute`. A diverged destination blocks; never force it or push tags/private forks. The mirror is outside the landing critical path and is not the source of truth.
 
 ## Recording defaults and fallback
 

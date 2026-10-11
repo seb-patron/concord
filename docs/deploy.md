@@ -16,6 +16,16 @@ sh scripts/validate.sh
 
 `--local` checks the production and local Wrangler configurations, safe content and credential settings, Node/Git, and local program availability. It reports `remote deployment unavailable: owner credentials required` without failing the local check. The production Worker accepts no `local-*` bearer tokens and selects Artifacts only. The [repo API guide](api-repos.md) documents the local bridge; its `file://` repositories are not deployed evidence.
 
+With the [README local bridge and Worker](../README.md#five-minute-local-start) running, these commands recheck the seeded fixture and its first barriers. They use the README's `CONCORD_RUN_DIR` and local URL, and do not constitute deployed smoke evidence.
+
+<!-- verified-by: 12c -->
+```sh
+npm run demo -- seed --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene leases --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
+npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
+```
+
 The owner supplies `CLOUDFLARE_ACCOUNT_ID` (32 hex characters), `CLOUDFLARE_API_TOKEN` with Workers and Artifacts permissions, and an existing `concord-demo` namespace. Keep credentials in the operator environment or a secret manager. Never commit them or pass them in URLs. Set `AUTH_TOKENS_FILE` and `TRUSTED_CONFIG_FILE` to operator-owned files **outside this clone**. `AUTH_TOKENS` is the production JSON map from SHA-256 bearer token digests to scoped principal records; `TRUSTED_CONFIG` contains only owner-approved policy and profile records. Do not put local fixture identities in either file. See [auth and trust](ARCHITECTURE.md#auth-and-trust).
 
 ```sh
@@ -148,7 +158,7 @@ If versioned secret provisioning reports that no Worker/version exists, stop and
 
 ## Deployed smoke and evidence
 
-Set `CONCORD_URL` to the **deployed** URL printed by Wrangler and `CONCORD_TOKEN` to an owner bearer credential from the production `AUTH_TOKENS` mapping. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. Then run the integrated public scenario driver against the deployed URL using its production identities and an operator temporary state directory. Do not use `local-*` tokens or `--pump-local` with a fake bridge as evidence of Artifacts hosting.
+Set `CONCORD_URL` to the **deployed** URL printed by Wrangler and `CONCORD_TOKEN` to an owner bearer credential from the production `AUTH_TOKENS` mapping. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. The current public scenario driver requires local `file:` bridge remotes and local fixture principals, so it cannot seed or run scenes against Artifacts. A production-capable scenario flow and separately provisioned scoped identities are required before claiming a live checked landing. Do not use `local-*` tokens or `--pump-local` with a fake bridge as Artifacts evidence.
 
 ```sh
 export CONCORD_URL='<Wrangler deployed HTTPS URL>'
@@ -159,17 +169,9 @@ curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "productio
 npm run deploy:check -- --remote
 ```
 
-<!-- verified-by: 12c -->
-```sh
-npm run demo -- seed --run remote-01 --state-dir "$CONCORD_RUN_DIR"
-npm run demo -- scene leases --run remote-01 --state-dir "$CONCORD_RUN_DIR"
-npm run demo -- scene stack --run remote-01 --state-dir "$CONCORD_RUN_DIR"
-npm run demo -- inspect --run remote-01 --state-dir "$CONCORD_RUN_DIR" --json
-```
+After a production-capable flow exists, the owner must observe one checker `PASS` for the exact pinned job, one promotion ticket with expected-old, a canonical `main` readback equal to the ticket's checked new SHA, and the same immutable SHA in the API repo detail and a fresh Git fetch of Artifacts. Record the Worker URL/version, Artifacts namespace and repo remote, job/result/promotion IDs, expected-old and new OIDs, and timestamps. No screenshot badge, local fake, or pre-rendered card replaces these checks. Until that flow is available, record the checked landing as **missing deployed evidence**; do not claim it from the local demo.
 
-Continue the checked landing through the driver's documented scene commands and trusted checker/promoter processes (see [demo contract](DEMO.md)). The owner must observe one checker `PASS` for the exact pinned job, one promotion ticket with expected-old, a canonical `main` readback equal to the ticket's checked new SHA, and the same immutable SHA in `inspect`, the API repo detail, and a fresh Git fetch of Artifacts. Record the Worker URL/version, Artifacts namespace and repo remote, job/result/promotion IDs, expected-old and new OIDs, and timestamps. No screenshot badge, local fake, or pre-rendered card replaces these checks. If the remote driver/profile is unavailable, record that as missing deployed evidence; do not claim a checked landing.
-
-Set `CONCORD_REPO_ID` to the runtime ID printed by `seed`; set `CHECKED_SHA` to the promoted SHA shown by the ticket and `inspect`. The separately provisioned production checker and promoter tokens have distinct roles. Run their bounded jobs as the scene requests, then verify the API and a fresh read-only Git clone:
+For a future production-capable flow, set `CONCORD_REPO_ID` to its runtime repo ID and `CHECKED_SHA` to the promoted SHA shown by the ticket. The separately provisioned production checker and promoter tokens have distinct roles. Run their bounded jobs as the flow requests, then verify the API and a fresh read-only Git clone:
 
 Set `CONCORD_HOME` to an absolute, owner-provisioned directory outside this clone containing the production checker profile at `checker-profile.json`. The profile must pin the deployed job's checker, oracle, toolchain, and environment; the demo fixture profile is not production evidence.
 
