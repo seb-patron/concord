@@ -8,6 +8,31 @@ The installed policy's `units` map is the only registry. Each alias has a `canon
 
 The helper `changedUnitsForFile` compares complete TSV rows by the first tab-separated field. It returns registered row identities for changed rows. New, duplicate, malformed, ambiguous, or otherwise unmapped row changes use the trusted file footprint. A file absent from the policy cannot be mapped and is rejected. Non-TSV changes use the file footprint. General language parsing is outside this policy.
 
+### Owner file-unit policy generation
+
+The owner runs `runner/generate-units.ts` against an owner checkout and an explicit canonical commit OID. Supply a trusted policy template and the union of planned new paths from **all** runs in the cohort. Each `--allow-path-file` is a plain text list with one exact repository-relative path per line; repeat the flag for multiple launcher specs and use `--allow-path` for individual paths. The template and path lists must come from owner-approved inputs, never a candidate checkout or candidate-authored data. For example:
+
+```sh
+./node_modules/.bin/tsx runner/generate-units.ts --repo /owner/checkout --oid 0123456789abcdef0123456789abcdef01234567 \
+  --template /owner/policy-template.json --allow-path-file /owner/run-a-paths.txt \
+  --allow-path-file /owner/run-b-paths.txt --allow-path future/report.py > /owner/policy-envelope.json
+```
+
+The JSON envelope contains `sourceOid`, `generatorVersion`, `policy`, and `policyDigest`. Install its `policy` through the owner's trusted configuration process after reviewing it. `policy.digest` and `policyDigest` are SHA-256 of canonical JSON of the policy **without** its `digest` field. `sourceOid` stays outside the policy, so a later canonical commit with the same tracked path set and approved future paths retains the policy pin. The generator never installs a policy, runs a checker or source file, accesses the network, or mutates Git. It preserves declared TSV row entries, dependencies, and table metadata in the template; it adds whole-file entries for all tracked regular files and approved future paths, including non-TypeScript files.
+
+Paths must be exact, relative, and at most 512 characters, with a `file:` key also at most 512 characters. The generator strictly decodes UTF-8 in the template, path lists, comparison envelope, and Git path output; invalid bytes are rejected before paths or keys are matched. Whitespace, backslashes, empty, `.` or `..` components, `.git` components, and non-NFC names are rejected with the offending path. Tracked symlinks, submodules, other unsupported tree modes, missing dependencies, conflicting unit metadata, and template entries for paths outside the tracked and approved set are errors. A future path is authority to create that exact file only; it does not authorize sibling paths.
+
+After reading back the canonical OID, compare a fresh generation with the previously approved envelope using the same owner template and planned-path union:
+
+```sh
+./node_modules/.bin/tsx runner/generate-units.ts --repo /owner/checkout --template /owner/policy-template.json \
+  --compare /owner/policy-envelope.json --read-back-oid 0123456789abcdef0123456789abcdef01234567 \
+  --allow-path-file /owner/run-a-paths.txt --allow-path-file /owner/run-b-paths.txt \
+  --allow-path future/report.py
+```
+
+Refresh writes a JSON envelope with `status: "unchanged"` and exits zero when the policy digest matches. It writes `status: "changed"` and exits 1 when it differs; input errors exit 2. It does not hot-install either result. On `changed`, stop admissions and have the owner review and reprovision the trusted policy and its pin before admitting more runs.
+
 ## Claim and inspect
 
 `POST /v1/repos/:repoId/leases` accepts:
