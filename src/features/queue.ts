@@ -6,6 +6,7 @@ import { digest, failure, HttpError, json } from '../http';
 import { eventSequence } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
+import { jobInput } from './runners';
 import {
   advanceDiagnosis, COALESCE_MS, MAX_CANDIDATES, selectStack, startDiagnosis, STACK_WIDTH,
   type Diagnosis, type PlannedEntry,
@@ -44,7 +45,7 @@ interface Ticket extends Promotion {
   jobIds: Id[]; retryIssued: boolean;
 }
 interface BootstrapState {
-  input: BootstrapHandoff; stackId: Id; createdAt: number; state: 'waiting' | 'checking' | 'blocked' | 'merged';
+  input: BootstrapHandoff; stackId: Id; jobId: Id; createdAt: number; state: 'waiting' | 'checking' | 'blocked' | 'merged';
   blockedReason: string | null; policyDigest: Digest; profileDigest: Digest;
 }
 interface QueueState {
@@ -232,7 +233,7 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
   const stackId = bootstrap ? state.bootstrap!.stackId : crypto.randomUUID();
   const scratchRef = `refs/heads/queue-${stackId}`;
   const base = {
-    kind: 'validate-stack' as const, version: 1, jobId: crypto.randomUUID(), repoId: context.repoId,
+    kind: 'validate-stack' as const, version: 1, jobId: bootstrap ? state.bootstrap!.jobId : crypto.randomUUID(), repoId: context.repoId,
     generation: state.generation, profileDigest: profile.digest, policyId, policyDigest: policy.digest,
     unitPolicy: policy, expectedRefs: Object.fromEntries([
       [canonicalName, state.observedMain], [scratchName, null],
@@ -249,9 +250,7 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
       candidates: [{ changeId: `seed-${stackId}`, revision: 1, baseOid: null, headOid: seed!.headOid,
         seedStorageName: seed!.seedStorageName, seedRef: seed!.seedRef }] as [SeedInput] }
     : { ...base, bootstrap: false as const, canonicalBaseOid: state.observedMain!, candidates };
-  const { version: _version, state: _state, attempt: _attempt,
-    runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, ...input } = immutable;
-  const inputDigest = await digest(input);
+  const inputDigest = await digest(jobInput(immutable));
   return { ...immutable, inputDigest } as ValidateStackJob;
 }
 function schedule(context: ModuleContext, state: QueueState, job: Job, purpose: JobRecord['purpose'], memberIds: Id[], contestId?: Id): JobRecord {
@@ -465,7 +464,8 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
 /** Repos calls this only after its authenticated owner-only bootstrap request validates the seed. */
 function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate<{ stackId: Id }> {
   if (!context.principal.roles.includes('owner')) return blocked(context, 'FORBIDDEN', 'Owner authorization required');
-  if (!validOid(input.headOid) || !input.seedStorageName || !input.seedRef || !input.canonicalStorageName
+  if (!validOid(input.headOid) || input.jobId !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(input.jobId)
+    || !input.seedStorageName || !input.seedRef || !input.canonicalStorageName
     || !input.scratchStorageName || !context.trusted.policies[input.policyId] || !context.trusted.profiles[input.profileId]) {
     return blocked(context, 'INVALID_BOOTSTRAP', 'Validated seed inputs required');
   }
@@ -474,7 +474,7 @@ function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate
     if (state.observedMain !== null || state.finalCanonicalOid !== null || state.bootstrap || state.ticket
       || state.entries.some(active)) return blocked(context, 'BOOTSTRAP_CONFLICT', 'Canonical repository is already initialized or initialization is pending');
     const stackId = crypto.randomUUID();
-    state.bootstrap = { input: { ...input }, stackId, createdAt: context.now(), state: 'waiting', blockedReason: null,
+    state.bootstrap = { input: { ...input }, stackId, jobId: input.jobId ?? crypto.randomUUID(), createdAt: context.now(), state: 'waiting', blockedReason: null,
       policyDigest: context.trusted.policies[input.policyId].digest,
       profileDigest: context.trusted.profiles[input.profileId].digest };
     bump(context, state, 'BOOTSTRAP_REQUESTED', [stackId]);
@@ -558,8 +558,8 @@ async function makePromotionJob(context: ModuleContext, state: QueueState, check
     generation: state.generation, profileDigest: job.profileDigest, policyId: job.policyId,
     policyDigest: job.policyDigest, unitPolicy: job.unitPolicy,
     expectedRefs: {
-      [job.scratchStorageName + ':' + job.scratchRef]: result.composedOid,
-      [canonicalName + ':refs/heads/main']: state.observedMain,
+      [job.scratchStorageName]: result.composedOid,
+      [canonicalName]: state.observedMain,
     }, storageRemotes: job.storageRemotes, checkerId: job.checkerId, checkerDigest: job.checkerDigest,
     oracleDigest: job.oracleDigest, toolchainDigest: job.toolchainDigest,
     environmentDigest: job.environmentDigest, timeoutMs: job.timeoutMs, maxOutputBytes: job.maxOutputBytes,
@@ -568,9 +568,7 @@ async function makePromotionJob(context: ModuleContext, state: QueueState, check
     bootstrap: job.bootstrap, ...(job.bootstrap ? { ownerAuthorized: true as const } : {}),
     scratchStorageName: job.scratchStorageName, scratchRef: job.scratchRef,
   };
-  const { jobId: _jobId, version: _version, state: _state, attempt: _attempt,
-    runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, ...input } = immutable;
-  return { ...immutable, inputDigest: await digest(input) } as Job;
+  return { ...immutable, inputDigest: await digest(jobInput(immutable)) } as Job;
 }
 async function createTicket(context: ModuleContext, state: QueueState, record: JobRecord, result: StackResult,
   main: string | null): Promise<void> {
@@ -806,7 +804,7 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
   }
 }
 
-function retryAmbiguousPromotion(context: ModuleContext, state: QueueState, observed: string | null): void {
+async function retryAmbiguousPromotion(context: ModuleContext, state: QueueState, observed: string | null): Promise<void> {
   const ticket = state.ticket;
   if (!ticket || ticket.state !== 'reconcile' || ticket.retryIssued || observed !== ticket.expectedOldOid
     || ticket.reconciliation !== 'AMBIGUOUS_OLD_OID') return;
@@ -814,6 +812,7 @@ function retryAmbiguousPromotion(context: ModuleContext, state: QueueState, obse
   if (!original || original.job.kind !== 'promote') return;
   const retry: Job = { ...original.job, jobId: crypto.randomUUID(), state: 'pending', attempt: 0,
     runnerId: null, fence: 0, expiresAt: null };
+  retry.inputDigest = await digest(jobInput(retry));
   context.transaction(() => {
     schedule(context, state, retry, 'promotion', ticket.memberIds);
     ticket.jobIds.push(retry.jobId);
@@ -854,6 +853,7 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
     if (!record.retryOf && !record.retryIssued) {
       const retry = { ...record.job, jobId: crypto.randomUUID(), state: 'pending' as const,
         attempt: 0, fence: 0, runnerId: null, expiresAt: null } as Job;
+      retry.inputDigest = await digest(jobInput(retry));
       context.transaction(() => {
         const next = schedule(context, state, retry, record.purpose, record.memberIds, record.contestId);
         next.retryOf = record.job.jobId;
@@ -890,7 +890,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
       }
     }
     reconcileTicket(context, state, main);
-    retryAmbiguousPromotion(context, state, main);
+    await retryAmbiguousPromotion(context, state, main);
     save(context, state);
     return;
   }

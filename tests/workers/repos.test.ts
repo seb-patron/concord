@@ -44,7 +44,7 @@ describe('repository and change lifecycle', () => {
     expect(ids(['file:dispatch.mjs', 'row:families:gamma'], 'unitKeys')).toEqual(['file:dispatch.mjs', 'row:families:gamma']);
   });
 
-  it('creates a visible repo, allocates an owner seed fork, and records one bootstrap request', async () => {
+  it('takes an owner seed through real queue and runner scheduling to canonical main', async () => {
     const repo = await create('seed_case');
     expect(repo).toMatchObject({ repoId: 'seed_case', status: 'ready', observedCanonicalOid: null });
     const listing = await fetchApi(apiRequest('/v1/repos'));
@@ -116,6 +116,12 @@ describe('repository and change lifecycle', () => {
     expect(scheduled.runners.jobs).toHaveLength(1);
     expect(scheduled.runners.jobs[0]).toMatchObject({ bootstrap: true, ownerAuthorized: true, canonicalBaseOid: null,
       scratchStorageName: snapshotResult.data.projections.repos.bootstrap.scratchStorageName });
+    expect(scheduled.runners.jobs[0].jobId).toBe(bootstrapResult.data.jobId);
+    expect(scheduled.runners.jobs[0].expectedRefs).toEqual({
+      [repo.canonicalStorageName]: null,
+      [change.candidateStorageName]: a,
+      [scheduled.runners.jobs[0].scratchStorageName]: null,
+    });
     const secondSeed = await fetchApi(mutation('/v1/repos/seed_case/changes', {
       intentKey: 'seed-two', intentText: 'another initializer', baseOid: null, branch: 'refs/heads/seed-two', unitKeys: [], dependencyChangeIds: [],
     }, 'seed-two-change'));
@@ -137,6 +143,72 @@ describe('repository and change lifecycle', () => {
     }, 'second-bootstrap'));
     expect(second.status).toBe(409);
     expect((await responseBody(second)).error.code).toBe('BOOTSTRAP_PENDING');
+
+    const checkerPoll = await fetchApi(mutation('/v1/repos/seed_case/runner/poll', {
+      runnerId: 'seed-checker', role: 'checker', supportedProfileDigests: [scheduled.runners.jobs[0].profileDigest],
+    }, 'seed-checker-poll', 'local-checker'));
+    expect(checkerPoll.status).toBe(200);
+    const checkedJob = (await responseBody(checkerPoll)).data.job;
+    expect(checkedJob.jobId).toBe(bootstrapResult.data.jobId);
+    await fake('seed_case', async provider => {
+      expect(await provider.resolveRef(change.candidateStorageName, 'refs/heads/seed')).toBe(a);
+      expect(await provider.readCommit(change.candidateStorageName, a)).toMatchObject({ treeOid: b, parents: [] });
+    });
+    await fake('seed_case', provider => {
+      provider.putCommit(checkedJob.scratchStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(checkedJob.scratchStorageName, checkedJob.scratchRef, null, a)).toBe(true);
+    });
+    const checkedInput = {
+      kind: 'validate-stack', jobId: checkedJob.jobId, attempt: checkedJob.attempt, fence: checkedJob.fence,
+      inputDigest: checkedJob.inputDigest, sourceTreeOid: b, checkerDigest: checkedJob.checkerDigest,
+      toolchainDigest: checkedJob.toolchainDigest, oracleDigest: checkedJob.oracleDigest,
+      environmentDigest: checkedJob.environmentDigest, durationMs: 1, log: '', outcome: 'PASS',
+      composedOid: a, composedTreeOid: b,
+      gateResults: checkedJob.unitPolicy.acceptance.gates.map((gate: { id: string; requiredOutcome: string }) => ({
+        gateId: gate.id, outcome: gate.requiredOutcome,
+      })), score: null, bootstrap: true, canonicalBaseOid: null,
+    };
+    const checkedDigest = await canonicalDigest(checkedInput);
+    const checkedResult = await fetchApi(mutation(`/v1/repos/seed_case/jobs/${checkedJob.jobId}/result`, {
+      attempt: checkedJob.attempt, fence: checkedJob.fence, inputDigest: checkedJob.inputDigest,
+      resultDigest: checkedDigest, result: { ...checkedInput, resultDigest: checkedDigest },
+    }, 'seed-check-result', 'local-checker'));
+    expect(checkedResult.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const ticketed = (await responseBody(await fetchApi(apiRequest('/v1/repos/seed_case/snapshot')))).data.projections;
+    expect(ticketed.queue.promotion).toMatchObject({ state: 'pending', bootstrap: true, checkedNewOid: a });
+    const promotionJob = ticketed.runners.jobs.find((job: { kind: string }) => job.kind === 'promote');
+    expect(promotionJob.expectedRefs).toEqual({ [repo.canonicalStorageName]: null, [checkedJob.scratchStorageName]: a });
+    const promoterPoll = await fetchApi(mutation('/v1/repos/seed_case/runner/poll', {
+      runnerId: 'seed-promoter', role: 'promoter', supportedProfileDigests: [promotionJob.profileDigest],
+    }, 'seed-promoter-poll', 'local-promoter'));
+    expect(promoterPoll.status).toBe(200);
+    const claimedPromotion = (await responseBody(promoterPoll)).data.job;
+    expect(claimedPromotion.jobId).toBe(promotionJob.jobId);
+    await fake('seed_case', provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a)).toBe(true);
+    });
+    const promotedInput = {
+      kind: 'promote', jobId: claimedPromotion.jobId, attempt: claimedPromotion.attempt, fence: claimedPromotion.fence,
+      inputDigest: claimedPromotion.inputDigest, sourceTreeOid: null, checkerDigest: claimedPromotion.checkerDigest,
+      toolchainDigest: claimedPromotion.toolchainDigest, oracleDigest: claimedPromotion.oracleDigest,
+      environmentDigest: claimedPromotion.environmentDigest, durationMs: 1, log: '', outcome: 'APPLIED',
+      observedCanonicalOid: a,
+    };
+    const promotedDigest = await canonicalDigest(promotedInput);
+    const promotedResult = await fetchApi(mutation(`/v1/repos/seed_case/jobs/${claimedPromotion.jobId}/result`, {
+      attempt: claimedPromotion.attempt, fence: claimedPromotion.fence, inputDigest: claimedPromotion.inputDigest,
+      resultDigest: promotedDigest, result: { ...promotedInput, resultDigest: promotedDigest },
+    }, 'seed-promotion-result', 'local-promoter'));
+    expect(promotedResult.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const merged = (await responseBody(await fetchApi(apiRequest('/v1/repos/seed_case/snapshot')))).data.projections;
+    expect(merged.queue.promotion).toMatchObject({ state: 'applied', checkedNewOid: a });
+    expect(merged.queue.bootstrap.state).toBe('merged');
+    await fake('seed_case', async provider => {
+      expect(await provider.resolveRef(repo.canonicalStorageName, 'refs/heads/main')).toBe(a);
+    });
   });
 
   it('records only one bootstrap request from two concurrent owner initializers', async () => {

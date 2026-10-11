@@ -71,10 +71,11 @@ function immutableJob(job: Job): string {
   const { state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId, expiresAt: _expiresAt, version: _version, ...input } = job;
   return stableJson(input);
 }
-function canonicalInput(job: Job): string {
+export function jobInput<T extends { inputDigest?: unknown; state: unknown; attempt: unknown; fence: unknown;
+  runnerId: unknown; expiresAt: unknown; version: unknown }>(job: T) {
   const { inputDigest: _inputDigest, state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId,
     expiresAt: _expiresAt, version: _version, ...input } = job;
-  return stableJson(input);
+  return input;
 }
 function validManifest(job: Job, manifest: ReviewManifest | null): manifest is ReviewManifest {
   return !!manifest && typeof manifest === 'object' && Array.isArray(manifest.changedUnits) &&
@@ -162,7 +163,7 @@ function schedule(c: ModuleContext, job: Job): Gate<{ jobId: string }> {
     if (prior) return prior.job.inputDigest === job.inputDigest && immutableJob(prior.job) === immutableJob(job) ?
       { status: 'eligible', version: prior.job.version, evidenceIds: [job.jobId], value: { jobId: job.jobId } } :
       { status: 'blocked', version: prior.job.version, code: 'JOB_CONFLICT', reason: 'Job identity changed', evidenceIds: [job.jobId] };
-    if (!validJob(c, job) || inputHash(canonicalInput(job)) !== job.inputDigest)
+    if (!validJob(c, job) || inputHash(stableJson(jobInput(job))) !== job.inputDigest)
       return { status: 'blocked', version: c.version(), code: 'INVALID_JOB', reason: 'Job pins or input digest invalid', evidenceIds: [] };
     const version = c.nextVersion();
     save(c, { job: { ...job, version } });

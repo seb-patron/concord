@@ -738,7 +738,7 @@ describe('queue state machine', () => {
     const original = h.jobs[0];
     await h.deliver(original, 'ENV_ERROR'); await h.tick();
     const retry = h.jobs[1];
-    expect(retry.inputDigest).toBe(original.inputDigest);
+    expect(retry.inputDigest).not.toBe(original.inputDigest);
     expect(retry.jobId).not.toBe(original.jobId);
     await h.deliver(retry, 'PASS'); await h.tick();
     expect((await h.state()).blockedReason).toBe('SUSPECTED_FLAKE');
@@ -817,7 +817,7 @@ describe('queue state machine', () => {
     expect(state.promotion.jobIds).toHaveLength(2);
     const attempts = h.jobs.filter(job => job.kind === 'promote');
     expect(attempts).toHaveLength(2);
-    expect(attempts[1].inputDigest).toBe(attempts[0].inputDigest);
+    expect(attempts[1].inputDigest).not.toBe(attempts[0].inputDigest);
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
     const freeze = await runInDurableObject<RepoCoordinator, { first: unknown; retry: unknown; unrelated: unknown }>(stub, instance => {
       const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };

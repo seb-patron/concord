@@ -454,7 +454,7 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (intents(context)[intentKey('ensure-repo', scratchStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Scratch provisioning failed; retry the same request');
   if (scratchIntent.state !== 'observed' || !scratch) return respond(context, { jobId, state: 'provisioning' }, 202);
   const seed: BootstrapHandoff = { seedStorageName, seedRef, headOid, canonicalStorageName: repo.canonicalStorageName,
-    scratchStorageName, policyId: policy.id, profileId: profile.id };
+    scratchStorageName, policyId: policy.id, profileId: profile.id, jobId };
   if (await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main')) fail(409, 'ALREADY_INITIALIZED', 'Canonical main appeared');
   context.transaction(() => {
     const pending = context.state.get<BootstrapPending>('bootstrap');

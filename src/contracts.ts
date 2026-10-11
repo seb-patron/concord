@@ -326,6 +326,8 @@ export type ChangeViewProvider = (context: ModuleContext, changeId: Id) => Gate<
 export interface BootstrapHandoff {
   seedStorageName: string; seedRef: string; headOid: Oid;
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
+  /** Reserved by repos so the bootstrap response identifies the scheduled runner job. */
+  jobId?: Id;
 }
 export type BootstrapHandoffProvider = (context: ModuleContext, seed: BootstrapHandoff) => Gate<{ stackId: Id }>;
 export interface Migration { version: number; statements: string[] }
