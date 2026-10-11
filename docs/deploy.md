@@ -162,20 +162,54 @@ If versioned secret provisioning reports that no Worker/version exists, stop and
 
 ## Deployed smoke and evidence
 
-Set `CONCORD_URL` to the **deployed** URL printed by Wrangler and `CONCORD_TOKEN` to an owner bearer credential from the production `AUTH_TOKENS` mapping. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. The current public scenario driver requires local `file:` bridge remotes and local fixture principals, so it cannot seed or run scenes against Artifacts. A production-capable scenario flow and separately provisioned scoped identities are required before claiming a live checked landing. Do not use `local-*` tokens or `--pump-local` with a fake bridge as Artifacts evidence.
+Set `CONCORD_URL` to the **deployed** URL printed by Wrangler. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. The live scenario driver uses fresh bearer credentials and mints short-lived repo-scoped Git tokens through the Worker. Keep all generated files outside the clone. The provisioned principals have distinct roles and a 24-hour expiry; provision again for another recording day.
 
 ```sh
 export CONCORD_URL='<Wrangler deployed HTTPS URL>'
-export CONCORD_TOKEN='<owner production bearer token>'
 export CONCORD_SHOW_DECOMPILED_C=0
 export CONCORD_RUN_DIR="$(mktemp -d)"
-curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "production" and .storageBackend == "artifacts"'
-npm run deploy:check -- --remote
+chmod 700 "$CONCORD_RUN_DIR"
+npm run demo -- preflight --local --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- provision --out-dir "$CONCORD_RUN_DIR/creds"
+export AUTH_TOKENS_FILE="$CONCORD_RUN_DIR/creds/auth-tokens.json"
+export DEMO_TOKENS_FILE="$CONCORD_RUN_DIR/creds/demo-tokens.json"
+export TRUSTED_CONFIG_FILE="$CONCORD_RUN_DIR/trusted-config.json"
+node -e 'const fs = require("node:fs"); for (const file of [process.env.AUTH_TOKENS_FILE, process.env.DEMO_TOKENS_FILE]) if ((fs.statSync(file).mode & 0o777) !== 0o600) process.exit(1)'
+test -s "$TRUSTED_CONFIG_FILE"
+export CONCORD_TOKEN="$(jq -r '.owner' "$DEMO_TOKENS_FILE")"
 ```
 
-After a production-capable flow exists, the owner must observe one checker `PASS` for the exact pinned job, one promotion ticket with expected-old, a canonical `main` readback equal to the ticket's checked new SHA, and the same immutable SHA in the API repo detail and a fresh Git fetch of Artifacts. Record the Worker URL/version, Artifacts namespace and repo remote, job/result/promotion IDs, expected-old and new OIDs, and timestamps. No screenshot badge, local fake, or pre-rendered card replaces these checks. Until that flow is available, record the checked landing as **missing deployed evidence**; do not claim it from the local demo.
+Upload the newly generated `AUTH_TOKENS` and `TRUSTED_CONFIG` with the exact `npx wrangler versions secret put` commands in [Provision secrets and deploy](#provision-secrets-and-deploy), then deploy that version. Do not reuse a deployment with an old token mapping. The commands in this section are remote-only and intentionally outside the `verified-by: 12c` local command blocks. Run the health check and seed after Wrangler prints the deployed URL.
 
-For a future production-capable flow, set `CONCORD_REPO_ID` to its runtime repo ID and `CHECKED_SHA` to the promoted SHA shown by the ticket. The separately provisioned production checker and promoter tokens have distinct roles. Run their bounded jobs as the flow requests, then verify the API and a fresh read-only Git clone:
+```sh
+curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "production" and .storageBackend == "artifacts"'
+npm run deploy:check -- --remote
+npm run demo -- seed --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene context --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene leases --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene stack --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene isolate --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene repair --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene carry --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene invalidate --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene contest --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- scene aw --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR"
+npm run demo -- inspect --target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE" --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
+```
+
+The driver launches bounded `npm run runner` checker and promoter processes as jobs appear. To inspect a barrier manually, use the repo ID and profile digest printed by seed and preflight. Run the processes with their distinct bearer tokens in the environment, and let the driver resume after inspection:
+
+```sh
+export CONCORD_REPO_ID='<seed output repoId>'
+export CONCORD_PROFILE_DIGEST='<preflight output profileDigest>'
+RUNNER_SCRIPT=runner
+CONCORD_TOKEN="$(jq -r '.checker' "$DEMO_TOKENS_FILE")" npm run "$RUNNER_SCRIPT" -- --repo "$CONCORD_REPO_ID" --role checker --profile "$CONCORD_RUN_DIR/dispatch-profile.json" --once
+CONCORD_TOKEN="$(jq -r '.promoter' "$DEMO_TOKENS_FILE")" npm run "$RUNNER_SCRIPT" -- --repo "$CONCORD_REPO_ID" --role promoter --profile-digest "$CONCORD_PROFILE_DIGEST" --once
+```
+
+For checked-landing evidence, observe a checker `PASS` for the exact pinned job, a promotion ticket with expected-old, canonical `main` readback equal to the ticket's checked new SHA, and the same immutable SHA in repo detail and a fresh Artifacts Git fetch. Record Worker URL/version, Artifacts namespace and repo remote, job/result/promotion IDs, OIDs, and timestamps. The local bridge and a screenshot badge are insufficient evidence.
+
+Set `CONCORD_REPO_ID` to the runtime repo ID and `CHECKED_SHA` to the promoted SHA shown by the ticket. Run bounded jobs as the flow requests, then verify the API and a fresh read-only Git clone:
 
 Set `CONCORD_HOME` to an absolute, owner-provisioned directory outside this clone containing the production checker profile at `checker-profile.json`. The profile must pin the deployed job's checker, oracle, toolchain, and environment; the demo fixture profile is not production evidence.
 

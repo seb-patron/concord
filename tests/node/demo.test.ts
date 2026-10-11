@@ -72,6 +72,42 @@ afterEach(async () => {
 });
 
 describe('dispatch-lab local acceptance', () => {
+  it('runs remote target through a production-style local Worker with provisioned principals', async () => {
+    const dir = await externalTempDir('concord-demo-remote-');
+    const bridgePort = await port();
+    const workerPort = await port();
+    const bridgeToken = 'local-bridge-fixture-remote';
+    const url = `http://127.0.0.1:${workerPort}`;
+    const env = { ...process.env, TMPDIR: dir, XDG_CONFIG_HOME: dir, CONCORD_RUN_DIR: dir,
+      CONCORD_URL: url, CONCORD_SHOW_DECOMPILED_C: '0' };
+    await demo(['preflight', '--local', '--state-dir', dir], env);
+    const privateFiles = await demo(['provision', '--out-dir', join(dir, 'private')], env);
+    const tokens = JSON.parse(await readFile(privateFiles.tokensFile, 'utf8')) as Record<string, string>;
+    expect(tokens.owner).not.toMatch(/^local-/);
+    const trusted = (await readFile(join(dir, 'trusted-config.json'), 'utf8')).trim();
+    const auth = (await readFile(privateFiles.authTokensFile, 'utf8')).trim();
+    const bridge = start(process.execPath, ['--import', 'tsx', 'local/git-bridge.ts'], { ...env,
+      CONCORD_BRIDGE_DATA_DIR: join(dir, 'bridge'), CONCORD_BRIDGE_TOKEN: bridgeToken, CONCORD_BRIDGE_PORT: String(bridgePort) });
+    await waitFor('bridge', async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`), bridge.output);
+    const worker = start(wrangler, ['dev', '--config', 'wrangler.local.jsonc', '--port', String(workerPort),
+      '--persist-to', wranglerStateDir(dir), '--var', 'STORAGE_BACKEND:bridge',
+      '--var', `BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=${bridgeToken}`,
+      '--var', `TRUSTED_CONFIG:${trusted}`, '--var', `AUTH_TOKENS:${auth}`], { ...env, WRANGLER_SEND_METRICS: 'false' });
+    await waitFor('Worker health', async () => (await fetch(url + '/health')).ok, worker.output);
+    const flags = ['--target', 'remote', '--url', url, '--tokens-file', privateFiles.tokensFile,
+      '--run', 'remote', '--state-dir', dir];
+    await expect(demo(['seed', ...flags, '--pump-local'], env)).rejects.toThrow('PUMP_LOCAL_FORBIDDEN_IN_REMOTE_MODE');
+    const seeded = await demo(['seed', ...flags], env);
+    expect(seeded.canonicalOid).toMatch(/^[a-f0-9]{40}$/);
+    for (const name of ['context', 'leases', 'stack']) {
+      const result = await demo(['scene', name, ...flags], env);
+      expect(result.scene).toBe(name);
+    }
+    const inspected = await demo(['inspect', ...flags, '--json'], env);
+    expect(inspected.scenes).toEqual(expect.arrayContaining(['seed', 'context', 'leases', 'stack']));
+    expect(inspected.audit.some((item: any) => item.jobId)).toBe(true);
+  }, 180_000);
+
   it('resolves Wrangler state under the physical checkout through a symlink', async () => {
     const root = await externalTempDir('concord-demo-link-');
     const linked = join(root, 'checkout');

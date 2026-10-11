@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { digest, requiresExpectedVersion } from '../src/http';
 import { ConcordClient } from '../cli/client';
+import { rememberCredential } from '../cli/client';
 import { runAwMock } from '../adapters/aw-mock';
 import { localEnvironment, dispatchArgv, loadProfile } from '../runner/profiles';
 import type { LocalProfile } from '../runner/profiles';
@@ -28,7 +29,8 @@ export function wranglerStateDir(stateDir: string): string {
   return resolve(realpathSync(resolve(root, '..')), '.wrangler', 'state', runHash);
 }
 
-export interface Options { run: string; stateDir: string; url: string; pumpLocal: boolean; json: boolean }
+export interface Options { run: string; stateDir: string; url: string; pumpLocal: boolean; json: boolean;
+  target: 'local' | 'remote'; actors: Record<string, string> }
 interface Envelope { status: number; data?: any; version?: number; error?: { code: string; message: string } }
 export interface Manifest {
   schemaVersion: 1; run: string; repoId: string; seedOid: string; canonicalOid: string;
@@ -59,7 +61,7 @@ async function api(options: Options, who: string, method: string, path: string, 
     body = { ...body as Record<string, unknown>, expectedVersion: current.version };
   }
   const response = await fetch(new URL('/v1' + path, options.url), { method, headers: {
-    authorization: `Bearer ${actor[who]}`, ...(body === undefined ? {} : { 'content-type': 'application/json', 'idempotency-key': randomUUID() }),
+    authorization: `Bearer ${options.actors[who] ?? actor[who]}`, ...(body === undefined ? {} : { 'content-type': 'application/json', 'idempotency-key': randomUUID() }),
   }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
   const value = response.status === 204 ? {} : await response.json() as Record<string, unknown>;
   const envelope = { status: response.status, ...value } as Envelope;
@@ -86,13 +88,26 @@ async function waitFor<T>(label: string, read: () => Promise<T>, accept: (value:
     await sleep(150); } while (Date.now() < until);
   throw new Error(`TIMEOUT ${label}: ${JSON.stringify(value).slice(0, 2000)}`);
 }
-async function git(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFile('git', args, { cwd, timeout: 30_000, maxBuffer: 1024 * 1024, env: {
+export async function gitWithCredential(cwd: string, secret: string | undefined, ...args: string[]): Promise<string> {
+  if (secret) rememberCredential(secret);
+  try {
+    const { stdout } = await execFile('git', args, { cwd, timeout: 30_000, maxBuffer: 1024 * 1024, env: {
     ...process.env, GIT_AUTHOR_NAME: 'Concord Demo', GIT_AUTHOR_EMAIL: 'demo@example.test',
     GIT_COMMITTER_NAME: 'Concord Demo', GIT_COMMITTER_EMAIL: 'demo@example.test',
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0',
+    ...(secret ? { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: `Authorization: Bearer ${secret}` } : {}),
   } });
-  return stdout.trim();
+    return stdout.trim();
+  } catch { throw new Error('DEMO_GIT_FAILED'); }
+}
+const git = (cwd: string, ...args: string[]) => gitWithCredential(cwd, undefined, ...args);
+export function demoGitRemote(options: Pick<Options, 'target' | 'url'>, remote: string): string {
+  let url: URL;
+  try { url = new URL(remote); } catch { throw new Error('INVALID_GIT_REMOTE'); }
+  if (url.username || url.password || url.search || url.hash ||
+    (url.protocol === 'file:' ? !!url.hostname || (options.target === 'remote' &&
+      !['127.0.0.1', 'localhost'].includes(new URL(options.url).hostname)) : options.target === 'local' || url.protocol !== 'https:')) throw new Error('INVALID_GIT_REMOTE');
+  return remote;
 }
 
 export async function prepareLocal(stateDir: string): Promise<{ profile: LocalProfile; trustedConfig: string }> {
@@ -147,14 +162,15 @@ async function pump(options: Options, manifest: Manifest, until: (view: any) => 
     if (until(last)) return last;
     const pending = (last.runners?.jobs ?? []).filter((job: any) => job.state === 'pending');
     const job = pending.find((item: any) => item.kind !== 'promote') ?? pending.find((item: any) => item.kind === 'promote');
-    if (job && options.pumpLocal) {
+    if (job && (options.pumpLocal || options.target === 'remote')) {
       const role = job.kind === 'promote' ? 'promoter' : 'checker';
       if (role === 'checker' ? ++checker > maxChecker : ++promoter > maxPromoter) throw new Error(`PUMP_BOUND ${label}`);
       const args = ['runner/main.ts', '--repo', manifest.repoId, '--role', role, '--once'];
       if (role === 'checker') args.push('--profile', manifest.profilePath);
-      const { stdout } = await execFile(process.execPath, ['--import', 'tsx', ...args], {
+      const { stdout } = await execFile(options.target === 'remote' ? 'npm' : process.execPath,
+        options.target === 'remote' ? ['run', 'runner', '--', ...args.slice(1)] : ['--import', 'tsx', ...args], {
         cwd: process.cwd(), timeout: 35_000, env: { ...process.env, CONCORD_URL: options.url,
-          CONCORD_TOKEN: actor[role], CONCORD_PROFILE_DIGEST: manifest.profileDigest }, maxBuffer: 1024 * 1024 });
+          CONCORD_TOKEN: options.actors[role] ?? actor[role], CONCORD_PROFILE_DIGEST: manifest.profileDigest }, maxBuffer: 1024 * 1024 });
       if (!stdout.includes('Completed 1 job(s)')) throw new Error(`RUNNER_IDLE ${label}: ${stdout}`);
       await waitFor(`result ${job.jobId}`, () => api(options, 'reviewer', 'GET',
         `/repos/${manifest.repoId}/jobs/${job.jobId}/result`), value => value.status === 200, 10_000);
@@ -163,11 +179,10 @@ async function pump(options: Options, manifest: Manifest, until: (view: any) => 
   throw new Error(`TIMEOUT ${label}: ${JSON.stringify(last).slice(0, 2500)}`);
 }
 
-async function tokenRemote(options: Options, manifest: Manifest, storageName: string, who: string): Promise<string> {
+async function tokenRemote(options: Options, manifest: Manifest, storageName: string, who: string): Promise<{ remote: string; secret: string }> {
   const detail = ok(await api(options, who, 'POST', `/repos/${manifest.repoId}/git-token`,
     { storageName, scope: 'write', ttlSeconds: 600 }), 'git token');
-  if (!detail.remote.startsWith('file://')) throw new Error('LOCAL_DEMO_REQUIRES_FILE_REMOTE');
-  return detail.remote;
+  return { remote: demoGitRemote(options, detail.remote), secret: detail.secret };
 }
 async function createDraft(options: Options, manifest: Manifest, alias: string, who: string, intentKey: string,
   intentText: string, baseOid: string | null, unitKeys: string[], dependencies: string[] = []): Promise<void> {
@@ -189,8 +204,8 @@ async function prepareCheckout(options: Options, manifest: Manifest, alias: stri
   const repo = ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}`), 'repo detail');
   const detail = ok(await api(options, 'owner', 'POST', `/repos/${manifest.repoId}/git-token`, {
     storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 600 }), 'canonical read token');
-  if (!detail.remote.startsWith('file://')) throw new Error('LOCAL_DEMO_REQUIRES_FILE_REMOTE');
-  await git(item.worktree, 'fetch', '--quiet', detail.remote, baseOid);
+  await gitWithCredential(item.worktree, options.target === 'remote' ? detail.secret : undefined,
+    'fetch', '--quiet', demoGitRemote(options, detail.remote), baseOid);
   await git(item.worktree, 'switch', '--detach', baseOid);
 }
 
@@ -207,8 +222,9 @@ async function commitPush(options: Options, manifest: Manifest, alias: string, w
   await git(item.worktree, 'commit', '--quiet', '-m', message);
   const head = await git(item.worktree, 'rev-parse', 'HEAD');
   const remote = await tokenRemote(options, manifest, item.storageName, who);
-  await git(item.worktree, 'push', '--quiet', ...(item.headOid ? [`--force-with-lease=${item.branch}:${item.headOid}`] : []),
-    remote, `HEAD:${item.branch}`);
+  await gitWithCredential(item.worktree, options.target === 'remote' ? remote.secret : undefined,
+    'push', '--quiet', ...(item.headOid ? [`--force-with-lease=${item.branch}:${item.headOid}`] : []),
+    remote.remote, `HEAD:${item.branch}`);
   const current = await change(options, manifest, alias);
   ok(await api(options, who, 'POST', `/repos/${manifest.repoId}/branches`, {
     expectedVersion: current.version, storageName: item.storageName, ref: item.branch,
@@ -344,7 +360,8 @@ async function checkoutAt(options: Options, manifest: Manifest, alias: string, b
   const repo = ok(await api(options, 'owner', 'GET', `/repos/${manifest.repoId}`), 'repo detail');
   const detail = ok(await api(options, 'owner', 'POST', `/repos/${manifest.repoId}/git-token`, {
     storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 600 }), 'canonical read token');
-  await git(item.worktree, 'fetch', '--quiet', detail.remote, base);
+  await gitWithCredential(item.worktree, options.target === 'remote' ? detail.secret : undefined,
+    'fetch', '--quiet', demoGitRemote(options, detail.remote), base);
   await git(item.worktree, 'switch', '--detach', base);
   item.baseOid = base;
 }
@@ -598,8 +615,8 @@ export async function scene(options: Options, name: string): Promise<Manifest> {
     const fixturePath = join(resolve(options.stateDir), 'aw-task.json');
     const runStatePath = join(resolve(options.stateDir), 'aw-run-state.json');
     const template = JSON.parse(await readFile(join(root, 'aw-task.json'), 'utf8')) as Record<string, unknown>;
-    const client = new ConcordClient({ url: options.url, token: actor.aw });
-    const reviewer = new ConcordClient({ url: options.url, token: actor.reviewer });
+    const client = new ConcordClient({ url: options.url, token: options.actors.aw ?? actor.aw });
+    const reviewer = new ConcordClient({ url: options.url, token: options.actors.reviewer ?? actor.reviewer });
     const observedBases: string[] = [];
     const changeIds: string[] = [];
     const outputs: Array<{ phase: string; headOid: string | null }> = [];

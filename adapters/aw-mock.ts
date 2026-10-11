@@ -45,6 +45,14 @@ function blockFor(error: unknown): Block {
   return { code: 'MOCK_ERROR', reason: error instanceof Error ? error.message : String(error) };
 }
 
+function gitRemote(value: string): string {
+  let remote: URL;
+  try { remote = new URL(value); } catch { throw new Error('INVALID_GIT_REMOTE'); }
+  if (!['file:', 'https:'].includes(remote.protocol) || remote.username || remote.password || remote.search || remote.hash ||
+    (remote.protocol === 'file:' && !!remote.hostname)) throw new Error('INVALID_GIT_REMOTE');
+  return remote.href;
+}
+
 async function loadState(statePath: string): Promise<RunState> {
   try {
     const parsed: unknown = JSON.parse(await readFile(statePath, 'utf8'));
@@ -212,19 +220,19 @@ async function registeredHead(client: ConcordClient, fixture: AwMockFixture, cha
   return null;
 }
 
-/** Produces an actual descendant commit using only a local bridge-backed Git remote. */
+/** Produces an actual descendant commit from a scoped read credential. */
 async function makeCandidate(client: ConcordClient, fixture: AwMockFixture, repo: Repo, change: Change, post: Post): Promise<{ headOid: string; remote: string; worktree: string; cleanup(): Promise<void> }> {
   if (!change.baseOid || !/^[a-f0-9]{40}$/.test(change.baseOid)) throw new Error('LOCAL_GIT_BASE_REQUIRED');
   const root = path(fixture.project);
   const token = (await post<Envelope<{ remote: string; secret: string }>>(`${root}/git-token`,
     { storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 300 }, await currentVersion(client, fixture))).data;
   rememberCredential(token.secret);
-  const remote = new URL(token.remote);
-  if (remote.protocol !== 'file:' || remote.hostname || remote.search || remote.hash) throw new Error('LOCAL_GIT_BRIDGE_REQUIRED');
+  const remote = gitRemote(token.remote);
   const temporary = await mkdtemp(join(tmpdir(), 'concord-aw-mock-'));
   const worktree = join(temporary, 'candidate');
   try {
-    await git(['clone', '--no-checkout', '--single-branch', '--branch', 'main', '--', remote.href, worktree]);
+    await git(['clone', '--no-checkout', '--single-branch', '--branch', 'main', '--', remote, worktree],
+      { token: token.remote.startsWith('https:') ? token.secret : undefined });
     const actualBase = await git(['rev-parse', '--verify', `${change.baseOid}^{commit}`], {}, worktree);
     if (actualBase !== change.baseOid) throw new Error('CANONICAL_BASE_UNAVAILABLE');
     await git(['read-tree', actualBase], {}, worktree);
@@ -242,7 +250,7 @@ async function makeCandidate(client: ConcordClient, fixture: AwMockFixture, repo
     const tree = await git(['write-tree'], {}, worktree);
     const headOid = await git(['-c', 'user.name=Concord AW Mock', '-c', 'user.email=aw-mock@example.invalid', 'commit-tree', tree, '-p', actualBase, '-m', 'AW mock synthetic edit'], {}, worktree);
     await git(['update-ref', 'HEAD', headOid], {}, worktree);
-    return { headOid, remote: remote.href, worktree, cleanup: () => rm(temporary, { recursive: true, force: true }) };
+    return { headOid, remote, worktree, cleanup: () => rm(temporary, { recursive: true, force: true }) };
   } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
 }
 
@@ -253,9 +261,10 @@ async function publishCandidate(client: ConcordClient, fixture: AwMockFixture, m
     const fork = (await post<Envelope<{ remote: string; secret: string }>>(`${root}/git-token`,
       { storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 300 }, await currentVersion(client, fixture))).data;
     rememberCredential(fork.secret);
-    const remote = new URL(fork.remote);
-    if (remote.protocol !== 'file:' || remote.hostname || remote.search || remote.hash || remote.href === candidate.remote) throw new Error('LOCAL_GIT_BRIDGE_REQUIRED');
-    await git(['push', '--no-follow-tags', '--', remote.href, `${candidate.headOid}:${change.branch}`], {}, candidate.worktree);
+    const remote = gitRemote(fork.remote);
+    if (remote === candidate.remote) throw new Error('CANDIDATE_REMOTE_EQUALS_CANONICAL');
+    await git(['push', '--no-follow-tags', '--', remote, `${candidate.headOid}:${change.branch}`],
+      { token: fork.remote.startsWith('https:') ? fork.secret : undefined }, candidate.worktree);
     await post(`${root}/branches`, { storageName: change.candidateStorageName, ref: change.branch, observedHead: candidate.headOid, ownerId: 'mock-aw' },
       await currentVersion(client, fixture));
     const latest = await getChangeEnvelope(client, fixture, mapping.changeId);
@@ -401,7 +410,8 @@ async function main() {
   const url = process.env.CONCORD_URL; const token = process.env.CONCORD_TOKEN;
   if (!url || !token) throw new Error('CONCORD_URL and CONCORD_TOKEN are required');
   const origin = new URL(url);
-  if (!['127.0.0.1', 'localhost'].includes(origin.hostname)) throw new Error('AW mock only accepts a local Concord Worker');
+  if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(origin.hostname)) ||
+    origin.username || origin.password || origin.search || origin.hash) throw new Error('UNSAFE_CONCORD_URL');
   const client = new ConcordClient({ url, token });
   const reviewer = process.env.CONCORD_REVIEW_TOKEN ? new ConcordClient({ url, token: process.env.CONCORD_REVIEW_TOKEN }) : client;
   process.stdout.write(`${JSON.stringify(redactOutput(await runAwMock(args[fixtureIndex + 1], args[stateIndex + 1], client, reviewer)))}\n`);

@@ -118,7 +118,7 @@ async function harness() {
       if (body.scope === 'write' && api.publishPreparationUnavailable) return fail('MODULE_UNAVAILABLE', 501);
       const remote = await storage.info(String(body.storageName));
       if (!remote) return fail('STORAGE_NOT_FOUND', 404);
-      return ok({ remote: body.scope === 'write' && api.badForkRemote ? 'https://invalid.example/fork' : remote.remote, secret: 'bridge-issued-test-secret' });
+      return ok({ remote: body.scope === 'write' && api.badForkRemote ? 'https://invalid.example/fork#fragment' : remote.remote, secret: 'bridge-issued-test-secret' });
     }
     if (path === '/v1/repos/demo/branches' && method === 'POST') {
       api.registers++;
