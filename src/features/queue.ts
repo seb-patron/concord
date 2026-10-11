@@ -33,6 +33,7 @@ interface ContestState {
 }
 interface ContestLeaseEvidence {
   contestId: Id; parentChangeId: Id; childChangeIds: [Id, Id]; selectedChangeId: Id | null; ownerCreated: true;
+  closed?: boolean;
 }
 interface Ticket extends Promotion {
   jobId: Id; canonicalStorageName: string; scratchStorageName: string; scratchRef: string; memberIds: Id[];
@@ -108,6 +109,11 @@ function requiredView(context: ModuleContext, changeId: Id): ChangeView & Requir
 }
 function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id, verdictId: Id,
   fences: Record<string, number>, main: string, contestId: Id | null): Omit<Entry, 'entryId' | 'sequence' | 'admittedAt'> {
+  if (state.contests.some(contest => contest.childIds.includes(changeId) &&
+    (contest.state === 'open' || contest.state === 'selected' && contest.admissionIds.some(id => {
+      const entry = admitted(state, id);
+      return entry?.changeId === contest.winnerId && active(entry);
+    })))) throw new HttpError(409, 'CONTEST_OWNED', 'Change remains owned by an active contest');
   const view = requiredView(context, changeId);
   if (view.status !== 'ready' || view.frozen) throw new HttpError(409, 'CHANGE_NOT_READY', 'Change is not ready');
   if (state.entries.some(entry => active(entry) && entry.changeId === changeId)) throw new HttpError(409, 'ALREADY_QUEUED', 'Change already admitted');
@@ -268,9 +274,23 @@ function invalidate(context: ModuleContext, state: QueueState, reason: string, i
   bump(context, state, reason, ids);
 }
 function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, reason: string): void {
+  const contest = state.contests.find(item => item.contestId === entry.contestId && item.state === 'open');
+  if (contest) {
+    closeContest(context, state, contest, reason);
+    invalidate(context, state, reason, contest.childIds);
+    return;
+  }
   transition(context, entry, 'blocked', reason);
   emit(context, 'queue.entry_blocked', [entry.changeId], { reason, confidence: 'none' });
   invalidate(context, state, reason, [entry.changeId]);
+}
+function closeContest(context: ModuleContext, state: QueueState, contest: ContestState, reason: string): void {
+  contest.state = 'blocked'; contest.reason = reason;
+  contestEvidence(context, contest, contest.childIds[0]);
+  for (const id of contest.admissionIds) {
+    const entry = admitted(state, id);
+    if (entry && active(entry)) transition(context, entry, 'blocked', reason);
+  }
 }
 async function enqueue(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
   if (!validId(body.changeId)) throw new HttpError(400, 'INVALID_ENQUEUE', 'Change ID is required');
@@ -400,7 +420,6 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
       Object.entries(firstFences).some(([key, fence]) => secondFences[key] !== fence)) {
       throw new HttpError(409, 'LEASE_COVERAGE', 'Contest children must share the same fenced units');
     }
-    for (const id of children) context.state.delete(`contest-child:${id}`);
     const parentReservation = requireGate(context.call('leases.reserve', children[0], prepared[0].reservationFences));
     if (!prepared[0].unitKeys.every(key => parentReservation.reservationFences[key] === prepared[0].reservationFences[key])) {
       throw new HttpError(409, 'LEASE_FENCE_CHANGED', 'Contest parent reservation differs');
@@ -413,8 +432,6 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
     const creationSequences: [number, number] = [0, 0];
     const admissionIds: [Id, Id] = ['', ''];
     prepared.forEach((candidate, i) => {
-      const reservation = requireGate(context.call('leases.reserve', candidate.changeId, candidate.reservationFences));
-      if (!candidate.unitKeys.every(key => reservation.reservationFences[key] === candidate.reservationFences[key])) throw new HttpError(409, 'LEASE_FENCE_CHANGED', 'Contest reservation differs');
       const sequence = emit(context, 'queue.contest_child', [candidate.changeId, contestId], { headOid: candidate.headOid });
       creationSequences[i] = sequence;
       const entry: Entry = { ...candidate, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
@@ -503,6 +520,7 @@ function failRecord(context: ModuleContext, state: QueueState, record: JobRecord
   if (record.job.generation !== state.generation || record.purpose === 'promotion') return;
   const contest = record.contestId ? state.contests.find(item => item.contestId === record.contestId && item.state === 'open') : undefined;
   if (record.purpose === 'contest' && !contest) return;
+  if (contest) contestEvidence(context, contest, contest.childIds[0]);
   if (contest) { contest.state = 'blocked'; contest.reason = reason; }
   const ids = contest?.admissionIds ?? (record.purpose === 'diagnostic' && state.diagnosis
     ? state.diagnosis.admissionIds ?? record.admissionIds : record.admissionIds);
@@ -677,9 +695,7 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
   const contest = state.contests.find(item => item.contestId === record.contestId);
   if (!contest || contest.state !== 'open') return;
   if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
-    contest.state = 'blocked'; contest.reason = 'CHILD_UNAVAILABLE';
-    contestEvidence(context, contest, contest.childIds[0]);
-    for (const id of contest.admissionIds) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', 'CHILD_UNAVAILABLE'); }
+    closeContest(context, state, contest, 'CHILD_UNAVAILABLE');
     bump(context, state, 'CONTEST_BLOCKED', contest.childIds);
     return;
   }
@@ -703,13 +719,8 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
     : arbitrate(inputs[0], inputs[1], policy.acceptance);
   contest.reason = outcome.reason;
   if (outcome.status === 'blocked') {
-    contest.state = 'blocked';
-    contestEvidence(context, contest, contest.childIds[0]);
     state.blockedReason = outcome.reason;
-    for (const id of contest.childIds) {
-      const entry = admitted(state, contest.admissionIds[contest.childIds.indexOf(id)])!;
-      transition(context, entry, 'blocked', outcome.reason);
-    }
+    closeContest(context, state, contest, outcome.reason);
   } else {
     contest.state = 'selected'; contest.winnerId = outcome.winnerId;
     contestEvidence(context, contest, outcome.winnerId);
@@ -868,8 +879,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
     state.observedMain = main;
     invalidate(context, state, 'MAIN_CHANGED', []);
     for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
-      transition(context, entry, 'blocked', 'STALE_MAIN');
-      emit(context, 'queue.entry_blocked', [entry.changeId], { reason: 'STALE_MAIN' });
+      blockEntry(context, state, entry, 'STALE_MAIN');
     }
   }
   for (const entry of state.entries) if (active(entry) && entry.state !== 'blocked' && !admissionStillValid(context, entry)) {
@@ -886,9 +896,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   const contest = state.contests.find(item => item.state === 'open');
   if (contest) {
     if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
-      contest.state = 'blocked'; contest.reason = 'CHILD_UNAVAILABLE';
-      contestEvidence(context, contest, contest.childIds[0]);
-      for (const id of contest.admissionIds) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', 'CHILD_UNAVAILABLE'); }
+      closeContest(context, state, contest, 'CHILD_UNAVAILABLE');
       bump(context, state, 'CONTEST_BLOCKED', contest.childIds);
       save(context, state);
       return;

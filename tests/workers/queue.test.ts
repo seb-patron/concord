@@ -255,6 +255,15 @@ async function leaseState(h: Harness, id: string): Promise<{ state: string; expi
   });
 }
 
+async function contestReleaseCount(h: Harness): Promise<number> {
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+  return runInDurableObject<RepoCoordinator, number>(stub, instance => {
+    const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+    const context = internal.context('queue', principal, h.repoId);
+    return context.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM concord_events WHERE kind = 'lease.reservationReleased'").toArray()[0].count;
+  });
+}
+
 async function prepareReal(changes: Array<{ id: string; unit: string }>, claimedIds: string[]): Promise<Harness> {
   const h = harness;
   await h.seed(`canonical-${h.repoId}`);
@@ -274,6 +283,13 @@ async function prepareReal(changes: Array<{ id: string; unit: string }>, claimed
 async function enqueueReal(h: Harness, id: string, unit: string): Promise<void> {
   const response = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
     changeId: id, verdictId: `v-${id}`, leaseFences: { [unit]: 1 } });
+  expect(response.response.status).toBe(201);
+}
+
+async function contestReal(h: Harness): Promise<void> {
+  const response = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+    baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
+    leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
   expect(response.response.status).toBe(201);
 }
 
@@ -312,6 +328,17 @@ describe('queue with real lease hooks', () => {
     expect((await h.state()).contests[0].winnerId).toBe('B');
     expect((await h.state()).entries.find((entry: any) => entry.changeId === 'A').state).toBe('failed');
     expect((await leaseState(h, 'A')).state).toBe('reserved');
+    const loser = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:J': 1 } });
+    expect(loser.response.status).toBe(409);
+    expect(loser.body.error.code).toBe('CONTEST_OWNED');
+    expect((await h.state()).entries).toHaveLength(2);
+    const contestedStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    const directReserve = await runInDurableObject<RepoCoordinator, Gate<{ reservationFences: Record<string, number> }>>(contestedStub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      return internal.context('queue', principal, h.repoId).call('leases.reserve', 'A', { 'row:J': 1 });
+    });
+    expect(directReserve).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
     await h.tick();
     await h.deliver(h.jobs[2], 'PASS'); await h.tick();
     expect((await h.state()).promotion.state).toBe('pending');
@@ -319,6 +346,71 @@ describe('queue with real lease hooks', () => {
     await h.tick();
     expect((await h.state()).entries.find((entry: any) => entry.changeId === 'B').state).toBe('landed');
     expect((await leaseState(h, 'A')).state).toBe('released');
+    expect(await contestReleaseCount(h)).toBe(1);
+    const stale = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:J': 1 } });
+    expect(stale.response.status).toBe(409);
+    h.views.set('A', { ...h.views.get('A')!, baseOid: oid('e') });
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      context.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'lease-A-fresh', 'row:J', 'agent-a', 'A', 'fresh', 2, Date.now() + 120_000, 'active', 1, Date.now(), Date.now());
+      context.sql.exec('UPDATE leases_fences SET fence = ? WHERE unit_key = ?', 2, 'row:J');
+    });
+    const fresh = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:J': 2 } });
+    expect(fresh.response.status).toBe(201);
+  });
+
+  it('releases the contest reservation when the first child loses eligibility', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    h.views.set('A', { ...h.views.get('A')!, status: 'draft' });
+    await h.tick();
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'blocked', reason: 'ELIGIBILITY_CHANGED' });
+    expect((await leaseState(h, 'A')).state).toBe('released');
+    expect(await contestReleaseCount(h)).toBe(1);
+  });
+
+  it('releases the contest reservation when a child job fails before arbitration', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    await h.tick();
+    await h.deliver(h.jobs[0], 'TIMEOUT'); await h.tick();
+    expect(h.jobs).toHaveLength(3);
+    await h.deliver(h.jobs[2], 'TIMEOUT'); await h.tick();
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
+    expect((await leaseState(h, 'A')).state).toBe('released');
+    expect(await contestReleaseCount(h)).toBe(1);
+  });
+
+  it('releases the contest reservation when both children fail validation', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    await h.tick();
+    await h.deliver(h.jobs[0], 'FAIL'); await h.tick();
+    await h.deliver(h.jobs[1], 'FAIL'); await h.tick();
+    expect((await h.state()).contests[0].state).toBe('blocked');
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
+    expect((await leaseState(h, 'A')).state).toBe('released');
+    expect(await contestReleaseCount(h)).toBe(1);
+  });
+
+  it('releases the contest reservation when the selected winner becomes ineligible', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    await h.tick();
+    await h.deliver(h.jobs[1], 'PASS'); await h.tick();
+    await h.deliver(h.jobs[0], 'PASS'); await h.tick();
+    expect((await h.state()).contests[0].winnerId).toBe('B');
+    h.views.set('B', { ...h.views.get('B')!, status: 'draft' });
+    await h.tick();
+    expect((await h.state()).entries.find((entry: any) => entry.changeId === 'B').state).toBe('blocked');
+    expect((await leaseState(h, 'A')).state).toBe('released');
+    expect(await contestReleaseCount(h)).toBe(1);
   });
 
   it('blocks both contest children and releases the shared reservation when one withdraws', async () => {
@@ -331,6 +423,7 @@ describe('queue with real lease hooks', () => {
     expect(withdrawn.response.status).toBe(200);
     expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'withdrawn']);
     expect((await leaseState(h, 'A')).state).toBe('released');
+    expect(await contestReleaseCount(h)).toBe(1);
   });
 
   it('blocks an expired reservation before scheduling a contest child', async () => {

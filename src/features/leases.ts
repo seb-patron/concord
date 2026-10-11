@@ -20,7 +20,7 @@ type VerifiedFootprint = {
   unitKeys: string[]; verifiedBy: 'checker';
 };
 type QueueEntryEvidence = { changeId: string; state: 'waiting' | 'checking' | 'blocked' | 'merged' | 'withdrawn' };
-type ContestEvidence = { contestId: string; parentChangeId: string; childChangeIds: [string, string]; selectedChangeId: string | null; ownerCreated: true };
+type ContestEvidence = { contestId: string; parentChangeId: string; childChangeIds: [string, string]; selectedChangeId: string | null; ownerCreated: true; closed?: boolean };
 
 function policy(context: ModuleContext): TrustedPolicy {
   const repo = sqlState(context.sql).get<Repo>('module:repos:repo');
@@ -312,8 +312,10 @@ function reserve(context: ModuleContext, changeId: string, fences: Record<string
     const contest = child && state.get<ContestEvidence>(`module:queue:contest:${child.contestId}`);
     if (contest && child?.ownerCreated === true && contest.ownerCreated === true &&
         contest.contestId === child.contestId && contest.parentChangeId === child.parentChangeId &&
-        contest.childChangeIds.includes(changeId) && child.childChangeIds.includes(changeId) &&
-        (contest.selectedChangeId === null || contest.selectedChangeId === changeId)) {
+        contest.childChangeIds.includes(changeId) && child.childChangeIds.includes(changeId) && !contest.closed) {
+      if (contest.selectedChangeId !== null && contest.selectedChangeId !== changeId) {
+        return blocked(context, 'LEASE_STALE', 'The selected winner owns this reservation');
+      }
       const inherited: Record<string, number> = {};
       const parentRows = active.filter(row => row.state === 'reserved' && row.change_id === contest.parentChangeId);
       for (const claim of claims) {
@@ -371,7 +373,7 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
     const shared = contest?.ownerCreated === true && parent?.ownerCreated === true &&
       parent.contestId === contest.contestId && parent.parentChangeId === contest.parentChangeId &&
       parent.childChangeIds.includes(changeId) && contest.childChangeIds.includes(changeId);
-    if (shared && parent.selectedChangeId !== changeId) {
+    if (shared && (parent.closed || parent.selectedChangeId !== changeId)) {
       return { status: 'eligible', version: context.version(), evidenceIds: [], value: undefined };
     }
     const reservationChangeId = shared ? parent.parentChangeId : changeId;
@@ -380,12 +382,22 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
     if (!selected.length) {
       const previous = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND (state IN ('expired','released') OR (state = 'reserved' AND expires_at <= ?))", reservationChangeId, now);
       if (!previous.length) return blocked(context, 'RESERVATION_NOT_FOUND', 'No reservation for this change');
+      if (shared) {
+        const closed = { ...parent, closed: true };
+        state.put(`module:queue:contest:${parent.contestId}`, closed);
+        for (const id of parent.childChangeIds) state.put(`module:queue:contest-child:${id}`, closed);
+      }
       return { status: 'eligible', version: context.version(), evidenceIds: previous.map(row => row.lease_id), value: undefined };
     }
     for (const row of selected) {
       const version = context.nextVersion();
       context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, now, row.lease_id);
       makeEvent(context, 'lease.reservationReleased', row, version);
+    }
+    if (shared) {
+      const closed = { ...parent, closed: true };
+      state.put(`module:queue:contest:${parent.contestId}`, closed);
+      for (const id of parent.childChangeIds) state.put(`module:queue:contest-child:${id}`, closed);
     }
     return { status: 'eligible', version: context.version(), evidenceIds: selected.map(row => row.lease_id), value: undefined };
   });
@@ -399,7 +411,7 @@ function reservationLive(context: ModuleContext, changeId: string, fences: Recor
   const shared = child?.ownerCreated === true && contest?.ownerCreated === true &&
     contest.contestId === child.contestId && contest.parentChangeId === child.parentChangeId &&
     contest.childChangeIds.includes(changeId) && child.childChangeIds.includes(changeId) &&
-    (contest.selectedChangeId === null || contest.selectedChangeId === changeId);
+    !contest.closed && (contest.selectedChangeId === null || contest.selectedChangeId === changeId);
   const reservationChangeId = shared ? contest.parentChangeId : changeId;
   const claims = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND state = 'reserved' AND expires_at > ?", reservationChangeId, context.now());
   const keys = Object.keys(fences);
