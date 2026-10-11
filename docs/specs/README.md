@@ -4,9 +4,9 @@ The twelve specs implement a small agent-native git platform, not production Git
 
 ## Scope and deadline interpretation
 
-The brief says “Tue 10-14 6 pm CT.” In 2026, October 14 is Wednesday. Use the more conservative **Tuesday, October 13, 2026 at 6:00 pm America/Chicago (23:00 UTC)** as the internal finish. Wednesday October 14 at 6 pm CT is contingency, not scheduled feature work. The supplied submission deadline is Wednesday October 14 at 11:59 pm PDT, equivalent to Thursday October 15 at 1:59 am CT (06:59 UTC). The owner should verify competition submission mechanics separately before uploading. The finalist date is October 21.
+The supplied weekday/date labels conflict with the 2026 calendar: October 11 is Sunday and October 14 is Wednesday. Keep the supplied final submission instant, **10-14 at 11:59 pm PDT** (Thursday October 15 at 1:59 am CT / 06:59 UTC), often labelled “Tue 10-14 11:59 pm PDT” in the brief; the owner verifies the competition form before uploading. The working integration deadline is **Monday October 12, 2026 at 6:00 pm CT**. Tuesday October 13 is reserved for rehearsal, recording, and bounded fixes, with October 14 contingency before the submission instant. The finalist date is October 21.
 
-With six implementation workers plus one independent reviewer and one integrator/owner slot, the scoped build is approximately 15 worker-hours plus integration, review, repair, and filming across three days. Budgets are estimates, not a promise about agent throughput. Keep leases + queue + UI even when applying cuts. Missing Cloudflare access blocks deployed evidence, not local development; begin owner provisioning alongside 01.
+With six implementation workers plus one independent reviewer and one integrator/owner slot, the scoped build is approximately 15 worker-hours plus integration, review, repair, and filming across three days. Budgets are estimates, not a promise about agent throughput. Keep leases + queue + UI even when applying cuts. Missing Cloudflare access blocks deployed evidence, not local development; the owner begins provisioning alongside 01 and supplies account access by Sunday noon CT at the latest.
 
 ## Slice index
 
@@ -91,37 +91,42 @@ If an interface repair requires a file outside a slice's allowlist, stop that wo
 
 ## Hour-by-hour plan (America/Chicago)
 
-All times are in CDT (UTC−05:00). Work starts Sunday October 11; no overnight owner availability is assumed. Each implementation run gets its listed 45–90 minute budget; follow-up repairs use explicit bounded scopes, not indefinite extensions. Reviewer and integrator work beside the six worker slots.
+All times are in CDT (UTC−05:00). The supplied “Sat 10-11 12:45 am CT” start means Saturday night into Sunday, October 11 at 00:45 CDT on the 2026 calendar; slice 01 has already started then. The workers run overnight. The first wave starts as soon as 01 merges, and later waves start when dependencies and slots clear. Owner-only account and publication gates remain explicit; the integrator/reviewer can work alongside the six worker slots. Each implementation run gets its listed 45–90 minute budget; repairs use explicit bounded scopes.
 
 | Date / hour | Six-worker lane / integrator | Owner/reviewer evidence or gate |
 | --- | --- | --- |
-| Sun 10-11 09:00–10:00 | Start 01; freeze data/API/job contracts | Owner begins account/Artifacts access request and identifies optional human mirror repo |
-| Sun 10-11 10:00–11:00 | Finish 01 by 10:30; launch 02/03/04/05/06/11 | Independently check offline startup, fail-closed seams, real gate; do not dispatch if contracts fail |
-| Sun 10-11 11:00–12:00 | Six parallel slices continue; 06/11 finish first | Reviewer checks lease atomicity and protocol/security boundaries as candidates arrive |
-| Sun 10-11 12:00–13:00 | Launch 07/08/09; integrate first wave through frozen hooks | Exercise fake-backed admission and real local Git bridge; register concrete repairs |
-| Sun 10-11 13:00–14:00 | Finish 07/08/09 by 13:30; launch 10 | Review manifest equality vs dependency change; UI/CLI walkthrough against actual API |
-| Sun 10-11 14:00–15:00 | Finish 10 by 14:15; start 12 on accepted local integration | Check seven-retry dedupe and provenance rejection; no real history required yet |
-| Sun 10-11 15:00–16:00 | Finish 12 local packaging by 15:45 | Run full local gate plus fixture through actual processes; confirm no fabricated results |
-| Sun 10-11 16:00–17:00 | Bounded seam repairs in owning files | Fresh review of repaired candidate; account/provisioning checkpoint |
-| Sun 10-11 17:00–18:00 | First complete local rehearsal, record failure list | Must demonstrate lease refusal, checker queue, UI; cut extras if any core behavior is still missing |
-| Mon 10-12 09:00–10:00 | Apply highest-priority local repairs | Owner supplies cloud grant if ready; reviewer verifies no out-of-scope migration |
-| Mon 10-12 10:00–11:00 | Authorized operator runs Artifacts disposable smoke; otherwise continue local resilience checks | Verify actual token scopes, push/read, expected-old stale rejection; failed essential capability escalates immediately |
-| Mon 10-12 11:00–12:00 | Deploy accepted candidate if authorized; otherwise freeze local package | Noon account cutoff: missing access is a submission risk, not a fake-backend substitution |
-| Mon 10-12 12:00–13:00 | Real-API UI/CLI rehearsal; finite restart/retry cases | Confirm no self-approval, stale carry, or unresolved-finding landing |
-| Mon 10-12 13:00–14:00 | Owner exports sanitized timeline if available; run replay validator | Missing provenance yields unavailable panel; do not reconstruct events from aggregates |
-| Mon 10-12 14:00–15:00 | Optional mirror dry run and authorized execution | Verify one-way source SHA equality and divergence refusal; cut mirror if grant is absent |
-| Mon 10-12 15:00–16:00 | Full nine-minute local/cloud rehearsal with exact commands | First timing pass; reduce narration/extras if over ten minutes |
-| Mon 10-12 16:00–17:00 | Repair only demonstrated failures; rerun affected checks | Independent review of repair diff and final full local gate |
-| Mon 10-12 17:00–18:00 | Feature freeze; capture backup run and redacted manifest | Preserve evidence with immutable candidate SHA; list known limitations |
+| Sun 10-11 00:45–02:15 | 01 already running; finish contracts, fake, and fresh-worktree gate | Review 01's offline startup and fail-closed seams immediately on candidate |
+| Sun 10-11 02:15–03:15 | On 01 merge, launch 02/03/04/05/06/11 in all six slots | Independently confirm 01's contract and real validation gate; do not dispatch against a failing base |
+| Sun 10-11 03:15–04:15 | First wave continues; integrate completed 06/11 as slots clear | Review lease atomicity, repo bootstrap and runner protocol evidence |
+| Sun 10-11 04:15–05:15 | Launch 07/08/09 immediately into free slots; integrate first wave | Exercise fake-backed admission and local Git bridge; register bounded repairs |
+| Sun 10-11 05:15–06:15 | Continue 07/08/09; launch 10 once 09 lands | Review carry manifest/dependency cases and real API UI/CLI flow |
+| Sun 10-11 06:15–07:15 | Finish 10; begin 12 as soon as 01–11 integration is accepted | Check seven-retry dedupe and evidence provenance |
+| Sun 10-11 07:15–08:15 | 12 packages local scenario, checker cases, and deployment runbook | Run fixture through actual processes and reject fabricated greens |
+| Sun 10-11 08:15–09:15 | Bounded integration repairs in owning files | Fresh review of repaired candidates and local full gate |
+| Sun 10-11 09:15–10:15 | First full local rehearsal; list demonstrated failures | Verify lease refusal, checker queue, UI, and safe negative case |
+| Sun 10-11 10:15–11:15 | Repair highest-priority local failures | Owner completes account/Artifacts access; prepare disposable namespace |
+| Sun 10-11 11:15–12:00 | Run early live create/empty-fork/first-push gate immediately when account exists | **Owner account by noon CT latest**; if empty fork fails, seed a separate repo, push first commit, then fork it |
+| Sun 10-11 12:00–13:00 | Adapt only the documented bootstrap fallback if smoke requires it | Record live responses/OIDs; escalate failure of seeded fork or first push |
+| Sun 10-11 13:00–14:00 | Resume local/cloud integration and bounded repairs | Confirm token scopes and conditional stale-push behavior |
+| Sun 10-11 14:00–15:00 | Deploy accepted candidate if separately authorized | Verify actual backend badge, checked landing SHA, and rollback path |
+| Sun 10-11 15:00–16:00 | Real API UI/CLI rehearsal and restart/retry cases | Confirm no self-approval, stale carry, or unresolved-finding landing |
+| Sun 10-11 16:00–17:00 | Optional mirror dry run and local resilience checks | Verify one-way source SHA equality; cut mirror execution if grant absent |
+| Sun 10-11 17:00–18:00 | Full nine-minute local/cloud rehearsal; capture defects | Reduce narration/extras if over ten minutes |
+| Mon 10-12 09:00–10:00 | Repair only demonstrated failures; rerun affected checks | Independent review of repair diff and integration state |
+| Mon 10-12 10:00–11:00 | Repeat remote smoke on deploy and verify checked promotion | Record provider URL, immutable SHA, token isolation and stale rejection |
+| Mon 10-12 11:00–12:00 | Clean-clone runbook rehearsal | Check fresh `scripts/validate.sh` install and real scenario commands |
+| Mon 10-12 12:00–13:00 | Replay validator and optional report wiring | Owner supplies sanitized timeline export if approved; missing provenance remains unavailable |
+| Mon 10-12 13:00–14:00 | Full local/cloud timed rehearsal | Confirm real failure and survivor landing appear on screen |
+| Mon 10-12 14:00–15:00 | Last bounded seam repairs | Reviewer checks exact candidate and reruns final local gate |
+| Mon 10-12 15:00–16:00 | Freeze feature scope, inspect redacted manifest | Confirm known limitations and account/deployment evidence |
+| Mon 10-12 16:00–17:00 | Backup run and independent end-to-end runbook check | Resolve evidence gaps before freeze |
+| Mon 10-12 17:00–18:00 | **Finish integration by 6 pm CT** and hand off recording candidate | Preserve immutable candidate SHA and review results |
+| Mon 10-12 18:00–21:00 | Optional first recording pass on frozen candidate | Owner may defer capture to Tuesday; no feature work |
 | Tue 10-13 09:00–10:00 | Reconfirm frozen deployment and clean-clone instructions | Final timeline decision: approved export or explicit unavailable panel |
-| Tue 10-13 10:00–11:00 | Capture scenes 0–4, including real failures and survivor landing | Keep backend mode, job input hashes, and canonical SHA visible |
-| Tue 10-13 11:00–12:00 | Capture scenes 5–9 and deployed Artifacts proof | No account: cloud/submission gate remains visibly blocked for owner decision |
-| Tue 10-13 12:00–13:00 | Assemble nine-minute video; trim pauses | Rights/redaction check; default decomp-only numbers and anonymized names |
-| Tue 10-13 13:00–14:00 | Validate clean clone in a fresh directory; final commands/doc links | Run scripts/validate.sh on exact candidate; verify MIT LICENSE and runbook |
-| Tue 10-13 14:00–15:00 | Independent end-to-end reviewer follows runbook | Record actual results and risks; no unsupported performance claims |
-| Tue 10-13 15:00–16:00 | Reserved bounded repair/re-record slot | Re-review changed candidate; no new features |
-| Tue 10-13 16:00–17:00 | Owner prepares video/repo/run-instruction submission bundle | Match video evidence, deployment, and reviewed commit; confirm actual contest form |
-| Tue 10-13 17:00–18:00 | Finish and hand off; owner publishes/submits when authorized | Internal deadline 18:00 CT; preserve Wednesday as contingency |
+| Tue 10-13 10:00–12:00 | Capture scenes 0–9 and deployed Artifacts proof | Keep backend mode, job input hashes, and canonical SHA visible |
+| Tue 10-13 12:00–14:00 | Assemble and trim nine-minute video | Rights/redaction check; default decomp-only numbers and anonymized names |
+| Tue 10-13 14:00–16:00 | Independent recording review; bounded re-record if needed | Match video, deployment, and reviewed commit; no new features |
+| Tue 10-13 16:00–18:00 | Owner prepares submission bundle and verifies form | Tuesday remains rehearsal/recording reserve; supplied 10-14 11:59 pm PDT deadline is unchanged |
 
 ## Cut list
 
@@ -144,6 +149,6 @@ The immutable core is semantic overlap refusal, real checker-backed speculative 
 
 ## Validation and handoff
 
-The current documentation gate is `sh scripts/validate.sh`; it only checks the design-phase repository and cannot prove an implementation. Slice 01 replaces it with typecheck plus tests, and every later slice lists that real gate alongside its targeted test command. Targeted tests are run during work; run the full configured gate once on the final candidate. No cloud credential is required for that gate. Slice 12's live provider smoke is a separate deployment prerequisite, never a silently skipped green test.
+The current documentation gate is `sh scripts/validate.sh`; it only checks the design-phase repository and cannot prove an implementation. Slice 01 replaces it with a fresh-checkout `npm ci --no-audit --no-fund` bootstrap when node_modules is absent, then typecheck plus tests; every later slice lists that real gate alongside its targeted test command. Targeted tests are run during work; run the full configured gate once on the final candidate. No cloud credential is required for that gate. The early account-time Artifacts create/first-push/fork smoke and slice 12's deployed smoke are separate prerequisites, never silently skipped green tests.
 
 Each worker leaves a report with changed files, concrete acceptance evidence, actual command output, separate-review availability, and unimplemented/deferred paths. The launcher creates/publishes candidates under its own rules. The integrator reviews exact candidates and the owner merges. A green worker report alone does not establish acceptance or competition readiness.

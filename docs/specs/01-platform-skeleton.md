@@ -13,6 +13,7 @@ Goal:
     - Prewire the six feature modules and both provider adapters as explicit unavailable placeholders. Prewire local fake selection, role-specific local fixture identities, static assets, alarm dispatch to all modules, and injected clock support for tests. No placeholder may approve a change, resolve a finding, or advance main.
     - The fake persists repo/object fixtures through its injected state store, provides deterministic faults and conditional ref-update test support, and conforms to RepoStorage. It does not claim smart HTTP or real Artifacts compatibility. Document the local bridge replacement seam.
     - scripts/validate.sh is replaced with a fail-fast real gate: npm run typecheck then npm test (non-watch, all implemented local tests). Neither command may succeed with zero tests. A failing type fixture and failing test in an isolated temporary copy demonstrate a nonzero gate result, without changing committed files.
+    - scripts/validate.sh must work in a fresh checkout with no node_modules (the launcher validates in a clean worktree): when node_modules is missing, run `npm ci --no-audit --no-fund` first, then typecheck and test.
     - npm run test:target -- <path> dispatches Workers versus Node test projects by tests/workers/ versus tests/node/. All later directories are included in typecheck and test discovery. package scripts reserve concord, runner, git-bridge, aw-mock, replay, demo, mirror, and deploy:check commands described in DEMO.md, even before their entrypoints exist.
   Inputs:
     - Read docs/ARCHITECTURE.md, docs/DEMO.md, and docs/specs/README.md. This slice implements infrastructure only, not the later features.
@@ -24,42 +25,42 @@ Goal:
   Stop and escalate when:
     - The pinned tooling cannot run local SQLite DO tests, a frozen contract cannot express a required architecture transition, or an account/credential would be needed. Report the exact gap rather than loosening gates or editing another slice's eventual implementation.
 Allowed files:
-  package.json
-  package-lock.json
-  tsconfig.json
-  vitest.config.ts
-  wrangler.jsonc
-  wrangler.local.jsonc
-  worker-configuration.d.ts
-  .gitignore
-  scripts/validate.sh
-  src/worker.ts
-  src/contracts.ts
-  src/auth.ts
-  src/http.ts
-  src/state.ts
-  src/catalog.ts
-  src/coordinator.ts
-  src/storage/interface.ts
-  src/storage/fake.ts
-  src/storage/artifacts.ts
-  src/storage/bridge.ts
-  src/features/repos.ts
-  src/features/leases.ts
-  src/features/queue.ts
-  src/features/runners.ts
-  src/features/findings.ts
-  src/features/verdicts.ts
-  web/index.html
-  web/app.js
-  web/styles.css
-  tests/helpers.ts
-  tests/workers/platform.test.ts
-  tests/workers/storage-contract.test.ts
-  docs/dev.md
+  - package.json
+  - package-lock.json
+  - tsconfig.json
+  - vitest.config.ts
+  - wrangler.jsonc
+  - wrangler.local.jsonc
+  - worker-configuration.d.ts
+  - .gitignore
+  - scripts/validate.sh
+  - src/worker.ts
+  - src/contracts.ts
+  - src/auth.ts
+  - src/http.ts
+  - src/state.ts
+  - src/catalog.ts
+  - src/coordinator.ts
+  - src/storage/interface.ts
+  - src/storage/fake.ts
+  - src/storage/artifacts.ts
+  - src/storage/bridge.ts
+  - src/features/repos.ts
+  - src/features/leases.ts
+  - src/features/queue.ts
+  - src/features/runners.ts
+  - src/features/findings.ts
+  - src/features/verdicts.ts
+  - web/index.html
+  - web/app.js
+  - web/styles.css
+  - tests/helpers.ts
+  - tests/workers/platform.test.ts
+  - tests/workers/storage-contract.test.ts
+  - docs/dev.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/platform.test.ts tests/workers/storage-contract.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/platform.test.ts tests/workers/storage-contract.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: establish Concord local platform and validation gate
 Sandbox: network

@@ -24,14 +24,14 @@ Goal:
   Stop and escalate when:
     - Atomic admission cannot be expressed within RepoCoordinator, a promotion race cannot be fenced, or required hooks differ from the frozen contract. Do not work around a missing review/lease gate with test-only success in production.
 Allowed files:
-  src/features/queue.ts
-  src/queue/plan.ts
-  src/queue/arbitrate.ts
-  tests/workers/queue.test.ts
-  docs/api-queue.md
+  - src/features/queue.ts
+  - src/queue/plan.ts
+  - src/queue/arbitrate.ts
+  - tests/workers/queue.test.ts
+  - docs/api-queue.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/queue.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/queue.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: arbitrate speculative landing with bounded bisection
 Sandbox: on

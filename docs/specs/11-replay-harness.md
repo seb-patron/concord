@@ -22,16 +22,16 @@ Goal:
   Stop and escalate when:
     - Requested public evidence contains proprietary code/identifiers, lacks release approval, or requires guessing historical data. Complete the unavailable-data path and report which evidence the owner must supply.
 Allowed files:
-  replay/main.ts
-  replay/schema.ts
-  replay/simulate.ts
-  replay/report.ts
-  tests/node/replay.test.ts
-  tests/fixtures/replay-synthetic.jsonl
-  docs/replay-export.md
+  - replay/main.ts
+  - replay/schema.ts
+  - replay/simulate.ts
+  - replay/report.ts
+  - tests/node/replay.test.ts
+  - tests/fixtures/replay-synthetic.jsonl
+  - docs/replay-export.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/node/replay.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/node/replay.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: replay collaboration timelines with explicit provenance
 Sandbox: on

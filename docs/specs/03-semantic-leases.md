@@ -21,13 +21,13 @@ Goal:
   Stop and escalate when:
     - A unit cannot be mapped conservatively to an existing footprint, or integration requires a cross-DO transaction. Never weaken overlap checks or introduce a permissive claim fallback.
 Allowed files:
-  src/features/leases.ts
-  src/leases/units.ts
-  tests/workers/leases.test.ts
-  docs/api-leases.md
+  - src/features/leases.ts
+  - src/leases/units.ts
+  - tests/workers/leases.test.ts
+  - docs/api-leases.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/leases.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/leases.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: fence semantic leases and preserve agent intent
 Sandbox: on

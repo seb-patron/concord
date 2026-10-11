@@ -21,13 +21,13 @@ Goal:
   Stop and escalate when:
     - Review scope cannot be established from trusted metadata, a runner result cannot bind the requested delta, or a proposed shortcut would carry on patch-id alone. Preserve review-required rather than guessing.
 Allowed files:
-  src/features/verdicts.ts
-  src/verdicts/manifest.ts
-  tests/workers/verdicts.test.ts
-  docs/api-verdicts.md
+  - src/features/verdicts.ts
+  - src/verdicts/manifest.ts
+  - tests/workers/verdicts.test.ts
+  - docs/api-verdicts.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/verdicts.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/verdicts.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: carry content-bound verdicts with delta evidence
 Sandbox: on

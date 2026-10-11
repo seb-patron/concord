@@ -21,16 +21,16 @@ Goal:
   Stop and escalate when:
     - The API lacks a required projection or action, or live states cannot be represented truthfully. Report the contract gap rather than editing backend/shared files or fabricating display state.
 Allowed files:
-  web/index.html
-  web/app.js
-  web/styles.css
-  web/api.js
-  web/views.js
-  tests/node/ui.test.ts
-  docs/ui.md
+  - web/index.html
+  - web/app.js
+  - web/styles.css
+  - web/api.js
+  - web/views.js
+  - tests/node/ui.test.ts
+  - docs/ui.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/node/ui.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/node/ui.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: explain fleet coordination in the Concord web UI
 Sandbox: on

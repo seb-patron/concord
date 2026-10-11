@@ -21,13 +21,13 @@ Goal:
   Stop and escalate when:
     - Implementing the mapping would require private AW contents, changes to the real launcher, or paid worker invocation. Keep the mock boundary and report the missing future integration contract.
 Allowed files:
-  adapters/aw-mock.ts
-  adapters/aw-schema.ts
-  tests/node/aw-mock.test.ts
-  docs/aw-mock.md
+  - adapters/aw-mock.ts
+  - adapters/aw-schema.ts
+  - tests/node/aw-mock.test.ts
+  - docs/aw-mock.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/node/aw-mock.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/node/aw-mock.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: demonstrate intent-keyed AW to Concord adaptation
 Sandbox: on

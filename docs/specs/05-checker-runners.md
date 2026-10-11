@@ -15,6 +15,7 @@ Goal:
     - Promoter mode never executes source or checkers. It verifies the ticket and commit ancestry, applies an explicit expected-old Git push, and reports readback. Checker processes receive no canonical credentials; promoter credentials are unavailable to checker mode. Disable hooks, ambient Git config, and candidate-controlled executable selection.
     - The explicit bootstrap input (null canonical base) validates the seed tree without composition; its promotion requires absent main instead of a parent ancestry check. Only the owner-authorized stored bootstrap job can use this case. Subsequent ordinary jobs cannot claim an empty base to bypass ancestry.
     - The local allowlist profile schema records checker/oracle/toolchain/environment digests and argv; default demo timeout is 120 seconds, with a configurable 35-minute ceiling for owner profiles. Fake timers test long runs without waiting. Credentials are renewed only while the job fence is valid and are redacted from logs.
+    - For the dispatch-lab profile, validate-stack runs the exact candidate executable under test with a trusted case ID and compares its outputs and table cells against fixed acceptance constants pinned outside candidate forks. The runner refuses unknown/unpinned case IDs and cannot derive expected outputs from candidate-edited TSV rows. A candidate with an in-range table but wrong executable behavior fails and cannot produce a promotion ticket; 12 owns the concrete fixture and negative test.
     - Tests exercise expired claims, wrong profiles, replayed results, subprocess timeout, missing compiler => ENV_ERROR, no credential in child environment, TSV collision, stale expected-old push, and timeout-after-success reconciliation. Use small real temporary Git repos plus fake API transport, not CPU load.
   Inputs:
     - docs/ARCHITECTURE.md local protocol, review manifests, and queue; 01 types and test helpers. Native git and Node 22+ are available. No proprietary compiler or API/model spend is authorized.
@@ -24,18 +25,18 @@ Goal:
   Stop and escalate when:
     - Required result identity cannot be verified, standard Git cannot enforce expected-old writes, or isolation would require ungranted system/account permissions. Do not replace a real check with a scripted green result.
 Allowed files:
-  src/features/runners.ts
-  runner/main.ts
-  runner/execute.ts
-  runner/git.ts
-  runner/profiles.ts
-  runner/units.ts
-  tests/workers/runners.test.ts
-  tests/node/runner.test.ts
-  docs/runner.md
+  - src/features/runners.ts
+  - runner/main.ts
+  - runner/execute.ts
+  - runner/git.ts
+  - runner/profiles.ts
+  - runner/units.ts
+  - tests/workers/runners.test.ts
+  - tests/node/runner.test.ts
+  - docs/runner.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/runners.test.ts tests/node/runner.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/runners.test.ts tests/node/runner.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: execute fenced checker jobs on local runners
 Sandbox: on

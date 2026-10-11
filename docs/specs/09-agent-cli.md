@@ -21,14 +21,14 @@ Goal:
   Stop and escalate when:
     - An essential command requires a missing server contract, canonical write access, or a new dependency outside the frozen package. Do not widen the allowlist or bypass API authorization.
 Allowed files:
-  cli/main.ts
-  cli/client.ts
-  cli/git.ts
-  tests/node/cli.test.ts
-  docs/cli.md
+  - cli/main.ts
+  - cli/client.ts
+  - cli/git.ts
+  - tests/node/cli.test.ts
+  - docs/cli.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/node/cli.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/node/cli.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: drive Concord changes from an agent CLI
 Sandbox: on

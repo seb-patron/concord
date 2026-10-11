@@ -13,29 +13,30 @@ Goal:
     - A change starts draft with one candidate fork. Its intent key is stable across base changes; identical active task submissions return the same change. Reusing a key with different intent content conflicts; terminal tasks require an explicit attempt number.
     - Publish resolves the registered candidate branch, verifies head and base existence and expected revision, and schedules inspect-candidate. Only trusted inspection evidence transitions to ready; unknown units and missing objects block it. Head changes invalidate prior queue generation and review evidence. Closing cannot bypass promotion freeze.
     - Artifacts adapter uses only documented methods, disposable repo handles, exact returned remotes, bounded polling of provisioning status, short token TTLs, and immediate revocation of unused initial tokens. An agent never obtains a canonical write token or another change's fork token.
+    - As soon as the owner's account exists, the authorized operator runs the early live Artifacts smoke in ARCHITECTURE.md: create an empty disposable repo, attempt an empty-source fork, push/read back the first seed commit to that fork, and record API responses/OIDs. If empty-source fork fails, create a separate disposable seed repo, push/read back its first commit, then fork it and verify the seed; use that fork as the seed source and verify checked absent-ref bootstrap once integrated. Do not wait for slice 12 to discover an unsupported sequence. [Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) documents create/fork; [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/) documents push.
     - The loopback Git bridge implements RepoStorage using temporary local bare repos and fixed argv native Git. It authenticates bridge calls, rejects traversal/unknown storage names, binds only 127.0.0.1, and returns file:// remotes only in local mode. It supports branch/ref reads, immutable object reads, fork copies, and restart persistence under its supplied data directory. The Worker bridge adapter handles this HTTP boundary without Node APIs.
-    - Contract tests run create/fork/read/resolve cases against the in-memory fake and local bridge; provider-shaped stubs verify actual binding method/result shapes. Tests cover repeat publication, changed-base dedupe, nonexistent SHA, delayed fork, lost response, and wrong-principal token issuance. Real remote smoke is explicitly deferred to 12.
+    - Contract tests run create/fork/read/resolve cases against the in-memory fake and local bridge; provider-shaped stubs verify actual binding method/result shapes. Tests cover repeat publication, changed-base dedupe, nonexistent SHA, delayed fork, lost response, and wrong-principal token issuance. The account-time create/first-push/fork gate above runs before 12; deployed end-to-end smoke remains in 12.
   Inputs:
     - docs/ARCHITECTURE.md RepoStorage, data model, HTTP, auth, and Open risks; frozen contracts from 01. Read the official Artifacts URLs cited there before implementing the adapter.
-    - Branch creation is native Git push to an owned candidate fork followed by API registration. Do not invent a binding branch-write or merge method. Main is advanced only by a promoter job.
+    - Branch creation is native Git push to an owned candidate fork followed by API registration. For empty-repo bootstrap, the early live smoke determines whether the candidate fork can come from the empty canonical repo or must come from a separately created, first-commit-seeded repo. Do not invent a binding branch-write or merge method. Main is advanced only by a promoter job.
     - The local bridge is a labelled fake backend for development, not an alternative deployed platform. Maximum fixture repo size is 10 MB. No private repository is imported.
   Deliverables:
     - Repo/change module, binding and bridge adapters, bridge process, lifecycle/contract tests, and a repo API runbook.
   Stop and escalate when:
     - Artifacts lacks a required operation or conditional Git push is disproved; record evidence and proposed alternative in the report. Do not silently replace Artifacts hosting. Escalate contract changes to the integrator.
 Allowed files:
-  src/features/repos.ts
-  src/repos/model.ts
-  src/storage/artifacts.ts
-  src/storage/bridge.ts
-  local/git-bridge.ts
-  tests/workers/repos.test.ts
-  tests/workers/artifacts-adapter.test.ts
-  tests/node/git-bridge.test.ts
-  docs/api-repos.md
+  - src/features/repos.ts
+  - src/repos/model.ts
+  - src/storage/artifacts.ts
+  - src/storage/bridge.ts
+  - local/git-bridge.ts
+  - tests/workers/repos.test.ts
+  - tests/workers/artifacts-adapter.test.ts
+  - tests/node/git-bridge.test.ts
+  - docs/api-repos.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/repos.test.ts tests/workers/artifacts-adapter.test.ts tests/node/git-bridge.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/repos.test.ts tests/workers/artifacts-adapter.test.ts tests/node/git-bridge.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: publish Artifacts-backed Concord changes
 Sandbox: network

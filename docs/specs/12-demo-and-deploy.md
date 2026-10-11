@@ -8,11 +8,11 @@ Goal:
   Outcome: Package the owned synthetic repository, scenario driver, optional one-way human mirror, and deployment preflight so the demo can be repeated from a clean clone.
   Done when:
     - demo/main.ts implements seed, scene <name>, inspect, and preflight commands exactly as DEMO.md. It uses public APIs/CLI, real native Git commits, distinct fixture identities, and a real pinned checker. It never writes directly into coordinator state or injects fabricated PASS results. A --run identifier isolates every rehearsal.
-    - The public MIT fixture is dispatch-lab with the exact TSV rows, golden checker, trusted unit/dependency policy, changes, findings, contest, and safe default flags specified in DEMO.md. Its checksum/logic are inspectable. Runtime IDs/OIDs are captured in a manifest rather than hard-coded as fake SHAs.
-    - Local end-to-end test launches the bridge, Worker, bounded checker/promoter processes, and scenario driver with deterministic synchronization barriers. It demonstrates conflict refusal, disjoint work, failing-singleton isolation with surviving changes landed, full repair, verdict carry/invalidation, contest winner, and seven-attempt dedupe. All child processes are waited for or stopped in finally blocks.
+    - The public MIT fixture is dispatch-lab with the exact TSV rows, executable dispatch behavior, fixed trusted acceptance matrix, checker, unit/dependency policy, changes, findings, contest, and safe default flags specified in DEMO.md. The checker invokes the candidate executable and compares outputs and row values with literal case constants held outside candidate forks; no expected value is calculated from candidate-edited data. Case selection is trusted and pinned to the job profile. Runtime IDs/OIDs are captured in a manifest rather than hard-coded as fake SHAs.
+    - Local end-to-end test launches the bridge, Worker, bounded checker/promoter processes, and scenario driver with deterministic synchronization barriers. It demonstrates conflict refusal, disjoint work, failing-singleton isolation with surviving changes landed, full repair, verdict carry/invalidation, contest winner, and seven-attempt dedupe. It also proves a wrong in-range executable result and an in-range unintended table edit fail the pinned case without promotion. All child processes are waited for or stopped in finally blocks.
     - GitHub mirror command defaults to --dry-run, reads the confirmed canonical SHA, and pushes only main to an explicitly owner-supplied demo remote when --execute is authorized. No reverse sync, force push, real-project mirror, PR API, or token in URL/log is allowed. Divergence blocks mirroring. Its failure cannot roll back a Concord merge.
     - deploy:check --local validates config, absence of fixture credentials in production, safe content flags, and local readiness. --remote checks account/Artifacts availability only with owner-supplied credentials. Local absence of account reports remote deployment unavailable, not local failure. Production mode cannot use the fake bridge.
-    - Deployment runbook gives exact dry-run, secrets provisioning, deploy, smoke, and rollback commands. Remote smoke proves create/fork/push/read, stale expected-old rejection, token isolation, and one checked canonical landing, records provider version/URL and immutable SHA, and never substitutes a local fake for deployed evidence.
+    - Deployment runbook references the early account-time Artifacts create/empty-fork/first-push gate from 02 and its separately created, first-commit-seeded repo fallback. It gives exact dry-run, secrets provisioning, deploy, smoke, and rollback commands. Remote smoke repeats create/fork/push/read, proves stale expected-old rejection, token isolation, and one checked canonical landing, records provider version/URL and immutable SHA, and never substitutes a local fake for deployed evidence.
     - README and DEMO are reconciled with actual commands and honest status; default CONCORD_SHOW_DECOMPILED_C=0 excludes all C/proprietary artifacts. No real historical comparison is claimed without 11's approved input. Account-free local acceptance is complete even if the owner has not provisioned cloud access.
   Inputs:
     - docs/ARCHITECTURE.md, DEMO.md, JUDGING.md, and slice runbooks; integrated implementations 01–11. No Cloudflare account or GitHub mirror destination is assumed.
@@ -23,27 +23,28 @@ Goal:
   Stop and escalate when:
     - Live Artifacts disproves a required capability, credentials/spend/publication are not granted for a requested remote action, code rights are unclear, or frozen seams prevent local integration. Keep completed local artifacts and report the exact owner decision. Missing optional historical export or account does not prevent local packaging acceptance.
 Allowed files:
-  demo/main.ts
-  demo/scenarios.ts
-  demo/dispatch-lab/families.tsv
-  demo/dispatch-lab/README.md
-  demo/checker.mjs
-  demo/profile.json
-  demo/units.json
-  demo/aw-task.json
-  deploy/preflight.ts
-  deploy/mirror.ts
-  tests/node/demo.test.ts
-  tests/node/mirror.test.ts
-  tests/node/deploy.test.ts
-  wrangler.jsonc
-  docs/deploy.md
-  docs/DEMO.md
-  README.md
+  - demo/main.ts
+  - demo/scenarios.ts
+  - demo/dispatch-lab/families.tsv
+  - demo/dispatch-lab/dispatch.mjs
+  - demo/dispatch-lab/README.md
+  - demo/checker.mjs
+  - demo/profile.json
+  - demo/units.json
+  - demo/aw-task.json
+  - deploy/preflight.ts
+  - deploy/mirror.ts
+  - tests/node/demo.test.ts
+  - tests/node/mirror.test.ts
+  - tests/node/deploy.test.ts
+  - wrangler.jsonc
+  - docs/deploy.md
+  - docs/DEMO.md
+  - README.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/node/demo.test.ts tests/node/mirror.test.ts tests/node/deploy.test.ts
-  npm run deploy:check -- --local
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/node/demo.test.ts tests/node/mirror.test.ts tests/node/deploy.test.ts
+  - npm run deploy:check -- --local
+  - sh scripts/validate.sh
 Commit message: feat: package reproducible Concord demo and deployment
 Sandbox: network

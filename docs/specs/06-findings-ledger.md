@@ -21,13 +21,13 @@ Goal:
   Stop and escalate when:
     - Stable identity or finding-set version cannot survive a revision using the frozen contract. Do not use head SHA as finding identity or silently mark an unattributable item resolved.
 Allowed files:
-  src/features/findings.ts
-  src/findings/round.ts
-  tests/workers/findings.test.ts
-  docs/api-findings.md
+  - src/features/findings.ts
+  - src/findings/round.ts
+  - tests/workers/findings.test.ts
+  - docs/api-findings.md
 Validation:
-  npm run typecheck
-  npm run test:target -- tests/workers/findings.test.ts
-  sh scripts/validate.sh
+  - npm run typecheck
+  - npm run test:target -- tests/workers/findings.test.ts
+  - sh scripts/validate.sh
 Commit message: feat: preserve findings through atomic repair rounds
 Sandbox: on
