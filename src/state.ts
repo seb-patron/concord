@@ -1,4 +1,4 @@
-import type { Event, FeatureModule, Migration, ModuleContext, PromotionFreezeProvider, TrustedConfiguration } from './contracts';
+import type { Event, FeatureModule, Migration, ModuleContext, Principal, PromotionFreezeProvider, TrustedConfiguration } from './contracts';
 
 /** Queue's slice-01 placeholder until its promotion ticket state exists. */
 export const unfrozenPromotion: PromotionFreezeProvider = () => ({ frozen: false });
@@ -62,9 +62,20 @@ export function eventSequence(sql: SqlStorage): number {
   return sql.exec<{ sequence: number }>('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM concord_events').toArray()[0].sequence;
 }
 
-export function eventsAfter(sql: SqlStorage, after: number, limit = 100): Event[] {
+export function eventsAfter(sql: SqlStorage, after: number, limit = 100, scope?: Principal): Event[] {
+  const restricted = scope?.repoIds !== undefined && scope.repoIds !== '*';
+  const filter = restricted ? `AND (
+      (kind LIKE 'repo.%' AND EXISTS (
+        SELECT 1 FROM json_each(?) AS allowed WHERE allowed.value = json_extract(concord_events.related_ids, '$[0]')
+      )) OR (kind LIKE 'principal.%' AND EXISTS (
+        SELECT 1 FROM json_each(concord_events.related_ids) AS related
+        WHERE related.value = ? OR related.value IN (SELECT id FROM principals_records WHERE parent_id = ?)
+      ))
+    )` : '';
   return sql.exec<{ sequence: number; kind: string; actor_id: string; timestamp: number; version: number; related_ids: string; payload: string }>(
-    'SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload FROM concord_events WHERE sequence > ? ORDER BY sequence LIMIT ?', after, Math.min(101, limit),
+    `SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload FROM concord_events WHERE sequence > ? ${filter} ORDER BY sequence LIMIT ?`,
+    ...(restricted ? [after, JSON.stringify(scope.repoIds), scope.principalId, scope.principalId, Math.min(101, limit)]
+      : [after, Math.min(101, limit)]),
   ).toArray().map(row => ({ sequence: row.sequence, kind: row.kind, actorId: row.actor_id, timestamp: row.timestamp, version: row.version, relatedIds: JSON.parse(row.related_ids) as string[], payload: JSON.parse(row.payload) as Record<string, unknown> }));
 }
 

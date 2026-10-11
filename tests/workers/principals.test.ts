@@ -17,6 +17,14 @@ afterEach(() => {
 const fetchApi = (request: Request) => worker.fetch(request, env);
 const mint = (body: Record<string, unknown>, key = crypto.randomUUID(), token = 'local-agent-a') =>
   fetchApi(mutation('/v1/principals', body, key, token));
+async function scopedViewerParent(): Promise<string> {
+  const secret = `scoped-viewer-${crypto.randomUUID()}`;
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret))),
+    byte => byte.toString(16).padStart(2, '0')).join('');
+  runtime.AUTH_TOKENS = JSON.stringify({ [hash]: { tenantId: 'local', principalId: 'scoped-viewer',
+    roles: ['agent', 'viewer'], repoIds: ['alpha'], expiresAt: Date.now() + 60_000 } });
+  return secret;
+}
 
 describe('delegated principals', () => {
   it('skips the catalog for tokens outside the exact delegated format', async () => {
@@ -92,6 +100,66 @@ describe('delegated principals', () => {
     expect((await fetchApi(apiRequest('/v1/events', 'local-agent-a'))).status).toBe(403);
     expect((await fetchApi(apiRequest('/v1/events?cursor=bad!', 'local-viewer'))).status).toBe(400);
     expect((await fetchApi(apiRequest('/v1/events?limit=101', 'local-viewer'))).status).toBe(400);
+  });
+
+  it('filters catalog events before paging and hides storage names from scoped viewers', async () => {
+    const before = await responseBody(await fetchApi(apiRequest('/v1/events')));
+    const cursor = btoa(String(before.eventSeq));
+    const parent = await scopedViewerParent();
+    const minted = await mint({ roles: ['viewer'], repoIds: ['alpha'], ttlSeconds: 30 }, crypto.randomUUID(), parent);
+    expect(minted.status).toBe(201);
+    const viewer = (await responseBody(minted)).data;
+    for (const name of ['beta', 'alpha']) {
+      const created = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, crypto.randomUUID()));
+      expect([201, 202]).toContain(created.status);
+    }
+    const visibleRepos = (await responseBody(await fetchApi(apiRequest('/v1/repos', viewer.token)))).data.items;
+    expect(visibleRepos.map((repo: { repoId: string }) => repo.repoId)).toEqual(['alpha']);
+
+    const ownerEvents = (await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}`)))).data.items;
+    const betaEvent = ownerEvents.find((event: { kind: string; relatedIds: string[] }) =>
+      event.kind === 'repo.provisioning' && event.relatedIds.includes('beta'));
+    expect(betaEvent?.payload.storageName).toMatch(/^concord-r-/);
+    const allViewerEvents = (await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}`, 'local-viewer')))).data.items;
+    expect(allViewerEvents.some((event: { relatedIds: string[] }) => event.relatedIds.includes('beta'))).toBe(true);
+    expect(JSON.stringify(allViewerEvents)).not.toContain(betaEvent.payload.storageName);
+    expect(JSON.stringify(allViewerEvents)).not.toContain('storageName');
+
+    const first = await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}&limit=1`, viewer.token)));
+    expect(first.data.items).toHaveLength(1);
+    expect(first.data.items[0]).toMatchObject({ kind: 'principal.minted', relatedIds: [viewer.id] });
+    expect(first.data.nextCursor).toBeTruthy();
+    const second = await responseBody(await fetchApi(apiRequest(
+      `/v1/events?cursor=${encodeURIComponent(first.data.nextCursor)}&limit=1`, viewer.token)));
+    expect(second.data.items).toHaveLength(1);
+    expect(second.data.items[0]).toMatchObject({ kind: 'repo.provisioning', relatedIds: ['alpha'] });
+    expect(second.data.items[0].sequence).toBeGreaterThan(first.data.items[0].sequence);
+    expect(second.data.nextCursor).toBeTruthy();
+    const third = await responseBody(await fetchApi(apiRequest(
+      `/v1/events?cursor=${encodeURIComponent(second.data.nextCursor)}`, viewer.token)));
+    const visible = [...first.data.items, ...second.data.items, ...third.data.items];
+    expect(visible.every((event: { relatedIds: string[] }) => !event.relatedIds.includes('beta'))).toBe(true);
+    expect(JSON.stringify(visible)).not.toContain(betaEvent.payload.storageName);
+    expect(JSON.stringify(visible)).not.toContain('storageName');
+    expect(third.data.nextCursor).toBeNull();
+  });
+
+  it('includes principal events for a scoped viewer and principals it minted', async () => {
+    const secret = await scopedViewerParent();
+    const before = await responseBody(await fetchApi(apiRequest('/v1/events', secret)));
+    const cursor = btoa(String(before.eventSeq));
+    const own = await mint({ roles: ['viewer'], repoIds: ['alpha'], ttlSeconds: 30 }, crypto.randomUUID(), secret);
+    expect(own.status).toBe(201);
+    const ownId = (await responseBody(own)).data.id;
+    const other = await mint({ roles: ['agent'], repoIds: ['beta'] }, crypto.randomUUID(), 'local-agent-a');
+    expect(other.status).toBe(201);
+    const otherId = (await responseBody(other)).data.id;
+    const revoked = await fetchApi(apiRequest(`/v1/principals/${ownId}`, secret, { method: 'DELETE' }));
+    expect(revoked.status).toBe(200);
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}`, secret)))).data.items;
+    expect(events.filter((event: { relatedIds: string[] }) => event.relatedIds.includes(ownId))
+      .map((event: { kind: string }) => event.kind)).toEqual(['principal.minted', 'principal.revoked']);
+    expect(events.some((event: { relatedIds: string[] }) => event.relatedIds.includes(otherId))).toBe(false);
   });
 
   it('refuses role, repository, TTL, and parent-expiry escalation', async () => {

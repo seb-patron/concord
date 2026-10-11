@@ -85,8 +85,22 @@ export class TenantCatalog extends DurableObject<Env> {
         const limitRaw = url.searchParams.get('limit');
         const limit = limitRaw === null ? 100 : Number(limitRaw);
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400, 'INVALID_LIMIT', 'Limit must be 1 to 100');
-        const page = eventsAfter(context.sql, after, limit + 1);
-        const items = page.slice(0, limit);
+        const page = eventsAfter(context.sql, after, limit + 1, principal);
+        const visiblePrincipalIds = principal.repoIds === '*' ? null : new Set([
+          principal.principalId,
+          ...context.sql.exec<{ id: string }>('SELECT id FROM principals_records WHERE parent_id = ?', principal.principalId)
+            .toArray().map(row => row.id),
+        ]);
+        const items = page.slice(0, limit).map(event => {
+          const payload = { ...event.payload };
+          if (!principal.roles.includes('owner')) {
+            for (const key of Object.keys(payload)) if (/storageName$/i.test(key)) delete payload[key];
+          }
+          if (visiblePrincipalIds && event.kind.startsWith('principal.')) {
+            return { ...event, relatedIds: event.relatedIds.filter(id => visiblePrincipalIds.has(id)), payload };
+          }
+          return { ...event, payload };
+        });
         const nextCursor = page.length > limit ? encodeCursor(items[items.length - 1].sequence) : null;
         return json({ items, nextCursor }, context.version(), eventSequence(context.sql));
       }
