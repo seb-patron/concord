@@ -44,7 +44,7 @@ describe('repository and change lifecycle', () => {
     expect(ids(['file:dispatch.mjs', 'row:families:gamma'], 'unitKeys')).toEqual(['file:dispatch.mjs', 'row:families:gamma']);
   });
 
-  it('creates a visible repo, allocates an owner seed fork, and records one bootstrap request', async () => {
+  it('takes an owner seed through real queue and runner scheduling to canonical main', async () => {
     const repo = await create('seed_case');
     expect(repo).toMatchObject({ repoId: 'seed_case', status: 'ready', observedCanonicalOid: null });
     const listing = await fetchApi(apiRequest('/v1/repos'));
@@ -81,32 +81,134 @@ describe('repository and change lifecycle', () => {
     expect(registered.status).toBe(201);
     const bootstrapBody = { expectedVersion: 2, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a, policyId: 'local-demo', profileId: 'local-demo' };
     const bootstrap = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', bootstrapBody, 'bootstrap-seed'));
-    expect(bootstrap.status).toBe(409);
-    expect((await responseBody(bootstrap)).error.code).toBe('INVALID_JOB');
+    expect(bootstrap.status).toBe(202);
+    const bootstrapResult = await responseBody(bootstrap);
+    expect(bootstrapResult.data).toMatchObject({ state: 'requested', jobId: expect.any(String) });
     const snapshot = await fetchApi(apiRequest('/v1/repos/seed_case/snapshot'));
-    expect((await responseBody(snapshot)).data.projections.repos.bootstrap).toMatchObject({ changeId: change.changeId, headOid: a, status: 'blocked' });
-    const retry = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', { ...bootstrapBody, expectedVersion: 3 }, 'bootstrap-retry'));
-    expect(retry.status).toBe(409);
-    expect((await responseBody(retry)).error.code).toBe('INVALID_JOB');
+    const snapshotResult = await responseBody(snapshot);
+    expect(snapshotResult.data.projections.repos.bootstrap).toMatchObject({ changeId: change.changeId, headOid: a, status: 'requested' });
+    const retry = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', { ...bootstrapBody, expectedVersion: snapshotResult.version }, 'bootstrap-retry'));
+    expect(retry.status).toBe(202);
+    expect((await responseBody(retry)).data).toEqual(bootstrapResult.data);
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:seed_case'));
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      }, 'seed_case');
+      expect(context.readChange?.(change.changeId)).toMatchObject({ status: 'eligible', value: {
+        candidateStorageName: change.candidateStorageName, canonicalStorageName: repo.canonicalStorageName,
+        scratchStorageName: snapshotResult.data.projections.repos.bootstrap.scratchStorageName,
+        policyId: 'local-demo', profileId: 'local-demo', intentKey: 'seed',
+      } });
+    });
+    const originalInfo = FakeStorage.prototype.info;
+    const localRemotes = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const info = await originalInfo.call(this, name);
+      return info ? { ...info, remote: `file:///${name}` } : null;
+    });
+    try {
+      await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    } finally {
+      localRemotes.mockRestore();
+    }
+    const scheduled = (await responseBody(await fetchApi(apiRequest('/v1/repos/seed_case/snapshot')))).data.projections;
+    expect(scheduled.queue.bootstrap).toMatchObject({ state: 'checking' });
+    expect(scheduled.runners.jobs).toHaveLength(1);
+    expect(scheduled.runners.jobs[0]).toMatchObject({ bootstrap: true, ownerAuthorized: true, canonicalBaseOid: null,
+      scratchStorageName: snapshotResult.data.projections.repos.bootstrap.scratchStorageName });
+    expect(scheduled.runners.jobs[0].jobId).toBe(bootstrapResult.data.jobId);
+    expect(scheduled.runners.jobs[0].expectedRefs).toEqual({
+      [repo.canonicalStorageName]: null,
+      [change.candidateStorageName]: a,
+      [scheduled.runners.jobs[0].scratchStorageName]: null,
+    });
     const secondSeed = await fetchApi(mutation('/v1/repos/seed_case/changes', {
       intentKey: 'seed-two', intentText: 'another initializer', baseOid: null, branch: 'refs/heads/seed-two', unitKeys: [], dependencyChangeIds: [],
     }, 'seed-two-change'));
     expect(secondSeed.status).toBe(201);
-    const rival = (await responseBody(secondSeed)).data;
+    const secondSeedResult = await responseBody(secondSeed);
+    const rival = secondSeedResult.data;
     await fake('seed_case', provider => {
       provider.putCommit(rival.candidateStorageName, { oid: c, treeOid: b, parents: [] });
       provider.conditionalUpdateRef(rival.candidateStorageName, 'refs/heads/seed-two', null, c);
     });
     const rivalBranch = await fetchApi(mutation('/v1/repos/seed_case/branches', {
-      expectedVersion: 4, storageName: rival.candidateStorageName, ref: 'refs/heads/seed-two', observedHead: c, ownerId: 'owner',
+      expectedVersion: secondSeedResult.version, storageName: rival.candidateStorageName, ref: 'refs/heads/seed-two', observedHead: c, ownerId: 'owner',
     }, 'register-rival'));
     expect(rivalBranch.status).toBe(201);
+    const rivalBranchResult = await responseBody(rivalBranch);
     const second = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', {
-      expectedVersion: 5, seedStorageName: rival.candidateStorageName, seedRef: 'refs/heads/seed-two', headOid: c,
+      expectedVersion: rivalBranchResult.version, seedStorageName: rival.candidateStorageName, seedRef: 'refs/heads/seed-two', headOid: c,
       policyId: 'local-demo', profileId: 'local-demo',
     }, 'second-bootstrap'));
     expect(second.status).toBe(409);
     expect((await responseBody(second)).error.code).toBe('BOOTSTRAP_PENDING');
+
+    const checkerPoll = await fetchApi(mutation('/v1/repos/seed_case/runner/poll', {
+      runnerId: 'seed-checker', role: 'checker', supportedProfileDigests: [scheduled.runners.jobs[0].profileDigest],
+    }, 'seed-checker-poll', 'local-checker'));
+    expect(checkerPoll.status).toBe(200);
+    const checkedJob = (await responseBody(checkerPoll)).data.job;
+    expect(checkedJob.jobId).toBe(bootstrapResult.data.jobId);
+    await fake('seed_case', async provider => {
+      expect(await provider.resolveRef(change.candidateStorageName, 'refs/heads/seed')).toBe(a);
+      expect(await provider.readCommit(change.candidateStorageName, a)).toMatchObject({ treeOid: b, parents: [] });
+    });
+    await fake('seed_case', provider => {
+      provider.putCommit(checkedJob.scratchStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(checkedJob.scratchStorageName, checkedJob.scratchRef, null, a)).toBe(true);
+    });
+    const checkedInput = {
+      kind: 'validate-stack', jobId: checkedJob.jobId, attempt: checkedJob.attempt, fence: checkedJob.fence,
+      inputDigest: checkedJob.inputDigest, sourceTreeOid: b, checkerDigest: checkedJob.checkerDigest,
+      toolchainDigest: checkedJob.toolchainDigest, oracleDigest: checkedJob.oracleDigest,
+      environmentDigest: checkedJob.environmentDigest, durationMs: 1, log: '', outcome: 'PASS',
+      composedOid: a, composedTreeOid: b,
+      gateResults: checkedJob.unitPolicy.acceptance.gates.map((gate: { id: string; requiredOutcome: string }) => ({
+        gateId: gate.id, outcome: gate.requiredOutcome,
+      })), score: null, bootstrap: true, canonicalBaseOid: null,
+    };
+    const checkedDigest = await canonicalDigest(checkedInput);
+    const checkedResult = await fetchApi(mutation(`/v1/repos/seed_case/jobs/${checkedJob.jobId}/result`, {
+      attempt: checkedJob.attempt, fence: checkedJob.fence, inputDigest: checkedJob.inputDigest,
+      resultDigest: checkedDigest, result: { ...checkedInput, resultDigest: checkedDigest },
+    }, 'seed-check-result', 'local-checker'));
+    expect(checkedResult.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const ticketed = (await responseBody(await fetchApi(apiRequest('/v1/repos/seed_case/snapshot')))).data.projections;
+    expect(ticketed.queue.promotion).toMatchObject({ state: 'pending', bootstrap: true, checkedNewOid: a });
+    const promotionJob = ticketed.runners.jobs.find((job: { kind: string }) => job.kind === 'promote');
+    expect(promotionJob.expectedRefs).toEqual({ [repo.canonicalStorageName]: null, [checkedJob.scratchStorageName]: a });
+    const promoterPoll = await fetchApi(mutation('/v1/repos/seed_case/runner/poll', {
+      runnerId: 'seed-promoter', role: 'promoter', supportedProfileDigests: [promotionJob.profileDigest],
+    }, 'seed-promoter-poll', 'local-promoter'));
+    expect(promoterPoll.status).toBe(200);
+    const claimedPromotion = (await responseBody(promoterPoll)).data.job;
+    expect(claimedPromotion.jobId).toBe(promotionJob.jobId);
+    await fake('seed_case', provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a)).toBe(true);
+    });
+    const promotedInput = {
+      kind: 'promote', jobId: claimedPromotion.jobId, attempt: claimedPromotion.attempt, fence: claimedPromotion.fence,
+      inputDigest: claimedPromotion.inputDigest, sourceTreeOid: null, checkerDigest: claimedPromotion.checkerDigest,
+      toolchainDigest: claimedPromotion.toolchainDigest, oracleDigest: claimedPromotion.oracleDigest,
+      environmentDigest: claimedPromotion.environmentDigest, durationMs: 1, log: '', outcome: 'APPLIED',
+      observedCanonicalOid: a,
+    };
+    const promotedDigest = await canonicalDigest(promotedInput);
+    const promotedResult = await fetchApi(mutation(`/v1/repos/seed_case/jobs/${claimedPromotion.jobId}/result`, {
+      attempt: claimedPromotion.attempt, fence: claimedPromotion.fence, inputDigest: claimedPromotion.inputDigest,
+      resultDigest: promotedDigest, result: { ...promotedInput, resultDigest: promotedDigest },
+    }, 'seed-promotion-result', 'local-promoter'));
+    expect(promotedResult.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const merged = (await responseBody(await fetchApi(apiRequest('/v1/repos/seed_case/snapshot')))).data.projections;
+    expect(merged.queue.promotion).toMatchObject({ state: 'applied', checkedNewOid: a });
+    expect(merged.queue.bootstrap.state).toBe('merged');
+    await fake('seed_case', async provider => {
+      expect(await provider.resolveRef(repo.canonicalStorageName, 'refs/heads/main')).toBe(a);
+    });
   });
 
   it('records only one bootstrap request from two concurrent owner initializers', async () => {
@@ -138,11 +240,14 @@ describe('repository and change lifecycle', () => {
       expectedVersion: 4, seedStorageName: draft.candidateStorageName, seedRef: draft.ref,
       headOid: index === 0 ? a : c, policyId: 'local-demo', profileId: 'local-demo',
     }, `race-${index}`))));
-    expect(responses.map(response => response.status).sort()).toEqual([409, 409]);
-    expect((await Promise.all(responses.map(response => responseBody(response)))).map(body => body.error.code).sort()).toEqual(['INVALID_JOB', 'STALE_VERSION']);
+    expect(responses.map(response => response.status).sort()).toEqual([202, 409]);
+    const bodies = await Promise.all(responses.map(response => responseBody(response)));
+    expect(bodies.filter(body => body.error).map(body => body.error.code)).toEqual(['STALE_VERSION']);
     const snapshot = await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/snapshot'));
-    const bootstrap = (await responseBody(snapshot)).data.projections.repos.bootstrap;
-    expect(drafts.map(draft => draft.changeId)).toContain(bootstrap.changeId);
+    const projections = (await responseBody(snapshot)).data.projections;
+    const bootstrap = projections.repos.bootstrap;
+    expect(bootstrap).toMatchObject({ changeId: drafts[0].changeId, status: 'requested' });
+    expect(projections.queue.bootstrap).toMatchObject({ state: 'waiting' });
   });
 
   it('keeps one scratch intent and job while bootstrap storage is provisioning', async () => {
@@ -195,10 +300,10 @@ describe('repository and change lifecycle', () => {
       expect(names).toEqual([`concord-s-${pending.jobId}`]);
       ready = true;
       const third = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-ready'));
-      expect(third.status).toBe(409);
-      expect((await responseBody(third)).error.code).toBe('INVALID_JOB');
+      expect(third.status).toBe(202);
+      expect((await responseBody(third)).data).toMatchObject({ state: 'requested', jobId: pending.jobId });
       const finished = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos;
-      expect(finished.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'blocked' });
+      expect(finished.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'requested' });
       expect(finished.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'observed' }));
       expect(names).toEqual([`concord-s-${pending.jobId}`]);
     } finally {

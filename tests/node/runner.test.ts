@@ -285,6 +285,42 @@ export function attemptBudget(family) {
     });
   });
 
+  it('checks the canonical commit and tree for a base-check job', async () => {
+    await gitFixture(async ({ repo, canonical, scratch, base }) => {
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job: Job = { ...jobBase(remotes), kind: 'validate-stack', canonicalBaseOid: base,
+        candidates: [], baseCheck: true, bootstrap: false, stackId: 'stack', scratchStorageName: 'scratch',
+        scratchRef: 'refs/heads/check', expectedRefs: { canonical: base, scratch: null } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
+        executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'PASS', composedOid: base,
+        composedTreeOid: await git(repo, ['rev-parse', base + '^{tree}']) });
+      expect(await refOid(repo, remotes.scratch, 'refs/heads/check')).toBe(base);
+    });
+  });
+
+  it('rejects a same-tree scratch descendant during base-check reconciliation', async () => {
+    await gitFixture(async ({ repo, canonical, scratch, base }) => {
+      await git(repo, ['commit', '--allow-empty', '--quiet', '-m', 'descendant'], 30_000, commitEnv);
+      const descendant = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', scratch, 'HEAD:refs/heads/check']);
+      expect(await git(repo, ['rev-parse', descendant + '^{tree}'])).toBe(await git(repo, ['rev-parse', base + '^{tree}']));
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job: Job = { ...jobBase(remotes), kind: 'validate-stack', canonicalBaseOid: base,
+        candidates: [], baseCheck: true, bootstrap: false, stackId: 'stack', scratchStorageName: 'scratch',
+        scratchRef: 'refs/heads/check', expectedRefs: { canonical: base, scratch: null } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
+        executable: process.execPath, argv: ['-e', 'process.exit(1)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'ENV_ERROR', composedOid: null });
+      expect(result.log).toContain('SCRATCH_OLD_REF');
+      expect(await refOid(repo, remotes.scratch, 'refs/heads/check')).toBe(descendant);
+    });
+  });
+
   it('composes disjoint TSV candidates and blocks a divergent same-row candidate', async () => {
     await temporaryWork(async dir => {
       const canonical = join(dir, 'canonical.git');

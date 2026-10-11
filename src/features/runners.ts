@@ -71,10 +71,11 @@ function immutableJob(job: Job): string {
   const { state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId, expiresAt: _expiresAt, version: _version, ...input } = job;
   return stableJson(input);
 }
-function canonicalInput(job: Job): string {
+export function jobInput<T extends { inputDigest?: unknown; state: unknown; attempt: unknown; fence: unknown;
+  runnerId: unknown; expiresAt: unknown; version: unknown }>(job: T) {
   const { inputDigest: _inputDigest, state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId,
     expiresAt: _expiresAt, version: _version, ...input } = job;
-  return stableJson(input);
+  return input;
 }
 function validManifest(job: Job, manifest: ReviewManifest | null): manifest is ReviewManifest {
   return !!manifest && typeof manifest === 'object' && Array.isArray(manifest.changedUnits) &&
@@ -142,7 +143,9 @@ function validJob(c: ModuleContext, job: Job): boolean {
     const canonical = Object.entries(job.expectedRefs).filter(([name]) => name !== job.scratchStorageName && !candidateNames.has(name));
     if (canonical.length !== 1 || canonical[0][1] !== job.canonicalBaseOid) return false;
     if (job.bootstrap) return job.ownerAuthorized === true && job.canonicalBaseOid === null && job.candidates.length === 1 && job.candidates[0].baseOid === null;
-    return !!job.canonicalBaseOid && job.candidates.length > 0 && job.candidates.every(candidate => !!candidate.baseOid);
+    return !!job.canonicalBaseOid &&
+      (job.baseCheck === true ? job.candidates.length === 0 : job.baseCheck === undefined && job.candidates.length > 0) &&
+      job.candidates.every(candidate => !!candidate.baseOid);
   }
   if (job.kind === 'delta-check') return !!job.candidate.baseOid && !!job.storageRemotes[job.candidate.storageName] &&
     Object.entries(job.expectedRefs).filter(([name, oid]) => name !== job.candidate.storageName && oid === job.newBaseOid).length === 1;
@@ -162,7 +165,7 @@ function schedule(c: ModuleContext, job: Job): Gate<{ jobId: string }> {
     if (prior) return prior.job.inputDigest === job.inputDigest && immutableJob(prior.job) === immutableJob(job) ?
       { status: 'eligible', version: prior.job.version, evidenceIds: [job.jobId], value: { jobId: job.jobId } } :
       { status: 'blocked', version: prior.job.version, code: 'JOB_CONFLICT', reason: 'Job identity changed', evidenceIds: [job.jobId] };
-    if (!validJob(c, job) || inputHash(canonicalInput(job)) !== job.inputDigest)
+    if (!validJob(c, job) || inputHash(stableJson(jobInput(job))) !== job.inputDigest)
       return { status: 'blocked', version: c.version(), code: 'INVALID_JOB', reason: 'Job pins or input digest invalid', evidenceIds: [] };
     const version = c.nextVersion();
     save(c, { job: { ...job, version } });
@@ -302,6 +305,13 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       (await c.storage.readCommit(name, candidate.headOid))?.treeOid !== value.sourceTreeOid) conflict('RESULT_IDENTITY');
     if (candidate.baseOid && !await ancestor(c.storage, name, candidate.baseOid, candidate.headOid)) conflict('RESULT_IDENTITY');
   }
+  if (value.kind === 'validate-stack' && job.kind === 'validate-stack' && !job.bootstrap && job.baseCheck &&
+    (value.composedOid !== null || !['ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT'].includes(value.outcome))) {
+    const canonicalName = Object.keys(job.expectedRefs).find(name => name !== job.scratchStorageName);
+    if (value.composedOid !== job.canonicalBaseOid || value.composedTreeOid !== value.sourceTreeOid ||
+      !canonicalName || (await c.storage.readCommit(canonicalName, job.canonicalBaseOid))?.treeOid !== value.composedTreeOid)
+      conflict('RESULT_IDENTITY');
+  }
   if (value.kind === 'validate-stack' && value.outcome === 'PASS') {
     if (job.kind !== 'validate-stack' || !value.composedOid) throw new HttpError(409, 'RESULT_IDENTITY', 'Stack missing');
     const stack = job;
@@ -312,7 +322,7 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       await c.storage.resolveRef(stack.scratchStorageName, stack.scratchRef) !== composedOid) conflict('RESULT_IDENTITY');
     if (stack.bootstrap) {
       if (composedOid !== stack.candidates[0].headOid) conflict('RESULT_IDENTITY');
-    } else {
+    } else if (!stack.baseCheck) {
       if (!await ancestor(c.storage, stack.scratchStorageName, stack.canonicalBaseOid, composedOid) ||
         (await Promise.all(stack.candidates.map(candidate => ancestor(c.storage, stack.scratchStorageName, candidate.headOid, composedOid)))).some(found => !found)) conflict('RESULT_IDENTITY');
     }

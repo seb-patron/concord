@@ -268,6 +268,7 @@ describe('cross-module coordinator hooks', () => {
           authorId: 'owner', headOid: null, revision: 0, status: 'draft', unitKeys: [], frozen: false,
           baseOid: null, candidateStorageName: change.candidateStorageName, branch: 'refs/heads/seed',
           dependencyChangeIds: ['dependency-a'], canonicalStorageName: repo.canonicalStorageName,
+          scratchStorageName: `concord-s-${repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'seed',
         } },
         missing: { status: 'blocked', version: 1, code: 'CHANGE_NOT_FOUND', reason: 'Change not found', evidenceIds: [] },
         writable: false, writableUnit: false, writableDependency: false, ownState: null,
@@ -278,4 +279,32 @@ describe('cross-module coordinator hooks', () => {
       findings.routes.splice(findings.routes.indexOf(inspect), 1);
     }
   });
+
+  it('lets only the pending ticket promoter use job lifecycle routes during a freeze', async () => {
+    const repoId = 'hooks_promoter_lifecycle';
+    const base = `/v1/repos/${repoId}`;
+    const allowed = [`${base}/runner/poll`, `${base}/jobs/ticket/heartbeat`,
+      `${base}/jobs/ticket/credentials`, `${base}/jobs/ticket/result`];
+    const prior = queue.promotionFreeze;
+    const routes: ModuleRoute[] = allowed.map(path => ({
+      method: 'POST', pattern: new RegExp(`^${path}$`), handle: () => json({ accepted: true }),
+    }));
+    runners.routes.unshift(...routes);
+    queue.promotionFreeze = (_context, request) => ({ frozen: true,
+      exempt: allowed.includes(new URL(request.url).pathname) });
+    try {
+      for (const path of allowed) {
+        const promoter = await fetchApi(mutation(path, {}, `promoter-${path}`, 'local-promoter'));
+        expect(promoter.status).toBe(200);
+        const owner = await fetchApi(mutation(path, {}, `owner-${path}`, 'local-owner'));
+        expect(['FORBIDDEN', 'PROMOTION_IN_PROGRESS']).toContain((await responseBody(owner)).error.code);
+      }
+      const otherJob = await fetchApi(mutation(`${base}/jobs/other/heartbeat`, {}, 'other-job', 'local-promoter'));
+      expect((await responseBody(otherJob)).error.code).toBe('PROMOTION_IN_PROGRESS');
+    } finally {
+      queue.promotionFreeze = prior;
+      for (const route of routes) runners.routes.splice(runners.routes.indexOf(route), 1);
+    }
+  });
+
 });
