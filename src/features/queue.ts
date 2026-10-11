@@ -272,8 +272,10 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
         seedStorageName: seed!.seedStorageName, seedRef: seed!.seedRef }] as [SeedInput] }
     : { ...base, bootstrap: false as const, canonicalBaseOid: state.observedMain!, candidates,
       ...(candidates.length === 0 ? { baseCheck: true as const } : {}) };
-  const pinned = policy.checkerId === 'dispatch-lab' ? { ...immutable, caseId: dispatchCase(state, entries, bootstrap),
-    ...(contest ? { contest: true as const } : {}) } : immutable;
+  const pinned = { ...immutable,
+    ...(policy.checkerId === 'dispatch-lab' ? { caseId: dispatchCase(state, entries, bootstrap) } : {}),
+    ...(contest ? { contest: true as const } : {}),
+  };
   const inputDigest = await digest(jobInput(pinned));
   return { ...pinned, inputDigest } as ValidateStackJob;
 }

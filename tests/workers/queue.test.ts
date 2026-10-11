@@ -7,7 +7,7 @@ import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
 import { queue } from '../../src/features/queue';
 import { leases } from '../../src/features/leases';
-import { runners } from '../../src/features/runners';
+import { jobInput, runners } from '../../src/features/runners';
 import { findings } from '../../src/features/findings';
 import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
@@ -194,7 +194,7 @@ afterEach(async () => {
   (env as Env).TRUSTED_CONFIG = originalTrustedConfig;
 });
 
-async function addChange(h: Harness, id: string, deps: string[] = [], profileId = 'local-demo') {
+async function addChange(h: Harness, id: string, deps: string[] = [], profileId = 'local-demo', intentKey = 'shared-intent') {
   await h.seed(`candidate-${h.repoId}-${id}`);
   h.views.set(id, {
     authorId: 'agent-a', headOid: oid(id.toLowerCase().replace(/[^a-f0-9]/g, 'a').slice(0, 1)),
@@ -202,7 +202,7 @@ async function addChange(h: Harness, id: string, deps: string[] = [], profileId 
     candidateStorageName: `candidate-${h.repoId}-${id}`, branch: 'refs/heads/work',
     dependencyChangeIds: deps, canonicalStorageName: `canonical-${h.repoId}`,
     scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId,
-    intentKey: 'shared-intent',
+    intentKey,
   });
   for (let attempt = 0; attempt < 3; attempt++) {
     const version = (await h.fetch('/queue')).body.version;
@@ -728,6 +728,51 @@ describe('queue state machine', () => {
     expect(state.entries.find((entry: any) => entry.changeId === 'B').state).toBe('blocked');
   });
 
+  it('lands three generic candidates with arbitrary intents and pinned queue order', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const [id, intent] of [['A', 'repair/alpha'], ['B', 'feature:beta'], ['C', 'misc.gamma']]) {
+      const response = await addChange(h, id, [], 'local-demo', intent);
+      expect(response.response.status).toBe(201);
+    }
+    await h.tick();
+    const job = h.jobs[0];
+    if (job.kind !== 'validate-stack' || job.bootstrap) throw new Error('expected generic stack');
+    expect(job.caseId).toBeUndefined();
+    expect(job.candidates.map(candidate => candidate.changeId)).toEqual(['A', 'B', 'C']);
+    expect(job.canonicalBaseOid).toBe(main);
+    expect(job.expectedRefs[`canonical-${h.repoId}`]).toBe(main);
+    expect(job.candidates.map(candidate => job.expectedRefs[candidate.storageName])).toEqual(job.candidates.map(candidate => candidate.headOid));
+    expect(job.policyDigest).toBe(job.unitPolicy.digest);
+    expect(job.inputDigest).toBe(await digest(jobInput(job)));
+    await deliverChecked(h, job, 'PASS'); await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ memberIds: ['A', 'B', 'C'], expectedOldOid: main });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('2'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['landed', 'landed', 'landed']);
+  });
+
+  it('bisects a failing generic middle candidate and lands the survivors', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const [id, intent] of [['A', 'first/unknown'], ['B', 'second/unknown'], ['C', 'third/unknown']]) {
+      expect((await addChange(h, id, [], 'local-demo', intent)).response.status).toBe(201);
+    }
+    await h.tick();
+    await deliverChecked(h, h.jobs[0], 'FAIL'); await h.tick();
+    for (const [index, outcome] of [[1, 'PASS'], [2, 'PASS'], [3, 'FAIL'], [4, 'FAIL'], [5, 'PASS']] as const) {
+      expect(h.jobs[index].caseId).toBeUndefined();
+      await deliverChecked(h, h.jobs[index], outcome); await h.tick();
+    }
+    expect((await h.state()).diagnosis).toMatchObject({ reason: 'SINGLETON', blame: ['B'], survivors: ['A', 'C'] });
+    expect((await h.state()).promotion.memberIds).toEqual(['A', 'C']);
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('7'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['landed', 'blocked', 'landed']);
+  });
+
   it.each([
     { name: 'descendant commit', outcome: 'PASS', composedOid: oid('3'), tree: oid('3') },
     { name: 'canonical OID with a different tree', outcome: 'PASS', composedOid: main, tree: oid('3') },
@@ -1013,6 +1058,8 @@ describe('queue state machine', () => {
     expect(created.response.status).toBe(201);
     await h.tick();
     if (h.jobs.length !== 2) throw new Error(JSON.stringify(h.jobs.map(job => ({ jobId: job.jobId, candidates: job.kind === 'validate-stack' ? job.candidates.map(item => item.changeId) : [] }))));
+    expect(h.jobs.map(job => ({ caseId: job.caseId, contest: job.contest })))
+      .toEqual([{ caseId: undefined, contest: true }, { caseId: undefined, contest: true }]);
     await h.deliver(h.jobs[1], 'PASS'); await h.tick();
     await h.deliver(h.jobs[0], 'PASS'); await h.tick();
     const state = await h.state();

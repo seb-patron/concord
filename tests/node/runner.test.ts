@@ -354,7 +354,8 @@ export function attemptBudget(family) {
         expectedRefs: { canonical: base, scratch: null } };
       const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
-        executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+        executable: process.execPath, argv: ['-e', "if (require('node:fs').readFileSync('example.txt', 'utf8') !== 'candidate\\n') process.exit(1)"] };
+      expect(job.caseId).toBeUndefined();
       const result = await executeJob(job, profile, credentials(remotes));
       expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
       if (result.kind !== 'validate-stack') throw new Error('wrong result');

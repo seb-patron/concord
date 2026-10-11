@@ -15,6 +15,10 @@ At most eight candidates are active. A composed stack has at most four. Entries 
 
 Admission reads the exact ready revision and registered head/base/ref from the repos view. It requires lease fences for every verified unit, a findings gate with no open finding or pending repair round, and a verdict gate for the requested verdict and the same finding-set version. The verdict gate is responsible for independent reviewer and coverage checks. Every job and ticket records policy/profile pins. A candidate base must be canonical main or the exact head of an admitted declared prerequisite. Dependencies must already be admitted or merged; the stack planner includes only dependency-closed candidates. Any changed head, eligibility, or canonical main increments the queue generation and invalidates prior checks.
 
+For any trusted profile whose policy checker ID is not `dispatch-lab`, the queue builds a stack from eligible candidates in admission order, starting at the observed canonical base. Intent keys do not select a test scene. The runner composes the pinned candidate heads in job order and runs the profile's pinned checker on the composed commit. The job pins the policy and profile digests, canonical base, expected refs, candidate heads and order; its input digest covers those values. Generic stack and contest jobs have no `caseId`. A generic contest job retains the `contest` marker so a score policy can produce comparable scores.
+
+Only a policy with checker ID `dispatch-lab` uses the scripted demo case table. Its queue job carries the trusted `caseId` selected from the current demo stage and intent keys; an unplanned combination is rejected. The demo's case table remains strict and does not constrain other profiles.
+
 ## Failure isolation and arbitration
 
 The baseline diagnostic uses `validate-stack` with `baseCheck: true` and no candidates. The runner checks the pinned canonical base alone. Other ordinary stack jobs require at least one candidate.
