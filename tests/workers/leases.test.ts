@@ -432,8 +432,9 @@ describe('RepoCoordinator lease routes', () => {
       const contest = { contestId: 'contest-one', parentChangeId: 'parent', childChangeIds: ['child-a', 'child-b'], selectedChangeId: null, ownerCreated: true };
       const store = sqlState(state.storage.sql);
       store.put('module:queue:contest:contest-one', contest);
-      store.put('module:queue:contest-child:child-a', contest);
+      store.put('module:queue:contest-child:child-a', { contestId: contest.contestId });
       expect(reserve(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'eligible', value: { reservationFences: { [item.unitKey]: item.fence } } });
+      expect(leases.hooks['leases.reservationLive']!(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'eligible' });
       const claimRoute = leases.routes.find(route => route.method === 'POST' && route.pattern.test(path(repo)))!;
       seedClaim(state, repo, 'ordinary', 'agent-b');
       const bypass = await claimRoute.handle(contextFor(state, repo, 'agent-b', Date.now), new Request(`https://concord.test${path(repo)}`),
@@ -441,11 +442,16 @@ describe('RepoCoordinator lease routes', () => {
       expect(bypass.status).toBe(409);
       store.put('module:queue:contest:contest-one', { ...contest, selectedChangeId: 'child-b' });
       expect(reserve(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
+      expect(leases.hooks['leases.reservationLive']!(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
       addVerified(state, fakeReadyChange(repo, 'child-b', 'agent-b', [item.unitKey]));
-      store.put('module:queue:contest-child:child-b', { ...contest, selectedChangeId: 'child-b' });
+      store.put('module:queue:contest-child:child-b', { contestId: contest.contestId });
       expect(reserve(context, 'child-b', { [item.unitKey]: item.fence })).toMatchObject({ status: 'eligible' });
+      expect(leases.hooks['leases.reservationLive']!(context, 'child-b', { [item.unitKey]: item.fence })).toMatchObject({ status: 'eligible' });
       store.put('module:queue:entry:child-b', { changeId: 'child-b', state: 'merged' });
       expect(leases.hooks['leases.releaseReservation']!(context, 'child-b')).toMatchObject({ status: 'eligible' });
+      expect(store.get<{ closed: boolean }>('module:queue:contest:contest-one')?.closed).toBe(true);
+      expect(reserve(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
+      expect(leases.hooks['leases.reservationLive']!(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
     });
   });
 });

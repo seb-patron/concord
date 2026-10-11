@@ -74,6 +74,22 @@ describe('durable runner protocol', () => {
     expect(runners.hooks['runners.schedule']!(f.context, f.job)).toMatchObject({ status: 'eligible' });
   });
 
+  it('accepts only an explicit empty-candidate canonical base check', async () => {
+    const f = await fixture();
+    const stack = { ...f.job, kind: 'validate-stack' as const, canonicalBaseOid: oid,
+      candidates: [], bootstrap: false as const, stackId: 'stack1', scratchStorageName: 'scratch',
+      scratchRef: 'refs/heads/check', expectedRefs: { canonical: oid, scratch: null },
+      storageRemotes: { canonical: 'file:///canonical', scratch: 'file:///scratch' } } as Job;
+    expect(runners.hooks['runners.schedule']!(f.context, await seal(stack))).toMatchObject({ status: 'blocked', code: 'INVALID_JOB' });
+    const baseCheck = await seal({ ...stack, baseCheck: true } as Job);
+    expect(runners.hooks['runners.schedule']!(f.context, baseCheck)).toMatchObject({ status: 'eligible' });
+    const withCandidate = await seal({ ...stack, jobId: 'job2', baseCheck: true,
+      candidates: [{ changeId: 'change1', revision: 1, baseOid: oid, headOid: oid,
+        storageName: 'candidate', ref: 'refs/heads/main' }], expectedRefs: { canonical: oid, scratch: null, candidate: oid },
+      storageRemotes: { canonical: 'file:///canonical', scratch: 'file:///scratch', candidate: 'file:///candidate' } } as Job);
+    expect(runners.hooks['runners.schedule']!(f.context, withCandidate)).toMatchObject({ status: 'blocked', code: 'INVALID_JOB' });
+  });
+
   it('schedules only an owner-pinned null-base seed and completes its inspection', async () => {
     const f = await fixture();
     const seed = await seal({ ...f.job, candidate: { changeId: 'change1', revision: 1, baseOid: null,

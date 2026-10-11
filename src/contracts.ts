@@ -81,7 +81,7 @@ export interface RepairRound extends Versioned {
 export interface Contest extends Versioned {
   contestId: Id; intentKey: string; unitKey: string; baseOid: Oid;
   childChangeIds: [Id, Id]; selectedChangeId: Id | null;
-  state: 'open' | 'selected' | 'blocked';
+  state: 'open' | 'selected' | 'landed' | 'blocked';
 }
 export interface OutboxIntent extends Versioned {
   intentId: Id; kind: 'ensure-repo' | 'fork' | 'promotion';
@@ -90,7 +90,10 @@ export interface OutboxIntent extends Versioned {
 }
 export interface FrozenAdmission {
   changeId: Id; revision: number; verdictId: Id | null;
+  /** Queue admission identity; distinguishes a re-enqueued change from its withdrawn predecessor. */
+  admissionId?: Id;
   findingSetVersion: number; reservationFences: Record<string, number>;
+  headOid?: Oid; baseOid?: Oid | null; policyDigest?: Digest; profileDigest?: Digest;
 }
 export interface Event {
   sequence: number; kind: string; actorId: Id; timestamp: number;
@@ -158,6 +161,8 @@ export interface AddVerdictBody extends MutationBody {
 export interface CarryBody extends MutationBody { parentVerdictId: Id; revision: number; newBaseOid: Oid }
 export interface CreateContestBody {
   intentKey: string; intentText: string; unitKey: string; baseOid: Oid; profileId: Id;
+  /** Two already published children, admitted atomically through the queue's normal gates. */
+  childChangeIds?: [Id, Id]; verdictIds?: [Id, Id]; leaseFences?: [Record<string, number>, Record<string, number>];
 }
 export interface RegisterBranchBody extends MutationBody {
   storageName: string; ref: string; observedHead: Oid; ownerId: Id;
@@ -194,6 +199,8 @@ export interface InspectCandidateJob extends JobBase {
 }
 export interface OrdinaryStackJob extends JobBase {
   kind: 'validate-stack'; canonicalBaseOid: Oid; candidates: CandidateInput[];
+  /** Explicit canonical-base-only diagnostic; ordinary stacks require candidates. */
+  baseCheck?: true;
   bootstrap: false; stackId: Id; scratchStorageName: string; scratchRef: string;
 }
 export interface BootstrapStackJob extends JobBase {
@@ -293,6 +300,7 @@ export type Gate<T = void> =
 export interface ServiceHooks {
   'repos.inspectRevision': (context: ModuleContext, result: InspectionResult) => Gate<{ changeId: Id; revision: number; reviewManifestDigest: Digest }>;
   'leases.reserve': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate<{ reservationFences: Record<string, number> }>;
+  'leases.reservationLive': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate;
   'leases.releaseReservation': (context: ModuleContext, changeId: Id) => Gate;
   'findings.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ findingSetVersion: number; unresolvedIds: Id[]; pendingRound: number | null }>;
   'verdicts.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ verdictId: Id; reviewManifestDigest: Digest; findingSetVersion: number }>;
@@ -309,10 +317,21 @@ export type PromotionFreezeProvider = (context: ModuleContext, request: Request)
 export interface ChangeView {
   readonly authorId: Id; readonly headOid: Oid | null; readonly revision: number;
   readonly status: Change['status']; readonly unitKeys: readonly string[]; readonly frozen: boolean;
+  /** Optional until repos publishes immutable queue inputs; queue fails closed when required fields are absent. */
   readonly baseOid?: Oid | null; readonly candidateStorageName?: string; readonly branch?: string;
   readonly dependencyChangeIds?: readonly Id[]; readonly canonicalStorageName?: string;
+  readonly scratchStorageName?: string; readonly policyId?: Id; readonly profileId?: Id;
+  readonly intentKey?: string;
 }
 export type ChangeViewProvider = (context: ModuleContext, changeId: Id) => Gate<ChangeView>;
+/** Internal, authenticated repos-to-queue handoff after the owner-only bootstrap route validates its seed. */
+export interface BootstrapHandoff {
+  seedStorageName: string; seedRef: string; headOid: Oid;
+  canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
+  /** Reserved by repos so the bootstrap response identifies the scheduled runner job. */
+  jobId?: Id;
+}
+export type BootstrapHandoffProvider = (context: ModuleContext, seed: BootstrapHandoff) => Gate<{ stackId: Id }>;
 export interface Migration { version: number; statements: string[] }
 export interface ModuleContext {
   readonly repoId: Id; readonly tenantId: Id; readonly principal: Principal;
@@ -327,6 +346,8 @@ export interface ModuleContext {
   call<K extends HookName>(name: K, ...args: Parameters<ServiceHooks[K]> extends [ModuleContext, ...infer A] ? A : never): ReturnType<ServiceHooks[K]>;
   /** Present on repo-coordinator contexts; catalog contexts do not read changes. */
   readChange?(changeId: Id): Gate<ChangeView>;
+  /** Internal dispatch only; never exposed as an HTTP route. */
+  handoffBootstrap?(seed: BootstrapHandoff): Gate<{ stackId: Id }>;
 }
 export interface ModuleRoute {
   method: string; pattern: RegExp;
@@ -342,4 +363,6 @@ export interface FeatureModule {
   promotionFreeze?: PromotionFreezeProvider;
   /** Slice 02 registers a reader of repos-owned change state here. */
   changeView?: ChangeViewProvider;
+  /** Slice 02 calls this after its owner-only bootstrap request has been authenticated and validated. */
+  bootstrapHandoff?: BootstrapHandoffProvider;
 }
