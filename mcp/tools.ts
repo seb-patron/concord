@@ -22,7 +22,7 @@ export const tools: Tool[] = [
   tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result.', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 300 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
   tool('lease_list', 'List active leases and recent refusals.', { ...repo, cursor: s }, ['repoId']),
-  tool('change_checkout', 'Fetch the assigned candidate branch into a local Git worktree with a short-lived, process-local Git credential.', { ...change, worktree: s }, ['repoId', 'changeId', 'worktree']),
+  tool('change_checkout', 'Fetch the candidate revision, or create a new local branch at its base, with a short-lived, process-local Git credential.', { ...change, worktree: s }, ['repoId', 'changeId', 'worktree']),
   tool('change_publish', 'Verify and push local HEAD to the assigned candidate fork, then publish the revision.', { ...change, worktree: s, leaseFences: fences, idempotencyKey: s }, ['repoId', 'changeId', 'worktree', 'leaseFences']),
   tool('findings_list', 'List findings for a change.', { ...change, cursor: s }, ['repoId', 'changeId']),
   tool('review_verdict_submit', 'Submit an independent reviewer verdict for the inspected revision.', { ...change, revision: n, reviewManifestDigest: s, findingSetVersion: n, decision: { type: 'string', enum: ['approve', 'reject'] }, evidenceDigest: s, idempotencyKey: s }, ['repoId', 'changeId', 'revision', 'reviewManifestDigest', 'findingSetVersion', 'decision', 'evidenceDigest']),
@@ -119,7 +119,26 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
       const access = await gitAccess(client, args, field(change, 'candidateStorageName'), 'read', version(repository));
       const branch = field(change, 'branch');
       const worktree = field(args, 'worktree');
-      await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/concord/${branch.replace(/^refs\/heads\//, '')}`], { token: access.token }, worktree);
+      const localBranch = branch.replace(/^refs\/heads\//, '');
+      const existing = change.headOid === null
+        ? await git(['ls-remote', '--heads', '--', access.remote, branch], { token: access.token }, worktree)
+        : branch;
+      if (change.headOid === null && !existing.split('\n').some(line => line.endsWith(`\t${branch}`))) {
+        const baseOid = field(change, 'baseOid');
+        await git(['fetch', '--no-tags', '--', access.remote, baseOid], { token: access.token }, worktree);
+        await assertCommit(worktree, baseOid);
+        const localRef = `refs/heads/${localBranch}`;
+        const local = await git(['for-each-ref', '--format=%(refname)', localRef], {}, worktree);
+        if (local.split('\n').includes(localRef)) {
+          const localOid = await git(['rev-parse', '--verify', `${localRef}^{commit}`], {}, worktree);
+          await assertHeadBasedOn(worktree, baseOid, localOid);
+          await git(['switch', localBranch], {}, worktree);
+        } else {
+          await git(['switch', '-c', localBranch, baseOid], {}, worktree);
+        }
+      } else {
+        await git(['fetch', '--no-tags', '--', access.remote, `${branch}:refs/remotes/concord/${localBranch}`], { token: access.token }, worktree);
+      }
       result = { fetched: true, changeId: args.changeId, worktree, branch, remote: safeRemote(access.remote) };
       break;
     }
