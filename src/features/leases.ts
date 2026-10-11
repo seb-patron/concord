@@ -368,13 +368,20 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
     }
     const contest = state.get<ContestEvidence>(`module:queue:contest-child:${changeId}`);
     const parent = contest && state.get<ContestEvidence>(`module:queue:contest:${contest.contestId}`);
-    const reservationChangeId = contest?.ownerCreated === true && parent?.ownerCreated === true &&
+    const shared = contest?.ownerCreated === true && parent?.ownerCreated === true &&
       parent.contestId === contest.contestId && parent.parentChangeId === contest.parentChangeId &&
-      parent.selectedChangeId === changeId && parent.childChangeIds.includes(changeId) &&
-      contest.childChangeIds.includes(changeId) ? contest.parentChangeId : changeId;
+      parent.childChangeIds.includes(changeId) && contest.childChangeIds.includes(changeId);
+    if (shared && parent.selectedChangeId !== changeId) {
+      return { status: 'eligible', version: context.version(), evidenceIds: [], value: undefined };
+    }
+    const reservationChangeId = shared ? parent.parentChangeId : changeId;
     const now = context.now();
     const selected = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND state = 'reserved' AND expires_at > ?", reservationChangeId, now);
-    if (!selected.length) return blocked(context, 'RESERVATION_NOT_FOUND', 'No live reservation for this change');
+    if (!selected.length) {
+      const previous = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND (state IN ('expired','released') OR (state = 'reserved' AND expires_at <= ?))", reservationChangeId, now);
+      if (!previous.length) return blocked(context, 'RESERVATION_NOT_FOUND', 'No reservation for this change');
+      return { status: 'eligible', version: context.version(), evidenceIds: previous.map(row => row.lease_id), value: undefined };
+    }
     for (const row of selected) {
       const version = context.nextVersion();
       context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, now, row.lease_id);
@@ -382,6 +389,25 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
     }
     return { status: 'eligible', version: context.version(), evidenceIds: selected.map(row => row.lease_id), value: undefined };
   });
+}
+
+function reservationLive(context: ModuleContext, changeId: string, fences: Record<string, number>): Gate {
+  if (!context?.sql || !validId(changeId) || !fences || typeof fences !== 'object' || Array.isArray(fences)) return unavailableGate();
+  const state = sqlState(context.sql);
+  const child = state.get<ContestEvidence>(`module:queue:contest-child:${changeId}`);
+  const contest = child && state.get<ContestEvidence>(`module:queue:contest:${child.contestId}`);
+  const shared = child?.ownerCreated === true && contest?.ownerCreated === true &&
+    contest.contestId === child.contestId && contest.parentChangeId === child.parentChangeId &&
+    contest.childChangeIds.includes(changeId) && child.childChangeIds.includes(changeId) &&
+    (contest.selectedChangeId === null || contest.selectedChangeId === changeId);
+  const reservationChangeId = shared ? contest.parentChangeId : changeId;
+  const claims = rows(context, "SELECT * FROM leases_claims WHERE change_id = ? AND state = 'reserved' AND expires_at > ?", reservationChangeId, context.now());
+  const keys = Object.keys(fences);
+  if (!keys.length || claims.length !== keys.length || keys.some(key =>
+    !Number.isSafeInteger(fences[key]) || !claims.some(row => row.unit_key === key && row.fence === fences[key]))) {
+    return blocked(context, 'LEASE_STALE', 'Live reservation with current fences required');
+  }
+  return { status: 'eligible', version: context.version(), evidenceIds: claims.map(row => row.lease_id), value: undefined };
 }
 
 const collection = /^\/v1\/repos\/[^/]+\/leases$/;
@@ -404,5 +430,5 @@ export const leases: FeatureModule = {
   snapshot: context => projection(context),
   nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,
   onAlarm: context => context.transaction(() => expireDue(context, context.now())),
-  hooks: { 'leases.reserve': reserve, 'leases.releaseReservation': releaseReservation },
+  hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation },
 };

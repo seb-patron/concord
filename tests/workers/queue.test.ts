@@ -11,6 +11,7 @@ import { runners } from '../../src/features/runners';
 import { findings } from '../../src/features/findings';
 import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
+import { localFixtureConfig, sqlState } from '../../src/state';
 import { FakeStorage } from '../../src/storage/fake';
 import { arbitrate, accepted } from '../../src/queue/arbitrate';
 import { advanceDiagnosis, dependencyClosure, startDiagnosis } from '../../src/queue/plan';
@@ -40,9 +41,11 @@ interface Harness {
 const original = {
   changeView: repos.changeView,
   reserve: leases.hooks['leases.reserve'], release: leases.hooks['leases.releaseReservation'],
+  live: leases.hooks['leases.reservationLive'],
   findings: findings.hooks['findings.gate'], verdict: verdicts.hooks['verdicts.gate'],
   schedule: runners.hooks['runners.schedule'],
 };
+const originalTrustedConfig = (env as Env).TRUSTED_CONFIG;
 let harness: Harness;
 beforeEach(() => {
   const repoId = freshRepo();
@@ -151,6 +154,7 @@ beforeEach(() => {
     ? gate({ reservationFences: { ...fences } })
     : { status: 'blocked', version: 1, code: 'LEASE_STALE', reason: 'Lease unavailable', evidenceIds: [] };
   leases.hooks['leases.releaseReservation'] = (_context, id) => { releases.push(id); return gate(undefined); };
+  leases.hooks['leases.reservationLive'] = () => gate(undefined);
   findings.hooks['findings.gate'] = (_context, id) => gate({ findingSetVersion: findingsVersion.get(id) ?? 1,
     unresolvedIds: [], pendingRound: null });
   verdicts.hooks['verdicts.gate'] = (_context, id) => gate({ verdictId: `v-${id}`, reviewManifestDigest: 'sha256:0',
@@ -169,9 +173,11 @@ afterEach(async () => {
   repos.changeView = original.changeView;
   leases.hooks['leases.reserve'] = original.reserve;
   leases.hooks['leases.releaseReservation'] = original.release;
+  leases.hooks['leases.reservationLive'] = original.live;
   findings.hooks['findings.gate'] = original.findings;
   verdicts.hooks['verdicts.gate'] = original.verdict;
   runners.hooks['runners.schedule'] = original.schedule;
+  (env as Env).TRUSTED_CONFIG = originalTrustedConfig;
 });
 
 async function addChange(h: Harness, id: string, deps: string[] = [], profileId = 'local-demo') {
@@ -203,6 +209,163 @@ async function setup(...ids: string[]): Promise<Harness> {
   }
   return h;
 }
+
+async function realLeases(h: Harness, changes: Array<{ id: string; unit: string }>, claimedIds: string[]): Promise<void> {
+  const config = localFixtureConfig('local');
+  for (const unit of new Set(changes.map(change => change.unit))) {
+    config.policies['local-demo'].units[unit] = { canonicalKey: unit, file: 'data/queue.tsv',
+      resources: [unit], dependencyKeys: [] };
+  }
+  (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+  leases.hooks['leases.reserve'] = original.reserve;
+  leases.hooks['leases.reservationLive'] = original.live;
+  leases.hooks['leases.releaseReservation'] = original.release;
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+  await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+    const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+    const context = internal.context('queue', principal, h.repoId);
+    const store = sqlState(context.sql);
+    store.put('module:repos:repo', { repoId: h.repoId, tenantId: 'local', displayName: h.repoId,
+      canonicalStorageName: `canonical-${h.repoId}`, defaultBranch: 'main', observedCanonicalOid: main,
+      policyId: 'local-demo', policyDigest: config.policies['local-demo'].digest,
+      profileId: 'local-demo', status: 'ready', version: 1 });
+    for (const { id, unit } of changes) {
+      const view = h.views.get(id)!;
+      store.put(`module:repos:change:${id}`, { changeId: id, repoId: h.repoId, authorId: 'agent-a',
+        intentKey: 'shared-intent', intentText: id, candidateStorageName: view.candidateStorageName,
+        branch: view.branch, baseOid: view.baseOid, headOid: view.headOid, revision: 1,
+        unitKeys: [unit], dependencyChangeIds: [], status: 'ready', version: 1 });
+      store.put(`module:repos:verified:${id}`, { changeId: id, revision: 1, headOid: view.headOid,
+        policyDigest: config.policies['local-demo'].digest, unitKeys: [unit], verifiedBy: 'checker' });
+      if (claimedIds.includes(id)) {
+        context.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          `lease-${id}`, unit, 'agent-a', id, id, 1, Date.now() + 120_000, 'active', 1, Date.now(), Date.now());
+        context.sql.exec('INSERT INTO leases_fences(unit_key, fence) VALUES(?, ?)', unit, 1);
+      }
+    }
+  });
+}
+
+async function leaseState(h: Harness, id: string): Promise<{ state: string; expires_at: number }> {
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+  return runInDurableObject<RepoCoordinator, { state: string; expires_at: number }>(stub, instance => {
+    const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+    const context = internal.context('queue', principal, h.repoId);
+    return context.sql.exec<{ state: string; expires_at: number }>('SELECT state, expires_at FROM leases_claims WHERE lease_id = ?', `lease-${id}`).toArray()[0];
+  });
+}
+
+async function prepareReal(changes: Array<{ id: string; unit: string }>, claimedIds: string[]): Promise<Harness> {
+  const h = harness;
+  await h.seed(`canonical-${h.repoId}`);
+  await h.seed(`scratch-${h.repoId}`, null);
+  for (const { id, unit } of changes) {
+    await h.seed(`candidate-${h.repoId}-${id}`);
+    h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1,
+      status: 'ready', unitKeys: [unit], frozen: false, baseOid: main,
+      candidateStorageName: `candidate-${h.repoId}-${id}`, branch: 'refs/heads/work',
+      dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+      scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+  }
+  await realLeases(h, changes, claimedIds);
+  return h;
+}
+
+async function enqueueReal(h: Harness, id: string, unit: string): Promise<void> {
+  const response = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+    changeId: id, verdictId: `v-${id}`, leaseFences: { [unit]: 1 } });
+  expect(response.response.status).toBe(201);
+}
+
+describe('queue with real lease hooks', () => {
+  it('releases a withdrawn reservation', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:A' }], ['A']);
+    await enqueueReal(h, 'A', 'row:A');
+    expect((await leaseState(h, 'A')).state).toBe('reserved');
+    const response = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', reason: 'cancel' });
+    expect(response.response.status).toBe(200);
+    expect((await leaseState(h, 'A')).state).toBe('released');
+  });
+
+  it('releases a reservation after failed diagnosis', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:A' }], ['A']);
+    await enqueueReal(h, 'A', 'row:A');
+    await h.tick();
+    await h.deliver(h.jobs[0], 'FAIL'); await h.tick();
+    await h.deliver(h.jobs[1], 'FAIL'); await h.tick();
+    expect((await h.state()).entries[0].state).toBe('blocked');
+    expect((await leaseState(h, 'A')).state).toBe('released');
+  });
+
+  it('shares one contest reservation, keeps it after a loss, and releases it on landing', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    const created = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+      baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
+      leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
+    expect(created.response.status).toBe(201);
+    expect((await leaseState(h, 'A')).state).toBe('reserved');
+    await h.tick();
+    expect(h.jobs).toHaveLength(2);
+    await h.deliver(h.jobs[1], 'PASS'); await h.tick();
+    await h.deliver(h.jobs[0], 'PASS'); await h.tick();
+    expect((await h.state()).contests[0].winnerId).toBe('B');
+    expect((await h.state()).entries.find((entry: any) => entry.changeId === 'A').state).toBe('failed');
+    expect((await leaseState(h, 'A')).state).toBe('reserved');
+    await h.tick();
+    await h.deliver(h.jobs[2], 'PASS'); await h.tick();
+    expect((await h.state()).promotion.state).toBe('pending');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries.find((entry: any) => entry.changeId === 'B').state).toBe('landed');
+    expect((await leaseState(h, 'A')).state).toBe('released');
+  });
+
+  it('blocks both contest children and releases the shared reservation when one withdraws', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    expect((await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+      baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
+      leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] })).response.status).toBe(201);
+    const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'B', reason: 'cancel' });
+    expect(withdrawn.response.status).toBe(200);
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'withdrawn']);
+    expect((await leaseState(h, 'A')).state).toBe('released');
+  });
+
+  it('blocks an expired reservation before scheduling a contest child', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    expect((await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+      baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
+      leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] })).response.status).toBe(201);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      context.sql.exec('UPDATE leases_claims SET expires_at = ? WHERE lease_id = ?', Date.now() - 1, 'lease-A');
+    });
+    await h.tick();
+    expect(h.jobs).toHaveLength(0);
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['blocked', 'blocked']);
+  });
+
+  it('does not issue a promotion ticket after the reservation expires', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:A' }], ['A']);
+    await enqueueReal(h, 'A', 'row:A');
+    await h.tick();
+    expect(h.jobs).toHaveLength(1);
+    await h.deliver(h.jobs[0], 'PASS');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      context.sql.exec('UPDATE leases_claims SET expires_at = ? WHERE lease_id = ?', Date.now() - 1, 'lease-A');
+    });
+    await h.tick();
+    expect((await h.state()).promotion).toBeNull();
+    expect((await h.state()).entries[0].state).toBe('blocked');
+  });
+});
 
 describe('queue state machine', () => {
   it('fails closed for missing change, review, and lease providers', async () => {

@@ -31,6 +31,9 @@ interface ContestState {
   state: 'open' | 'selected' | 'blocked'; winnerId: Id | null; reason: string | null;
   resultIds: Id[];
 }
+interface ContestLeaseEvidence {
+  contestId: Id; parentChangeId: Id; childChangeIds: [Id, Id]; selectedChangeId: Id | null; ownerCreated: true;
+}
 interface Ticket extends Promotion {
   jobId: Id; canonicalStorageName: string; scratchStorageName: string; scratchRef: string; memberIds: Id[];
   admissionIds: Id[];
@@ -66,6 +69,12 @@ const active = (entry: Entry) => ['admitted', 'reserved', 'checking'].includes(e
 const current = (state: QueueState, id: Id) => [...state.entries].reverse().find(entry => entry.changeId === id && active(entry));
 const admitted = (state: QueueState, id: Id) => state.entries.find(entry => entry.entryId === id);
 const member = (state: QueueState, record: JobRecord, id: Id) => admitted(state, record.admissionIds[record.memberIds.indexOf(id)]);
+function contestEvidence(context: ModuleContext, contest: ContestState, selectedChangeId: Id | null): void {
+  const evidence: ContestLeaseEvidence = { contestId: contest.contestId, parentChangeId: contest.childIds[0],
+    childChangeIds: contest.childIds, selectedChangeId, ownerCreated: true };
+  context.state.put(`contest:${contest.contestId}`, evidence);
+  for (const id of contest.childIds) context.state.put(`contest-child:${id}`, evidence);
+}
 function transition(context: ModuleContext, entry: Entry, next: EntryState, reason: string | null = null): void {
   if (entry.state === next) return;
   const allowed: Record<EntryState, EntryState[]> = {
@@ -75,7 +84,13 @@ function transition(context: ModuleContext, entry: Entry, next: EntryState, reas
     landed: [], blocked: [], withdrawn: [], failed: [],
   };
   if (!allowed[entry.state].includes(next)) throw new HttpError(409, 'INVALID_QUEUE_TRANSITION', `${entry.state} -> ${next}`);
-  if (['landed', 'blocked', 'withdrawn', 'failed'].includes(next)) requireGate(context.call('leases.releaseReservation', entry.changeId));
+  if (['landed', 'blocked', 'withdrawn', 'failed'].includes(next)) {
+    context.transaction(() => {
+      context.state.put(`entry:${entry.changeId}`, { changeId: entry.changeId,
+        state: next === 'landed' ? 'merged' : 'withdrawn', entryId: entry.entryId });
+      requireGate(context.call('leases.releaseReservation', entry.changeId));
+    });
+  }
   entry.state = next;
   entry.blockedReason = reason;
 }
@@ -134,6 +149,7 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
 }
 function admissionStillValid(context: ModuleContext, entry: Entry): boolean {
   try {
+    requireGate(context.call('leases.reservationLive', entry.changeId, entry.reservationFences));
     const view = requiredView(context, entry.changeId);
     if (view.revision !== entry.revision || view.headOid !== entry.headOid || view.baseOid !== entry.baseOid
       || !['ready', 'queued', 'checking'].includes(view.status)
@@ -225,6 +241,7 @@ function schedule(context: ModuleContext, state: QueueState, job: Job, purpose: 
   if (entries.some(entry => !entry || !['reserved', 'checking'].includes(entry.state))) {
     throw new HttpError(409, 'ADMISSION_UNAVAILABLE', 'Scheduled member has no active reservation');
   }
+  for (const entry of entries) requireGate(context.call('leases.reservationLive', entry!.changeId, entry!.reservationFences));
   if (contestId) {
     const contest = state.contests.find(item => item.contestId === contestId && item.state === 'open');
     if (!contest || entries.some(entry => !contest.admissionIds.includes(entry!.entryId))) {
@@ -276,6 +293,7 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     if (state.observedMain !== null && state.observedMain !== main) invalidate(context, state, 'MAIN_CHANGED', []);
     state.observedMain = main;
     const checked = checkAdmission(context, state, changeId, body.verdictId as Id, body.leaseFences as Record<string, number>, main, null);
+    context.state.delete(`contest-child:${changeId}`);
     const reservation = requireGate(context.call('leases.reserve', changeId, checked.reservationFences));
     if (Object.keys(reservation.reservationFences).length !== checked.unitKeys.length
       || !checked.unitKeys.every(key => reservation.reservationFences[key] === checked.reservationFences[key])) {
@@ -323,11 +341,17 @@ function withdraw(context: ModuleContext, body: Record<string, unknown>): Respon
     const entry = current(state, body.changeId as Id);
     if (!entry) throw new HttpError(404, 'QUEUE_ENTRY_NOT_FOUND', 'No active entry');
     if (entry.authorId !== context.principal.principalId && !context.principal.roles.includes('owner')) throw new HttpError(403, 'FORBIDDEN', 'Only the author or owner may withdraw');
-    transition(context, entry, 'withdrawn', body.reason as string);
     if (entry.contestId) {
       const contest = state.contests.find(item => item.contestId === entry.contestId && item.state === 'open');
       if (contest) {
         contest.state = 'blocked'; contest.reason = 'CHILD_WITHDRAWN';
+        contestEvidence(context, contest, entry.changeId);
+      }
+    }
+    transition(context, entry, 'withdrawn', body.reason as string);
+    if (entry.contestId) {
+      const contest = state.contests.find(item => item.contestId === entry.contestId && item.reason === 'CHILD_WITHDRAWN');
+      if (contest) {
         for (const id of contest.admissionIds) {
           const sibling = admitted(state, id);
           if (sibling && active(sibling)) transition(context, sibling, 'blocked', 'CHILD_WITHDRAWN');
@@ -370,6 +394,22 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
     const prepared = children.map((id, i) => checkAdmission(context, state, id, verdicts[i], fences[i] as Record<string, number>, main, contestId));
     if (prepared[0].policyId !== prepared[1].policyId || prepared[0].canonicalStorageName !== prepared[1].canonicalStorageName
       || prepared[0].scratchStorageName !== prepared[1].scratchStorageName) throw new HttpError(409, 'NON_COMPARABLE_PROFILE', 'Contest policy or storage differs');
+    const firstFences = prepared[0].reservationFences;
+    const secondFences = prepared[1].reservationFences;
+    if (Object.keys(firstFences).length !== Object.keys(secondFences).length ||
+      Object.entries(firstFences).some(([key, fence]) => secondFences[key] !== fence)) {
+      throw new HttpError(409, 'LEASE_COVERAGE', 'Contest children must share the same fenced units');
+    }
+    for (const id of children) context.state.delete(`contest-child:${id}`);
+    const parentReservation = requireGate(context.call('leases.reserve', children[0], prepared[0].reservationFences));
+    if (!prepared[0].unitKeys.every(key => parentReservation.reservationFences[key] === prepared[0].reservationFences[key])) {
+      throw new HttpError(409, 'LEASE_FENCE_CHANGED', 'Contest parent reservation differs');
+    }
+    const contest: ContestState = { contestId, childIds: [children[0], children[1]], admissionIds: ['', ''], creationSequences: [0, 0],
+      intentKey: body.intentKey as string, intentText: body.intentText as string, unitKey: body.unitKey as string,
+      baseOid: main, policyDigest: prepared[0].policyDigest, profileDigest: prepared[0].profileDigest,
+      state: 'open', winnerId: null, reason: null, resultIds: [] };
+    contestEvidence(context, contest, null);
     const creationSequences: [number, number] = [0, 0];
     const admissionIds: [Id, Id] = ['', ''];
     prepared.forEach((candidate, i) => {
@@ -638,6 +678,7 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
   if (!contest || contest.state !== 'open') return;
   if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
     contest.state = 'blocked'; contest.reason = 'CHILD_UNAVAILABLE';
+    contestEvidence(context, contest, contest.childIds[0]);
     for (const id of contest.admissionIds) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', 'CHILD_UNAVAILABLE'); }
     bump(context, state, 'CONTEST_BLOCKED', contest.childIds);
     return;
@@ -663,6 +704,7 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
   contest.reason = outcome.reason;
   if (outcome.status === 'blocked') {
     contest.state = 'blocked';
+    contestEvidence(context, contest, contest.childIds[0]);
     state.blockedReason = outcome.reason;
     for (const id of contest.childIds) {
       const entry = admitted(state, contest.admissionIds[contest.childIds.indexOf(id)])!;
@@ -670,6 +712,7 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
     }
   } else {
     contest.state = 'selected'; contest.winnerId = outcome.winnerId;
+    contestEvidence(context, contest, outcome.winnerId);
     const loser = admitted(state, contest.admissionIds[contest.childIds.indexOf(outcome.loserId)])!;
     transition(context, loser, 'failed', outcome.reason);
   }
@@ -844,6 +887,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   if (contest) {
     if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
       contest.state = 'blocked'; contest.reason = 'CHILD_UNAVAILABLE';
+      contestEvidence(context, contest, contest.childIds[0]);
       for (const id of contest.admissionIds) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', 'CHILD_UNAVAILABLE'); }
       bump(context, state, 'CONTEST_BLOCKED', contest.childIds);
       save(context, state);
