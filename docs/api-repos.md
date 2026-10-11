@@ -1,0 +1,153 @@
+# Repository and change API
+
+This slice implements repository provisioning, owned candidate forks, branch registration, and publication requests. All routes use `Authorization: Bearer <Concord credential>`. Every mutation needs an `Idempotency-Key`; mutations of existing objects also need `expectedVersion` from the latest response envelope. Success responses are `{ "data": ..., "version": number, "eventSeq": number }`; failures are `{ "error": { "code", "message" }, "requestId" }`. A replay of one successful key and body returns the original response. Provider failures return `503`, keep their intent visible, and can be retried with the same key and body.
+
+| Method and path | Role | Request / result |
+| --- | --- | --- |
+| `GET /v1/repos` | Any authorized principal | Page of tenant repos; `?cursor=` advances. |
+| `POST /v1/repos` | Owner | `{name,policyId,profileId}` reserves a logical name and canonical storage intent before contacting the provider. Returns `201 ready`, `202 provisioning`, or `503` with visible `blocked` state. Repost the same name/config to reconcile a failed call. |
+| `GET /v1/repos/:r` | Repo reader | Repo status and observed canonical `main` OID; `202` while provisioning. |
+| `GET /v1/repos/:r/branches` | Repo reader | Registered candidate refs only. |
+| `POST /v1/repos/:r/branches` | Candidate author | `{expectedVersion,storageName,ref,observedHead,ownerId}`. `ref` is a full `refs/heads/...` name. The server resolves the exact fork ref and commit before registration. |
+| `POST /v1/repos/:r/git-token` | Owner/agent | `{expectedVersion,storageName,scope,ttlSeconds}`. TTL is 60–600 seconds. Canonical accepts read scope only; a candidate write token is confined to its author. Returns the provider's exact remote and a short-lived token. |
+| `GET /v1/repos/:r/changes` | Repo reader | Page of changes. |
+| `POST /v1/repos/:r/changes` | Owner/agent | `{intentKey,intentText,baseOid,branch,unitKeys,dependencyChangeIds,attempt?}`. An empty repo permits an owner seed draft with `baseOid:null`. Every draft gets one candidate fork. Repeated active task content returns the same change even if the submitted base differs. New work after a terminal task needs `attempt` incremented by one. |
+| `GET /v1/repos/:r/changes/:c` | Repo reader | Change and its fork provisioning intent. |
+| `POST /v1/repos/:r/changes/:c/publish` | Author/owner | `{expectedVersion,baseOid,headOid,branch,unitKeys,leaseFences}`. Requires registered current fork ref and existing head/base commits. Records an immutable revision and requests `inspect-candidate`. The current runner placeholder answers `501 MODULE_UNAVAILABLE`; the revision stays draft. Identical repeat publication returns the same revision. |
+| `POST /v1/repos/:r/changes/:c/close` | Author/owner | `{expectedVersion}`. Only unfrozen draft or ready changes can close. A terminal intent requires an explicit next attempt. |
+| `POST /v1/repos/:r/bootstrap` | Owner | `{expectedVersion,seedStorageName,seedRef,headOid,policyId,profileId}`. Requires an owned, registered root commit in a seed fork and absent canonical `main`. Records one owner request for root-tree validation. Runner/queue promotion is integrated in slices 04/05; the current placeholder answers `501 MODULE_UNAVAILABLE` and no canonical write token is returned. |
+
+The candidate branch is made with a native Git push to its assigned fork remote, then registered through Concord. A `202` fork has no usable remote yet; poll change detail until `provisioning.state` is `observed`. A failed fork remains in change detail and the repo snapshot and can be retried with the same intent content and request key. A registered branch must be refreshed when its head changes. Publication replaces the pending inspection revision and clears the repos module's review pointer. A checker result can mark it ready only when the pending job, fetched head/tree, trusted pins, unit set, and review evidence match. Queue admission, checker result authentication/digest validation, promotion freeze, and canonical advancement belong to slices 04/05/07.
+
+Provisioning status is checked at most 30 times at one-second intervals before it becomes `failed`; an owner or change author can retry the same deterministic storage name. An already observed repository that later disappears is blocked for operator reconciliation and is never silently recreated empty. A publication whose inspection scheduler is unavailable keeps its revision and job intent, returns `501 MODULE_UNAVAILABLE`, and can retry scheduling with a new request key and the current version without incrementing the revision.
+
+Job `expectedRefs` keys are `${storageName}:${fullRef}` so a candidate and canonical repo may both use `refs/heads/main` without collision. `inputDigest` hashes canonical sorted JSON of the immutable job input, excluding `jobId`, `inputDigest`, `state`, `attempt`, `runnerId`, `fence`, `expiresAt`, and `version`.
+
+## Local Git bridge
+
+The bridge is an **account-free local fake**, bound to `127.0.0.1` and backed by bare Git repositories under one supplied directory. It uses fixed native Git argv and accepts only an authenticated `/rpc` request. Repo remotes are `file://` paths and are suitable only for local fixtures below 10 MB. They do not enforce token scope as Artifacts HTTPS does.
+
+```sh
+export CONCORD_BRIDGE_DATA_DIR="$(mktemp -d)"
+export CONCORD_BRIDGE_TOKEN="$(openssl rand -hex 24)"
+export CONCORD_BRIDGE_PORT=8788
+npm run git-bridge
+```
+
+In a second terminal with the same bridge token, start the local Worker with [Wrangler `--var` overrides](https://developers.cloudflare.com/workers/wrangler/commands/workers/):
+
+```sh
+npm run dev -- --var 'STORAGE_BACKEND:bridge' \
+  --var "BRIDGE_URL:http://127.0.0.1:8788/?token=$CONCORD_BRIDGE_TOKEN"
+```
+
+The checked-in local Wrangler configuration defaults to `fake`. Keep the data directory to persist repos and issued fake-token revocation state across bridge restarts. The Worker adapter uses HTTP only; Node Git and filesystem APIs stay in `local/git-bridge.ts`. Do not deploy the bridge URL: production storage selection accepts only Artifacts.
+
+## Early live Artifacts gate (skipped by default)
+
+The owner's Cloudflare account and disposable namespace are not available in this run, so no live result or OID is claimed. The authorized operator runs the following **opt-in** script as soon as access exists, before slice 12. It uses the documented [REST create/fork routes](https://developers.cloudflare.com/artifacts/api/rest-api/), the corresponding [Workers binding methods](https://developers.cloudflare.com/artifacts/api/workers-binding/), and the [Git protocol push](https://developers.cloudflare.com/artifacts/api/git-protocol/). The script records redacted API responses and OIDs in a temporary directory; copy that output into the integration evidence after the run. It does not run as part of validation.
+
+```sh
+if [ "${RUN_ARTIFACTS_LIVE_SMOKE:-0}" != 1 ]; then
+  echo 'SKIP: set RUN_ARTIFACTS_LIVE_SMOKE=1 after the owner grants disposable Artifacts access'
+  exit 0
+fi
+set -eu
+: "${ACCOUNT_ID:?}" "${ARTIFACTS_NAMESPACE:?}" "${CLOUDFLARE_API_TOKEN:?}"
+command -v jq >/dev/null
+base="https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/artifacts/namespaces/$ARTIFACTS_NAMESPACE"
+run="$(date -u +%Y%m%d%H%M%S)-$$"
+canonical="concord-smoke-empty-$run"
+seed_repo="concord-smoke-seed-$run"
+seed_fork="concord-smoke-fork-$run"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+api() { curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' "$@"; }
+record() { jq 'del(.result.token, .result.plaintext)' >> "$tmp/api-responses.jsonl"; }
+create() { api -X POST "$base/repos" --data "$(jq -nc --arg n "$1" '{name:$n,default_branch:"main",read_only:false}')"; }
+fork() { api -X POST "$base/repos/$1/fork" --data "$(jq -nc --arg n "$2" '{name:$n,read_only:false,default_branch_only:false}')"; }
+read_head() { api "$base/repos/$1/log?ref=main&limit=1" | jq -r '.result[0].hash // empty'; }
+wait_ready() {
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if api "$base/repos/$1" | jq -e '.success == true and .result.remote != null' >/dev/null; then return 0; fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "repository $1 did not become ready in 30 seconds" >&2
+  return 1
+}
+wait_head() {
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if [ "$(read_head "$1")" = "$2" ]; then return 0; fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "repository $1 did not expose expected OID $2" >&2
+  return 1
+}
+revoke_tokens() {
+  api "$base/repos/$1/tokens?state=active&per_page=100&page=1" |
+    jq -r '.result[]?.id' | while IFS= read -r token_id; do
+      api -X DELETE "$base/tokens/$token_id" | jq -e '.success == true' >/dev/null
+    done
+}
+canonical_response="$(create "$canonical")"
+printf '%s\n' "$canonical_response" | record
+printf '%s\n' "$canonical_response" | jq -e '.success == true' >/dev/null
+wait_ready "$canonical"
+revoke_tokens "$canonical"
+fork_response="$(fork "$canonical" "$seed_fork")"
+printf '%s\n' "$fork_response" | record
+if printf '%s\n' "$fork_response" | jq -e '.success == true' >/dev/null; then
+  wait_ready "$seed_fork"
+  source_name="$seed_fork"
+  source_response="$fork_response"
+  path='empty-source-fork'
+else
+  # The separate seed repo receives its first commit before being forked.
+  seed_response="$(create "$seed_repo")"
+  printf '%s\n' "$seed_response" | record
+  printf '%s\n' "$seed_response" | jq -e '.success == true' >/dev/null
+  wait_ready "$seed_repo"
+  source_name="$seed_repo"
+  source_response="$seed_response"
+  path='seeded-source-fork'
+fi
+work="$tmp/work"
+git init -q "$work"
+printf 'Concord Artifacts bootstrap gate\n' > "$work/README.md"
+git -C "$work" add README.md
+GIT_AUTHOR_NAME=Concord GIT_AUTHOR_EMAIL=smoke@example.test \
+GIT_COMMITTER_NAME=Concord GIT_COMMITTER_EMAIL=smoke@example.test \
+  git -C "$work" commit -q -m 'first seed commit'
+oid="$(git -C "$work" rev-parse HEAD)"
+remote="$(printf '%s\n' "$source_response" | jq -r '.result.remote')"
+repo_token="$(printf '%s\n' "$source_response" | jq -r '.result.token')"
+git -C "$work" -c "http.extraHeader=Authorization: Bearer $repo_token" push "$remote" HEAD:refs/heads/main
+wait_head "$source_name" "$oid"
+observed="$(read_head "$source_name")"
+test "$observed" = "$oid"
+if [ "$path" = seeded-source-fork ]; then
+  fork_response="$(fork "$seed_repo" "$seed_fork")"
+  printf '%s\n' "$fork_response" | record
+  printf '%s\n' "$fork_response" | jq -e '.success == true' >/dev/null
+  wait_ready "$seed_fork"
+  wait_head "$seed_fork" "$oid"
+  observed_fork="$(read_head "$seed_fork")"
+  test "$observed_fork" = "$oid"
+fi
+revoke_tokens "$source_name"
+revoke_tokens "$seed_fork"
+printf 'path=%s canonical=%s seed_source=%s seed_fork=%s oid=%s readback=%s\n' \
+  "$path" "$canonical" "$source_name" "$seed_fork" "$oid" "$observed"
+cat "$tmp/api-responses.jsonl"
+```
+
+After that operation gate, the operator uses the verified fork as the owner seed source and, once slices 04/05 are integrated, verifies checked root-tree validation and a single absent-ref promotion to canonical `main`. Record the before/after ref OIDs, checker evidence, promotion result, and a second initializer's failed absent-ref check. If create, first push, seeded fork, or conditional Git push fails, stop Artifacts-dependent integration and give the integrator the redacted response and failing command. The script's fork response may be asynchronous; wait for ready via the documented repo status before pushing or reading back.
+
+TODO after PR #3 (slice 01b) merges: register the repos change-view provider through its cross-module hook. The hook was absent at this slice's starting commit.
+
+TODO for slices 04/05 integration: consume the recorded bootstrap validation request, provision its scratch fork, route a failed seed checker back to the bootstrap state, and issue the owner-authorized absent-ref promotion ticket only after a trusted pass. The current queue and runner hooks return `MODULE_UNAVAILABLE`; this slice never advances canonical `main`.
+Queue admission must also recheck the candidate's current registered ref and revision, consult the repos module's queue generation after a head change, and mark admitted/promoting changes frozen so `close` cannot bypass that state.

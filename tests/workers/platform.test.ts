@@ -62,7 +62,7 @@ describe('local Worker and SQLite Durable Objects', () => {
     const snapshot = await fetchApi(apiRequest('/v1/repos/alpha/snapshot'));
     expect(snapshot.status).toBe(200);
     expect((await responseBody(snapshot)).data.projections).toMatchObject({
-      repos: { status: 'unavailable' }, leases: { status: 'unavailable' },
+      repos: { repo: null, branches: [], changes: [], bootstrap: null }, leases: { status: 'unavailable' },
       queue: { status: 'unavailable' }, runners: { status: 'unavailable' },
       findings: { status: 'unavailable' }, verdicts: { status: 'unavailable' },
     });
@@ -125,7 +125,7 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect((await fetchApi(mutation('/v1/repos/beta/changes/c/verdicts', { expectedVersion: 0, decision: 'approve' }, 'wrong-role', 'local-agent-a'))).status).toBe(403);
     expect((await fetchApi(mutation('/v1/repos', { name: 'new', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key', 'local-viewer'))).status).toBe(403);
     const catalog = await fetchApi(mutation('/v1/repos', { name: 'new', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key'));
-    expect(catalog.status).toBe(501);
+    expect(catalog.status).toBe(201);
     const catalogConflict = await fetchApi(mutation('/v1/repos', { name: 'different', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key'));
     expect(catalogConflict.status).toBe(409);
   });
