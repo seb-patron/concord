@@ -3,11 +3,15 @@ import { promisify } from 'node:util';
 import { ConcordError } from './client.ts';
 
 const execFile = promisify(execFileCallback);
-export interface GitOptions { token?: string; timeoutMs?: number }
+export interface GitOptions { token?: string; timeoutMs?: number; alternateObjectDirectory?: string; identity?: boolean }
 
 export async function git(args: string[], options: GitOptions = {}, cwd?: string): Promise<string> {
   if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1' };
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1' };
+  if (options.alternateObjectDirectory) env.GIT_ALTERNATE_OBJECT_DIRECTORIES = options.alternateObjectDirectory;
+  if (options.identity) Object.assign(env, { GIT_AUTHOR_NAME: 'Concord Import', GIT_AUTHOR_EMAIL: 'import@concord.invalid',
+    GIT_COMMITTER_NAME: 'Concord Import', GIT_COMMITTER_EMAIL: 'import@concord.invalid',
+    GIT_AUTHOR_DATE: '@0 +0000', GIT_COMMITTER_DATE: '@0 +0000' });
   if (options.token) {
     env.GIT_CONFIG_COUNT = '1';
     env.GIT_CONFIG_KEY_0 = 'http.extraHeader';
@@ -51,11 +55,11 @@ export async function fetchFork(worktree: string, remote: string, branch: string
   await git(['fetch', '--no-tags', '--', remote, `refs/heads/${branch}:refs/remotes/concord/${branch}`], { token }, worktree);
 }
 
-export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string, headOid = 'HEAD'): Promise<void> {
+export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string, headOid = 'HEAD', alternateObjectDirectory?: string): Promise<void> {
   validateRemote(remote);
   validateBranch(branch);
   if (!/^(?:HEAD|[0-9a-f]{40,64})$/i.test(headOid)) throw new ConcordError('Candidate head OID is malformed', 'usage');
-  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch}`], { token }, worktree);
+  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch}`], { token, alternateObjectDirectory }, worktree);
 }
 
 export function rejectCanonicalTarget(candidateStorageName: string, canonicalStorageName: unknown, candidateRemote: string, canonicalRemote?: unknown): void {
