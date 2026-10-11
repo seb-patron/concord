@@ -22,4 +22,10 @@ The 201 response uses the standard `{data, version, eventSeq}` envelope. `data` 
 
 `DELETE /v1/principals/:id` revokes the principal and every descendant; it returns `{data:{revokedIds:[...]},version,eventSeq}`. Owners can revoke any principal in their tenant; agents can revoke themselves or a direct child. Revocation records a `principal.revoked` catalog event with affected IDs and no secrets. A revoked or expired token receives 401 on its next request, including existing repository routes. Tokens are never renewable; mint a replacement before expiry.
 
+## Tenant events
+
+`GET /v1/events` reads the tenant catalog event log, including `principal.minted` and `principal.revoked`. An authenticated principal needs the `owner` or `viewer` role. This is a separate log from `GET /v1/repos/:id/events`, which reads a repository coordinator. The response uses the same `{data:{items,nextCursor},version,eventSeq}` envelope as repository events. Events are ordered by increasing `sequence`; each item has `sequence`, `kind`, `actorId`, `timestamp`, `version`, `relatedIds`, and `payload`. Mint payloads contain `parentId`, `roles`, `repoIds`, and `expiresAt`; revoke payloads contain `rootId`. Neither event includes plaintext tokens or token digests.
+
+Pass `?cursor=...` using the opaque `nextCursor` to continue; `null` means no more events were present in that page. The optional `limit` is an integer from 1 to 100 and defaults to 100. A malformed cursor returns 400 `INVALID_CURSOR`; an invalid limit returns 400 `INVALID_LIMIT`. To poll from the last event after reaching the end, encode its decimal `sequence` as a URL-safe base64 cursor. The `eventSeq` envelope field is the latest catalog sequence.
+
 Status: validated against main 5b558e0 (the docs-test port-8788 fix).

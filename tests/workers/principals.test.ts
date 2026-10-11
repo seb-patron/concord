@@ -58,6 +58,42 @@ describe('delegated principals', () => {
     expect(JSON.stringify(listing)).not.toContain('token_digest');
   });
 
+  it('reads mint and revoke from the tenant event stream in order without secrets', async () => {
+    const before = await responseBody(await fetchApi(apiRequest('/v1/principals')));
+    const cursor = btoa(String(before.eventSeq));
+    const minted = await mint({ roles: ['agent'], repoIds: ['alpha'] });
+    expect(minted.status).toBe(201);
+    const created = (await responseBody(minted)).data;
+    const revoked = await fetchApi(apiRequest(`/v1/principals/${created.id}`, 'local-agent-a', { method: 'DELETE' }));
+    expect(revoked.status).toBe(200);
+
+    const first = await fetchApi(apiRequest(`/v1/events?cursor=${cursor}&limit=1`, 'local-viewer'));
+    expect(first.status).toBe(200);
+    const firstPage = await responseBody(first);
+    expect(firstPage.data.items).toHaveLength(1);
+    expect(firstPage.data.items[0]).toMatchObject({ kind: 'principal.minted', actorId: 'agent-a', relatedIds: [created.id],
+      payload: { parentId: 'agent-a', roles: ['agent'], repoIds: ['alpha'], expiresAt: created.expiresAt } });
+    expect(firstPage.data.nextCursor).toBeTruthy();
+    const second = await fetchApi(apiRequest(`/v1/events?cursor=${encodeURIComponent(firstPage.data.nextCursor)}&limit=1`));
+    expect(second.status).toBe(200);
+    const secondPage = await responseBody(second);
+    expect(secondPage.data.items).toHaveLength(1);
+    expect(secondPage.data.items[0]).toMatchObject({ kind: 'principal.revoked', actorId: 'agent-a', relatedIds: [created.id], payload: { rootId: created.id } });
+    expect(secondPage.data.items[0].sequence).toBeGreaterThan(firstPage.data.items[0].sequence);
+    expect(secondPage.data.nextCursor).toBeNull();
+    expect(secondPage.eventSeq).toBe(secondPage.data.items[0].sequence);
+    const eventsJson = JSON.stringify([...firstPage.data.items, ...secondPage.data.items]);
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(created.token))),
+      byte => byte.toString(16).padStart(2, '0')).join('');
+    expect(eventsJson).not.toContain(created.token);
+    expect(eventsJson).not.toContain(digest);
+    expect(eventsJson).not.toContain('token_digest');
+    expect(eventsJson).not.toContain('tokenDigest');
+    expect((await fetchApi(apiRequest('/v1/events', 'local-agent-a'))).status).toBe(403);
+    expect((await fetchApi(apiRequest('/v1/events?cursor=bad!', 'local-viewer'))).status).toBe(400);
+    expect((await fetchApi(apiRequest('/v1/events?limit=101', 'local-viewer'))).status).toBe(400);
+  });
+
   it('refuses role, repository, TTL, and parent-expiry escalation', async () => {
     for (const roles of [['checker'], ['promoter'], ['owner'], ['reviewer'], ['viewer'], ['agent', 'viewer']]) {
       expect((await mint({ roles })).status).toBe(403);

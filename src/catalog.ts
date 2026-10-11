@@ -1,8 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { HookName, ModuleContext, Principal, Repo, ServiceHooks } from './contracts';
-import { clock, requireTenant } from './auth';
+import { clock, requireRole, requireTenant } from './auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
-import { appendEvent, applyMigrations, costLimits, eventSequence, initialize, loadTrustedConfig, sqlState } from './state';
+import { appendEvent, applyMigrations, costLimits, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
 import { selectStorage } from './coordinator';
 import { repos } from './features/repos';
 import { handlePrincipalRoute, initializePrincipals, lookupPrincipal } from './features/principals';
@@ -76,6 +76,19 @@ export class TenantCatalog extends DurableObject<Env> {
         if (count >= costLimits(context.trusted).maxForksPerTenant) throw new HttpError(429, 'TENANT_FORK_LIMIT', 'Tenant fork limit reached');
         state.put('catalog:forkCount', count + 1);
         return json({ reserved: true });
+      }
+      if (path === '/v1/events') {
+        if (request.method !== 'GET') throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+        requireRole(principal, 'owner', 'viewer');
+        const url = new URL(request.url);
+        const after = parseCursor(url.searchParams.get('cursor'));
+        const limitRaw = url.searchParams.get('limit');
+        const limit = limitRaw === null ? 100 : Number(limitRaw);
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400, 'INVALID_LIMIT', 'Limit must be 1 to 100');
+        const page = eventsAfter(context.sql, after, limit + 1);
+        const items = page.slice(0, limit);
+        const nextCursor = page.length > limit ? encodeCursor(items[items.length - 1].sequence) : null;
+        return json({ items, nextCursor }, context.version(), eventSequence(context.sql));
       }
       if (path === '/v1/principals' || path.startsWith('/v1/principals/')) return await handlePrincipalRoute(context, request, path);
       if (path !== '/v1/repos') throw new HttpError(404, 'NOT_FOUND', 'Unknown catalog route');

@@ -40,6 +40,7 @@ Commands and required fields:
   verdict add --repo ID --change-id ID --revision N --review-manifest-digest sha256:... --finding-set-version N --decision approve|reject --evidence-digest sha256:... --expected-version N
   verdict carry --repo ID --change-id ID --parent-verdict-id ID --revision N --new-base-oid OID --expected-version N
   events list --repo ID [--after SEQUENCE]
+  events --tenant [--cursor CURSOR]
   api METHOD PATH [--body-file PATH]                 (advanced API; mutations need --idempotency-key)
 
 Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UNAVAILABLE responses remain explicit server errors.
@@ -55,6 +56,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     for (const name of [...OPTION_NAMES, 'role', 'ttl']) options[name] = { type: 'string' };
     options.json = { type: 'boolean' };
     options.help = { type: 'boolean' };
+    options.tenant = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
     parsed = parseArgs({ args: argv, options, allowPositionals: true, strict: true });
   } catch (error) { throw new ConcordError(`${error instanceof Error ? error.message : error}\n\n${HELP}`, 'usage'); }
@@ -125,6 +127,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     return print({ cloned: true, repoId: repo, path: destination, access: 'read-only' });
   }
 
+  if (noun === 'events' && flags.tenant && (!verb || verb === 'list')) {
+    if (repo || flags.after !== undefined) throw new ConcordError('Tenant events use --cursor without --repo or --after', 'usage');
+    return print(await send('GET', `/events${query({ cursor: flags.cursor })}`));
+  }
   const rid = requireRepo();
   const root = `/repos/${rid}`;
   if (noun === 'change' && verb === 'create') {
