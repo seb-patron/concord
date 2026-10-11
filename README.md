@@ -22,10 +22,13 @@ flowchart LR
 
 ## Five-minute local start
 
-Prerequisites: Node 22+, npm, and native Git. In a clean clone, install the pinned dependencies first:
+Prerequisites: Node 22+, npm, and native Git. In a clean clone, install the pinned dependencies first. Start from the clone's directory:
+
+Run `cd "$(pwd -P)"` because macOS `/tmp` is a symlink and Wrangler rejects `..` paths through symlinked checkouts.
 
 <!-- verified-by: 12c -->
 ```sh
+cd "$(pwd -P)"
 npm ci
 ```
 
@@ -35,6 +38,7 @@ Terminal 1, preflight:
 
 <!-- verified-by: 12c -->
 ```sh
+cd "$(pwd -P)"
 export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 npm run demo -- preflight --local --state-dir "$CONCORD_RUN_DIR"
 ```
@@ -43,6 +47,7 @@ Terminal 2, local Git bridge (leave running):
 
 <!-- verified-by: 12c -->
 ```sh
+cd "$(pwd -P)"
 export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 export CONCORD_BRIDGE_DATA_DIR="$CONCORD_RUN_DIR/bridge"
 CONCORD_BRIDGE_TOKEN=local-bridge-fixture-2026 CONCORD_BRIDGE_PORT=8788 npm run git-bridge
@@ -52,6 +57,7 @@ Terminal 3, local API Worker (leave running):
 
 <!-- verified-by: 12c -->
 ```sh
+cd "$(pwd -P)"
 export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 export CONCORD_WRANGLER_STATE=".wrangler/state/$(node -p 'require("node:crypto").createHash("sha256").update(process.env.CONCORD_RUN_DIR).digest("hex").slice(0,12)')"
 WRANGLER_SEND_METRICS=false npm run dev -- --persist-to "$CONCORD_WRANGLER_STATE" --var STORAGE_BACKEND:bridge --var 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026' --var "TRUSTED_CONFIG:$(cat "$CONCORD_RUN_DIR/trusted-config.json")"
@@ -61,6 +67,7 @@ Terminal 4, seed and the first three scenes:
 
 <!-- verified-by: 12c -->
 ```sh
+cd "$(pwd -P)"
 export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
 export CONCORD_URL=http://127.0.0.1:8787
 export CONCORD_TOKEN=local-owner

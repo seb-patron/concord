@@ -1,14 +1,16 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { wranglerStateDir } from '../../demo/scenarios';
 
 const execFile = promisify(execFileCallback);
-const cwd = resolve('.');
+const cwd = realpathSync(resolve('.'));
 const wrangler = join(cwd, 'node_modules/.bin/wrangler');
 const children: ChildProcess[] = [];
 const dirs: string[] = [];
@@ -70,6 +72,19 @@ afterEach(async () => {
 });
 
 describe('dispatch-lab local acceptance', () => {
+  it('resolves Wrangler state under the physical checkout through a symlink', async () => {
+    const root = await externalTempDir('concord-demo-link-');
+    const linked = join(root, 'checkout');
+    await symlink(cwd, linked, 'dir');
+    const stateDir = join(root, 'run');
+    const moduleUrl = pathToFileURL(join(linked, 'demo/scenarios.ts')).href;
+    const script = `import { wranglerStateDir } from ${JSON.stringify(moduleUrl)}; console.log(wranglerStateDir(${JSON.stringify(stateDir)}));`;
+    const { stdout } = await execFile(process.execPath,
+      ['--preserve-symlinks', '--import', 'tsx', '--input-type=module', '-e', script], { cwd, timeout: 30_000 });
+    expect(stdout.trim()).toBe(wranglerStateDir(stateDir));
+    expect(stdout.trim().startsWith(join(cwd, '.wrangler', 'state') + '/')).toBe(true);
+  });
+
   it('uses a distinct ignored Worker state path for each external demo run', async () => {
     const firstRun = await externalTempDir('concord-demo-path-');
     const secondRun = await externalTempDir('concord-demo-path-');

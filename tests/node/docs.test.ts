@@ -1,4 +1,6 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { access, copyFile, mkdir, readFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -7,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { wranglerStateDir } from '../../demo/scenarios';
 
 const execFile = promisify(execFileCallback);
-const cwd = resolve('.');
+const cwd = realpathSync(resolve('.'));
 const children: ChildProcess[] = [];
 const directories: string[] = [];
 
@@ -37,8 +39,22 @@ async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
 function commandLines(block: string): { exports: string[]; commands: string[] } {
   const lines = block.trim().split('\n').map(line => line.trim()).filter(Boolean);
   const exports = lines.filter(line => line.startsWith('export '));
-  const commands = lines.filter(line => !line.startsWith('export '));
+  const commands = lines.filter(line => !line.startsWith('export ') && line !== 'cd "$(pwd -P)"');
   return { exports, commands };
+}
+
+async function capturedNpm(exports: string[], command: string, env: NodeJS.ProcessEnv): Promise<{ args: string[]; values: string[] }> {
+  const script = [
+    'npm() {',
+    '  printf "ARG:%s\\n" "$@"',
+    '  printf "ENV:%s\\n" "$CONCORD_BRIDGE_DATA_DIR" "$CONCORD_BRIDGE_TOKEN" "$CONCORD_BRIDGE_PORT" "$CONCORD_URL" "$CONCORD_TOKEN" "$WRANGLER_SEND_METRICS"',
+    '}',
+    ...exports, command,
+  ].join('\n');
+  const { stdout } = await execFile('sh', ['-c', script], { cwd, env });
+  const lines = stdout.trimEnd().split('\n');
+  return { args: lines.filter(line => line.startsWith('ARG:')).map(line => line.slice(4)),
+    values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
 }
 
 async function run(command: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; data: any }> {
@@ -88,9 +104,13 @@ describe('documented demo commands', () => {
   it('keeps Wrangler persistence in the clone when TMPDIR is outside it', async () => {
     const root = await externalTempDir('concord-docs-paths-');
     const readme = await taggedBlocks('README.md');
-    const blocks = [...readme, ...await taggedBlocks('docs/DEMO.md'), ...await taggedBlocks('docs/deploy.md')];
+    const demo = await taggedBlocks('docs/DEMO.md');
+    const deploy = await taggedBlocks('docs/deploy.md');
+    const blocks = [...readme, ...demo, ...deploy];
     const env = { ...process.env, TMPDIR: root };
     expect(relative(cwd, root).startsWith('..')).toBe(true);
+    expect(readme).toHaveLength(5);
+    for (const block of readme) expect(block).toContain('cd "$(pwd -P)"');
     const { stdout: runDir } = await execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
       { cwd, env });
     expect(isAbsolute(runDir)).toBe(true);
@@ -98,34 +118,67 @@ describe('documented demo commands', () => {
     await mkdir(runDir);
     await writeFile(join(runDir, 'trusted-config.json'), '{}\n');
 
-    let checked = 0;
-    for (const block of blocks) {
+    const trusted = (await readFile(join(runDir, 'trusted-config.json'), 'utf8')).trim();
+    const runHash = createHash('sha256').update(resolve(runDir)).digest('hex').slice(0, 12);
+    const persistenceDir = join(cwd, '.wrangler', 'state', runHash);
+    expect(wranglerStateDir(runDir)).toBe(persistenceDir);
+    expect(relative(cwd, persistenceDir).startsWith('.wrangler/state/')).toBe(true);
+    let workers = 0;
+    let bridges = 0;
+    let demos = 0;
+    for (const block of blocks.slice(1)) {
       const { exports, commands } = commandLines(block);
       for (const command of commands) {
-        const script = [
-          'npm() { previous=; for arg do',
-          '  if [ "$previous" = --state-dir ] || [ "$previous" = --persist-to ]; then printf "%s\\n%s\\n" "$previous" "$arg"; fi',
-          '  previous=$arg',
-          'done; }',
-          ...exports, command,
-        ].join('\n');
-        const { stdout } = await execFile('sh', ['-c', script], { cwd, env: { ...env, CONCORD_RUN_DIR: runDir } });
-        const args = stdout.trim() ? stdout.trim().split('\n') : [];
-        expect(args).toHaveLength(2 * (command.match(/--(?:state-dir|persist-to)\b/g) ?? []).length);
-        for (let index = 0; index < args.length; index += 2) {
-          const [flag, path] = args.slice(index, index + 2);
-          if (flag === '--state-dir') {
-            expect(isAbsolute(path), `${command}: ${path}`).toBe(true);
-            expect(path.startsWith(root + '/'), `${command}: ${path}`).toBe(true);
-          } else {
-            expect(flag).toBe('--persist-to');
-            expect(resolve(cwd, path), `${command}: ${path}`).toBe(wranglerStateDir(runDir));
-          }
-          checked++;
+        const { args, values } = await capturedNpm(exports, command, { ...env, CONCORD_RUN_DIR: runDir });
+        if (args[1] === 'dev') {
+          workers++;
+          expect(args).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${runHash}`,
+            '--var', 'STORAGE_BACKEND:bridge', '--var', 'BRIDGE_URL:http://127.0.0.1:8788/?token=local-bridge-fixture-2026',
+            '--var', `TRUSTED_CONFIG:${trusted}`]);
+          expect(resolve(cwd, args[4])).toBe(persistenceDir);
+          expect(values[5]).toBe('false');
+        } else if (args[1] === 'git-bridge') {
+          bridges++;
+          expect(args).toEqual(['run', 'git-bridge']);
+          expect(values.slice(0, 3)).toEqual([join(runDir, 'bridge'), 'local-bridge-fixture-2026', '8788']);
+        } else {
+          demos++;
+          expect(args.slice(0, 3)).toEqual(['run', 'demo', '--']);
+          const stateFlags = args.flatMap((arg, index) => arg === '--state-dir' ? [args[index + 1]] : []);
+          expect(stateFlags, command).toEqual([runDir]);
+          expect(isAbsolute(stateFlags[0])).toBe(true);
+          expect(stateFlags[0].startsWith(root + '/')).toBe(true);
         }
       }
     }
-    expect(checked).toBeGreaterThan(0);
+    expect([workers, bridges, demos]).toEqual([1, 1, 18]);
+
+    const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(await readFile(join(cwd, 'docs/DEMO.md'), 'utf8'))?.[1];
+    expect(manual).toBeDefined();
+    const runnerCommands = commandLines(manual!).commands;
+    expect(runnerCommands).toHaveLength(2);
+    const checker = await capturedNpm([], runnerCommands[0], { ...env, CONCORD_RUN_DIR: runDir });
+    expect(checker.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'checker',
+      '--profile', join(runDir, 'dispatch-profile.json'), '--once']);
+    expect(checker.values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-checker']);
+    const promoter = await capturedNpm([], runnerCommands[1], { ...env, CONCORD_RUN_DIR: runDir });
+    expect(promoter.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'promoter',
+      '--profile-digest', 'PROFILE_DIGEST_FROM_PREFLIGHT', '--once']);
+    expect(promoter.values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-promoter']);
+
+    const release = await readFile(join(cwd, 'docs/deploy.md'), 'utf8');
+    const productionRunners = release.split('\n').filter(line => line.includes('npm run runner --'));
+    expect(productionRunners).toHaveLength(2);
+    const productionEnv = { ...env, CONCORD_REPO_ID: 'repo-id', CONCORD_HOME: join(root, 'operator'),
+      CHECKER_TOKEN: 'checker-token', PROMOTER_TOKEN: 'promoter-token', PROFILE_DIGEST: 'profile-digest' };
+    const productionChecker = await capturedNpm([], productionRunners[0], productionEnv);
+    expect(productionChecker.args).toEqual(['run', 'runner', '--', '--repo', 'repo-id', '--role', 'checker',
+      '--profile', join(root, 'operator', 'checker-profile.json'), '--once']);
+    expect(productionChecker.values[4]).toBe('checker-token');
+    const productionPromoter = await capturedNpm([], productionRunners[1], productionEnv);
+    expect(productionPromoter.args).toEqual(['run', 'runner', '--', '--repo', 'repo-id', '--role', 'promoter',
+      '--profile-digest', 'profile-digest', '--once']);
+    expect(productionPromoter.values[4]).toBe('promoter-token');
   });
 
   it('runs every 12c-tagged local command against the real bridge and Worker', async () => {
@@ -154,7 +207,7 @@ describe('documented demo commands', () => {
       .flatMap(block => [...block.matchAll(/npm run demo -- scene (\w+)/g)].map(match => match[1]));
     expect([...new Set(documented)].sort()).toEqual([...new Set(implemented)].sort());
 
-    expect(readme[0].trim()).toBe('npm ci');
+    expect(readme[0].trim()).toBe('cd "$(pwd -P)"\nnpm ci');
     const install = join(root, 'install');
     await mkdir(install);
     await Promise.all(['package.json', 'package-lock.json'].map(file => copyFile(join(cwd, file), join(install, file))));

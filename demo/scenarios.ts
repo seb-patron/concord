@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,7 @@ const fileHash = async (path: string) => `sha256:${createHash('sha256').update(a
 
 export function wranglerStateDir(stateDir: string): string {
   const runHash = createHash('sha256').update(resolve(stateDir)).digest('hex').slice(0, 12);
-  return resolve(root, '..', '.wrangler', 'state', runHash);
+  return resolve(realpathSync(resolve(root, '..')), '.wrangler', 'state', runHash);
 }
 
 export interface Options { run: string; stateDir: string; url: string; pumpLocal: boolean; json: boolean }
