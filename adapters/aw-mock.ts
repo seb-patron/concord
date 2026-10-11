@@ -17,11 +17,14 @@ interface Mapping {
 }
 interface PendingRequest { path: string; body: string; key: string }
 interface RunState { schemaVersion: 1; mappings: Record<string, Mapping>; pendingRequest?: PendingRequest }
-interface Change { changeId: string; intentKey: string; intentText: string; branch: string; unitKeys: string[]; baseOid: string | null; headOid: string | null; revision: number; status: string; version: number; candidateStorageName: string }
+interface Change { changeId: string; authorId: string; intentKey: string; intentText: string; branch: string; unitKeys: string[]; baseOid: string | null; headOid: string | null; revision: number; status: string; version: number; candidateStorageName: string }
 interface Repo { canonicalStorageName: string; observedCanonicalOid: string | null; version: number; status: string }
 interface Lease { changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }
 interface Verdict { verdictId: string; revision: number; decision: string }
-interface QueueEntry { changeId: string; state: string }
+interface QueueEntry { entryId?: string; changeId: string; admittedRevision: number; state: string; blockedReason?: string | null }
+interface ServerState { change: Change; attempt: number; queue: QueueEntry[] | null }
+type ReconcileDecision = { kind: 'reuse'; queued: boolean } | { kind: 'refuse'; block: Block };
+const workerPrincipal = 'mock-aw';
 type Envelope<T> = { data: T; version: number };
 const terminal = new Set(['merged', 'superseded', 'closed']);
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -66,6 +69,35 @@ function ensureTask(change: Change, fixture: AwMockFixture): void {
     JSON.stringify([...change.unitKeys].sort()) !== JSON.stringify([...fixture.unitKeys].sort())) {
     throw new ConcordError('Active intent has different task content', 'conflict', 409, { error: { code: 'INTENT_CONFLICT', message: 'Active intent has different task content' } });
   }
+}
+
+export function reconcile(serverState: ServerState, fixture: AwMockFixture, identity: string): ReconcileDecision {
+  const { change, attempt, queue } = serverState;
+  const refuse = (code: string, reason: string, details?: unknown): ReconcileDecision =>
+    ({ kind: 'refuse', block: { code, reason, status: 409, ...(details === undefined ? {} : { details }) } });
+  if (change.authorId !== identity) return refuse('INTENT_OWNED', 'Intent key belongs to another author');
+  if (change.intentKey !== intentKey(fixture) || change.intentText !== fixture.intent || change.branch !== branch(fixture) ||
+    JSON.stringify([...change.unitKeys].sort()) !== JSON.stringify([...fixture.unitKeys].sort()))
+    return refuse('INTENT_CONFLICT', 'Active intent has different task content');
+  if (attempt !== fixture.explicitAttempt)
+    return refuse('ATTEMPT_CONFLICT', 'Explicit attempt differs from the server intent', { serverAttempt: attempt, explicitAttempt: fixture.explicitAttempt });
+  if (terminal.has(change.status)) return refuse('ATTEMPT_REQUIRED', 'Terminal change requires the next explicitAttempt.');
+  if (change.status === 'blocked') return refuse('CHECKER_BLOCKED', 'Concord marked the candidate blocked; inspect the change and checker evidence.');
+  const active = queue?.find(entry => entry.changeId === change.changeId && entry.admittedRevision === change.revision);
+  if (active?.state === 'blocked') return refuse('QUEUE_BLOCKED', 'Concord queue blocked the active revision.', active);
+  if (change.status === 'queued' || change.status === 'checking') {
+    if (!queue) return refuse('QUEUE_UNAVAILABLE', 'Queue state is unavailable for an admitted change.');
+    if (!active) return refuse('QUEUE_REVISION_MISMATCH', 'No queue entry matches the active revision.',
+      { revision: change.revision, entries: queue.filter(entry => entry.changeId === change.changeId) });
+    if (active.state !== 'waiting' && active.state !== 'checking')
+      return refuse('QUEUE_STATE_CONFLICT', 'Queue entry is not awaiting admission or checking.', active);
+    return { kind: 'reuse', queued: true };
+  }
+  return { kind: 'reuse', queued: active?.state === 'waiting' || active?.state === 'checking' };
+}
+
+function refusalError(block: Block): ConcordError {
+  return new ConcordError(block.reason, 'conflict', block.status, { error: { code: block.code, message: block.reason, details: block.details } });
 }
 
 function output(fixture: AwMockFixture, mapping: Mapping, client: ConcordClient, change?: Change) {
@@ -136,23 +168,23 @@ async function claimLeases(client: ConcordClient, fixture: AwMockFixture, change
   return Object.fromEntries(claim.leases.map(item => [item.unitKey, item.fence]));
 }
 
-async function alreadyQueued(client: ConcordClient, fixture: AwMockFixture, change: Change): Promise<boolean> {
-  if (change.status === 'queued' || change.status === 'checking') return true;
+async function queueEntries(client: ConcordClient, fixture: AwMockFixture): Promise<QueueEntry[] | null> {
   try {
     let cursor: string | null = null;
     const seen = new Set<string>();
+    const entries: QueueEntry[] = [];
     do {
       const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
       const queue: { items: QueueEntry[]; nextCursor?: string | null } = (await client.request<Envelope<{ items: QueueEntry[]; nextCursor?: string | null }>>('GET', `${path(fixture.project)}/queue${query}`)).data;
-      if (queue.items.some(item => item.changeId === change.changeId && ['waiting', 'checking', 'blocked'].includes(item.state))) return true;
+      entries.push(...queue.items);
       cursor = queue.nextCursor ?? null;
       if (cursor && seen.has(cursor)) throw new Error('INVALID_QUEUE_CURSOR');
       if (cursor) seen.add(cursor);
     } while (cursor);
-    return false;
+    return entries;
   } catch (error) {
     // The optional queue module has no readable state until it is installed.
-    if (error instanceof ConcordError && error.status === 501) return false;
+    if (error instanceof ConcordError && error.status === 501) return null;
     throw error;
   }
 }
@@ -222,13 +254,12 @@ async function publishCandidate(client: ConcordClient, fixture: AwMockFixture, m
 async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, post: Post): Promise<Change> {
   const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
   const change = viewed.data;
-  ensureTask(change, fixture);
-  if (change.status === 'blocked') {
-    mapping.phase = 'blocked'; mapping.block = { code: 'CHECKER_BLOCKED', reason: 'Concord marked the candidate blocked; inspect the change and checker evidence.' };
+  const decision = reconcile({ change, attempt: fixture.explicitAttempt, queue: await queueEntries(client, fixture) }, fixture, workerPrincipal);
+  if (decision.kind === 'refuse') {
+    mapping.phase = 'blocked'; mapping.block = decision.block;
     return change;
   }
-  if (terminal.has(change.status)) return change;
-  if (change.status === 'queued' || change.status === 'checking') { mapping.phase = 'queued'; return change; }
+  if (decision.queued) { mapping.phase = 'queued'; mapping.block = undefined; return change; }
   if (!change.headOid) return change;
   const verdicts = (await client.request<Envelope<{ items: Verdict[] }>>('GET', `${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/verdicts`)).data;
   const approval = verdicts.items.find(item => item.revision === change.revision && item.decision === 'approve');
@@ -245,18 +276,14 @@ async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, 
   return change;
 }
 
-async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, remember: () => Promise<void>, recovered: boolean, post: Post): Promise<Change> {
-  ensureTask(change, fixture);
+async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, attempt: number, remember: () => Promise<void>, post: Post): Promise<Change> {
+  const decision = reconcile({ change, attempt, queue: await queueEntries(client, fixture) }, fixture, workerPrincipal);
   mapping.headOid = change.headOid ?? undefined;
-  if (terminal.has(change.status)) {
-    mapping.phase = 'blocked'; mapping.block = { code: 'ATTEMPT_REQUIRED', reason: 'Terminal change requires the next explicitAttempt.' };
+  if (decision.kind === 'refuse') {
+    mapping.phase = 'blocked'; mapping.block = decision.block;
     return change;
   }
-  if (change.status === 'blocked') {
-    mapping.phase = 'blocked'; mapping.block = { code: 'CHECKER_BLOCKED', reason: 'Concord marked the candidate blocked; inspect the change and checker evidence.' };
-    return change;
-  }
-  if (change.status === 'queued' || change.status === 'checking' || recovered && change.headOid && await alreadyQueued(client, fixture, change)) {
+  if (decision.queued) {
     mapping.phase = 'queued'; mapping.block = undefined;
     return change;
   }
@@ -273,7 +300,7 @@ async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Ma
   mapping.phase = 'leased'; mapping.block = undefined; await remember();
   const latestRepo = (await client.request<Envelope<Repo>>('GET', path(fixture.project))).data;
   const latestChange = await getChange(client, fixture, change.changeId);
-  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, remember, recovered, post);
+  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, attempt, remember, post);
   const head = await registeredHead(client, fixture, latestChange);
   if (head) {
     const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
@@ -316,6 +343,7 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
   const root = path(fixture.project);
   const found = await findIntent(client, fixture);
   const existing = found?.change;
+  if (existing?.authorId !== undefined && existing.authorId !== workerPrincipal) throw refusalError({ code: 'INTENT_OWNED', reason: 'Intent key belongs to another author', status: 409 });
   if (existing) ensureTask(existing, fixture);
   const serverAttempt = found?.attempt ?? 0;
   if (serverAttempt !== fixture.explicitAttempt && !(existing && terminal.has(existing.status) && serverAttempt + 1 === fixture.explicitAttempt) &&
@@ -336,12 +364,13 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
     created = reply;
   }
   ensureTask(created, fixture);
+  if (created.authorId !== workerPrincipal) throw refusalError({ code: 'INTENT_OWNED', reason: 'Intent key belongs to another author', status: 409 });
   if (!mapping || mapping.changeId !== created.changeId) mapping = { identity, intentKey: intentKey(fixture), fingerprint: fingerprint(fixture), changeId: created.changeId,
     phase: 'opened', observedBaseOid: fixture.observedBaseOid };
   else mapping.observedBaseOid = fixture.observedBaseOid;
   await remember();
   try {
-    const change = await resume(client, fixture, mapping, created, remember, !!existing && existing.changeId === created.changeId, post);
+    const change = await resume(client, fixture, mapping, created, fixture.explicitAttempt, remember, post);
     await remember();
     return output(fixture, mapping, client, change);
   } catch (error) {
