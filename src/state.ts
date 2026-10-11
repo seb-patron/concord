@@ -70,8 +70,8 @@ export function eventsAfter(sql: SqlStorage, after: number, limit = 100): Event[
 
 const fixtureDigest = `sha256:${'0'.repeat(64)}` as const;
 export const MAX_RESULT_OUTPUT_BYTES = 16 * 1024;
-export interface CostLimits { maxReposPerTenant: number; maxTokenMintsPerTenantPerDay: number }
-const defaultCostLimits: CostLimits = { maxReposPerTenant: 100, maxTokenMintsPerTenantPerDay: 1000 };
+export interface CostLimits { maxReposPerTenant: number; maxForksPerTenant: number; maxTokenMintsPerTenantPerDay: number }
+const defaultCostLimits: CostLimits = { maxReposPerTenant: 100, maxForksPerTenant: 1000, maxTokenMintsPerTenantPerDay: 1000 };
 export function costLimits(config: TrustedConfiguration): CostLimits {
   const supplied = (config as TrustedConfiguration & { costLimits?: Partial<CostLimits> }).costLimits;
   return { ...defaultCostLimits, ...supplied };
@@ -100,7 +100,7 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   if (!config.policies || !config.profiles || typeof config.policies !== 'object' || typeof config.profiles !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
   const limits = (config as TrustedConfiguration & { costLimits?: Record<string, unknown> }).costLimits;
   if (limits !== undefined && (!limits || typeof limits !== 'object' || Array.isArray(limits) ||
-    Object.keys(limits).some(key => !['maxReposPerTenant', 'maxTokenMintsPerTenantPerDay'].includes(key)) ||
+    Object.keys(limits).some(key => !['maxReposPerTenant', 'maxForksPerTenant', 'maxTokenMintsPerTenantPerDay'].includes(key)) ||
     Object.values(limits).some(value => !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 10000))) throw new Error('TRUSTED_CONFIG_INVALID');
   for (const [id, policy] of Object.entries(config.policies)) {
     if (!policy || typeof policy !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');

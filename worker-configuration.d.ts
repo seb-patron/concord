@@ -12,6 +12,11 @@ interface Env {
   CONCORD_TEST_NOW?: string;
 }
 
+declare module '*?raw' {
+  const source: string;
+  export default source;
+}
+
 declare module 'cloudflare:workers' {
   interface ProvidedEnv extends Env {}
 }

@@ -60,6 +60,13 @@ export class TenantCatalog extends DurableObject<Env> {
         state.put('catalog:tokenQuota', { day, count: count + 1 });
         return json({ reserved: true });
       }
+      if (path === '/internal/fork-quota' && request.method === 'POST') {
+        const state = sqlState(context.sql);
+        const count = state.get<number>('catalog:forkCount') ?? 0;
+        if (count >= costLimits(context.trusted).maxForksPerTenant) throw new HttpError(429, 'TENANT_FORK_LIMIT', 'Tenant fork limit reached');
+        state.put('catalog:forkCount', count + 1);
+        return json({ reserved: true });
+      }
       if (path !== '/v1/repos') throw new HttpError(404, 'NOT_FOUND', 'Unknown catalog route');
       if (request.method === 'GET') {
         const repos = (context.state.get<Repo[]>('catalog:index') ?? []).filter(repo => repo.tenantId === principal.tenantId && (principal.repoIds === '*' || principal.repoIds.includes(repo.repoId)));

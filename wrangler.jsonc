@@ -9,7 +9,7 @@
     { "name": "REPO_COORDINATOR", "class_name": "RepoCoordinator" }
   ] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCatalog", "RepoCoordinator"] }],
-  "limits": { "cpu_ms": 5000 },
+  "limits": { "cpu_ms": 100 },
   "ratelimits": [{ "name": "AUTH_RATE_LIMIT", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }],
   "artifacts": [{ "binding": "ARTIFACTS", "namespace": "concord-demo" }],
   "vars": { "CONCORD_MODE": "production", "STORAGE_BACKEND": "artifacts", "CONCORD_SHOW_DECOMPILED_C": "0" }

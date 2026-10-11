@@ -10,20 +10,28 @@ async function limitAuthFailure(request: Request, env: Env): Promise<void> {
   if (!result.success) throw new HttpError(429, 'RATE_LIMITED', 'Authentication rate limit reached');
 }
 
-async function enforceBodyLimit(request: Request): Promise<void> {
+async function enforceBodyLimit(request: Request): Promise<Request> {
   const length = request.headers.get('content-length');
   if (length !== null && Number(length) > MAX_REQUEST_BODY_BYTES) throw new HttpError(413, 'BODY_TOO_LARGE', 'Request body exceeds 256 KiB');
-  if (!request.body) return;
-  const reader = request.clone().body!.getReader();
+  if (!request.body) return request;
+  const reader = request.body.getReader();
   let size = 0;
+  const chunks: ArrayBuffer[] = [];
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_REQUEST_BODY_BYTES) throw new HttpError(413, 'BODY_TOO_LARGE', 'Request body exceeds 256 KiB');
+      if (size > MAX_REQUEST_BODY_BYTES) {
+        void reader.cancel().catch(() => undefined);
+        throw new HttpError(413, 'BODY_TOO_LARGE', 'Request body exceeds 256 KiB');
+      }
+      const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
+      copy.set(value);
+      chunks.push(copy.buffer);
     }
-  } finally { await reader.cancel(); }
+  } finally { reader.releaseLock(); }
+  return new Request(request, { body: new Blob(chunks) });
 }
 
 export { TenantCatalog } from './catalog';
@@ -51,15 +59,15 @@ export default {
       let principal: Principal;
       try {
         principal = await authenticate(request, env, clock(env));
-        requireTenant(principal, request.headers.get('x-tenant-id') ?? undefined);
-        requireRouteRole(principal, request.method, url.pathname);
-        const repoMatch = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(url.pathname);
-        if (repoMatch) requireRepo(principal, repoMatch[1]);
       } catch (error) {
         if (error instanceof HttpError && (error.status === 401 || error.status === 403)) await limitAuthFailure(request, env);
         throw error;
       }
-      await enforceBodyLimit(request);
+      requireTenant(principal, request.headers.get('x-tenant-id') ?? undefined);
+      requireRouteRole(principal, request.method, url.pathname);
+      const repoMatch = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(url.pathname);
+      if (repoMatch) requireRepo(principal, repoMatch[1]);
+      request = await enforceBodyLimit(request);
       if (url.pathname === '/v1/repos') {
         const name = `tenant:${principal.tenantId}`;
         return forward(request, principal, env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName(name)));

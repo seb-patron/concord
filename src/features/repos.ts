@@ -311,6 +311,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
     if (!await context.storage.readCommit(repo.canonicalStorageName, input.baseOid as string)) fail(422, 'BASE_NOT_FOUND', 'Base commit does not exist');
   }
   if (all.filter(change => !terminal(change)).length >= 32) fail(429, 'CHANGE_LIMIT', 'Active change limit reached');
+  await reserveFork(context);
   const changeId = crypto.randomUUID();
   const candidateStorageName = `concord-f-${changeId}`;
   const requestDigest = await digest({ kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName });
@@ -377,6 +378,19 @@ export async function reserveTokenMint(context: ModuleContext): Promise<void> {
   if (!reservation.ok) {
     if (reservation.status === 429) fail(429, 'TENANT_TOKEN_LIMIT', 'Tenant daily token mint limit reached');
     fail(503, 'CATALOG_UNAVAILABLE', 'Token quota unavailable');
+  }
+}
+
+async function reserveFork(context: ModuleContext): Promise<void> {
+  if (!context.env?.CONCORD_MODE) return;
+  if (!context.env.TENANT_CATALOG) fail(503, 'CATALOG_UNAVAILABLE', 'Fork quota unavailable');
+  const quota = context.env.TENANT_CATALOG.get(context.env.TENANT_CATALOG.idFromName(`tenant:${context.tenantId}`));
+  const reservation = await quota.fetch(new Request('https://concord.test/internal/fork-quota', { method: 'POST', headers: {
+    'x-concord-principal': JSON.stringify(context.principal), 'x-concord-tenant': context.tenantId,
+  } }));
+  if (!reservation.ok) {
+    if (reservation.status === 429) fail(429, 'TENANT_FORK_LIMIT', 'Tenant fork limit reached');
+    fail(503, 'CATALOG_UNAVAILABLE', 'Fork quota unavailable');
   }
 }
 
