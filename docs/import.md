@@ -13,13 +13,17 @@ npm run concord -- import --source ./existing-repo --ref main --repo adopted \
   --exclude 'private/**' --exclude '**/.env' --exclude-file ./import-excludes.txt
 ```
 
-Exclusions match normalized, repository-relative Git paths. Supported glob
-operators are `*` (within one path component), `?` (one character), and
+`--source` must name the Git repository top level. Exclusions match normalized,
+repository-relative Git paths. Supported glob operators are `*` (within one
+path component), `?` (one character), and
 `**` (across path components); `**/` also matches zero directories. A trailing
 `/` excludes a directory and everything below it. The exclude file contains
 one glob per line; blank lines and lines beginning with `#` are ignored.
-An unreadable file or unsupported glob is an error. The command refuses any
-symlink or submodule in the source commit, including one under an excluded path.
+An unreadable file, malformed UTF-8, empty glob, or unsupported glob is an error.
+Patterns that match no committed path appear in `unmatchedPatterns` in the
+result. Add `--require-match` to make any such pattern an error. The command
+refuses any symlink or submodule in the source commit, including one under an
+excluded path.
 It verifies the completed tree against the selected paths before contacting
 Concord. Git paths are never printed merely because they were excluded.
 
@@ -30,6 +34,7 @@ npm run concord -- import --source ./existing-repo --ref main --repo adopted \
 
 `--print-tree` needs no API connection. It prints the included file count,
 included total bytes, excluded path count, and prospective root tree OID.
+It also reports patterns that matched no path.
 `--verbose` also prints excluded path names; use it only where those names
 can be disclosed.
 

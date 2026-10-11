@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
+import { ConcordClient } from '../../cli/client.ts';
 import { importRepo } from '../../cli/import.ts';
 
 const execFile = promisify(execFileCallback);
@@ -89,7 +90,7 @@ describe('adopted root import', () => {
     const options = { source, ref: 'main', repo: 'adopted', excludes: ['private/**'], printTree: true };
     const tree = await importRepo(options);
     expect(tree).toMatchObject({ fileCount: 3, excludedPathCount: 1 });
-    expect(tree.treeOid).toMatch(/^[a-f0-9]{40}$/);
+    expect(tree.treeOid).toBe(await git(source, 'rev-parse', 'HEAD~1^{tree}'));
     expect(JSON.stringify(tree)).not.toContain('secret.txt');
     expect(fetcher).not.toHaveBeenCalled();
     await expect(importRepo({ ...options, excludeFile: join(root, 'missing') })).rejects.toThrow(/exclude-file/);
@@ -97,6 +98,40 @@ describe('adopted root import', () => {
     await git(source, 'add', 'link');
     await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'link');
     await expect(importRepo(options)).rejects.toThrow(/symlink/);
+  });
+
+  it('rejects malformed exclusion bytes before contacting Concord', async () => {
+    const root = await temporary();
+    const { source } = await fixture(root);
+    const excludeFile = join(root, 'excludes');
+    await writeFile(excludeFile, Buffer.concat([Buffer.from('private/**'), Buffer.from([0xff])]));
+    const fetcher = vi.fn(() => { throw new Error('API contacted for invalid exclusions'); });
+    const client = new ConcordClient({ url: 'http://127.0.0.1:1', fetch: fetcher });
+    await expect(importRepo({ source, ref: 'main', repo: 'adopted', policyId: 'policy',
+      profileId: 'profile', excludeFile }, client)).rejects.toThrow(/valid UTF-8/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('requires the source repository top level', async () => {
+    const root = await temporary();
+    const { source } = await fixture(root);
+    await expect(importRepo({ source: join(source, 'private'), ref: 'main', repo: 'adopted',
+      printTree: true })).rejects.toThrow(/top level/);
+  });
+
+  it('reports unmatched exclusions and can require each pattern to match', async () => {
+    const root = await temporary();
+    const { source } = await fixture(root);
+    const options = { source, ref: 'main', repo: 'adopted', printTree: true,
+      excludes: ['private/**', 'absent/**'] };
+    await expect(importRepo(options)).resolves.toMatchObject({ excludedPathCount: 1,
+      unmatchedPatterns: ['absent/**'] });
+    await expect(importRepo({ ...options, requireMatch: true })).rejects.toThrow(/matches no paths/);
+    await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import', '--source', source,
+      '--ref', 'main', '--repo', 'adopted', '--exclude', 'absent/**', '--require-match', '--print-tree'],
+    { cwd, env: gitEnv, timeout: 30_000 })).rejects.toMatchObject({ code: 2 });
+    await expect(importRepo({ ...options, excludes: [''] })).rejects.toThrow(/Invalid exclusion glob/);
+    await expect(importRepo({ ...options, excludes: ['private//secret.txt'] })).rejects.toThrow(/Invalid exclusion glob/);
   });
 
   it('imports through the local bridge and Worker as one canonical root, then reconciles', async () => {
@@ -153,7 +188,9 @@ describe('adopted root import', () => {
     expect(detail.observedCanonicalOid).toBe(imported.canonicalOid);
     const canonical = join(root, 'bridge', detail.canonicalStorageName + '.git');
     expect(await git(root, '--git-dir', canonical, 'rev-list', '--count', 'refs/heads/main')).toBe('1');
-    expect(await git(root, '--git-dir', canonical, 'rev-parse', 'refs/heads/main^{tree}')).toBe(imported.treeOid);
+    const sourceWithoutExcludedPaths = await git(source, 'rev-parse', 'HEAD~1^{tree}');
+    expect(imported.treeOid).toBe(sourceWithoutExcludedPaths);
+    expect(await git(root, '--git-dir', canonical, 'rev-parse', 'refs/heads/main^{tree}')).toBe(sourceWithoutExcludedPaths);
     expect(await git(root, '--git-dir', canonical, 'show', '-s', '--format=%B', 'refs/heads/main')).toContain(sourceOid);
     await expect(git(root, '--git-dir', canonical, 'show', 'main:private/secret.txt')).rejects.toThrow();
     const second = await execFile(process.execPath, ['--import', 'tsx', ...args],

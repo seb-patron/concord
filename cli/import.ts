@@ -16,12 +16,13 @@ type Envelope = { version: number; data: Record<string, unknown> };
 
 export interface ImportOptions {
   source: string; ref: string; repo: string; policyId?: string; profileId?: string;
-  excludes?: string[]; excludeFile?: string; printTree?: boolean; verbose?: boolean;
+  excludes?: string[]; excludeFile?: string; requireMatch?: boolean; printTree?: boolean; verbose?: boolean;
 }
 
 function glob(pattern: string): RegExp {
   if (!pattern || pattern.startsWith('/') || pattern.includes('\\') || pattern.includes('\0') ||
-      pattern.split('/').some(part => part === '.' || part === '..') || /[\[\]{}]/.test(pattern)) {
+      pattern.split('/').some((part, index, parts) => (!part && index !== parts.length - 1) || part === '.' || part === '..') ||
+      /[\[\]{}]/.test(pattern)) {
     throw new ConcordError('Invalid exclusion glob; use normalized Git paths and *, **, or ?', 'usage');
   }
   const value = pattern.endsWith('/') ? pattern + '**' : pattern;
@@ -104,6 +105,13 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     throw new ConcordError('import requires --policy-id and --profile-id', 'usage');
   }
   const source = await realpath(resolve(options.source)).catch(() => { throw new ConcordError('Source Git repository is unreadable', 'usage'); });
+  const topLevel = await git(['-C', source, 'rev-parse', '--show-toplevel']).catch(() => {
+    throw new ConcordError('--source must be a Git repository top level', 'usage');
+  });
+  const sourceRoot = await realpath(topLevel).catch(() => {
+    throw new ConcordError('Source Git repository top level is unreadable', 'usage');
+  });
+  if (source !== sourceRoot) throw new ConcordError('--source must be the Git repository top level', 'usage');
   const sourceName = basename(source);
   const sourceOid = await git(['-C', source, 'rev-parse', '--verify', `${options.ref}^{commit}`]).catch(() => {
     throw new ConcordError('Source ref does not resolve to a commit', 'usage');
@@ -114,12 +122,19 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
   const entries = await treeEntries(source, sourceTree);
   const patterns = [...(options.excludes ?? [])];
   if (options.excludeFile) {
-    let file: string;
-    try { file = await readFile(options.excludeFile, 'utf8'); }
+    let bytes: Buffer;
+    try { bytes = await readFile(options.excludeFile); }
     catch { throw new ConcordError('Cannot read --exclude-file', 'usage'); }
+    let file: string;
+    try { file = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { throw new ConcordError('--exclude-file is not valid UTF-8', 'usage'); }
     patterns.push(...file.split(/\r?\n/).filter(line => line && !line.startsWith('#')));
   }
   const excludes = patterns.map(glob);
+  const unmatchedPatterns = patterns.filter((_, index) => !entries.some(item => excludes[index].test(item.path)));
+  if (options.requireMatch && unmatchedPatterns.length) {
+    throw new ConcordError(`Exclusion glob matches no paths: ${unmatchedPatterns.join(', ')}`, 'usage');
+  }
   const excluded = entries.filter(item => excludes.some(pattern => pattern.test(item.path)));
   const included = entries.filter(item => !excludes.some(pattern => pattern.test(item.path)));
   const scratch = await mkdtemp(join(tmpdir(), 'concord-import-'));
@@ -140,7 +155,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     }
     const summary: Record<string, unknown> = { fileCount: included.length,
       totalBytes: included.reduce((sum, item) => sum + item.bytes, 0),
-      excludedPathCount: excluded.length, treeOid };
+      excludedPathCount: excluded.length, unmatchedPatterns, treeOid };
     if (options.verbose) summary.excludedPaths = excluded.map(item => item.path);
     if (options.printTree) return summary;
     if (!client) throw new ConcordError('CONCORD_URL and CONCORD_TOKEN are required', 'usage');

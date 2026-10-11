@@ -33,7 +33,7 @@ Safe GET requests and keyed mutations retry transient transport failures, HTTP 4
 To adopt a committed source tree as one provenance-stamped root commit, see
 [Import an existing repository](import.md). Use `npm run concord -- import
 --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID` with
-optional repeated `--exclude GLOB`, `--exclude-file FILE`, `--print-tree`,
+optional repeated `--exclude GLOB`, `--exclude-file FILE`, `--require-match`, `--print-tree`,
 and `--verbose`.
 
 ```sh
