@@ -28,6 +28,15 @@ function revoked(raw: unknown, tokenIdOrSecret: string): boolean {
   return checked.ok ? checked.value : false;
 }
 
+/** A failed handle cleanup must not discard a credential returned by the provider. */
+function disposeCredentialHandle(repo: ArtifactsRepo, operation: 'fork' | 'mintToken'): boolean {
+  try { repo[Symbol.dispose](); return false; }
+  catch {
+    console.warn('ARTIFACTS_DISPOSE_FAILED', operation);
+    return true;
+  }
+}
+
 /** Cloudflare Artifacts binding adapter. Never exposes creation tokens. */
 export function artifactsStorage(bindingInput: unknown): RepoStorage {
   if (!bindingInput || typeof bindingInput !== 'object' || !('get' in bindingInput) || !('create' in bindingInput)) throw new Error('ARTIFACTS_ADAPTER_UNAVAILABLE');
@@ -93,8 +102,12 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
       const source = await open(sourceName);
       if (!source) throw new Error('ARTIFACTS_SOURCE_UNAVAILABLE');
       try {
-        using repo = source;
-        return await created(await repo.fork(targetName, { readOnly: false, defaultBranchOnly: false }), targetName);
+        let result: StorageRepo;
+        let disposalFailed = false;
+        try { result = await created(await source.fork(targetName, { readOnly: false, defaultBranchOnly: false }), targetName); }
+        finally { disposalFailed = disposeCredentialHandle(source, 'fork'); }
+        if (disposalFailed) result[pendingResultFailure] ??= 'ARTIFACTS_DISPOSE_FAILED';
+        return result;
       } catch (error) {
         if (code(error) === 'ALREADY_EXISTS') return await info(targetName) ?? pending(targetName);
         throw error;
@@ -118,15 +131,19 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
     },
     async mintToken(name, scope, ttlSeconds) {
       if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 600) throw new Error('INVALID_TOKEN_TTL');
-      using repo = await binding.get(name);
-      const checked = capture(await repo.createToken(scope, ttlSeconds), 'plaintext', 'ARTIFACTS_TOKEN_RESULT_INVALID', raw => {
-        const value = record(raw);
-        if (typeof value.plaintext !== 'string' || !value.plaintext || typeof value.expiresAt !== 'string') throw new Error('INVALID_RESULT');
-        const expiresAt = Date.parse(value.expiresAt);
-        if (!Number.isFinite(expiresAt)) throw new Error('INVALID_RESULT');
-        return { secret: value.plaintext, expiresAt };
-      });
-      if (checked.ok) return checked.value;
+      const repo = await binding.get(name);
+      let checked: Captured<{ secret: string; expiresAt: number }>;
+      let disposalFailed = false;
+      try {
+        checked = capture(await repo.createToken(scope, ttlSeconds), 'plaintext', 'ARTIFACTS_TOKEN_RESULT_INVALID', raw => {
+          const value = record(raw);
+          if (typeof value.plaintext !== 'string' || !value.plaintext || typeof value.expiresAt !== 'string') throw new Error('INVALID_RESULT');
+          const expiresAt = Date.parse(value.expiresAt);
+          if (!Number.isFinite(expiresAt)) throw new Error('INVALID_RESULT');
+          return { secret: value.plaintext, expiresAt };
+        });
+      } finally { disposalFailed = disposeCredentialHandle(repo, 'mintToken'); }
+      if (checked.ok) return disposalFailed ? { ...checked.value, [pendingResultFailure]: 'ARTIFACTS_DISPOSE_FAILED' } : checked.value;
       if (checked.credential) return { secret: checked.credential, expiresAt: NaN, [pendingResultFailure]: checked.reason };
       throw new Error(checked.reason);
     },

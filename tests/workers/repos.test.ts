@@ -627,10 +627,86 @@ describe('repository and change lifecycle', () => {
     });
   });
 
-  it('retains a malformed minted token until revocation succeeds on retry', async () => {
+  it('persists a fork token after source disposal throws and revokes it on retry despite an empty token listing', async () => {
+    let sourceName = '';
+    let candidateName = '';
+    let active = false;
+    let forkCalls = 0;
+    let revokeCalls = 0;
+    const binding = {
+      create: vi.fn(async (name: string) => {
+        sourceName = name;
+        return { name, remote: `https://example.test/${name}.git`, token: 'source-secret' };
+      }),
+      get: vi.fn(async (name: string) => {
+        if (name !== sourceName && name !== candidateName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
+        let forked = false;
+        return {
+          [Symbol.dispose]: () => { if (forked) throw new Error('dispose failed'); },
+          info: async () => ({ name, remote: `https://example.test/${name}.git` }),
+          log: async () => [],
+          fork: async (target: string) => {
+            forkCalls++;
+            forked = true;
+            candidateName = target;
+            active = true;
+            return { name: target, remote: `https://example.test/${target}.git`, token: 'fork-secret' };
+          },
+          revokeToken: async (secret: string) => {
+            if (name === candidateName) {
+              expect(secret).toBe('fork-secret');
+              revokeCalls++;
+              active = false;
+            }
+            return true;
+          },
+          listTokens: async () => ({ total: 0, tokens: [] }),
+        };
+      }),
+      list: vi.fn(async () => ({ repos: [], cursor: undefined })),
+    };
+    const catalog = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject<TenantCatalog, void>(catalog, async instance => {
+      const context = (instance as unknown as { context(principal: object): ModuleContext }).context({
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const path = '/v1/repos';
+      const route = repos.routes[0];
+      const response = await route.handle(context, new Request(`https://concord.test${path}`, { method: 'POST' }), route.pattern.exec(path)!,
+        { name: 'artifact_fork_disposal_retry', policyId: 'local-demo', profileId: 'local-demo' });
+      expect(response.status).toBe(201);
+    });
+    const coordinator = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:artifact_fork_disposal_retry'));
+    await runInDurableObject<RepoCoordinator, void>(coordinator, async instance => {
+      const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      }, 'artifact_fork_disposal_retry');
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const path = '/v1/repos/artifact_fork_disposal_retry/changes';
+      const route = repos.routes.find(item => item.method === 'POST' && item.pattern.test(path))!;
+      const request = new Request(`https://concord.test${path}`, { method: 'POST' });
+      const body = { intentKey: 'disposal', intentText: 'fork retry', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [] };
+      await expect(route.handle(context, request, route.pattern.exec(path)!, body))
+        .rejects.toMatchObject({ status: 503, code: 'PROVISIONING_FAILED' });
+      expect(context.state.get<string>(`initial-token:${candidateName}`)).toBe('fork-secret');
+      expect(active).toBe(true);
+      expect(await (await binding.get(candidateName)).listTokens()).toEqual({ total: 0, tokens: [] });
+      const retry = await route.handle(context, request, route.pattern.exec(path)!, body);
+      expect(retry.status).toBe(200);
+      expect(context.state.get<string>(`initial-token:${candidateName}`)).toBeNull();
+      expect(active).toBe(false);
+      expect(forkCalls).toBe(1);
+      expect(revokeCalls).toBe(1);
+    });
+  });
+
+  it.each([false, true])('retains a minted token after malformed result or throwing disposal=%s until revocation succeeds on retry', async disposalThrows => {
+    const repoId = disposalThrows ? 'artifact_mint_disposal_retry' : 'artifact_mint_retry';
     let createdName = '';
     let mintCalls = 0;
     let mintedRevocations = 0;
+    let disposeMintHandle = false;
     const binding = {
       create: vi.fn(async (name: string) => {
         createdName = name;
@@ -639,16 +715,25 @@ describe('repository and change lifecycle', () => {
       get: vi.fn(async (name: string) => {
         if (name !== createdName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
         return {
-          [Symbol.dispose]: () => {},
+          [Symbol.dispose]: () => {
+            if (disposeMintHandle) {
+              disposeMintHandle = false;
+              throw new Error('dispose failed');
+            }
+          },
           info: async () => ({ name, remote: `https://example.test/${name}.git` }),
           revokeToken: async (secret: string) => {
             if (secret === 'minted-secret') return ++mintedRevocations > 1;
             return true;
           },
           listTokens: async () => ({ total: 0, tokens: [] }),
-          createToken: async () => ++mintCalls === 1
-            ? { plaintext: 'minted-secret', expiresAt: 'invalid' }
-            : { plaintext: 'next-secret', expiresAt: '2026-10-11T08:00:00Z' },
+          createToken: async () => {
+            if (++mintCalls === 1) {
+              disposeMintHandle = disposalThrows;
+              return { plaintext: 'minted-secret', expiresAt: disposalThrows ? '2026-10-11T08:00:00Z' : 'invalid' };
+            }
+            return { plaintext: 'next-secret', expiresAt: '2026-10-11T08:00:00Z' };
+          },
         };
       }),
       list: vi.fn(async () => ({ repos: [], cursor: undefined })),
@@ -662,10 +747,10 @@ describe('repository and change lifecycle', () => {
       const createRoute = repos.routes[0];
       const createRequest = new Request('https://concord.test/v1/repos', { method: 'POST' });
       const created = await createRoute.handle(context, createRequest, createRoute.pattern.exec('/v1/repos')!,
-        { name: 'artifact_mint_retry', policyId: 'local-demo', profileId: 'local-demo' });
+        { name: repoId, policyId: 'local-demo', profileId: 'local-demo' });
       expect(created.status).toBe(201);
-      Object.assign(context, { repoId: 'artifact_mint_retry' });
-      const path = '/v1/repos/artifact_mint_retry/git-token';
+      Object.assign(context, { repoId });
+      const path = `/v1/repos/${repoId}/git-token`;
       const tokenRoute = repos.routes.find(route => route.method === 'POST' && route.pattern.test(path))!;
       const request = new Request(`https://concord.test${path}`, { method: 'POST' });
       const body = { storageName: createdName, scope: 'read', ttlSeconds: 60 };

@@ -88,6 +88,26 @@ describe('Artifacts binding adapter', () => {
     expect(result[pendingResultFailure]).toBe('ARTIFACTS_CREATE_RESULT_INVALID');
   });
 
+  it('returns a fork credential and a typed failure when the source handle disposal throws', async () => {
+    const fixture = provider();
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    await storage.ensureRepo('source');
+    const originalGet = fixture.binding.get.getMockImplementation()!;
+    fixture.binding.get.mockImplementation(async name => {
+      const handle = await originalGet(name);
+      if (name === 'source') handle[Symbol.dispose] = () => { throw new Error('dispose failed'); };
+      return handle;
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await storage.fork('source', 'target');
+      expect(result[pendingInitialToken]).toBe('initial-target');
+      expect(result[pendingResultFailure]).toBe('ARTIFACTS_DISPOSE_FAILED');
+      expect(warning).toHaveBeenCalledWith('ARTIFACTS_DISPOSE_FAILED', 'fork');
+      expect(await storage.info('target')).toMatchObject({ status: 'ready' });
+    } finally { warning.mockRestore(); }
+  });
+
   it.each([
     ['invalid expiry', { plaintext: 'held', expiresAt: 'invalid' }, true],
     ['missing expiry', { plaintext: 'held' }, true],
@@ -110,6 +130,25 @@ describe('Artifacts binding adapter', () => {
     const result = await storage.mintToken('source', 'read', 60);
     expect(result.secret).toBe('held');
     expect(result[pendingResultFailure]).toBe('ARTIFACTS_TOKEN_RESULT_INVALID');
+  });
+
+  it('returns a minted credential and a typed failure when its handle disposal throws', async () => {
+    const fixture = provider();
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    await storage.ensureRepo('source');
+    const originalGet = fixture.binding.get.getMockImplementation()!;
+    fixture.binding.get.mockImplementation(async name => {
+      const handle = await originalGet(name);
+      handle[Symbol.dispose] = () => { throw new Error('dispose failed'); };
+      return handle;
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await storage.mintToken('source', 'read', 60);
+      expect(result.secret).toBe('source-read-60');
+      expect(result[pendingResultFailure]).toBe('ARTIFACTS_DISPOSE_FAILED');
+      expect(warning).toHaveBeenCalledWith('ARTIFACTS_DISPOSE_FAILED', 'mintToken');
+    } finally { warning.mockRestore(); }
   });
 
   it.each([null, undefined, { token: 'unexpected' }, 'true', 1])('returns false for malformed revoke result %s', async raw => {
