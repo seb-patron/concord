@@ -55,6 +55,14 @@ export function expectVersion(body: Record<string, unknown>, current: number): v
   if (body.expectedVersion !== current) throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: current });
 }
 
+/** Creation and runner claim/result calls do not mutate an existing domain object. */
+export function requiresExpectedVersion(method: string, path: string): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  if (/^\/v1\/repos\/[A-Za-z0-9_-]{1,64}\/(changes|leases|contests|runner\/poll)$/.test(path)) return false;
+  if (/^\/v1\/repos\/[A-Za-z0-9_-]{1,64}\/jobs\/[A-Za-z0-9_-]{1,64}\/(heartbeat|result|credentials)$/.test(path)) return false;
+  return true;
+}
+
 export function parseCursor(raw: string | null): number {
   if (raw === null) return 0;
   try {

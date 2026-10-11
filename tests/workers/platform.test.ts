@@ -14,6 +14,44 @@ import { apiRequest, mutation, responseBody } from '../helpers';
 const fetchApi = (request: Request) => worker.fetch(request, env);
 
 describe('local Worker and SQLite Durable Objects', () => {
+  it('authenticates every named local actor as a distinct principal through the Worker', async () => {
+    const fixtures = [
+      ['local-owner', 'owner', 'owner'],
+      ['local-agent-a', 'agent-a', 'agent'],
+      ['local-agent-b', 'agent-b', 'agent'],
+      ['local-agent-c', 'agent-c', 'agent'],
+      ['local-contest-low', 'contest-agent-low', 'agent'],
+      ['local-contest-high', 'contest-agent-high', 'agent'],
+      ['local-mock-aw', 'mock-aw', 'agent'],
+      ['local-reviewer', 'reviewer', 'reviewer'],
+      ['local-checker', 'checker', 'checker'],
+      ['local-promoter', 'promoter', 'promoter'],
+      ['local-viewer', 'viewer', 'viewer'],
+    ] as const;
+    const route: ModuleRoute = {
+      method: 'GET', pattern: /^\/v1\/repos\/identity_case\/test-identity$/,
+      handle: context => json(context.principal),
+    };
+    repos.routes.push(route);
+    try {
+      const seen = new Set<string>();
+      for (const [token, principalId, role] of fixtures) {
+        const response = await fetchApi(apiRequest('/v1/repos/identity_case/test-identity', token));
+        expect(response.status).toBe(200);
+        const principal = (await responseBody(response)).data;
+        expect(principal).toMatchObject({ tenantId: 'local', principalId, roles: [role], repoIds: '*' });
+        expect(seen.has(principal.principalId)).toBe(false);
+        seen.add(principal.principalId);
+      }
+      const production = { CONCORD_MODE: 'production' } as Env;
+      for (const [token] of fixtures) {
+        await expect(authenticate(apiRequest('/v1/repos/identity_case', token), production)).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+      }
+    } finally {
+      repos.routes.splice(repos.routes.indexOf(route), 1);
+    }
+  });
+
   it('serves health and routes authenticated catalog and repo snapshots', async () => {
     const health = await fetchApi(new Request('https://concord.test/health'));
     expect(health.status).toBe(200);
@@ -58,11 +96,14 @@ describe('local Worker and SQLite Durable Objects', () => {
     const stale = await fetchApi(mutation(path, { expectedVersion: 99, changeId: 'three' }, 'new-key'));
     expect(stale.status).toBe(409);
     expect((await responseBody(stale)).error.code).toBe('STALE_VERSION');
+    const missingVersion = await fetchApi(mutation(path, { changeId: 'four' }, 'missing-version'));
+    expect(missingVersion.status).toBe(400);
+    expect((await responseBody(missingVersion)).error.code).toBe('EXPECTED_VERSION_REQUIRED');
     const noKey = await fetchApi(apiRequest(path, 'local-owner', { method: 'POST', body: '{}' }));
     expect(noKey.status).toBe(400);
     const noApprove = await fetchApi(mutation('/v1/repos/beta/changes/c/verdicts', { expectedVersion: 0, decision: 'approve' }, 'verdict-key', 'local-reviewer'));
     expect(noApprove.status).toBe(501);
-    expect((await fetchApi(mutation('/v1/repos/beta/changes/c/verdicts', { expectedVersion: 0, decision: 'approve' }, 'wrong-role', 'local-agent'))).status).toBe(403);
+    expect((await fetchApi(mutation('/v1/repos/beta/changes/c/verdicts', { expectedVersion: 0, decision: 'approve' }, 'wrong-role', 'local-agent-a'))).status).toBe(403);
     expect((await fetchApi(mutation('/v1/repos', { name: 'new', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key', 'local-viewer'))).status).toBe(403);
     const catalog = await fetchApi(mutation('/v1/repos', { name: 'new', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key'));
     expect(catalog.status).toBe(501);
@@ -85,7 +126,7 @@ describe('local Worker and SQLite Durable Objects', () => {
     repos.routes.push(testRoute);
     try {
       for (let version = 1; version <= 2; version++) {
-        const response = await fetchApi(mutation('/v1/repos/events_case/test-event', {}, `event-${version}`));
+        const response = await fetchApi(mutation('/v1/repos/events_case/test-event', { expectedVersion: version - 1 }, `event-${version}`));
         expect(response.status).toBe(200);
         expect((await responseBody(response)).version).toBe(version);
       }

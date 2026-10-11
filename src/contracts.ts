@@ -99,7 +99,7 @@ export interface IdempotentRequest {
 
 export interface TrustedPolicy {
   id: Id; digest: Digest; version: number;
-  units: Record<string, { canonicalKey: string; file: string; resources: string[] }>;
+  units: Record<string, { canonicalKey: string; file: string; resources: string[]; dependencyKeys: string[] }>;
   checkerId: string; checkerDigest: Digest;
   acceptance: 'match' | 'pass' | 'no-regression';
 }
@@ -164,7 +164,8 @@ export type JobKind = 'inspect-candidate' | 'validate-stack' | 'delta-check' | '
 export type JobState = 'pending' | 'claimed' | 'completed' | 'expired' | 'blocked';
 export interface JobBase extends Versioned {
   jobId: Id; repoId: Id; inputDigest: Digest; generation: number;
-  profileDigest: Digest; expectedRefs: Record<string, Oid | null>;
+  profileDigest: Digest; policyId: Id; policyDigest: Digest;
+  unitPolicy: Pick<TrustedPolicy, 'version' | 'units'>; expectedRefs: Record<string, Oid | null>;
   storageRemotes: Record<string, string>; checkerId: string; checkerDigest: Digest;
   oracleDigest: Digest; toolchainDigest: Digest; environmentDigest: Digest;
   timeoutMs: number; maxOutputBytes: number;
@@ -195,10 +196,10 @@ export interface BootstrapPromoteJob extends JobBase {
 }
 export type PromoteJob = OrdinaryPromoteJob | BootstrapPromoteJob;
 export type Job = InspectCandidateJob | ValidateStackJob | DeltaCheckJob | PromoteJob;
-export type CheckOutcome = 'PASS' | 'FAIL' | 'MATCH' | 'MISMATCH' | 'COMPILE_ERROR' | 'UNVERIFIED_TARGET' | 'ENV_ERROR' | 'MERGE_CONFLICT';
+export type CheckOutcome = 'PASS' | 'FAIL' | 'MATCH' | 'MISMATCH' | 'COMPILE_ERROR' | 'UNVERIFIED_TARGET' | 'ENV_ERROR' | 'MERGE_CONFLICT' | 'TIMEOUT';
 export interface ResultBase {
   jobId: Id; attempt: number; inputDigest: Digest; fence: number;
-  sourceTreeOid: Oid | null; toolchainDigest: Digest; oracleDigest: Digest;
+  sourceTreeOid: Oid | null; checkerDigest: Digest; toolchainDigest: Digest; oracleDigest: Digest;
   environmentDigest: Digest; durationMs: number; log: string; resultDigest: Digest;
 }
 export interface InspectionResult extends ResultBase {
@@ -207,7 +208,7 @@ export interface InspectionResult extends ResultBase {
 }
 export interface StackResultBase extends ResultBase {
   kind: 'validate-stack'; outcome: CheckOutcome; composedOid: Oid | null;
-  score: number | null;
+  score: { matched: number; total: number } | null;
 }
 export type StackResult = StackResultBase & (
   | { bootstrap: false; canonicalBaseOid: Oid }

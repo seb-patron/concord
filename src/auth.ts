@@ -3,7 +3,12 @@ import { HttpError } from './http';
 
 const local: Record<string, Omit<Principal, 'expiresAt'>> = {
   'local-owner': { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*' },
-  'local-agent': { tenantId: 'local', principalId: 'agent', roles: ['agent'], repoIds: '*' },
+  'local-agent-a': { tenantId: 'local', principalId: 'agent-a', roles: ['agent'], repoIds: '*' },
+  'local-agent-b': { tenantId: 'local', principalId: 'agent-b', roles: ['agent'], repoIds: '*' },
+  'local-agent-c': { tenantId: 'local', principalId: 'agent-c', roles: ['agent'], repoIds: '*' },
+  'local-contest-low': { tenantId: 'local', principalId: 'contest-agent-low', roles: ['agent'], repoIds: '*' },
+  'local-contest-high': { tenantId: 'local', principalId: 'contest-agent-high', roles: ['agent'], repoIds: '*' },
+  'local-mock-aw': { tenantId: 'local', principalId: 'mock-aw', roles: ['agent'], repoIds: '*' },
   'local-reviewer': { tenantId: 'local', principalId: 'reviewer', roles: ['reviewer'], repoIds: '*' },
   'local-checker': { tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*' },
   'local-promoter': { tenantId: 'local', principalId: 'promoter', roles: ['promoter'], repoIds: '*' },

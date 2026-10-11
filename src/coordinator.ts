@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
 import { clock, requireRepo, requireTenant } from './auth';
-import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
+import { digest, encodeCursor, expectVersion, failure, HttpError, json, parseCursor, readJson, requiresExpectedVersion } from './http';
 import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
 import { FakeStorage } from './storage/fake';
 import { artifactsStorage } from './storage/artifacts';
@@ -129,6 +129,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         }
       }
       const context = this.context(moduleRoute.module.name, principal, repoId);
+      if (body && requiresExpectedVersion(request.method, url.pathname)) expectVersion(body, context.version());
       const response = await moduleRoute.route.handle(context, request, url.pathname.match(moduleRoute.route.pattern)!, body);
       if (key && requestDigest) {
         const responseBody = await response.clone().text();

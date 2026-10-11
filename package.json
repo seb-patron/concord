@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "node -e \"const fs=require('node:fs');if(!['tests/workers','tests/node'].some(d=>fs.existsSync(d)&&fs.readdirSync(d,{recursive:true}).some(f=>f.endsWith('.test.ts')))){console.error('No tests found');process.exit(1)}\" && tsc --noEmit",
+    "typecheck": "sh scripts/validate.sh --test-count && tsc --noEmit",
     "test": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
     "test:target": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
     "dev": "wrangler dev --config wrangler.local.jsonc",
