@@ -6,6 +6,7 @@ import type { RepoCoordinator } from '../../src/coordinator';
 import type { InspectionResult, ModuleContext } from '../../src/contracts';
 import { repos } from '../../src/features/repos';
 import { runners } from '../../src/features/runners';
+import { digest as canonicalDigest } from '../../src/http';
 import { ids } from '../../src/repos/model';
 import { FakeStorage } from '../../src/storage/fake';
 import { sqlState } from '../../src/state';
@@ -71,12 +72,13 @@ describe('repository and change lifecycle', () => {
     expect(registered.status).toBe(201);
     const bootstrapBody = { expectedVersion: 2, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a, policyId: 'local-demo', profileId: 'local-demo' };
     const bootstrap = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', bootstrapBody, 'bootstrap-seed'));
-    expect(bootstrap.status).toBe(501);
-    expect((await responseBody(bootstrap)).error.code).toBe('MODULE_UNAVAILABLE');
+    expect(bootstrap.status).toBe(409);
+    expect((await responseBody(bootstrap)).error.code).toBe('INVALID_JOB');
     const snapshot = await fetchApi(apiRequest('/v1/repos/seed_case/snapshot'));
     expect((await responseBody(snapshot)).data.projections.repos.bootstrap).toMatchObject({ changeId: change.changeId, headOid: a, status: 'blocked' });
     const retry = await fetchApi(mutation('/v1/repos/seed_case/bootstrap', { ...bootstrapBody, expectedVersion: 3 }, 'bootstrap-retry'));
-    expect(retry.status).toBe(501);
+    expect(retry.status).toBe(409);
+    expect((await responseBody(retry)).error.code).toBe('INVALID_JOB');
     const secondSeed = await fetchApi(mutation('/v1/repos/seed_case/changes', {
       intentKey: 'seed-two', intentText: 'another initializer', baseOid: null, branch: 'refs/heads/seed-two', unitKeys: [], dependencyChangeIds: [],
     }, 'seed-two-change'));
@@ -127,10 +129,40 @@ describe('repository and change lifecycle', () => {
       expectedVersion: 4, seedStorageName: draft.candidateStorageName, seedRef: draft.ref,
       headOid: index === 0 ? a : c, policyId: 'local-demo', profileId: 'local-demo',
     }, `race-${index}`))));
-    expect(responses.map(response => response.status).sort()).toEqual([409, 501]);
+    expect(responses.map(response => response.status).sort()).toEqual([409, 409]);
+    expect((await Promise.all(responses.map(response => responseBody(response)))).map(body => body.error.code).sort()).toEqual(['INVALID_JOB', 'STALE_VERSION']);
     const snapshot = await fetchApi(apiRequest('/v1/repos/bootstrap_race_case/snapshot'));
     const bootstrap = (await responseBody(snapshot)).data.projections.repos.bootstrap;
     expect(drafts.map(draft => draft.changeId)).toContain(bootstrap.changeId);
+  });
+
+  it('rejects a closed owner seed even when its registered root ref remains current', async () => {
+    const repoId = 'closed_seed_case';
+    await create(repoId);
+    const created = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'seed', intentText: 'initial tree', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'closed-seed-create'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    await fake(repoId, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+      expect(provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, a)).toBe(true);
+    });
+    const registered = await fetchApi(mutation(`/v1/repos/${repoId}/branches`, {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: a, ownerId: 'owner',
+    }, 'closed-seed-branch'));
+    expect(registered.status).toBe(201);
+    const closed = await fetchApi(mutation(`/v1/repos/${repoId}/changes/${change.changeId}/close`, { expectedVersion: 2 }, 'closed-seed-close'));
+    expect(closed.status).toBe(200);
+    expect((await responseBody(closed)).data.status).toBe('closed');
+    const bootstrap = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, {
+      expectedVersion: 3, seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a,
+      policyId: 'local-demo', profileId: 'local-demo',
+    }, 'closed-seed-bootstrap'));
+    expect(bootstrap.status).toBe(409);
+    expect((await responseBody(bootstrap)).error.code).toBe('SEED_NOT_OPEN');
+    const snapshot = await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`));
+    expect((await responseBody(snapshot)).data.projections.repos.bootstrap).toBeNull();
   });
 
   it('deduplicates changed-base tasks, verifies refs and objects, and leaves inspection pending when runner is unavailable', async () => {
@@ -181,12 +213,13 @@ describe('repository and change lifecycle', () => {
     expect(unknownUnit.status).toBe(422);
     const publishBody = { expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {} };
     const publish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, publishBody, 'publish-one', 'local-agent-a'));
-    expect(publish.status).toBe(501);
-    expect((await responseBody(publish)).error.code).toBe('MODULE_UNAVAILABLE');
+    expect(publish.status).toBe(409);
+    expect((await responseBody(publish)).error.code).toBe('INVALID_JOB');
     const detail = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
     expect((await responseBody(detail)).data).toMatchObject({ revision: 1, headOid: b, status: 'draft' });
     const repeatPublish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-again', 'local-agent-a'));
-    expect(repeatPublish.status).toBe(501);
+    expect(repeatPublish.status).toBe(409);
+    expect((await responseBody(repeatPublish)).error.code).toBe('INVALID_JOB');
     const scheduleOriginal = runners.hooks['runners.schedule'];
     runners.hooks['runners.schedule'] = (context, job) => ({ status: 'eligible', version: context.version(), evidenceIds: [], value: { jobId: job.jobId } });
     try {
@@ -201,23 +234,31 @@ describe('repository and change lifecycle', () => {
     }
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:publish_case'));
     let inspection!: InspectionResult;
-    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
       const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
         tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
       }, 'publish_case');
       const pending = context.state.get<{ jobId: string; inputDigest: string }>(`inspection:${change.changeId}`)!;
+      const reviewManifest = {
+        coverage: 'complete' as const, changedUnits: [], dependencyScope: [], policyVersion: 1,
+        policyDigest: digest, checkerDigest: digest, oracleDigest: digest, toolchainDigest: digest,
+      };
       inspection = {
         kind: 'inspect-candidate', jobId: pending.jobId, attempt: 1, inputDigest: pending.inputDigest as typeof digest,
         fence: 1, sourceTreeOid: c, checkerDigest: digest, toolchainDigest: digest, oracleDigest: digest,
         environmentDigest: digest, durationMs: 1, log: '', resultDigest: digest,
-        outcome: 'PASS', observedHeadOid: b, unitKeys: [], reviewManifestDigest: digest,
-        reviewManifest: {
-          coverage: 'complete', changedUnits: [], dependencyScope: [], policyVersion: 1,
-          policyDigest: digest, checkerDigest: digest, oracleDigest: digest, toolchainDigest: digest,
-        },
+        outcome: 'PASS', observedHeadOid: b, unitKeys: [], reviewManifestDigest: await canonicalDigest(reviewManifest),
+        reviewManifest,
       };
+      const { resultDigest: _resultDigest, ...preimage } = inspection;
+      inspection.resultDigest = await canonicalDigest(preimage);
       const hook = repos.hooks['repos.inspectRevision']!;
       expect(hook(context, { ...inspection, observedHeadOid: d }).status).toBe('blocked');
+      const forgedManifestDigest = { ...inspection, reviewManifestDigest: digest };
+      const { resultDigest: _forgedResultDigest, ...forgedPreimage } = forgedManifestDigest;
+      forgedManifestDigest.resultDigest = await canonicalDigest(forgedPreimage);
+      expect(hook(context, forgedManifestDigest)).toMatchObject({ status: 'blocked', code: 'INSPECTION_MISMATCH' });
+      expect(hook(context, { ...inspection, log: 'tampered' })).toMatchObject({ status: 'blocked', code: 'INSPECTION_MISMATCH' });
       const accepted = hook(context, inspection);
       expect(accepted.status).toBe('eligible');
       expect(hook(context, inspection).version).toBe(accepted.version);

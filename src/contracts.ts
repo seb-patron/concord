@@ -298,6 +298,8 @@ export type PromotionFreezeProvider = (context: ModuleContext, request: Request)
 export interface ChangeView {
   readonly authorId: Id; readonly headOid: Oid | null; readonly revision: number;
   readonly status: Change['status']; readonly unitKeys: readonly string[]; readonly frozen: boolean;
+  readonly baseOid?: Oid | null; readonly candidateStorageName?: string; readonly branch?: string;
+  readonly dependencyChangeIds?: readonly Id[]; readonly canonicalStorageName?: string;
 }
 export type ChangeViewProvider = (context: ModuleContext, changeId: Id) => Gate<ChangeView>;
 export interface Migration { version: number; statements: string[] }

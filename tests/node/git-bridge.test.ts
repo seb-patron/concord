@@ -41,6 +41,11 @@ describe('authenticated loopback Git bridge', () => {
     git(['-C', work, 'push', canonical.remote, 'HEAD:refs/heads/main']);
     expect(await storage.resolveRef('canonical', 'refs/heads/main')).toBe(oid);
     expect(await storage.readCommit('canonical', oid)).toMatchObject({ oid, parents: [] });
+    const forged = join(directory, 'forged-commit.txt');
+    writeFileSync(forged, `tree ${'a'.repeat(40)}\n\nlooks like a commit\n`);
+    const blobOid = git(['--git-dir', new URL(canonical.remote).pathname, 'hash-object', '-w', forged]).trim();
+    expect(git(['--git-dir', new URL(canonical.remote).pathname, 'cat-file', '-t', blobOid]).trim()).toBe('blob');
+    expect(await storage.readCommit('canonical', blobOid)).toBeNull();
     expect(new TextDecoder().decode(await storage.readFile('canonical', oid, 'README.md') ?? new Uint8Array())).toBe('first seed\n');
     const fork = await storage.fork('canonical', 'candidate');
     expect(fork.remote).toMatch(/^file:\/\//);

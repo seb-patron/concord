@@ -64,7 +64,7 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect((await responseBody(snapshot)).data.projections).toMatchObject({
       repos: { repo: null, branches: [], changes: [], bootstrap: null }, leases: { status: 'unavailable' },
       queue: { status: 'unavailable' }, runners: { status: 'unavailable' },
-      findings: { status: 'unavailable' }, verdicts: { status: 'unavailable' },
+      findings: { status: 'unavailable' }, verdicts: { status: 'ready' },
     });
     expect((await fetchApi(apiRequest('/v1/repos/alpha/snapshot', 'local-viewer'))).status).toBe(200);
   });
@@ -102,7 +102,7 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(nullProfile) })).toThrow('TRUSTED_CONFIG_INVALID');
   });
 
-  it('rejects conflicting bodies and stale versions, and leaves feature routes unavailable', async () => {
+  it('rejects conflicting bodies, stale versions, and verdicts without a change', async () => {
     const path = '/v1/repos/beta/queue/enqueue';
     const first = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'one' }, 'same-key'));
     expect(first.status).toBe(501);
@@ -121,7 +121,8 @@ describe('local Worker and SQLite Durable Objects', () => {
     const noKey = await fetchApi(apiRequest(path, 'local-owner', { method: 'POST', body: '{}' }));
     expect(noKey.status).toBe(400);
     const noApprove = await fetchApi(mutation('/v1/repos/beta/changes/c/verdicts', { expectedVersion: 0, decision: 'approve' }, 'verdict-key', 'local-reviewer'));
-    expect(noApprove.status).toBe(501);
+    expect(noApprove.status).toBe(409);
+    expect((await responseBody(noApprove)).error.code).toBe('CHANGE_NOT_FOUND');
     expect((await fetchApi(mutation('/v1/repos/beta/changes/c/verdicts', { expectedVersion: 0, decision: 'approve' }, 'wrong-role', 'local-agent-a'))).status).toBe(403);
     expect((await fetchApi(mutation('/v1/repos', { name: 'new', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key', 'local-viewer'))).status).toBe(403);
     const catalog = await fetchApi(mutation('/v1/repos', { name: 'new', policyId: 'local-demo', profileId: 'local-demo' }, 'catalog-key'));

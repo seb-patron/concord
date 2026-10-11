@@ -70,6 +70,8 @@ export class RepoCoordinator extends DurableObject<Env> {
           value: Object.freeze({
             authorId: value.authorId, headOid: value.headOid, revision: value.revision,
             status: value.status, unitKeys: Object.freeze([...value.unitKeys]), frozen: value.frozen,
+            baseOid: value.baseOid, candidateStorageName: value.candidateStorageName, branch: value.branch,
+            dependencyChangeIds: value.dependencyChangeIds && Object.freeze([...value.dependencyChangeIds]), canonicalStorageName: value.canonicalStorageName,
           }),
         };
       },

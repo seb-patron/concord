@@ -1,6 +1,6 @@
 import type { BootstrapBody, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
-import { digest, encodeCursor, failure, HttpError, json, parseCursor, unavailableGate } from '../http';
+import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { eventSequence } from '../state';
 import { branch, ids, oid, pendingInitialToken, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
@@ -12,7 +12,7 @@ const page = <T>(items: T[], request: Request) => {
 };
 const respond = <T>(context: ModuleContext, data: T, status = 200) => json(data, context.version(), eventSequence(context.sql), status);
 const jobDigest = async (job: InspectCandidateJob | ValidateStackJob) => {
-  const { inputDigest: _digest, jobId: _jobId, state: _state, attempt: _attempt,
+  const { inputDigest: _digest, state: _state, attempt: _attempt,
     runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, version: _version, ...input } = job;
   return digest(input);
 };
@@ -345,7 +345,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
     candidate: { changeId, revision, baseOid: baseOid as string, headOid, storageName: change.candidateStorageName, ref },
     inputDigest: policy.digest, generation: revision, profileDigest: profile.digest,
     policyId: policy.id, policyDigest: policy.digest, unitPolicy: policy,
-    expectedRefs: { [`${change.candidateStorageName}:${ref}`]: headOid, [`${repo.canonicalStorageName}:refs/heads/main`]: baseOid },
+    expectedRefs: { [change.candidateStorageName]: headOid, [repo.canonicalStorageName]: baseOid },
     storageRemotes: { [change.candidateStorageName]: remote!, [repo.canonicalStorageName]: canonicalRemote! },
     checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
     toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
@@ -380,6 +380,7 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   const headOid = oid(body.headOid);
   const change = list<Change>(context, 'changes').find(item => item.candidateStorageName === seedStorageName && item.baseOid === null && item.authorId === context.principal.principalId);
   if (!change) return fail(403, 'SEED_NOT_OWNED', 'Seed must be an owner draft fork');
+  if (change.status !== 'draft') fail(409, 'SEED_NOT_OPEN', 'Seed must be an open draft');
   const registered = list<Branch>(context, 'branches').find(item => item.storageName === seedStorageName && item.ref === seedRef && item.observedHead === headOid);
   if (!registered || await context.storage.resolveRef(seedStorageName, seedRef) !== headOid) fail(422, 'SEED_REF_MISMATCH', 'Registered seed ref does not match');
   const head = await context.storage.readCommit(seedStorageName, headOid);
@@ -398,13 +399,16 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
     return scheduleBootstrap(context, existing, pendingJob);
   }
   const jobId = crypto.randomUUID();
+  const scratchStorageName = `concord-s-${jobId}`;
+  const scratchRemote = (await context.storage.ensureRepo(scratchStorageName)).remote;
+  if (!scratchRemote) fail(409, 'STORAGE_NOT_READY', 'Scratch storage remote is not ready');
   const job: ValidateStackJob = {
     kind: 'validate-stack', bootstrap: true, ownerAuthorized: true, jobId, repoId: repo.repoId,
     canonicalBaseOid: null, candidates: [{ changeId: change.changeId, revision: 1, baseOid: null, headOid, seedStorageName, seedRef }],
-    stackId: crypto.randomUUID(), scratchStorageName: `concord-s-${crypto.randomUUID()}`, scratchRef: 'refs/heads/bootstrap',
+    stackId: crypto.randomUUID(), scratchStorageName, scratchRef: 'refs/heads/bootstrap',
     inputDigest: policy.digest, generation: 1, profileDigest: profile.digest, policyId: policy.id,
-    policyDigest: policy.digest, unitPolicy: policy, expectedRefs: { [`${seedStorageName}:${seedRef}`]: headOid, [`${repo.canonicalStorageName}:refs/heads/main`]: null },
-    storageRemotes: { [seedStorageName]: seedRemote!, [repo.canonicalStorageName]: canonicalRemote! },
+    policyDigest: policy.digest, unitPolicy: policy, expectedRefs: { [seedStorageName]: headOid, [repo.canonicalStorageName]: null, [scratchStorageName]: null },
+    storageRemotes: { [seedStorageName]: seedRemote!, [repo.canonicalStorageName]: canonicalRemote!, [scratchStorageName]: scratchRemote },
     checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
     toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
     timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
@@ -439,8 +443,46 @@ function close(context: ModuleContext, changeId: string): Response {
   return respond(context, change);
 }
 
+const sha256Words = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+function evidenceHash(value: string): string {
+  const bytes = [...new TextEncoder().encode(value)];
+  const bitLength = BigInt(bytes.length) * 8n;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let shift = 56n; shift >= 0n; shift -= 8n) bytes.push(Number(bitLength >> shift & 255n));
+  const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const rotate = (word: number, count: number) => word >>> count | word << 32 - count;
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const words = new Array<number>(64);
+    for (let i = 0; i < 16; i++) words[i] = (bytes[offset + i * 4] << 24 | bytes[offset + i * 4 + 1] << 16 |
+      bytes[offset + i * 4 + 2] << 8 | bytes[offset + i * 4 + 3]) >>> 0;
+    for (let i = 16; i < 64; i++) {
+      const a = words[i - 15], b = words[i - 2];
+      words[i] = (words[i - 16] + (rotate(a, 7) ^ rotate(a, 18) ^ a >>> 3) + words[i - 7] +
+        (rotate(b, 17) ^ rotate(b, 19) ^ b >>> 10)) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let i = 0; i < 64; i++) {
+      const one = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + (e & f ^ ~e & g) + sha256Words[i] + words[i]) >>> 0;
+      const two = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + (a & b ^ a & c ^ b & c)) >>> 0;
+      h = g; g = f; f = e; e = (d + one) >>> 0; d = c; c = b; b = a; a = (one + two) >>> 0;
+    }
+    [a, b, c, d, e, f, g, h].forEach((word, i) => { state[i] = (state[i] + word) >>> 0; });
+  }
+  return 'sha256:' + state.map(word => word.toString(16).padStart(8, '0')).join('');
+}
 function inspectRevision(context: ModuleContext, result: InspectionResult) {
   if (!result || !context.state) return unavailableGate();
+  const { resultDigest, ...preimage } = result;
   const pending = list<Change>(context, 'changes').map(change => context.state.get<InspectionPending>(`inspection:${change.changeId}`)).find(value => value?.jobId === result.jobId);
   if (!pending) return { status: 'blocked' as const, version: context.version(), code: 'UNKNOWN_INSPECTION', reason: 'No matching pending inspection', evidenceIds: [] };
   const change = getChange(context, pending.changeId);
@@ -452,7 +494,9 @@ function inspectRevision(context: ModuleContext, result: InspectionResult) {
     pending.scheduled &&
     result.inputDigest === pending.inputDigest && result.observedHeadOid === pending.headOid &&
     result.sourceTreeOid === pending.sourceTreeOid && !!result.reviewManifestDigest && /^sha256:[a-f0-9]{64}$/.test(result.reviewManifestDigest) &&
+    !!result.resultDigest && result.resultDigest === evidenceHash(stableJson(preimage)) &&
     !!result.reviewManifest && result.reviewManifest.coverage === 'complete' && !!policy && !!profile &&
+    result.reviewManifestDigest === evidenceHash(stableJson(result.reviewManifest)) &&
     result.checkerDigest === policy.checkerDigest && result.oracleDigest === profile.oracleDigest &&
     result.toolchainDigest === profile.toolchainDigest && result.environmentDigest === profile.environmentDigest &&
     result.reviewManifest.policyDigest === policy.digest && result.reviewManifest.checkerDigest === policy.checkerDigest &&
@@ -509,4 +553,15 @@ export const repos: FeatureModule = {
     }
   },
   hooks: { 'repos.inspectRevision': inspectRevision, },
+  changeView: (context, changeId) => {
+    const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
+    const repo = context.state.get<Repo>('repo');
+    if (!change || !repo) return { status: 'blocked', version: context.version(), code: 'CHANGE_NOT_FOUND', reason: 'Change not found', evidenceIds: [] };
+    return { status: 'eligible', version: context.version(), evidenceIds: [changeId], value: {
+      authorId: change.authorId, headOid: change.headOid, revision: change.revision,
+      status: change.status, unitKeys: change.unitKeys, frozen: !['draft', 'ready'].includes(change.status) || context.state.get<BootstrapPending>('bootstrap')?.changeId === changeId,
+      baseOid: change.baseOid, candidateStorageName: change.candidateStorageName, branch: change.branch,
+      dependencyChangeIds: change.dependencyChangeIds, canonicalStorageName: repo.canonicalStorageName,
+    } };
+  },
 };

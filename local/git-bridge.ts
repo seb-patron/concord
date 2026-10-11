@@ -86,6 +86,7 @@ export async function startGitBridge(dataDirectory: string, token: string, port 
         remote(body.name);
         const oid = validOid(body.oid);
         try {
+          if (gitRepo(body.name, ['cat-file', '-t', oid]).toString().trim() !== 'commit') return null;
           const raw = gitRepo(body.name, ['cat-file', '-p', oid]).toString();
           if (!raw.startsWith('tree ')) return null;
           const header = raw.split('\n\n', 1)[0];

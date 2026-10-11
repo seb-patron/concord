@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
-import type { ChangeView, FeatureModule, ModuleRoute } from '../../src/contracts';
+import type { FeatureModule, ModuleRoute } from '../../src/contracts';
 import { modules } from '../../src/coordinator';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
@@ -180,7 +180,7 @@ describe('cross-module coordinator hooks', () => {
         module.routes.unshift(...synthetic);
         routes.set(module, synthetic);
         const blocked = await fetchApi(mutation(path, {}, `freeze-${module.name}`));
-        expect(blocked.status).toBe(409);
+        expect(blocked.status, path).toBe(409);
         expect((await responseBody(blocked)).error.code).toBe('PROMOTION_IN_PROGRESS');
         const read = await fetchApi(apiRequest(path));
         expect(read.status).toBe(200);
@@ -188,7 +188,6 @@ describe('cross-module coordinator hooks', () => {
       }
       const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${repoId}`));
       const routeCases: Array<[FeatureModule, string]> = [
-        [repos, `/v1/repos/${repoId}`],
         [repos, `/v1/repos/${repoId}/bootstrap`],
         [repos, `/v1/repos/${repoId}/changes`],
         [repos, `/v1/repos/${repoId}/changes/c/publish`],
@@ -207,7 +206,7 @@ describe('cross-module coordinator hooks', () => {
           method: 'POST',
           headers: { 'x-concord-principal': JSON.stringify({ tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER }) },
         })));
-        expect(blocked.status).toBe(409);
+        expect(blocked.status, path).toBe(409);
         expect((await responseBody(blocked)).error.code).toBe('PROMOTION_IN_PROGRESS');
       }
       const exemptRoute: ModuleRoute = {
@@ -238,53 +237,44 @@ describe('cross-module coordinator hooks', () => {
     }
   });
 
-  it('returns an unavailable change view before registration and a detached read-only repos record afterward', async () => {
-    const prior = repos.changeView;
+  it('lets findings read a detached repos change view with queue fields', async () => {
     const repoId = 'hooks_change';
-    const changeId = 'c1';
-    const stored: ChangeView = {
-      authorId: 'agent-a', headOid: 'abc123', revision: 3,
-      status: 'ready', unitKeys: ['row:one'], frozen: false,
-    };
-    const seed: ModuleRoute = {
-      method: 'POST', pattern: /^\/v1\/repos\/hooks_change\/test-seed$/,
-      handle: context => {
-        context.state.put(`change:${changeId}`, stored);
-        return json({ seeded: true });
-      },
-    };
+    const createdRepo = await fetchApi(mutation('/v1/repos', { name: repoId, policyId: 'local-demo', profileId: 'local-demo' }, 'hooks-create'));
+    expect(createdRepo.status).toBe(201);
+    const repo = (await responseBody(createdRepo)).data;
+    const createdChange = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'seed', intentText: 'test view', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: ['dependency-a'],
+    }, 'hooks-seed'));
+    expect(createdChange.status).toBe(201);
+    const change = (await responseBody(createdChange)).data;
     const inspect: ModuleRoute = {
       method: 'GET', pattern: /^\/v1\/repos\/hooks_change\/test-view$/,
       handle: context => {
-        const gate = context.readChange!(changeId);
-        if (gate.status === 'blocked') return json(gate);
+        const missing = context.readChange!('missing');
+        const gate = context.readChange!(change.changeId);
+        if (gate.status === 'blocked') return json({ gate, missing });
         const writable = Reflect.set(gate.value, 'authorId', 'intruder');
         const writableUnit = Reflect.set(gate.value.unitKeys, '0', 'row:intruder');
-        return json({ gate, writable, writableUnit, ownState: context.state.get(`change:${changeId}`) });
+        const writableDependency = Reflect.set(gate.value.dependencyChangeIds!, '0', 'intruder');
+        return json({ gate, missing, writable, writableUnit, writableDependency, ownState: context.state.get('changes') });
       },
     };
-    repos.routes.unshift(seed);
     findings.routes.unshift(inspect);
     try {
-      const unavailable = await fetchApi(apiRequest(`/v1/repos/${repoId}/test-view`));
-      expect((await responseBody(unavailable)).data).toMatchObject({ status: 'blocked', code: 'MODULE_UNAVAILABLE' });
-      expect((await fetchApi(mutation(`/v1/repos/${repoId}/test-seed`, { expectedVersion: 0 }, 'seed'))).status).toBe(200);
-      repos.changeView = (context, id) => {
-        const value = context.state.get<ChangeView>(`change:${id}`);
-        if (!value) return { status: 'blocked', version: context.version(), code: 'CHANGE_NOT_FOUND', reason: 'Missing change', evidenceIds: [] };
-        return { status: 'eligible', version: context.version(), evidenceIds: [id], value };
-      };
       const available = await fetchApi(apiRequest(`/v1/repos/${repoId}/test-view`));
       expect(available.status).toBe(200);
       expect((await responseBody(available)).data).toEqual({
-        gate: { status: 'eligible', version: 0, evidenceIds: [changeId], value: stored },
-        writable: false, writableUnit: false, ownState: null,
+        gate: { status: 'eligible', version: 1, evidenceIds: [change.changeId], value: {
+          authorId: 'owner', headOid: null, revision: 0, status: 'draft', unitKeys: [], frozen: false,
+          baseOid: null, candidateStorageName: change.candidateStorageName, branch: 'refs/heads/seed',
+          dependencyChangeIds: ['dependency-a'], canonicalStorageName: repo.canonicalStorageName,
+        } },
+        missing: { status: 'blocked', version: 1, code: 'CHANGE_NOT_FOUND', reason: 'Change not found', evidenceIds: [] },
+        writable: false, writableUnit: false, writableDependency: false, ownState: null,
       });
       const again = await fetchApi(apiRequest(`/v1/repos/${repoId}/test-view`));
-      expect((await responseBody(again)).data.gate.value).toEqual(stored);
+      expect((await responseBody(again)).data.gate.value.dependencyChangeIds).toEqual(['dependency-a']);
     } finally {
-      repos.changeView = prior;
-      repos.routes.splice(repos.routes.indexOf(seed), 1);
       findings.routes.splice(findings.routes.indexOf(inspect), 1);
     }
   });
