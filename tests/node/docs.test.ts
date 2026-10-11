@@ -1,7 +1,7 @@
 import { spawn, execFile as execFileCallback, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, copyFile, mkdir, readFile, readdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, mkdir, readFile, readdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -65,31 +65,81 @@ async function capturedNpm(exports: string[], command: string, env: NodeJS.Proce
     values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
 }
 
-async function capturedBlock(block: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ args: string[]; values: string[] }[]> {
-  const script = [
-    'npm() {',
-    '  printf "CALL\\n"',
-    '  printf "ARG:%s\\n" "$@"',
-    '  printf "ENV:%s\\n" "$CONCORD_URL" "$CONCORD_TOKEN" "$CONCORD_SHOW_DECOMPILED_C" "$CONCORD_RUN_DIR"',
-    '}',
-    block,
-  ].join('\n');
-  const cleanEnv = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...extraEnv };
-  const { stdout } = await execFile('env', ['-i', ...Object.entries(cleanEnv).map(([key, value]) => `${key}=${value}`),
-    'sh', '-c', script], { cwd });
-  return stdout.split('CALL\n').slice(1).map(call => {
-    const lines = call.trimEnd().split('\n');
-    return { args: lines.filter(line => line.startsWith('ARG:')).map(line => line.slice(4)),
-      values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
-  });
+type ShellCall = { command: string; args: string[]; env: NodeJS.ProcessEnv };
+
+async function capturedBlock(block: string, root: string): Promise<ShellCall[]> {
+  const bin = join(root, 'shims');
+  const log = join(root, 'calls.jsonl');
+  await mkdir(bin, { recursive: true });
+  await writeFile(log, '');
+  const shim = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const command = path.basename(process.argv[1]);
+fs.appendFileSync(process.env.CAPTURE_LOG, JSON.stringify({ command, args: process.argv.slice(2), env: process.env }) + '\\n');
+if (command === 'npm' && process.argv.slice(2).join(' ').startsWith('run demo -- preflight')) {
+  fs.mkdirSync(process.env.CONCORD_RUN_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.CONCORD_RUN_DIR, 'trusted-config.json'), '{"fixture":"trusted"}\\n');
+}
+`;
+  for (const command of ['npm', 'git', 'wrangler']) {
+    const path = join(bin, command);
+    await writeFile(path, shim);
+    await chmod(path, 0o755);
+  }
+  const cleanEnv = { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: root, TMPDIR: root, CAPTURE_LOG: log };
+  await execFile('env', ['-i', ...Object.entries(cleanEnv).map(([key, value]) => `${key}=${value}`),
+    'sh', '-ec', block], { cwd, timeout: 30_000 });
+  return (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as ShellCall);
 }
 
-async function run(command: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; data: any }> {
-  const { stdout } = await execFile('sh', ['-c', command], { cwd, env, timeout: 120_000,
-    maxBuffer: 8 * 1024 * 1024 });
-  const jsonAt = stdout.indexOf('{');
-  if (jsonAt < 0) throw new Error(`No JSON output from ${command}: ${stdout}`);
-  return { stdout, data: JSON.parse(stdout.slice(jsonAt)) };
+function assertCallEnvironment(calls: ShellCall[], block: string, runDir: string): void {
+  expect(calls).toHaveLength(commandLines(block).commands.length);
+  for (const call of calls) {
+    expect(call.command).toBe('npm');
+    expect(call.args.length).toBeGreaterThan(0);
+    if (call.args[0] === 'ci') continue;
+    const required = ['CONCORD_RUN_DIR'];
+    if (call.args[1] === 'git-bridge') required.push('CONCORD_BRIDGE_DATA_DIR', 'CONCORD_BRIDGE_TOKEN', 'CONCORD_BRIDGE_PORT');
+    if (call.args[1] === 'dev') required.push('CONCORD_BRIDGE_TOKEN', 'CONCORD_WRANGLER_STATE', 'WRANGLER_SEND_METRICS');
+    if (call.args[1] === 'demo' && call.args[3] !== 'preflight') required.push('CONCORD_URL', 'CONCORD_TOKEN', 'CONCORD_SHOW_DECOMPILED_C');
+    if (call.args[1] === 'runner') required.push('CONCORD_URL', 'CONCORD_TOKEN');
+    for (const key of required) expect(call.env[key], `${call.args.join(' ')} needs ${key}`).toBeTruthy();
+    expect(call.env.CONCORD_RUN_DIR).toBe(runDir);
+    if (call.args[1] === 'git-bridge') {
+      expect(call.env.CONCORD_BRIDGE_DATA_DIR).toBe(join(runDir, 'bridge'));
+      expect(call.env.CONCORD_BRIDGE_TOKEN).toBe('local-bridge-fixture-2026');
+      expect(call.env.CONCORD_BRIDGE_PORT).toBe('8788');
+    }
+    if (call.args[1] === 'dev') {
+      expect(call.args).toContain(`BRIDGE_URL:http://127.0.0.1:8788/?token=${call.env.CONCORD_BRIDGE_TOKEN}`);
+      expect(call.args.some(arg => arg.startsWith('TRUSTED_CONFIG:{'))).toBe(true);
+      expect(call.env.WRANGLER_SEND_METRICS).toBe('false');
+    }
+    if (call.args[1] === 'demo' && call.args[3] !== 'preflight') {
+      expect(call.env.CONCORD_URL).toBe('http://127.0.0.1:8787');
+      expect(call.env.CONCORD_TOKEN).toBe('local-owner');
+      expect(call.env.CONCORD_SHOW_DECOMPILED_C).toBe('0');
+    }
+    if (call.args[1] === 'runner') {
+      expect(call.env.CONCORD_URL).toBe('http://127.0.0.1:8787');
+      expect(call.env.CONCORD_TOKEN).toBe(call.args.includes('checker') ? 'local-checker' : 'local-promoter');
+    }
+  }
+}
+
+async function runDocumentedBlock(block: string, env: NodeJS.ProcessEnv): Promise<any[]> {
+  const marker = '__CONCORD_DOCUMENTED_NPM_CALL__';
+  const wrapper = `npm() { printf '\\n${marker}\\n'; command npm "$@"; }`;
+  const { stdout } = await execFile('sh', ['-ec', `${wrapper}\n${block}`],
+    { cwd, env, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+  const outputs = stdout.split(marker + '\n').slice(1);
+  expect(outputs).toHaveLength(commandLines(block).commands.length);
+  return outputs.map(output => {
+    const jsonAt = output.indexOf('{');
+    if (jsonAt < 0) throw new Error(`No JSON in documented command output: ${output}`);
+    return JSON.parse(output.slice(jsonAt));
+  });
 }
 
 function start(command: string, env: NodeJS.ProcessEnv): { child: ChildProcess; output: () => string } {
@@ -129,19 +179,24 @@ afterEach(async () => {
 
 describe('documented demo commands', () => {
   it('runs every 12c-tagged block in written order from a clean shell', async () => {
+    const root = await externalTempDir('concord-docs-shell-');
+    const runDir = join(root, 'concord-demo-01');
     for (const path of ['README.md', 'docs/DEMO.md', 'docs/deploy.md']) {
       for (const block of await taggedBlocks(path)) {
-        const calls = await capturedBlock(block);
-        expect(calls, path).toHaveLength(commandLines(block).commands.length);
-        expect(calls.every(call => call.args.length > 0), path).toBe(true);
+        assertCallEnvironment(await capturedBlock(block, root), block, runDir);
       }
     }
     const deploy = (await taggedBlocks('docs/deploy.md'))[0];
-    const [seed] = await capturedBlock(deploy, {
-      CONCORD_URL: 'https://wrong-worker.example', CONCORD_TOKEN: 'wrong-token', CONCORD_SHOW_DECOMPILED_C: '1',
-    });
+    const [seed] = await capturedBlock(deploy, root);
     expect(seed.args.slice(0, 4)).toEqual(['run', 'demo', '--', 'seed']);
-    expect(seed.values).toEqual(['http://127.0.0.1:8787', 'local-owner', '0', '/tmp/concord-demo-01']);
+    expect(seed.env.CONCORD_TOKEN).toBe('local-owner');
+    const readme = (await taggedBlocks('README.md'))[4];
+    const tokenExport = 'export CONCORD_TOKEN=local-owner\n';
+    const movedToken = readme.replace(tokenExport, '').replace(/(npm run demo -- seed[^\n]*\n)/, `$1${tokenExport}`);
+    expect(movedToken).not.toBe(readme);
+    const mutatedCalls = await capturedBlock(movedToken, root);
+    expect(() => assertCallEnvironment(mutatedCalls, movedToken, runDir)).toThrow();
+    expect(mutatedCalls.find(call => call.args[3] === 'seed')?.env.CONCORD_TOKEN).toBeUndefined();
   });
 
   it('keeps every documented Wrangler dev command persistent inside the clone', async () => {
@@ -327,8 +382,8 @@ describe('documented demo commands', () => {
     } });
     await access(join(install, 'node_modules/.bin/tsx'));
 
-    const preflight = await run(readme[1], env);
-    expect(preflight.data.status).toBe('ready');
+    const [preflight] = await runDocumentedBlock(readme[1], env);
+    expect(preflight.status).toBe('ready');
     const bridge = start(readme[2], env);
     await waitFor('bridge', async () => bridge.output().includes('listening on 127.0.0.1:8788'), bridge.output);
     const worker = start(readme[3], env);
@@ -336,16 +391,14 @@ describe('documented demo commands', () => {
     expect((await (await fetch(workerUrl + '/health')).json() as any).data.storageBackend).toBe('bridge');
 
     const execute = async (block: string) => {
-      const { exports, commands } = commandLines(block);
-      const results: any[] = [];
-      for (const command of commands) {
-        expect(command).toMatch(/^npm run demo -- (seed|scene|inspect) /);
-        const result = await run([...exports, command].join('\n'), env);
-        results.push(result.data);
-        const scene = /npm run demo -- scene (\w+)/.exec(command)?.[1];
+      const commands = commandLines(block).commands;
+      for (const command of commands) expect(command).toMatch(/^npm run demo -- (seed|scene|inspect) /);
+      const results = await runDocumentedBlock(block, env);
+      for (const [index, result] of results.entries()) {
+        const scene = /npm run demo -- scene (\w+)/.exec(commands[index])?.[1];
         if (scene) {
-          expect(result.data.scene).toBe(scene);
-          if (scene !== 'negative') expect(result.data.evidence).toBeTruthy();
+          expect(result.scene).toBe(scene);
+          if (scene !== 'negative') expect(result.evidence).toBeTruthy();
         }
       }
       return results;
