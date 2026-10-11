@@ -44,7 +44,7 @@ async function fixture() {
   };
   const route = async (suffix: string, body: unknown) => {
     const path = '/v1/repos/demo/' + suffix;
-    const entry = runners.routes.find(route => route.pattern.test(path))!;
+    const entry = runners.routes.find(route => route.method === 'POST' && route.pattern.test(path))!;
     try { return await entry.handle(context, new Request('https://test' + path, { method: 'POST' }), path.match(entry.pattern)!, body); }
     catch (error) { return failure(error instanceof HttpError ? error : new HttpError(503, 'ERROR', String(error))); }
   };
@@ -186,6 +186,36 @@ describe('durable runner protocol', () => {
     expect((await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'canonical-push' })).status).toBe(403);
     f.advance(60_000);
     expect((await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' })).status).toBe(409);
+  });
+
+  it('keeps a bridge job live beyond its minimum 60-second Git credential', async () => {
+    const f = await fixture();
+    Object.defineProperty(f.context, 'env', { value: { STORAGE_BACKEND: 'bridge' } as Env });
+    f.context.storage.mintToken = async (_name, _scope, ttlSeconds) => {
+      expect(ttlSeconds).toBe(60);
+      return { secret: 'bridge-secret', expiresAt: 61_000 };
+    };
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    const poll = await f.route('runner/poll', { runnerId: 'bridge', role: 'checker', supportedProfileDigests: [pin] });
+    expect(poll.status).toBe(200);
+    const job = (await poll.json() as { data: { job: Job } }).data.job;
+    expect(job.expiresAt).toBe(91_000);
+    const credential = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+    expect(credential.status).toBe(200);
+  });
+
+  it('exposes a completed result to a reviewer through a read-only route', async () => {
+    const f = await fixture();
+    runners.hooks['runners.schedule']!(f.context, f.job);
+    const poll = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const job = (await poll.json() as { data: { job: Job } }).data.job;
+    await f.route('jobs/job1/result', await acceptedResult(job));
+    f.principal.roles = ['reviewer'];
+    const path = '/v1/repos/demo/jobs/job1/result';
+    const route = runners.routes.find(item => item.method === 'GET' && item.pattern.test(path))!;
+    const response = await route.handle(f.context, new Request('https://test' + path), path.match(route.pattern)!, undefined);
+    expect(response.status).toBe(200);
+    expect((await response.json() as any).data.result.resultDigest).toMatch(/^sha256:/);
   });
 
   it('renews a 35-minute job with fake clock advances and no wall wait', async () => {

@@ -1,21 +1,18 @@
-import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule, Gate, Id, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../contracts';
+import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule, Gate, Id, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict, InspectedRevision } from '../contracts';
 import { requireRole } from '../auth';
 import { HttpError, json } from '../http';
 import { dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest } from '../verdicts/manifest';
 
-/** Persisted only by a trusted inspection integration, never accepted from an API caller. */
-export interface InspectedRevision {
-  changeId: Id; revision: number; candidate: CandidateInput;
-  canonicalStorageName: string; policyId: Id; profileId: Id;
-  reviewManifest: ReviewManifest; reviewManifestDigest: Digest; outcome: 'PASS' | 'MATCH';
-}
+export type { InspectedRevision } from '../contracts';
 interface ActiveEvidence { revision: number; headOid: string; manifestDigest: Digest; profileDigest: Digest; sourceId: Id }
 interface CarryRequest { job: DeltaCheckJob; parentVersion: number; status: 'pending' | 'review-required' | 'carried'; reason: string | null; resultDigest: Digest | null; derivedVerdictId: Id | null }
 
-function deltaInputDigest(job: DeltaCheckJob, parentVersion: number): Digest {
+function deltaInputDigest(job: DeltaCheckJob, _parentVersion: number): Digest {
   const { inputDigest: _digest, state: _state, attempt: _attempt, runnerId: _runnerId,
     fence: _fence, expiresAt: _expiresAt, version: _jobVersion, ...immutableInput } = job;
-  return hashCanonical({ ...immutableInput, parentVersion });
+  // Runner scheduling hashes the immutable wire job. Parent version is checked
+  // separately against the stored verdict before the result can carry review.
+  return hashCanonical(immutableInput);
 }
 
 const reject = (context: ModuleContext, code: string, reason: string, evidenceIds: Id[] = []): Gate<never> =>
@@ -272,6 +269,8 @@ export const verdicts: FeatureModule = {
         checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
         toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
         timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
+        ...(policy.checkerId === 'dispatch-lab' ? { caseId: change.value.intentKey === 'D' ? 'd-e' :
+          change.value.intentKey === 'H' ? 'h-only' : 'seed' } : {}),
         state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null,
         changeId, candidate: structuredClone(record.candidate), oldManifestDigest: parent.reviewManifestDigest,
         newBaseOid: body!.newBaseOid as string, parentVerdictId: parent.verdictId,
@@ -295,5 +294,21 @@ export const verdicts: FeatureModule = {
     return { status: availability.status === 'blocked' && availability.code === 'MODULE_UNAVAILABLE' ? 'unavailable' : 'ready', items: [] };
   },
   nextDeadline: () => null, onAlarm: () => undefined,
-  hooks: { 'verdicts.gate': gate, 'verdicts.evaluateCarry': evaluateCarry },
+  hooks: { 'verdicts.gate': gate, 'verdicts.evaluateCarry': evaluateCarry,
+    'verdicts.recordInspection': (context, record) => {
+      // The repository module has already checked this inspection against its
+      // indexed candidate and declared units. Keep the handoff digest strict,
+      // while allowing legacy seed inspections with no reviewable units to be
+      // recorded; the verdict gate still rejects those manifests.
+      if (!context.principal || !context.trusted || !context.state) {
+        return reject(context, 'MODULE_UNAVAILABLE', 'Trusted inspection context unavailable');
+      }
+      if (!context.principal.roles.includes('checker') || !record || !record.reviewManifest ||
+        !context.trusted.policies[record.policyId] ||
+        record.reviewManifestDigest !== hashCanonical(record.reviewManifest)) {
+        return reject(context, 'INSPECTION_MISMATCH', 'Trusted inspection record is incomplete');
+      }
+      context.state.put(`inspection:${record.changeId}`, structuredClone(record));
+      return { status: 'eligible', version: context.version(), evidenceIds: [record.changeId], value: undefined };
+    } },
 };

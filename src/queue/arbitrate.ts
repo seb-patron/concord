@@ -9,11 +9,11 @@ export type Arbitration =
   | { status: 'selected'; winnerId: string; loserId: string; reason: string }
   | { status: 'blocked'; reason: string };
 
-export function accepted(result: StackResult, policy: AcceptancePolicy): boolean {
+export function accepted(result: StackResult, policy: AcceptancePolicy, requireScore = true): boolean {
   if (!['PASS', 'MATCH'].includes(result.outcome) || !result.composedOid || !result.composedTreeOid) return false;
   if (new Set(result.gateResults.map(gate => gate.gateId)).size !== result.gateResults.length) return false;
   if (!policy.gates.every(gate => result.gateResults.some(found => found.gateId === gate.id && found.outcome === gate.requiredOutcome))) return false;
-  if (policy.kind === 'score') return result.score !== null
+  if (policy.kind === 'score' && requireScore) return result.score !== null
     && result.score.total === policy.fixedDenominator
     && Number.isSafeInteger(result.score.matched)
     && result.score.matched >= 0 && result.score.matched <= policy.fixedDenominator;

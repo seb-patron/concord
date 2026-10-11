@@ -113,6 +113,16 @@ describe('content-bound verdicts', () => {
     ] } as ReviewManifest;
     expect(manifestDigest(wider, widerPolicy, ['row:gamma'])).toBe(manifestDigest({ ...wider, dependencyScope: [...wider.dependencyScope].reverse() } as ReviewManifest, widerPolicy, ['row:gamma']));
     expect(trustedDependencyKeys(policy, ['row:gamma'])).toEqual(['row:beta']);
+    const dispatchPolicy = { ...policy, units: {
+      'row:families:gamma': { canonicalKey: 'row:families:gamma', file: 'families.tsv',
+        resources: ['families.tsv#gamma'], dependencyKeys: ['row:families:beta'] },
+      'row:families:beta': { canonicalKey: 'row:families:beta', file: 'families.tsv',
+        resources: ['families.tsv#beta'], dependencyKeys: [] },
+    } };
+    expect(trustedDependencyKeys(dispatchPolicy, ['row:families:gamma'])).toEqual(['row:families:beta']);
+    expect(() => trustedDependencyKeys({ ...dispatchPolicy, units: { ...dispatchPolicy.units,
+      'row:families:gamma': { ...dispatchPolicy.units['row:families:gamma'], resources: ['families.tsv#beta'] } } },
+    ['row:families:gamma'])).toThrow('UNKNOWN_RESOURCE_SCOPE');
     expect(() => manifestDigest({ ...original, dependencyScope: [] } as ReviewManifest, policy, ['row:gamma'])).toThrow('MANIFEST_DEPENDENCY_SCOPE_MISMATCH');
     expect(manifestDigest(manifest('row:gamma', { after: d('row:gamma:after ') }), policy, ['row:gamma'])).not.toBe(manifestDigest(original, policy, ['row:gamma']));
     expect(manifestDigest(manifest('row:gamma', { mode: '100755' }), policy, ['row:gamma'])).not.toBe(manifestDigest(original, policy, ['row:gamma']));

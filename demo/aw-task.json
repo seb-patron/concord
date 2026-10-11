@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "project": "public-aw",
+  "taskId": "task-17",
+  "explicitAttempt": 1,
+  "intent": "Increase gamma retry budget safely",
+  "unitKeys": ["row:families:gamma"],
+  "workerLabel": "scripted-aw",
+  "worktree": "${AW_TASK_CHECKOUT_PENDING_SLICE_10}"
+}

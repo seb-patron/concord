@@ -1,0 +1,19 @@
+{
+  "id": "dispatch-lab",
+  "version": 1,
+  "checkerId": "dispatch-lab",
+  "acceptance": {
+    "kind": "score",
+    "gates": [{ "id": "all", "requiredOutcome": "PASS" }],
+    "fixedDenominator": 4
+  },
+  "units": {
+    "row:families:alpha": { "canonicalKey": "row:families:alpha", "file": "families.tsv", "resources": ["families.tsv#alpha"], "dependencyKeys": ["row:families:beta"] },
+    "row:families:beta": { "canonicalKey": "row:families:beta", "file": "families.tsv", "resources": ["families.tsv#beta"], "dependencyKeys": [] },
+    "row:families:gamma": { "canonicalKey": "row:families:gamma", "file": "families.tsv", "resources": ["families.tsv#gamma"], "dependencyKeys": [] },
+    "row:families:delta": { "canonicalKey": "row:families:delta", "file": "families.tsv", "resources": ["families.tsv#delta"], "dependencyKeys": [] },
+    "row:families:epsilon": { "canonicalKey": "row:families:epsilon", "file": "families.tsv", "resources": ["families.tsv#epsilon"], "dependencyKeys": [] },
+    "file:families.tsv": { "canonicalKey": "file:families.tsv", "file": "families.tsv", "resources": [], "dependencyKeys": [] },
+    "file:dispatch.mjs": { "canonicalKey": "file:dispatch.mjs", "file": "dispatch.mjs", "resources": [], "dependencyKeys": [] }
+  }
+}

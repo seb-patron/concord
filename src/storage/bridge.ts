@@ -12,7 +12,9 @@ export function bridgeStorage(rawUrl: string): RepoStorage {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ operation, ...args }),
-      redirect: 'error',
+      // Workers reject redirect:'error'; manual keeps redirects from reaching an
+      // authenticated destination and the non-2xx check below fails closed.
+      redirect: 'manual',
       signal: AbortSignal.timeout(5000),
     });
     if (!response.ok) throw new Error(`BRIDGE_${response.status}:${(await response.text()).slice(0, 120)}`);

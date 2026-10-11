@@ -437,6 +437,12 @@ describe('repository and change lifecycle', () => {
       expect(hook(context, { ...inspection, log: 'tampered' })).toMatchObject({ status: 'blocked', code: 'INSPECTION_MISMATCH' });
       const accepted = hook(context, inspection);
       expect(accepted.status).toBe('eligible');
+      expect(context.state.get(`change:${change.changeId}`)).toMatchObject({ status: 'ready', headOid: b });
+      expect(context.state.get(`verified:${change.changeId}`)).toMatchObject({ verifiedBy: 'checker', headOid: b,
+        policyDigest: digest, unitKeys: [] });
+      expect(sqlState(context.sql).get(`module:verdicts:inspection:${change.changeId}`)).toMatchObject({
+        changeId: change.changeId, revision: 1, reviewManifestDigest: inspection.reviewManifestDigest,
+      });
       expect(hook(context, inspection).version).toBe(accepted.version);
     });
     const ready = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));

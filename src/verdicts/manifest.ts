@@ -74,7 +74,11 @@ export function trustedDependencyKeys(policy: TrustedPolicy, changedKeys: readon
     const key = pending.pop()!;
     const unit = policy.units[key];
     if (!unit || !Array.isArray(unit.dependencyKeys)) throw new Error(`UNKNOWN_DEPENDENCY:${key}`);
-    if (unit.canonicalKey !== key || !validPath(unit.file) || !Array.isArray(unit.resources) || unit.resources.length) {
+    const row = /^row:families:([a-z]+)$/.exec(key)?.[1];
+    const reviewedRowFootprint = row && unit.file === 'families.tsv' &&
+      JSON.stringify(unit.resources) === JSON.stringify([`families.tsv#${row}`]);
+    if (unit.canonicalKey !== key || !validPath(unit.file) || !Array.isArray(unit.resources) ||
+      unit.resources.length > 0 && !reviewedRowFootprint) {
       throw new Error(`UNKNOWN_RESOURCE_SCOPE:${key}`);
     }
     for (const dependency of unit.dependencyKeys) {

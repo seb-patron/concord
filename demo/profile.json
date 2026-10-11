@@ -1,0 +1,455 @@
+{
+  "id": "dispatch-lab",
+  "checkerId": "dispatch-lab",
+  "timeoutMs": 30000,
+  "maxOutputBytes": 16384,
+  "cases": {
+    "seed": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 1,
+          "timeout_ms": 1000,
+          "output": 1000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1000,
+          "output": 4000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "a-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1000,
+          "output": 4000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "b-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 1,
+          "timeout_ms": 1000,
+          "output": 1000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1000,
+          "output": 4000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "c-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 1,
+          "timeout_ms": 1000,
+          "output": 1000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 5,
+          "timeout_ms": 1000,
+          "output": 5000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "a-b": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1000,
+          "output": 4000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "a-c-survivors": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 5,
+          "timeout_ms": 1000,
+          "output": 5000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "b-c": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 1,
+          "timeout_ms": 1000,
+          "output": 1000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 5,
+          "timeout_ms": 1000,
+          "output": 5000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "a-b-c": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "delta": {
+          "retry_limit": 5,
+          "timeout_ms": 1000,
+          "output": 5000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "b-repaired": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 5,
+          "timeout_ms": 1000,
+          "output": 5000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "d-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 5,
+          "timeout_ms": 1000,
+          "output": 5000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "e-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "d-e": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "h-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 4,
+          "timeout_ms": 1000,
+          "output": 4000
+        },
+        "beta": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "i-only": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 1,
+          "timeout_ms": 500,
+          "output": 500
+        }
+      }
+    },
+    "j-common": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 4,
+          "timeout_ms": 1250,
+          "output": 5000
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 2,
+          "timeout_ms": 500,
+          "output": 1000
+        }
+      },
+      "epsilonChoices": [
+        {
+          "retry_limit": 2,
+          "timeout_ms": 500,
+          "output": 1000
+        },
+        {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        }
+      ]
+    }
+  }
+}

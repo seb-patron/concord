@@ -82,6 +82,7 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
     (![profile.toolchainFile, profile.checkerFile].map(value => resolve(value!)).includes(resolve(profile.executable)) ||
       resolve(profile.executable) !== resolve(profile.checkerFile) && !profile.argv!.includes(profile.checkerFile))) throw new Error('UNPINNED_EXECUTABLE');
   if (profile.checkerId === 'dispatch-lab' && (profile.executable !== process.execPath ||
+    profile.checkerFile !== undefined && !isAbsolute(profile.checkerFile) ||
     JSON.stringify(profile.argv) !== JSON.stringify(dispatchArgv))) throw new Error('INVALID_PROFILE_ARGV');
   if (profile.checkerId === 'dispatch-lab') {
     if (!profile.cases || !Object.keys(profile.cases).length) throw new Error('INVALID_PROFILE');
@@ -112,7 +113,7 @@ export async function verifyLocalProfile(profile: LocalProfile): Promise<void> {
   if (profile.checkerId === 'dispatch-lab' && resolve(profile.toolchainFile) !== resolve(process.execPath)) throw new Error('TOOLCHAIN_PATH_MISMATCH');
   if (await fileDigest(profile.toolchainFile) !== profile.toolchainDigest) throw new Error('TOOLCHAIN_DIGEST_MISMATCH');
   if (profile.checkerId === 'dispatch-lab') {
-    if (await fileDigest(fileURLToPath(import.meta.url)) !== profile.checkerDigest) throw new Error('CHECKER_DIGEST_MISMATCH');
+    if (await fileDigest(profile.checkerFile ?? fileURLToPath(import.meta.url)) !== profile.checkerDigest) throw new Error('CHECKER_DIGEST_MISMATCH');
   } else if (await fileDigest(profile.checkerFile!) !== profile.checkerDigest ||
     await fileDigest(profile.oracleFile!) !== profile.oracleDigest) throw new Error('LOCAL_PIN_MISMATCH');
   if (profile.checkerId === 'dispatch-lab' && (!profile.cases ||
@@ -161,6 +162,18 @@ export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string,
     const expected = caseId && profile.cases?.[caseId];
     if (!expected || families.some(family => !expected.rows[family]) ||
       Object.keys(expected.rows).length !== families.length) throw new Error('UNKNOWN_CASE_ID');
+    if (profile.checkerFile) {
+      if (resolve(profile.checkerFile).startsWith(resolve(repo) + sep)) throw new Error('CHECKER_IN_CANDIDATE');
+      const result = await command(process.execPath, [profile.checkerFile, '--repo', repo, '--unit', unit, '--case', caseId!],
+        repo, profile.timeoutMs, childEnvironment());
+      if (result.timedOut) return { outcome: 'TIMEOUT', log: result.stderr, score: null };
+      let value: { outcome: CheckOutcome; log: string; score: { matched: number; total: number } | null };
+      try { value = JSON.parse(result.stdout.trim()) as typeof value; }
+      catch { return { outcome: 'FAIL', log: 'Checker output was not JSON: ' + result.stderr, score: null }; }
+      if (!['PASS', 'FAIL'].includes(value.outcome) || typeof value.log !== 'string' ||
+        (value.outcome === 'PASS') !== (result.code === 0)) return { outcome: 'FAIL', log: 'Checker protocol mismatch', score: null };
+      return value;
+    }
     try {
       if (!(await lstat(resolve(repo, 'families.tsv'))).isFile() || !(await lstat(resolve(repo, 'dispatch.mjs'))).isFile())
         return { outcome: 'FAIL', log: 'Candidate files must be regular files', score: null };

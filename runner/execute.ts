@@ -59,7 +59,7 @@ async function runGates(profile: LocalProfile, job: Job, directory: string): Pro
     const checked = await pinnedCheck(profile, job, directory, gate.id);
     gates.push({ gateId: gate.id, outcome: checked.outcome });
     log += checked.log + '\n';
-    score = checked.score;
+    score = job.contest === true ? checked.score : null;
     if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log, score: null };
   }
   return { outcome: 'PASS', gates, log, score };
