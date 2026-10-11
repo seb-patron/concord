@@ -1,7 +1,7 @@
 import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
-import { eventSequence } from '../state';
+import { costLimits, eventSequence } from '../state';
 import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
@@ -173,6 +173,7 @@ async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Prom
     context.transaction(() => {
       const current = list<Repo>(context, 'catalog:index');
       if (current.some(item => item.repoId === repoId)) fail(409, 'REPO_NAME_CONFLICT', 'Repository already exists');
+      if (current.length >= costLimits(context.trusted).maxReposPerTenant) fail(429, 'TENANT_REPO_LIMIT', 'Tenant repository limit reached');
       repo!.version = versioned(context, 'repo.provisioning', [repoId], { storageName: repo!.canonicalStorageName });
       context.state.put('catalog:index', [...current, repo!]);
       saveIntent(context, { kind: 'ensure-repo', storageName: repo!.canonicalStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
@@ -310,6 +311,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
     if (!await context.storage.readCommit(repo.canonicalStorageName, input.baseOid as string)) fail(422, 'BASE_NOT_FOUND', 'Base commit does not exist');
   }
   if (all.filter(change => !terminal(change)).length >= 32) fail(429, 'CHANGE_LIMIT', 'Active change limit reached');
+  await reserveFork(context);
   const changeId = crypto.randomUUID();
   const candidateStorageName = `concord-f-${changeId}`;
   const requestDigest = await digest({ kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName });
@@ -365,6 +367,33 @@ async function registerBranch(context: ModuleContext, body: Record<string, unkno
   return respond(context, record, existing ? 200 : 201);
 }
 
+export async function reserveTokenMint(context: ModuleContext): Promise<void> {
+  // Module-only fixtures omit CONCORD_MODE; actual Worker contexts always supply it.
+  if (!context.env?.CONCORD_MODE) return;
+  if (!context.env.TENANT_CATALOG) fail(503, 'CATALOG_UNAVAILABLE', 'Token quota unavailable');
+  const quota = context.env.TENANT_CATALOG.get(context.env.TENANT_CATALOG.idFromName(`tenant:${context.tenantId}`));
+  const reservation = await quota.fetch(new Request('https://concord.test/internal/token-quota', { method: 'POST', headers: {
+    'x-concord-principal': JSON.stringify(context.principal), 'x-concord-tenant': context.tenantId,
+  } }));
+  if (!reservation.ok) {
+    if (reservation.status === 429) fail(429, 'TENANT_TOKEN_LIMIT', 'Tenant daily token mint limit reached');
+    fail(503, 'CATALOG_UNAVAILABLE', 'Token quota unavailable');
+  }
+}
+
+async function reserveFork(context: ModuleContext): Promise<void> {
+  if (!context.env?.CONCORD_MODE) return;
+  if (!context.env.TENANT_CATALOG) fail(503, 'CATALOG_UNAVAILABLE', 'Fork quota unavailable');
+  const quota = context.env.TENANT_CATALOG.get(context.env.TENANT_CATALOG.idFromName(`tenant:${context.tenantId}`));
+  const reservation = await quota.fetch(new Request('https://concord.test/internal/fork-quota', { method: 'POST', headers: {
+    'x-concord-principal': JSON.stringify(context.principal), 'x-concord-tenant': context.tenantId,
+  } }));
+  if (!reservation.ok) {
+    if (reservation.status === 429) fail(429, 'TENANT_FORK_LIMIT', 'Tenant fork limit reached');
+    fail(503, 'CATALOG_UNAVAILABLE', 'Fork quota unavailable');
+  }
+}
+
 async function gitToken(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
   const repo = await catalogRepo(context);
   requireReady(repo);
@@ -385,6 +414,7 @@ async function gitToken(context: ModuleContext, body: Record<string, unknown>): 
     if (!await context.storage.revokeToken(storageName, prior)) fail(503, 'TOKEN_REVOCATION_FAILED', 'Token cleanup is pending');
     context.state.delete(mintKey);
   }
+  await reserveTokenMint(context);
   const token = await context.storage.mintToken(storageName, scope as 'read' | 'write', Number(ttlSeconds));
   if (token[pendingResultFailure]) {
     context.state.put(mintKey, token.secret);

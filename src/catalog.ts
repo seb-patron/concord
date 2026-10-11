@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { HookName, ModuleContext, Principal, Repo, ServiceHooks } from './contracts';
 import { clock, requireTenant } from './auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
-import { appendEvent, applyMigrations, eventSequence, initialize, loadTrustedConfig, sqlState } from './state';
+import { appendEvent, applyMigrations, costLimits, eventSequence, initialize, loadTrustedConfig, sqlState } from './state';
 import { selectStorage } from './coordinator';
 import { repos } from './features/repos';
 
@@ -51,6 +51,22 @@ export class TenantCatalog extends DurableObject<Env> {
       if (!identity) identityStore.put('catalog:tenantId', principal.tenantId);
       const context = this.context(principal);
       const path = new URL(request.url).pathname;
+      if (path === '/internal/token-quota' && request.method === 'POST') {
+        const state = sqlState(context.sql);
+        const day = Math.floor(this.now() / 86_400_000);
+        const previous = state.get<{ day: number; count: number }>('catalog:tokenQuota');
+        const count = previous?.day === day ? previous.count : 0;
+        if (count >= costLimits(context.trusted).maxTokenMintsPerTenantPerDay) throw new HttpError(429, 'TENANT_TOKEN_LIMIT', 'Tenant daily token mint limit reached');
+        state.put('catalog:tokenQuota', { day, count: count + 1 });
+        return json({ reserved: true });
+      }
+      if (path === '/internal/fork-quota' && request.method === 'POST') {
+        const state = sqlState(context.sql);
+        const count = state.get<number>('catalog:forkCount') ?? 0;
+        if (count >= costLimits(context.trusted).maxForksPerTenant) throw new HttpError(429, 'TENANT_FORK_LIMIT', 'Tenant fork limit reached');
+        state.put('catalog:forkCount', count + 1);
+        return json({ reserved: true });
+      }
       if (path !== '/v1/repos') throw new HttpError(404, 'NOT_FOUND', 'Unknown catalog route');
       if (request.method === 'GET') {
         const repos = (context.state.get<Repo[]>('catalog:index') ?? []).filter(repo => repo.tenantId === principal.tenantId && (principal.repoIds === '*' || principal.repoIds.includes(repo.repoId)));
@@ -81,7 +97,10 @@ export class TenantCatalog extends DurableObject<Env> {
         principal.principalId, 'POST /v1/repos', key, requestDigest, response.status, responseBody);
       const deadline = repos.nextDeadline(context);
       const alarm = await this.ctx.storage.getAlarm();
-      if (deadline !== null && (alarm === null || deadline < alarm)) await this.ctx.storage.setAlarm(Math.max(this.now() + 1, deadline));
+      if (deadline === null) {
+        if (alarm !== null) await this.ctx.storage.deleteAlarm();
+      } else if (alarm === null || deadline < alarm) await this.ctx.storage.setAlarm(Math.max(this.now() + 1,
+        sqlState(context.sql).get<number>('catalog:alarmFloorAt') ?? 0, deadline));
       return response;
     } catch (error) {
       return failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'));
@@ -93,8 +112,18 @@ export class TenantCatalog extends DurableObject<Env> {
     if (!tenantId) return;
     const principal: Principal = { tenantId, principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
     const context = this.context(principal);
-    await repos.onAlarm(context);
+    const state = sqlState(context.sql);
+    let failed = false;
+    try { await repos.onAlarm(context); }
+    catch { failed = true; }
+    const failures = failed ? Math.min(7, (state.get<number>('catalog:alarmFailures') ?? 0) + 1) : 0;
+    state.put('catalog:alarmFailures', failures);
     const deadline = repos.nextDeadline(context);
-    if (deadline !== null) await this.ctx.storage.setAlarm(Math.max(this.now() + 1, deadline));
+    if (deadline === null) await this.ctx.storage.deleteAlarm();
+    else {
+      const floorAt = this.now() + (failed ? Math.min(60_000, 1000 * 2 ** (failures - 1)) : 1000);
+      state.put('catalog:alarmFloorAt', floorAt);
+      await this.ctx.storage.setAlarm(Math.max(floorAt, deadline));
+    }
   }
 }

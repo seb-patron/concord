@@ -87,15 +87,16 @@ export class RepoCoordinator extends DurableObject<Env> {
     return context;
   }
 
-  private async scheduleNextAlarm(principal: Principal, repoId: string): Promise<void> {
+  private async scheduleNextAlarm(principal: Principal, repoId: string, floorMs = 1, replace = false): Promise<void> {
     const deadlines = modules.map(module => module.nextDeadline(this.context(module.name, principal, repoId))).filter((deadline): deadline is number => deadline !== null && Number.isFinite(deadline));
     const current = await this.ctx.storage.getAlarm();
     if (deadlines.length === 0) {
       if (current !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
-    const earliest = Math.max(this.now() + 1, Math.min(...deadlines));
-    if (current === null || earliest < current) await this.ctx.storage.setAlarm(earliest);
+    const earliest = Math.max(this.now() + floorMs,
+      sqlState(this.ctx.storage.sql).get<number>('repo:alarmFloorAt') ?? 0, Math.min(...deadlines));
+    if (replace || current === null || earliest < current) await this.ctx.storage.setAlarm(earliest);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -207,7 +208,11 @@ export class RepoCoordinator extends DurableObject<Env> {
         catch (error) { failure ??= error; }
       }
     });
-    await this.scheduleNextAlarm(principal, identity.repoId);
-    if (failure) throw failure;
+    const state = sqlState(this.ctx.storage.sql);
+    const failures = failure ? Math.min(7, (state.get<number>('repo:alarmFailures') ?? 0) + 1) : 0;
+    state.put('repo:alarmFailures', failures);
+    const floorMs = failure ? Math.min(60_000, 1000 * 2 ** (failures - 1)) : 1000;
+    state.put('repo:alarmFloorAt', this.now() + floorMs);
+    await this.scheduleNextAlarm(principal, identity.repoId, floorMs, true);
   }
 }

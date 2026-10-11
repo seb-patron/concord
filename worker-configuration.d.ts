@@ -4,11 +4,17 @@ interface Env {
   TENANT_CATALOG: DurableObjectNamespace;
   REPO_COORDINATOR: DurableObjectNamespace;
   ASSETS: Fetcher;
+  AUTH_RATE_LIMIT: RateLimit;
   ARTIFACTS?: Artifacts;
   AUTH_TOKENS?: string;
   TRUSTED_CONFIG?: string;
   BRIDGE_URL?: string;
   CONCORD_TEST_NOW?: string;
+}
+
+declare module '*?raw' {
+  const source: string;
+  export default source;
 }
 
 declare module 'cloudflare:workers' {
@@ -22,6 +28,7 @@ declare namespace Cloudflare {
     TENANT_CATALOG: DurableObjectNamespace;
     REPO_COORDINATOR: DurableObjectNamespace;
     ASSETS: Fetcher;
+    AUTH_RATE_LIMIT: RateLimit;
     ARTIFACTS?: Artifacts;
   }
 }
