@@ -12,6 +12,26 @@ const tailLog = (value: string, cap: number): string => {
   return tail;
 };
 
+function cappedChecks(cap: number, commandProfile: boolean) {
+  let body = '';
+  const markers: string[] = [];
+  return {
+    append(log: string, label = '') {
+      const exit = commandProfile ? /^exit=-?\d+(?: timeout)?\n/.exec(log)?.[0] : undefined;
+      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap);
+      if (exit) {
+        markers.push(tailLog(label, cap - Buffer.byteLength(exit)) + exit);
+        // Keep complete exit lines, preferring the most recent check if markers alone fill the cap.
+        while (Buffer.byteLength(markers.join('')) > cap) markers.shift();
+      }
+    },
+    value() {
+      const suffix = markers.join('');
+      return tailLog(body, cap - Buffer.byteLength(suffix)) + suffix;
+    },
+  };
+}
+
 export type Credential = { storageName: string; remote: string; secret: string; expiresAt: number };
 export type CredentialProvider = (operation: 'fetch' | 'scratch-push' | 'canonical-push') => Promise<Credential[]>;
 const oidPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
@@ -58,28 +78,28 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
 
 async function runGates(profile: LocalProfile, job: Job, directory: string): Promise<{ outcome: CheckOutcome; gates: StackResult['gateResults']; log: string; score: StackResult['score'] }> {
   const gates: StackResult['gateResults'] = [];
-  let log = '';
+  const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   let score: StackResult['score'] = null;
   for (const gate of job.unitPolicy.acceptance.gates) {
     const checked = await pinnedCheck(profile, job, directory, gate.id);
     gates.push({ gateId: gate.id, outcome: checked.outcome });
-    log = tailLog(log + checked.log + '\n', Math.min(job.maxOutputBytes, OUTPUT_CAP));
+    log.append(checked.log);
     score = job.contest === true ? checked.score : null;
-    if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log, score: null };
+    if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log: log.value(), score: null };
   }
-  return { outcome: 'PASS', gates, log, score };
+  return { outcome: 'PASS', gates, log: log.value(), score };
 }
 
 async function runAffected(profile: LocalProfile, job: Job, directory: string, unitKeys: string[]): Promise<{ outcome: CheckOutcome; log: string }> {
   const targets = profile.checkerId === 'dispatch-lab' ? ['all'] : [...new Set(unitKeys)].sort();
   if (!targets.length) return { outcome: 'UNVERIFIED_TARGET', log: 'No affected units identified' };
-  let log = '';
+  const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   for (const unit of targets) {
     const checked = await pinnedCheck(profile, job, directory, unit);
-    log += unit + ': ' + checked.log + '\n';
-    if (!['PASS', 'MATCH'].includes(checked.outcome)) return { outcome: checked.outcome, log };
+    log.append(checked.log, unit + ': ');
+    if (!['PASS', 'MATCH'].includes(checked.outcome)) return { outcome: checked.outcome, log: log.value() };
   }
-  return { outcome: 'PASS', log };
+  return { outcome: 'PASS', log: log.value() };
 }
 
 async function reconcileScratch(directory: string, job: Extract<Job, { kind: 'validate-stack' }>, composed: string,
@@ -182,7 +202,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     return { ...common, kind: 'delta-check', outcome: checked.outcome, sourceTreeOid: await treeOid(directory, composed),
       reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest,
       dependencyScope: inspected.manifest.dependencyScope, dependencyScopeDigest: await digest(inspected.manifest.dependencyScope),
-      log: checked.log.slice(0, OUTPUT_CAP) };
+      log: checked.log };
   }
   // Promoter mode has no profile load, checkout, source execution, or checker invocation.
   if (job.bootstrap && (!job.ownerAuthorized || job.expectedOldOid !== null)) throw new Error('BOOTSTRAP_UNAUTHORIZED');
@@ -241,7 +261,7 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
   value.durationMs = Math.max(0, Date.now() - began);
   for (const secret of secrets) value.log = value.log.replaceAll(secret, '[REDACTED]');
   const cap = Math.min(job.maxOutputBytes, OUTPUT_CAP);
-  if (value.kind === 'validate-stack') value.log = tailLog(value.log, cap);
+  if (value.kind === 'validate-stack' || value.kind === 'delta-check') value.log = tailLog(value.log, cap);
   else while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
   const resultDigest = await digest(value);
   return { ...value, resultDigest } as JobResult;

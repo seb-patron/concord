@@ -45,7 +45,7 @@ function jobFor(profile: Awaited<ReturnType<typeof loadProfile>>, remotes: Recor
 
 describe('pinned command checker', () => {
   it('keeps a later failing gate and its exit marker when combined output reaches the cap', async () => {
-    await temporaryWork(async dir => {
+    for (const laterBytes of [16_383, 16_384, 16_385]) await temporaryWork(async dir => {
       const repo = join(dir, 'repo');
       const canonical = join(dir, 'canonical.git');
       const scratch = join(dir, 'scratch.git');
@@ -54,7 +54,7 @@ describe('pinned command checker', () => {
       await git(dir, ['init', '--bare', '--quiet', scratch]);
       await mkdir(join(repo, 'scripts'));
       await writeFile(join(repo, 'scripts/validate.sh'),
-        `if [ -f .first-gate-ran ]; then echo LATER_GATE_FAILURE; exit 7; fi\n` +
+        `if [ -f .first-gate-ran ]; then printf '%s' '${'y'.repeat(laterBytes)}'; exit 7; fi\n` +
         `touch .first-gate-ran\nprintf '%s' '${'x'.repeat(16_384)}'\n`);
       await git(repo, ['add', 'scripts/validate.sh']);
       await git(repo, ['commit', '--quiet', '-m', 'gates'], 30_000, commitEnv);
@@ -72,7 +72,9 @@ describe('pinned command checker', () => {
         { gateId: 'first', outcome: 'PASS' }, { gateId: 'later', outcome: 'FAIL' }] });
       expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(16_384);
       expect(result.log).toContain('exit=7');
-      expect(result.log).toContain('LATER_GATE_FAILURE');
+      expect(result.log).toContain('exit=0');
+      expect(result.log).toContain('yyyyyyyy');
+      expect(result.log.endsWith('exit=7\n')).toBe(true);
     });
   });
 
