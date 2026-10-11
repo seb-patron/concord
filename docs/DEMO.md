@@ -102,6 +102,10 @@ npm run demo -- scene aw --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-loc
 
 Inspect the final state with the README command. The nine-minute capture uses selected evidence from this rehearsal; the optional checks can run before recording.
 
+### Live (deployed) variant
+
+For a deployed Worker with Cloudflare Artifacts, follow the [live-scene runbook](deploy.md#deployed-smoke-and-evidence). Provision fresh private owner, agent, reviewer, checker, promoter, contest, and AW credentials outside the clone, upload `AUTH_TOKENS` with `versions secret put`, then run seed and each scene with `--target remote --url "$CONCORD_URL" --tokens-file "$DEMO_TOKENS_FILE"`. The driver runs bounded remote checker and promoter processes at each barrier. Confirm the Worker health reports `production` and `artifacts` before recording the checked landing.
+
 For a ten-minute finalist presentation, retain this script and use the extra minute for one audience-chosen failed carry or collision case. Do not add a live private-project dependency.
 
 ## Historical replay: optional evidence, never invented numbers

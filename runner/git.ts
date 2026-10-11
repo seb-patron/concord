@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 
 export const OUTPUT_CAP = 16 * 1024;
 const jobDeadline = new AsyncLocalStorage<number>();
@@ -115,13 +115,8 @@ export async function conditionalPush(directory: string, remote: string, newOid:
   return result.code === 0 ? 'THIRD_REF' : 'OLD_REF';
 }
 
-/** Git receives a token via askpass only; the command line and checker env never contain it. */
-export async function gitCredentialEnvironment(directory: string, secret: string): Promise<NodeJS.ProcessEnv> {
-  const path = resolve(directory, process.platform === 'win32' ? 'askpass.cmd' : 'askpass.sh');
-  const source = process.platform === 'win32'
-    ? '@echo off\r\necho %~1 | findstr /I "Username" >NUL && (echo token) || (echo %CONCORD_GIT_TOKEN%)\r\n'
-    : '#!/bin/sh\ncase "$1" in *sername*) printf "%s\\n" token;; *) printf "%s\\n" "$CONCORD_GIT_TOKEN";; esac\n';
-  await writeFile(path, source, { mode: 0o700 });
-  if (process.platform !== 'win32') await chmod(path, 0o700);
-  return childEnvironment({ GIT_ASKPASS: path, CONCORD_GIT_TOKEN: secret });
+/** Git receives the short-lived credential only through child environment config. */
+export async function gitCredentialEnvironment(_directory: string, secret: string): Promise<NodeJS.ProcessEnv> {
+  return childEnvironment({ GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_1: 'http.extraHeader',
+    GIT_CONFIG_VALUE_1: `Authorization: Bearer ${secret}` });
 }
