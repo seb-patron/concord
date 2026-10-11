@@ -42,7 +42,7 @@ async function harness() {
   await saveFixture();
   type Change = { changeId: string; intentKey: string; intentText: string; branch: string; unitKeys: string[]; baseOid: string; headOid: string | null; revision: number; status: string; version: number; candidateStorageName: string };
   const changes: Change[] = [];
-  const api = { creates: 0, claims: 0, publishes: 0, enqueues: 0, registers: 0, leaseConflict: false, queueUnavailable: false, publishPreparationUnavailable: false, publishUnavailable: false,
+  const api = { creates: 0, claims: 0, publishes: 0, enqueues: 0, registers: 0, leaseConflict: false, leaseCapacity: false, eventsUnavailable: false, queueUnavailable: false, publishPreparationUnavailable: false, badForkRemote: false, publishUnavailable: false,
     leases: [] as Array<{ changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }>,
     branches: [] as Array<{ storageName: string; ref: string; observedHead: string }>,
     queue: [] as Array<{ changeId: string; state: string }>,
@@ -52,6 +52,8 @@ async function harness() {
   const keyed = new Map<string, { body: string; status: number; payload: string }>();
   const events: Array<{ sequence: number; kind: string; relatedIds: string[] }> = [];
   const claimKeys: string[] = [];
+  const readTokenKeys: string[] = [];
+  const writeTokenKeys: string[] = [];
   const record = (kind: string, changeId: string) => events.push({ sequence: events.length + 1, kind, relatedIds: [changeId] });
   const ok = (data: unknown, status = 200) => new Response(JSON.stringify({ data, version: api.globalVersion }), { status, headers: { 'content-type': 'application/json' } });
   const fail = (code: string, status = 409, details?: unknown) => new Response(JSON.stringify({ error: { code, message: code, details } }), { status });
@@ -61,6 +63,7 @@ async function harness() {
     const path = url.pathname;
     if (path === '/v1/repos/demo' && method === 'GET') return ok({ canonicalStorageName: 'canonical', observedCanonicalOid: api.canonicalOid, version: 1, status: 'ready' });
     if (path === '/v1/repos/demo/events' && method === 'GET') {
+      if (api.eventsUnavailable) return fail('EVENTS_UNAVAILABLE', 503);
       const after = Number(url.searchParams.get('after') ?? 0);
       const items = events.filter(event => event.sequence > after).slice(0, 100);
       return ok({ items, nextCursor: events.some(event => event.sequence > (items.at(-1)?.sequence ?? after)) ? 'more' : null });
@@ -92,7 +95,7 @@ async function harness() {
     if (changeMatch && method === 'GET') return ok(changes.find(item => item.changeId === changeMatch[1]));
     if (path === '/v1/repos/demo/leases' && method === 'POST') {
       api.claims++;
-      claimKeys.push(new Headers(init?.headers).get('idempotency-key') ?? '');
+      if (api.leaseCapacity) return fail('LEASE_CAPACITY', 429);
       if (api.leaseConflict) {
         record('lease.refused', String(body.changeId));
         return fail('LEASE_CONFLICT', 409, { holderId: 'other-agent', intentText: 'Other work', keys: ['unit:a'], nextAction: 'Wait for holder' });
@@ -106,11 +109,13 @@ async function harness() {
     if (path === '/v1/repos/demo/leases' && method === 'GET') return ok({ items: api.leases, nextCursor: null });
     if (path === '/v1/repos/demo/branches' && method === 'GET') return ok({ items: api.branches, nextCursor: null });
     if (path === '/v1/repos/demo/git-token' && method === 'POST') {
+      if (body.scope === 'read') readTokenKeys.push(new Headers(init?.headers).get('idempotency-key') ?? '');
+      if (body.scope === 'write') writeTokenKeys.push(new Headers(init?.headers).get('idempotency-key') ?? '');
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
       if (body.scope === 'write' && api.publishPreparationUnavailable) return fail('MODULE_UNAVAILABLE', 501);
       const remote = await storage.info(String(body.storageName));
       if (!remote) return fail('STORAGE_NOT_FOUND', 404);
-      return ok({ remote: remote.remote, secret: 'bridge-issued-test-secret' });
+      return ok({ remote: body.scope === 'write' && api.badForkRemote ? 'https://invalid.example/fork' : remote.remote, secret: 'bridge-issued-test-secret' });
     }
     if (path === '/v1/repos/demo/branches' && method === 'POST') {
       api.registers++;
@@ -151,14 +156,14 @@ async function harness() {
     const method = init?.method ?? 'GET';
     const key = new Headers(init?.headers).get('idempotency-key');
     if (method !== 'POST' || !key) return handle(input, init);
+    if (url.pathname.endsWith('/leases')) claimKeys.push(key);
     const slot = `${url.pathname}:${key}`;
     const body = String(init?.body ?? '');
     const prior = keyed.get(slot);
     if (prior) return prior.body === body ? new Response(prior.payload, { status: prior.status }) : fail('IDEMPOTENCY_CONFLICT');
     const response = await handle(input, init);
-    // Concord records returned lease refusals and successful mutations. A
-    // thrown module error (the harness's 5xx responses) is not recorded.
-    if (response.ok || url.pathname.endsWith('/leases') && response.status === 409) {
+    // Concord records returned 409 and 429 responses, including capacity.
+    if (response.ok || response.status === 409 || response.status === 429) {
       keyed.set(slot, { body, status: response.status, payload: await response.clone().text() });
     }
     return response;
@@ -181,7 +186,7 @@ async function harness() {
     if (!address || typeof address === 'string') throw new Error('Expected local test server');
     return `http://127.0.0.1:${address.port}`;
   };
-  return { directory, storage, fixture, fixturePath, statePath, saveFixture, changes, api, baseOid, run, startServer, claimKeys };
+  return { directory, storage, fixture, fixturePath, statePath, saveFixture, changes, api, baseOid, run, startServer, claimKeys, readTokenKeys, writeTokenKeys };
 }
 
 describe('AW mock adapter', () => {
@@ -285,6 +290,7 @@ describe('AW mock adapter', () => {
     expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { code: 'LEASE_CONFLICT' } });
     expect(h.claimKeys).toHaveLength(1);
     h.api.leaseConflict = false;
+    h.api.eventsUnavailable = true; // Recovery must not depend on refusal events.
     await rm(h.statePath);
     expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
     expect(h.claimKeys).toHaveLength(2);
@@ -298,6 +304,7 @@ describe('AW mock adapter', () => {
     expect(h.claimKeys).toHaveLength(1);
     h.api.leases[0].expiresAt = Date.now() - 1;
     h.api.publishPreparationUnavailable = false;
+    h.api.eventsUnavailable = true; // A lease fence is not an idempotency key.
     await rm(h.statePath);
     const result = await h.run();
     expect(result.blocked).toBeUndefined();
@@ -306,6 +313,47 @@ describe('AW mock adapter', () => {
     expect(new Set(h.claimKeys).size).toBe(2);
     expect(h.api.leases.map(lease => lease.fence)).toEqual([7, 8]);
     expect(h.api.publishes).toBe(1);
+  });
+
+  it('recovers from a cached 429 capacity refusal after run-state loss', async () => {
+    const h = await harness(); h.api.leaseCapacity = true;
+    expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { code: 'LEASE_CAPACITY', status: 429 } });
+    expect(h.claimKeys).toHaveLength(3); // Transport retries share one request nonce.
+    expect(new Set(h.claimKeys).size).toBe(1);
+    expect(JSON.parse(await readFile(h.statePath, 'utf8')).pendingRequest).toBeUndefined();
+    h.api.leaseCapacity = false;
+    await rm(h.statePath);
+    expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
+    expect(h.claimKeys).toHaveLength(4);
+    expect(new Set(h.claimKeys).size).toBe(2);
+    expect(h.api.publishes).toBe(1);
+  });
+
+  it('retries a terminal capacity response with a new nonce on the next run', async () => {
+    const h = await harness(); h.api.leaseCapacity = true;
+    expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { code: 'LEASE_CAPACITY' } });
+    const refusedKey = h.claimKeys[0];
+    h.api.leaseCapacity = false;
+    expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
+    expect(h.claimKeys.at(-1)).not.toBe(refusedKey);
+    expect(h.api.publishes).toBe(1);
+  });
+
+  it('mints a new token request after the repository version changes', async () => {
+    const h = await harness(); h.api.badForkRemote = true;
+    expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { code: 'MOCK_ERROR' } });
+    expect(h.readTokenKeys).toHaveLength(1);
+    expect(h.writeTokenKeys).toHaveLength(1);
+    h.api.globalVersion++; // Another server mutation while the lease remains live.
+    h.api.badForkRemote = false;
+    await rm(h.statePath);
+    expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
+    expect(h.readTokenKeys).toHaveLength(2);
+    expect(new Set(h.readTokenKeys).size).toBe(2);
+    expect(h.writeTokenKeys).toHaveLength(2);
+    expect(new Set(h.writeTokenKeys).size).toBe(2);
+    expect(h.api.publishes).toBe(1);
+    expect(h.changes).toHaveLength(1);
   });
 
   it('waits for independent review, then records unavailable queue as a structured blocked terminal run', async () => {

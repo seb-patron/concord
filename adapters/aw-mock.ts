@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -15,7 +15,8 @@ interface Mapping {
   phase: Phase; observedBaseOid?: string; leaseFences?: Record<string, number>;
   headOid?: string; block?: Block;
 }
-interface RunState { schemaVersion: 1; mappings: Record<string, Mapping> }
+interface PendingRequest { path: string; body: string; key: string }
+interface RunState { schemaVersion: 1; mappings: Record<string, Mapping>; pendingRequest?: PendingRequest }
 interface Change { changeId: string; intentKey: string; intentText: string; branch: string; unitKeys: string[]; baseOid: string | null; headOid: string | null; revision: number; status: string; version: number; candidateStorageName: string }
 interface Repo { canonicalStorageName: string; observedCanonicalOid: string | null; version: number; status: string }
 interface Lease { changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }
@@ -30,7 +31,7 @@ function fixtureIdentity(fixture: AwMockFixture): string { return `${fixture.pro
 function intentKey(fixture: AwMockFixture): string { return `aw-mock:${sha([fixture.project, fixture.taskId])}`; }
 function branch(fixture: AwMockFixture): string { return `refs/heads/aw-mock/${sha([fixture.project, fixture.taskId]).slice(0, 24)}`; }
 function fingerprint(fixture: AwMockFixture): string { return sha([fixture.intent, [...fixture.unitKeys].sort()]); }
-function keyFor(identity: string, operation: string): string { return `aw-mock:${sha([identity, operation])}`; }
+type Post = <T = unknown>(route: string, body: Record<string, unknown>, expectedVersion?: number) => Promise<T>;
 
 function blockFor(error: unknown): Block {
   if (error instanceof ConcordError) {
@@ -122,48 +123,16 @@ async function leaseFences(client: ConcordClient, fixture: AwMockFixture, mappin
     if (cursor && seen.has(cursor)) throw new Error('INVALID_LEASE_CURSOR');
     if (cursor) seen.add(cursor);
   } while (cursor && Object.keys(fences).length < fixture.unitKeys.length);
-  return fixture.unitKeys.every(key => fences[key] !== undefined) ? fences : null;
+  if (fixture.unitKeys.every(key => fences[key] !== undefined)) return fences;
+  if (Object.keys(fences).length) throw new ConcordError('A partial live lease set must be resolved before a new claim', 'conflict', 409,
+    { error: { code: 'LEASE_PARTIAL', message: 'A partial live lease set must be resolved before a new claim' } });
+  return null;
 }
 
-// A claim either records a refusal event or one or more claimed leases. Once
-// no lease for this change is live, that event is a durable attempt boundary.
-// Reusing its key would replay the old refusal or an expired fence.
-async function claimAttempt(client: ConcordClient, fixture: AwMockFixture, changeId: string): Promise<number> {
-  let leaseCursor: string | null = null;
-  const leaseCursors = new Set<string>();
-  do {
-    const query: string = leaseCursor ? `?cursor=${encodeURIComponent(leaseCursor)}` : '';
-    const page = (await client.request<Envelope<{ items: Lease[]; nextCursor: string | null }>>('GET', `${path(fixture.project)}/leases${query}`)).data;
-    if (page.items.some(lease => lease.changeId === changeId &&
-      (lease.state === 'active' || lease.state === 'reserved') && lease.expiresAt > Date.now())) {
-      throw new ConcordError('A partial live lease set must be resolved before a new claim', 'conflict', 409,
-        { error: { code: 'LEASE_PARTIAL', message: 'A partial live lease set must be resolved before a new claim' } });
-    }
-    leaseCursor = page.nextCursor;
-    if (leaseCursor && leaseCursors.has(leaseCursor)) throw new Error('INVALID_LEASE_CURSOR');
-    if (leaseCursor) leaseCursors.add(leaseCursor);
-  } while (leaseCursor);
-  let after = 0;
-  let last = 0;
-  while (true) {
-    const page = (await client.request<Envelope<{ items: Array<{ sequence: number; kind: string; relatedIds: string[] }>; nextCursor: string | null }>>(
-      'GET', `${path(fixture.project)}/events?after=${after}&limit=100`)).data;
-    for (const event of page.items) {
-      if (!Number.isSafeInteger(event.sequence) || event.sequence <= after) throw new Error('INVALID_EVENT_SEQUENCE');
-      after = event.sequence;
-      if (event.relatedIds.includes(changeId) && (event.kind === 'lease.refused' || event.kind === 'lease.claimed')) last = event.sequence;
-    }
-    if (!page.nextCursor) return last;
-    if (!page.items.length) throw new Error('INVALID_EVENT_CURSOR');
-  }
-}
-
-async function claimLeases(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change): Promise<Record<string, number>> {
-  const attempt = await claimAttempt(client, fixture, change.changeId);
-  const claim = (await client.request<Envelope<{ leases: Lease[] }>>('POST', `${path(fixture.project)}/leases`, {
-    body: { changeId: change.changeId, unitKeys: fixture.unitKeys, intentText: fixture.intent, ttlSeconds: 120 },
-    expectedVersion: await currentVersion(client, fixture), idempotencyKey: keyFor(mapping.identity, `claim:${attempt}`),
-  })).data;
+async function claimLeases(client: ConcordClient, fixture: AwMockFixture, change: Change, post: Post): Promise<Record<string, number>> {
+  const claim = (await post<Envelope<{ leases: Lease[] }>>(`${path(fixture.project)}/leases`,
+    { changeId: change.changeId, unitKeys: fixture.unitKeys, intentText: fixture.intent, ttlSeconds: 120 },
+    await currentVersion(client, fixture))).data;
   return Object.fromEntries(claim.leases.map(item => [item.unitKey, item.fence]));
 }
 
@@ -205,13 +174,11 @@ async function registeredHead(client: ConcordClient, fixture: AwMockFixture, cha
 }
 
 /** Produces an actual descendant commit using only a local bridge-backed Git remote. */
-async function makeCandidate(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, repo: Repo, change: Change): Promise<{ headOid: string; remote: string; worktree: string; cleanup(): Promise<void> }> {
+async function makeCandidate(client: ConcordClient, fixture: AwMockFixture, repo: Repo, change: Change, post: Post): Promise<{ headOid: string; remote: string; worktree: string; cleanup(): Promise<void> }> {
   if (!change.baseOid || !/^[a-f0-9]{40}$/.test(change.baseOid)) throw new Error('LOCAL_GIT_BASE_REQUIRED');
   const root = path(fixture.project);
-  const token = (await client.request<Envelope<{ remote: string; secret: string }>>('POST', `${root}/git-token`, {
-    body: { storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 300 }, expectedVersion: await currentVersion(client, fixture),
-    idempotencyKey: keyFor(mapping.identity, `canonical-read:${sha(mapping.leaseFences)}`),
-  })).data;
+  const token = (await post<Envelope<{ remote: string; secret: string }>>(`${root}/git-token`,
+    { storageName: repo.canonicalStorageName, scope: 'read', ttlSeconds: 300 }, await currentVersion(client, fixture))).data;
   rememberCredential(token.secret);
   const remote = new URL(token.remote);
   if (remote.protocol !== 'file:' || remote.hostname || remote.search || remote.hash) throw new Error('LOCAL_GIT_BRIDGE_REQUIRED');
@@ -233,33 +200,26 @@ async function makeCandidate(client: ConcordClient, fixture: AwMockFixture, mapp
   } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
 }
 
-async function publishCandidate(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, repo: Repo, change: Change): Promise<string> {
-  const candidate = await makeCandidate(client, fixture, mapping, repo, change);
+async function publishCandidate(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, repo: Repo, change: Change, post: Post): Promise<string> {
+  const candidate = await makeCandidate(client, fixture, repo, change, post);
   try {
     const root = path(fixture.project);
-    const fork = (await client.request<Envelope<{ remote: string; secret: string }>>('POST', `${root}/git-token`, {
-      body: { storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 300 }, expectedVersion: await currentVersion(client, fixture),
-      idempotencyKey: keyFor(mapping.identity, `fork-write:${sha(mapping.leaseFences)}`),
-    })).data;
+    const fork = (await post<Envelope<{ remote: string; secret: string }>>(`${root}/git-token`,
+      { storageName: change.candidateStorageName, scope: 'write', ttlSeconds: 300 }, await currentVersion(client, fixture))).data;
     rememberCredential(fork.secret);
     const remote = new URL(fork.remote);
     if (remote.protocol !== 'file:' || remote.hostname || remote.search || remote.hash || remote.href === candidate.remote) throw new Error('LOCAL_GIT_BRIDGE_REQUIRED');
     await git(['push', '--no-follow-tags', '--', remote.href, `${candidate.headOid}:${change.branch}`], {}, candidate.worktree);
-    await client.request('POST', `${root}/branches`, {
-      body: { storageName: change.candidateStorageName, ref: change.branch, observedHead: candidate.headOid, ownerId: 'mock-aw' },
-      expectedVersion: await currentVersion(client, fixture),
-      idempotencyKey: keyFor(mapping.identity, `register-branch:${sha([candidate.headOid, mapping.leaseFences])}`),
-    });
+    await post(`${root}/branches`, { storageName: change.candidateStorageName, ref: change.branch, observedHead: candidate.headOid, ownerId: 'mock-aw' },
+      await currentVersion(client, fixture));
     const latest = await getChangeEnvelope(client, fixture, mapping.changeId);
-    await client.request('POST', `${root}/changes/${encodeURIComponent(mapping.changeId)}/publish`, {
-      body: { baseOid: latest.data.baseOid, headOid: candidate.headOid, branch: latest.data.branch, unitKeys: latest.data.unitKeys, leaseFences: mapping.leaseFences },
-      expectedVersion: latest.version, idempotencyKey: keyFor(mapping.identity, `publish:${latest.data.revision}:${sha(mapping.leaseFences)}`),
-    });
+    await post(`${root}/changes/${encodeURIComponent(mapping.changeId)}/publish`,
+      { baseOid: latest.data.baseOid, headOid: candidate.headOid, branch: latest.data.branch, unitKeys: latest.data.unitKeys, leaseFences: mapping.leaseFences }, latest.version);
     return candidate.headOid;
   } finally { await candidate.cleanup(); }
 }
 
-async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping): Promise<Change> {
+async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, post: Post): Promise<Change> {
   const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
   const change = viewed.data;
   ensureTask(change, fixture);
@@ -275,19 +235,17 @@ async function pollAndMaybeQueue(client: ConcordClient, fixture: AwMockFixture, 
   if (!approval) { mapping.phase = 'awaiting_review'; return change; }
   let fences = await leaseFences(client, fixture, mapping);
   if (!fences && (change.status === 'draft' || change.status === 'ready')) {
-    fences = await claimLeases(client, fixture, mapping, change);
+    fences = await claimLeases(client, fixture, change, post);
   }
   if (!fences) { mapping.phase = 'blocked'; mapping.block = { code: 'LEASE_STALE', reason: 'Active lease fences are unavailable; an operator must renew or reclaim before enqueue.' }; return change; }
   mapping.leaseFences = fences;
-  await client.request('POST', `${path(fixture.project)}/queue/enqueue`, {
-    body: { changeId: mapping.changeId, verdictId: approval.verdictId, leaseFences: fences },
-    expectedVersion: await currentVersion(client, fixture), idempotencyKey: keyFor(mapping.identity, `enqueue:${change.revision}:${approval.verdictId}:${sha(fences)}`),
-  });
+  await post(`${path(fixture.project)}/queue/enqueue`,
+    { changeId: mapping.changeId, verdictId: approval.verdictId, leaseFences: fences }, await currentVersion(client, fixture));
   mapping.phase = 'queued';
   return change;
 }
 
-async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, remember: () => Promise<void>, recovered: boolean): Promise<Change> {
+async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Mapping, change: Change, remember: () => Promise<void>, recovered: boolean, post: Post): Promise<Change> {
   ensureTask(change, fixture);
   mapping.headOid = change.headOid ?? undefined;
   if (terminal.has(change.status)) {
@@ -305,28 +263,26 @@ async function resume(client: ConcordClient, fixture: AwMockFixture, mapping: Ma
   if (change.headOid) {
     mapping.phase = 'awaiting_review'; mapping.block = undefined;
     mapping.leaseFences = await leaseFences(client, fixture, mapping) ?? undefined;
-    return pollAndMaybeQueue(client, fixture, mapping);
+    return pollAndMaybeQueue(client, fixture, mapping, post);
   }
   let fences = await leaseFences(client, fixture, mapping);
   if (!fences) {
-    fences = await claimLeases(client, fixture, mapping, change);
+    fences = await claimLeases(client, fixture, change, post);
   }
   mapping.leaseFences = fences;
   mapping.phase = 'leased'; mapping.block = undefined; await remember();
   const latestRepo = (await client.request<Envelope<Repo>>('GET', path(fixture.project))).data;
   const latestChange = await getChange(client, fixture, change.changeId);
-  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, remember, recovered);
+  if (latestChange.headOid || !['draft', 'ready'].includes(latestChange.status)) return resume(client, fixture, mapping, latestChange, remember, recovered, post);
   const head = await registeredHead(client, fixture, latestChange);
   if (head) {
     const viewed = await getChangeEnvelope(client, fixture, mapping.changeId);
-    await client.request('POST', `${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/publish`, {
-      body: { baseOid: viewed.data.baseOid, headOid: head, branch: viewed.data.branch, unitKeys: viewed.data.unitKeys, leaseFences: fences },
-      expectedVersion: viewed.version, idempotencyKey: keyFor(mapping.identity, `publish:${viewed.data.revision}:${sha(fences)}`),
-    });
+    await post(`${path(fixture.project)}/changes/${encodeURIComponent(mapping.changeId)}/publish`,
+      { baseOid: viewed.data.baseOid, headOid: head, branch: viewed.data.branch, unitKeys: viewed.data.unitKeys, leaseFences: fences }, viewed.version);
     mapping.headOid = head;
-  } else mapping.headOid = await publishCandidate(client, fixture, mapping, latestRepo, latestChange);
+  } else mapping.headOid = await publishCandidate(client, fixture, mapping, latestRepo, latestChange, post);
   mapping.phase = 'awaiting_review'; await remember();
-  return pollAndMaybeQueue(client, fixture, mapping);
+  return pollAndMaybeQueue(client, fixture, mapping, post);
 }
 
 export async function runAwMock(fixturePath: string, statePath: string, client: ConcordClient): Promise<ReturnType<typeof output>> {
@@ -334,13 +290,34 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
   if (dirname(resolve(statePath)) !== dirname(resolve(fixturePath)) || resolve(statePath) === resolve(fixturePath)) throw new Error('Run-state must be a separate file in the fixture demo directory');
   const state = await loadState(statePath);
   const identity = fixtureIdentity(fixture);
+  // Persist the nonce before sending. Only a transport failure can leave an
+  // in-flight request to retry; every HTTP response retires that nonce.
+  const post: Post = async <T>(route: string, body: Record<string, unknown>, expectedVersion?: number): Promise<T> => {
+    const wireBody = JSON.stringify(expectedVersion === undefined ? body : { ...body, expectedVersion });
+    if (state.pendingRequest?.path !== route || state.pendingRequest.body !== wireBody) {
+      state.pendingRequest = { path: route, body: wireBody, key: randomUUID() };
+      await saveState(statePath, state);
+    }
+    try {
+      const response = await client.request<T>('POST', route, { body, expectedVersion, idempotencyKey: state.pendingRequest.key });
+      state.pendingRequest = undefined;
+      await saveState(statePath, state);
+      return response;
+    } catch (error) {
+      if (error instanceof ConcordError && error.kind !== 'transport') {
+        state.pendingRequest = undefined;
+        await saveState(statePath, state);
+      }
+      throw error;
+    }
+  };
   let mapping = state.mappings[identity];
   const remember = async () => { state.mappings[identity] = mapping!; await saveState(statePath, state); };
   if (mapping) {
     if (mapping.fingerprint !== fingerprint(fixture)) throw new ConcordError('Intent key reused with different task content', 'conflict', 409, { error: { code: 'INTENT_CONFLICT', message: 'Intent key reused with different task content' } });
     mapping.observedBaseOid = fixture.observedBaseOid;
     try {
-      if (mapping.phase === 'blocked') {
+      if (mapping.phase === 'blocked' && ![409, 429].includes(mapping.block?.status ?? 0) && mapping.block?.code !== 'TRANSPORT') {
         const change = await getChange(client, fixture, mapping.changeId);
         ensureTask(change, fixture);
         if (terminal.has(change.status)) mapping.block = { code: 'ATTEMPT_REQUIRED', reason: 'Terminal change requires the next explicitAttempt.' };
@@ -349,7 +326,7 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
         return output(fixture, mapping, client, change);
       }
       const change = await getChange(client, fixture, mapping.changeId);
-      const resumed = await resume(client, fixture, mapping, change, remember, false);
+      const resumed = await resume(client, fixture, mapping, change, remember, false, post);
       await remember();
       return output(fixture, mapping, client, resumed);
     } catch (error) { mapping.phase = 'blocked'; mapping.block = blockFor(error); await remember(); return output(fixture, mapping, client); }
@@ -361,14 +338,12 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
   const repo = (await client.request<Envelope<Repo>>('GET', root)).data;
   if (repo.status !== 'ready' || !repo.observedCanonicalOid) throw new Error('READY_CANONICAL_REPO_REQUIRED');
   let created: Change;
-  try {
-    const reply = (await client.request<Envelope<Change>>('POST', `${root}/changes`, {
-      body: { intentKey: intentKey(fixture), intentText: fixture.intent, baseOid: existing && !terminal.has(existing.status) ? existing.baseOid : repo.observedCanonicalOid,
-        branch: branch(fixture), unitKeys: [...fixture.unitKeys].sort(), dependencyChangeIds: [], attempt: fixture.explicitAttempt },
-      idempotencyKey: keyFor(identity, `create:${fixture.explicitAttempt}`),
-    })).data;
-    // A replayed create response can contain the original draft snapshot.
-    created = existing?.changeId === reply.changeId ? existing : reply;
+  if (existing && (!terminal.has(existing.status) || found?.attempt === fixture.explicitAttempt)) created = existing;
+  else try {
+    const reply = (await post<Envelope<Change>>(`${root}/changes`,
+      { intentKey: intentKey(fixture), intentText: fixture.intent, baseOid: existing && !terminal.has(existing.status) ? existing.baseOid : repo.observedCanonicalOid,
+        branch: branch(fixture), unitKeys: [...fixture.unitKeys].sort(), dependencyChangeIds: [], attempt: fixture.explicitAttempt })).data;
+    created = reply;
   } catch (error) {
     if (!(error instanceof ConcordError) || !existing || !terminal.has(existing.status) || found?.attempt !== fixture.explicitAttempt ||
       (error.payload as { error?: { code?: string } } | undefined)?.error?.code !== 'ATTEMPT_REQUIRED') throw error;
@@ -379,7 +354,7 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
     phase: 'opened', observedBaseOid: fixture.observedBaseOid };
   await remember();
   try {
-    const change = await resume(client, fixture, mapping, created, remember, !!existing && existing.changeId === created.changeId);
+    const change = await resume(client, fixture, mapping, created, remember, !!existing && existing.changeId === created.changeId, post);
     await remember();
     return output(fixture, mapping, client, change);
   } catch (error) {
