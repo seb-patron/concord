@@ -36,27 +36,14 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
     return null;
   }
 
-  async function revokeInitial(name: string, token: string): Promise<boolean> {
-    if (!token) return true;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const handle = await open(name);
-      if (handle) {
-        using repo = handle;
-        if (!await repo.revokeToken(token)) throw new Error('ARTIFACTS_INITIAL_TOKEN_REVOCATION_FAILED');
-        return true;
-      }
-      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    return false;
-  }
-
   async function created(result: ArtifactsCreateRepoResult, expectedName: string): Promise<StorageRepo> {
     if (result.name !== expectedName || !result.remote.startsWith('https://') || !result.token) throw new Error('ARTIFACTS_CREATE_RESULT_INVALID');
-    if (!await revokeInitial(result.name, result.token)) {
-      return Object.assign(pending(result.name), { [pendingInitialToken]: result.token });
-    }
-    const observed = await info(result.name);
-    return observed?.status === 'ready' ? observed : pending(result.name);
+    // The coordinator must persist the token before attempting revocation.
+    // Even if the first status lookup fails, return the credential for retry.
+    let observed: StorageRepo | null;
+    try { observed = await info(result.name); }
+    catch { observed = null; }
+    return Object.assign(observed ?? pending(result.name), { [pendingInitialToken]: result.token });
   }
 
   const storage: RepoStorage & { [revokeOrphanTokens]?: (name: string) => Promise<void> } = {

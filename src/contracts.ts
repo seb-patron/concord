@@ -262,7 +262,9 @@ export interface PromotionResult extends ResultBase {
 }
 export type JobResult = InspectionResult | StackResult | DeltaResult | PromotionResult;
 
-export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning' }
+/** Internal handoff for a creation token; never included in JSON responses. */
+export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');
+export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning'; [pendingInitialToken]?: string }
 export interface StorageCommit { oid: Oid; treeOid: Oid; parents: Oid[] }
 export interface StorageToken { secret: string; expiresAt: number }
 export interface RepoStorage {

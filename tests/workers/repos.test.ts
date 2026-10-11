@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
+import type { TenantCatalog } from '../../src/catalog';
 import type { RepoCoordinator } from '../../src/coordinator';
 import type { InspectionResult, ModuleContext } from '../../src/contracts';
 import { repos } from '../../src/features/repos';
@@ -9,6 +10,7 @@ import { runners } from '../../src/features/runners';
 import { digest as canonicalDigest } from '../../src/http';
 import { ids, pendingInitialToken, type ProvisioningIntent } from '../../src/repos/model';
 import { FakeStorage } from '../../src/storage/fake';
+import { artifactsStorage } from '../../src/storage/artifacts';
 import { sqlState } from '../../src/state';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
@@ -569,6 +571,60 @@ describe('repository and change lifecycle', () => {
       revoke.mockRestore();
       ensure.mockRestore();
     }
+  });
+
+  it('persists an Artifacts creation token before revocation and retries despite an empty token listing', async () => {
+    let createdName = '';
+    let active = false;
+    let revokeCalls = 0;
+    const binding = {
+      create: vi.fn(async (name: string) => {
+        createdName = name;
+        active = true;
+        return { name, remote: `https://example.test/${name}.git`, token: 'artifact-secret' };
+      }),
+      get: vi.fn(async (name: string) => {
+        if (name !== createdName) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' });
+        return {
+          [Symbol.dispose]: () => {},
+          info: async () => ({ name, remote: `https://example.test/${name}.git` }),
+          revokeToken: vi.fn(async (token: string) => {
+            expect(token).toBe('artifact-secret');
+            revokeCalls++;
+            if (revokeCalls === 1) return false;
+            active = false;
+            return true;
+          }),
+          listTokens: async () => ({ total: 0, tokens: [] }),
+        };
+      }),
+      list: vi.fn(async () => ({ repos: [], cursor: undefined })),
+    };
+    const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+    await runInDurableObject<TenantCatalog, void>(stub, async instance => {
+      const context = (instance as unknown as { context(principal: object): ModuleContext }).context({
+        tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+      });
+      Object.assign(context, { storage: artifactsStorage(binding as unknown as Artifacts) });
+      const route = repos.routes[0];
+      const request = new Request('https://concord.test/v1/repos', { method: 'POST' });
+      const match = route.pattern.exec('/v1/repos')!;
+      const body = { name: 'artifact_revoke_retry', policyId: 'local-demo', profileId: 'local-demo' };
+      await expect(route.handle(context, request, match, body)).rejects.toMatchObject({ status: 503, code: 'PROVISIONING_FAILED' });
+      const intentKey = `ensure-repo:${createdName}`;
+      expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![intentKey].state).toBe('failed');
+      expect(context.state.get<string>(`initial-token:${createdName}`)).toBe('artifact-secret');
+      expect(active).toBe(true);
+      expect(revokeCalls).toBe(1);
+      expect(await (await binding.get(createdName)).listTokens()).toEqual({ total: 0, tokens: [] });
+      const retry = await route.handle(context, request, match, body);
+      expect(retry.status).toBe(201);
+      expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![intentKey].state).toBe('observed');
+      expect(context.state.get<string>(`initial-token:${createdName}`)).toBeNull();
+      expect(active).toBe(false);
+      expect(revokeCalls).toBe(2);
+      expect(binding.create).toHaveBeenCalledTimes(1);
+    });
   });
 
   it.each([false, true])('maps an empty status poll with held token=%s to a persisted pending transition', async held => {

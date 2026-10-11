@@ -1,8 +1,7 @@
 import type { Change, Digest, Oid, Repo } from '../contracts';
 import { HttpError } from '../http';
 
-/** Internal-only handoff of an Artifacts create token awaiting handle readiness. */
-export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');
+export { pendingInitialToken } from '../contracts';
 /** Internal Artifacts cleanup after a create response was lost before its token was received. */
 export const revokeOrphanTokens: unique symbol = Symbol('revokeOrphanTokens');
 

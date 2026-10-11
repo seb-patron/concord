@@ -92,7 +92,7 @@ async function reconcile(context: ModuleContext, intent: ProvisioningIntent, ret
       ? await context.storage.ensureRepo(intent.storageName)
       : await context.storage.fork(intent.sourceName!, intent.storageName);
     if (observed && (observed.name !== intent.storageName || (observed.status === 'ready' && !observed.remote))) throw new Error('PROVIDER_IDENTITY_MISMATCH');
-    const returnedToken = (observed as (StorageRepo & { [pendingInitialToken]?: string }) | null)?.[pendingInitialToken];
+    const returnedToken = observed?.[pendingInitialToken];
     if (returnedToken && context.state.get<string>(tokenKey) && context.state.get<string>(tokenKey) !== returnedToken) throw new Error('INITIAL_TOKEN_CONFLICT');
     if (returnedToken) {
       context.state.put(tokenKey, returnedToken);

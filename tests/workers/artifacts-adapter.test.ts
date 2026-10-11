@@ -43,13 +43,19 @@ describe('Artifacts binding adapter', () => {
   it('uses documented create, get, fork, info, read and token result shapes', async () => {
     const fixture = provider();
     const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
-    expect(await storage.ensureRepo('canonical')).toEqual({ name: 'canonical', remote: 'https://example.test/canonical.git', status: 'ready' });
+    const canonical = await storage.ensureRepo('canonical');
+    expect(canonical).toMatchObject({ name: 'canonical', remote: 'https://example.test/canonical.git', status: 'ready' });
+    expect(canonical[pendingInitialToken]).toBe('initial-canonical');
+    expect(await storage.revokeToken('canonical', canonical[pendingInitialToken]!)).toBe(true);
     expect(fixture.revoked).toContainEqual(['canonical', 'initial-canonical']);
     fixture.repos.get('canonical')!.refs['refs/heads/main'] = 'a'.repeat(40);
     expect(await storage.resolveRef('canonical', 'refs/heads/main')).toBe('a'.repeat(40));
     expect(await storage.readCommit('canonical', 'a'.repeat(40))).toEqual({ oid: 'a'.repeat(40), treeOid: 'b'.repeat(40), parents: [] });
     expect(new TextDecoder().decode(await storage.readFile('canonical', 'a'.repeat(40), 'README.md') ?? new Uint8Array())).toBe('seed');
-    expect(await storage.fork('canonical', 'candidate')).toEqual({ name: 'candidate', remote: 'https://example.test/candidate.git?exact=1', status: 'ready' });
+    const candidate = await storage.fork('canonical', 'candidate');
+    expect(candidate).toMatchObject({ name: 'candidate', remote: 'https://example.test/candidate.git?exact=1', status: 'ready' });
+    expect(candidate[pendingInitialToken]).toBe('initial-candidate');
+    expect(await storage.revokeToken('candidate', candidate[pendingInitialToken]!)).toBe(true);
     expect(fixture.revoked).toContainEqual(['candidate', 'initial-candidate']);
     expect(await storage.mintToken('candidate', 'write', 60)).toEqual({ secret: 'candidate-write-60', expiresAt: Date.parse('2026-10-11T08:00:00Z') });
     expect(await storage.revokeToken('candidate', 'another')).toBe(true);
@@ -78,10 +84,24 @@ describe('Artifacts binding adapter', () => {
     await expect(storage.mintToken('delayed', 'read', 601)).rejects.toThrow('INVALID_TOKEN_TTL');
   });
 
+  it('returns the creation token when the first status lookup fails', async () => {
+    const fixture = provider();
+    const originalGet = fixture.binding.get.getMockImplementation()!;
+    fixture.binding.get.mockImplementation(async (name: string) => {
+      if (fixture.repos.has(name)) throw new Error('status unavailable');
+      return originalGet(name);
+    });
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    const result = await storage.ensureRepo('uncertain');
+    expect(result.status).toBe('provisioning');
+    expect(result[pendingInitialToken]).toBe('initial-uncertain');
+  });
+
   it('keeps an unrevokeable initial token private while the fork capability is pending', async () => {
     const fixture = provider();
     const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
-    await storage.ensureRepo('source');
+    const source = await storage.ensureRepo('source');
+    expect(await storage.revokeToken('source', source[pendingInitialToken]!)).toBe(true);
     const originalGet = fixture.binding.get.getMockImplementation()!;
     fixture.binding.get.mockImplementation(async (name: string) => {
       const handle = await originalGet(name);
@@ -94,7 +114,7 @@ describe('Artifacts binding adapter', () => {
     const pending = await storage.fork('source', 'slow');
     expect(pending.status).toBe('provisioning');
     expect(JSON.stringify(pending)).not.toContain('initial-slow');
-    expect((pending as typeof pending & { [pendingInitialToken]?: string })[pendingInitialToken]).toBe('initial-slow');
+    expect(pending[pendingInitialToken]).toBe('initial-slow');
     fixture.repos.get('slow')!.status = 'ready';
     expect(await storage.revokeToken('slow', 'initial-slow')).toBe(true);
   });
