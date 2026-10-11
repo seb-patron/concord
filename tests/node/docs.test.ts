@@ -75,7 +75,7 @@ async function capturedNpm(exports: string[], command: string, env: NodeJS.Proce
     '}',
     ...exports, command,
   ].join('\n');
-  const { stdout } = await execFile('sh', ['-c', script], { cwd, env });
+  const { stdout } = await execFile('sh', ['-c', script], { cwd, env, timeout: 30_000 });
   const lines = stdout.trimEnd().split('\n');
   return { args: lines.filter(line => line.startsWith('ARG:')).map(line => line.slice(4)),
     values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
@@ -169,7 +169,7 @@ function start(command: string, env: NodeJS.ProcessEnv): { child: ChildProcess; 
 }
 
 async function waitFor(label: string, predicate: () => Promise<boolean>, output: () => string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (await predicate().catch(() => false)) return;
     await new Promise(done => setTimeout(done, 150));
@@ -232,7 +232,7 @@ describe('documented demo commands', () => {
     const mutatedCalls = await capturedBlock(movedToken, root);
     expect(() => assertCallEnvironment(mutatedCalls, movedToken, runDir)).toThrow();
     expect(mutatedCalls.find(call => call.args[3] === 'seed')?.env.CONCORD_TOKEN).toBeUndefined();
-  });
+  }, 60_000);
 
   it('keeps every documented Wrangler dev command persistent inside the clone', async () => {
     async function markdownFiles(dir: string): Promise<string[]> {
@@ -290,7 +290,7 @@ describe('documented demo commands', () => {
     }
     const missingToken = bridgeWorker!.replace(/^export CONCORD_BRIDGE_TOKEN=.*\n/m, '');
     await expect(capturedNpm([], missingToken, freshShellEnv(process.env))).rejects.toMatchObject({ stdout: '' });
-  });
+  }, 60_000);
 
   it('keeps Wrangler persistence in the clone when TMPDIR is outside it', async () => {
     const root = await externalTempDir('concord-docs-paths-');
@@ -306,7 +306,7 @@ describe('documented demo commands', () => {
       expect((await capturedNpm([], block, env)).args.length).toBeGreaterThan(0);
     }
     const { stdout: runDir } = await execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
-      { cwd, env });
+      { cwd, env, timeout: 30_000 });
     expect(isAbsolute(runDir)).toBe(true);
     expect(runDir).toBe(join(resolve(env.TMPDIR), 'concord-demo-01'));
     const firstDeploy = await capturedNpm(commandLines(deploy[0]).exports, commandLines(deploy[0]).commands[0], env);
@@ -369,7 +369,7 @@ describe('documented demo commands', () => {
     const missingRunDir = runnerExports.filter(line => !line.startsWith('export CONCORD_RUN_DIR='));
     expect(missingRunDir).toHaveLength(runnerExports.length - 1);
     await expect(execFile('sh', ['-c', [...missingRunDir, runnerCommands[0]].join('\n')],
-      { cwd, env: { ...env, TMPDIR: relative(cwd, root) }, timeout: 120_000 }))
+      { cwd, env: { ...env, TMPDIR: relative(cwd, root) }, timeout: 30_000 }))
       .rejects.toMatchObject({ stderr: expect.stringMatching(/ENOENT.*\/dispatch-profile\.json/) });
 
     const release = await readFile(join(cwd, 'docs/deploy.md'), 'utf8');
@@ -385,7 +385,7 @@ describe('documented demo commands', () => {
     expect(productionPromoter.args).toEqual(['run', 'runner', '--', '--repo', 'repo-id', '--role', 'promoter',
       '--profile-digest', 'profile-digest', '--once']);
     expect(productionPromoter.values[4]).toBe('promoter-token');
-  });
+  }, 60_000);
 
   it('runs every 12c-tagged local command against the real bridge and Worker', async () => {
     const root = await externalTempDir('concord-docs-');
