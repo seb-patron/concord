@@ -29,42 +29,41 @@ const validRow = (value: unknown): value is ExpectedRow => !!value && typeof val
   Number.isSafeInteger((value as ExpectedRow).timeout_ms) && (value as ExpectedRow).timeout_ms >= 250 && (value as ExpectedRow).timeout_ms <= 2000 &&
   Number.isSafeInteger((value as ExpectedRow).output);
 
-// The demo's reviewed fixture cases. A new case or changed expected value needs
-// a reviewed revision here as well as a new content-pinned owner profile.
+// Reviewed fixture tuples, independent of candidate files. Even the B-containing
+// cases pin the last valid gamma row: B's zero-valued row must fail the gate.
+// A new case or changed tuple needs a reviewed revision and a new owner profile.
+const alpha1 = { retry_limit: 1, timeout_ms: 1000, output: 1000 };
+const alpha2 = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+const alpha3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
+const alpha4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
+const beta2 = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+const beta3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
+const gamma3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
+const gamma4 = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
+const delta4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
+const delta5 = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
+const deltaE = { retry_limit: 4, timeout_ms: 1500, output: 6000 };
+const epsilon1 = { retry_limit: 1, timeout_ms: 500, output: 500 };
+const epsilonLow = { retry_limit: 2, timeout_ms: 500, output: 1000 };
+const epsilonHigh = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
 const requiredDispatchCases: NonNullable<LocalProfile['cases']> = {
-  seed: { rows: {
-    alpha: { retry_limit: 1, timeout_ms: 1000, output: 1000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 4, timeout_ms: 1000, output: 4000 },
-    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
-  } },
-  'a-only': { rows: {
-    alpha: { retry_limit: 2, timeout_ms: 1000, output: 2000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 4, timeout_ms: 1000, output: 4000 },
-    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
-  } },
-  'c-only': { rows: {
-    alpha: { retry_limit: 1, timeout_ms: 1000, output: 1000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 5, timeout_ms: 1000, output: 5000 },
-    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
-  } },
-  'a-c-survivors': { rows: {
-    alpha: { retry_limit: 2, timeout_ms: 1000, output: 2000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-    gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 5, timeout_ms: 1000, output: 5000 },
-    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
-  } },
-  'b-repaired': { rows: {
-    alpha: { retry_limit: 2, timeout_ms: 1000, output: 2000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-    gamma: { retry_limit: 4, timeout_ms: 1250, output: 5000 }, delta: { retry_limit: 5, timeout_ms: 1000, output: 5000 },
-    epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
-  } },
+  seed: { rows: { alpha: alpha1, beta: beta2, gamma: gamma3, delta: delta4, epsilon: epsilon1 } },
+  'a-only': { rows: { alpha: alpha2, beta: beta2, gamma: gamma3, delta: delta4, epsilon: epsilon1 } },
+  'b-only': { rows: { alpha: alpha1, beta: beta2, gamma: gamma3, delta: delta4, epsilon: epsilon1 } },
+  'c-only': { rows: { alpha: alpha1, beta: beta2, gamma: gamma3, delta: delta5, epsilon: epsilon1 } },
+  'a-b': { rows: { alpha: alpha2, beta: beta2, gamma: gamma3, delta: delta4, epsilon: epsilon1 } },
+  'a-c-survivors': { rows: { alpha: alpha2, beta: beta2, gamma: gamma3, delta: delta5, epsilon: epsilon1 } },
+  'b-c': { rows: { alpha: alpha1, beta: beta2, gamma: gamma3, delta: delta5, epsilon: epsilon1 } },
+  'a-b-c': { rows: { alpha: alpha2, beta: beta2, gamma: gamma3, delta: delta5, epsilon: epsilon1 } },
+  'b-repaired': { rows: { alpha: alpha2, beta: beta2, gamma: gamma4, delta: delta5, epsilon: epsilon1 } },
+  'd-only': { rows: { alpha: alpha3, beta: beta2, gamma: gamma4, delta: delta5, epsilon: epsilon1 } },
+  'e-only': { rows: { alpha: alpha2, beta: beta2, gamma: gamma4, delta: deltaE, epsilon: epsilon1 } },
+  'd-e': { rows: { alpha: alpha3, beta: beta2, gamma: gamma4, delta: deltaE, epsilon: epsilon1 } },
+  'h-only': { rows: { alpha: alpha4, beta: beta2, gamma: gamma4, delta: deltaE, epsilon: epsilon1 } },
+  'i-only': { rows: { alpha: alpha3, beta: beta3, gamma: gamma4, delta: deltaE, epsilon: epsilon1 } },
+  'j-common': { rows: { alpha: alpha3, beta: beta3, gamma: gamma4, delta: deltaE, epsilon: epsilonLow },
+    epsilonChoices: [epsilonLow, epsilonHigh] },
 };
-const jCommonCase: NonNullable<LocalProfile['cases']>[string] = { rows: {
-  alpha: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, beta: { retry_limit: 3, timeout_ms: 1000, output: 3000 },
-  gamma: { retry_limit: 4, timeout_ms: 1250, output: 5000 }, delta: { retry_limit: 4, timeout_ms: 1500, output: 6000 },
-  epsilon: { retry_limit: 2, timeout_ms: 500, output: 1000 },
-}, epsilonChoices: [
-  { retry_limit: 2, timeout_ms: 500, output: 1000 }, { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-] };
 
 export async function loadProfile(filename: string): Promise<LocalProfile> {
   if (!isAbsolute(filename)) throw new Error('PROFILE_ABSOLUTE_PATH_REQUIRED');
@@ -89,8 +88,7 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
     for (const [caseId, required] of Object.entries(requiredDispatchCases)) {
       if (stableJson(profile.cases[caseId]) !== stableJson(required)) throw new Error('INVALID_PROFILE_CASE');
     }
-    if (Object.keys(profile.cases).some(caseId => !Object.hasOwn(requiredDispatchCases, caseId) && caseId !== 'j-common') ||
-      profile.cases['j-common'] && stableJson(profile.cases['j-common']) !== stableJson(jCommonCase)) throw new Error('INVALID_PROFILE_CASE');
+    if (Object.keys(profile.cases).some(caseId => !Object.hasOwn(requiredDispatchCases, caseId))) throw new Error('INVALID_PROFILE_CASE');
     const allowedChoices = ['2:500:1000', '2:1000:2000'];
     for (const [caseId, config] of Object.entries(profile.cases)) {
       if (!/^[a-z0-9-]{1,64}$/.test(caseId) || !config || !config.rows ||

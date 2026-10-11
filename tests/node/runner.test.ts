@@ -53,27 +53,41 @@ function credentials(remotes: Record<string, string>): CredentialProvider {
 }
 
 describe('local runner Git and checker execution', () => {
-  it('requires literal dispatch acceptance cases even with valid profile and oracle digests', async () => {
+  it('requires every reviewed dispatch scene case and checks its expected tree', async () => {
     await temporaryWork(async dir => {
-      const rows = {
-        alpha: { retry_limit: 1, timeout_ms: 1000, output: 1000 }, beta: { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-        gamma: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, delta: { retry_limit: 4, timeout_ms: 1000, output: 4000 },
-        epsilon: { retry_limit: 1, timeout_ms: 500, output: 500 },
-      };
+      const a1 = { retry_limit: 1, timeout_ms: 1000, output: 1000 };
+      const a2 = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+      const a3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
+      const a4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
+      const b2 = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+      const b3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
+      const g3 = { retry_limit: 3, timeout_ms: 1000, output: 3000 };
+      const g4 = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
+      const c4 = { retry_limit: 4, timeout_ms: 1000, output: 4000 };
+      const c5 = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
+      const e4 = { retry_limit: 4, timeout_ms: 1500, output: 6000 };
+      const j1 = { retry_limit: 1, timeout_ms: 500, output: 500 };
+      const jLow = { retry_limit: 2, timeout_ms: 500, output: 1000 };
+      const jHigh = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+      const rows = (alpha: typeof a1, beta: typeof b2, gamma: typeof g3, delta: typeof c4, epsilon = j1) =>
+        ({ alpha, beta, gamma, delta, epsilon });
       const cases: NonNullable<LocalProfile['cases']> = {
-        seed: { rows: structuredClone(rows) },
-        'a-only': { rows: structuredClone(rows) },
-        'c-only': { rows: structuredClone(rows) },
-        'a-c-survivors': { rows: structuredClone(rows) },
-        'b-repaired': { rows: structuredClone(rows) },
+        seed: { rows: rows(a1, b2, g3, c4) },
+        'a-only': { rows: rows(a2, b2, g3, c4) },
+        'b-only': { rows: rows(a1, b2, g3, c4) },
+        'c-only': { rows: rows(a1, b2, g3, c5) },
+        'a-b': { rows: rows(a2, b2, g3, c4) },
+        'a-c-survivors': { rows: rows(a2, b2, g3, c5) },
+        'b-c': { rows: rows(a1, b2, g3, c5) },
+        'a-b-c': { rows: rows(a2, b2, g3, c5) },
+        'b-repaired': { rows: rows(a2, b2, g4, c5) },
+        'd-only': { rows: rows(a3, b2, g4, c5) },
+        'e-only': { rows: rows(a2, b2, g4, e4) },
+        'd-e': { rows: rows(a3, b2, g4, e4) },
+        'h-only': { rows: rows(a4, b2, g4, e4) },
+        'i-only': { rows: rows(a3, b3, g4, e4) },
+        'j-common': { rows: rows(a3, b3, g4, e4, jLow), epsilonChoices: [jLow, jHigh] },
       };
-      cases['a-only'].rows.alpha = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
-      cases['c-only'].rows.delta = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
-      cases['a-c-survivors'].rows.alpha = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
-      cases['a-c-survivors'].rows.delta = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
-      cases['b-repaired'].rows.alpha = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
-      cases['b-repaired'].rows.gamma = { retry_limit: 4, timeout_ms: 1250, output: 5000 };
-      cases['b-repaired'].rows.delta = { retry_limit: 5, timeout_ms: 1000, output: 5000 };
       const path = join(dir, 'dispatch-profile.json');
       const write = async (matrix: NonNullable<LocalProfile['cases']>) => {
         const content = { id: 'dispatch', checkerId: 'dispatch-lab', checkerDigest: pin, oracleDigest: await digest(matrix),
@@ -82,7 +96,44 @@ describe('local runner Git and checker execution', () => {
         await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
       };
       await write(cases);
-      await expect(loadProfile(path)).resolves.toMatchObject({ checkerId: 'dispatch-lab' });
+      const profile = await loadProfile(path);
+      await writeFile(join(dir, 'dispatch.mjs'), `import fs from 'node:fs';
+export function attemptBudget(family) {
+  const line = fs.readFileSync('families.tsv', 'utf8').trim().split('\\n').slice(1).find(row => row.startsWith(family + '\\t'));
+  const [, retry, timeout] = line.split('\\t');
+  return Number(retry) * Number(timeout);
+}`);
+      const bCases = new Set(['b-only', 'a-b', 'b-c', 'a-b-c']);
+      for (const [caseId, config] of Object.entries(cases)) {
+        const tree = structuredClone(config.rows);
+        if (bCases.has(caseId)) tree.gamma = { retry_limit: 0, timeout_ms: 0, output: 0 };
+        await writeFile(join(dir, 'families.tsv'), 'family\tretry_limit\ttimeout_ms\n' +
+          Object.entries(tree).map(([family, row]) => `${family}\t${row.retry_limit}\t${row.timeout_ms}\n`).join(''));
+        const job = { ...jobBase({}), checkerId: 'dispatch-lab', caseId, profileDigest: profile.digest,
+          oracleDigest: profile.oracleDigest } as Job & { caseId: string };
+        expect((await pinnedCheck(profile, job, dir)).outcome, caseId).toBe(bCases.has(caseId) ? 'FAIL' : 'PASS');
+        if (caseId === 'j-common') {
+          tree.epsilon = jHigh;
+          await writeFile(join(dir, 'families.tsv'), 'family\tretry_limit\ttimeout_ms\n' +
+            Object.entries(tree).map(([family, row]) => `${family}\t${row.retry_limit}\t${row.timeout_ms}\n`).join(''));
+          expect((await pinnedCheck(profile, job, dir)).score).toEqual({ matched: 4, total: 4 });
+        }
+      }
+      const survivorRows = cases['a-c-survivors'].rows;
+      const survivorTable = 'family\tretry_limit\ttimeout_ms\n' +
+        Object.entries(survivorRows).map(([family, row]) => `${family}\t${row.retry_limit}\t${row.timeout_ms}\n`).join('');
+      const survivorJob = { ...jobBase({}), checkerId: 'dispatch-lab', caseId: 'a-c-survivors',
+        profileDigest: profile.digest, oracleDigest: profile.oracleDigest } as Job & { caseId: string };
+      for (const table of [
+        survivorTable.replace('alpha\t2\t1000', 'alpha\tx\t1000'),
+        survivorTable + 'alpha\t2\t1000\n',
+        survivorTable.replace('gamma\t3\t1000\n', ''),
+        survivorTable.replace('gamma\t3\t1000', 'gamma\t0\t0'),
+        survivorTable.replace('alpha\t2\t1000', 'alpha\t3\t1000'),
+      ]) {
+        await writeFile(join(dir, 'families.tsv'), table);
+        expect((await pinnedCheck(profile, survivorJob, dir)).outcome).toBe('FAIL');
+      }
       for (const name of Object.keys(cases)) {
         const incomplete = structuredClone(cases);
         delete incomplete[name];
@@ -94,19 +145,10 @@ describe('local runner Git and checker execution', () => {
         await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
       }
       const extra = structuredClone(cases);
-      extra['unreviewed'] = { rows: structuredClone(rows) };
+      extra['unreviewed'] = { rows: rows(a1, b2, g3, c4) };
       await write(extra);
       await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
       const jCases = structuredClone(cases);
-      jCases['j-common'] = { rows: {
-        alpha: { retry_limit: 3, timeout_ms: 1000, output: 3000 }, beta: { retry_limit: 3, timeout_ms: 1000, output: 3000 },
-        gamma: { retry_limit: 4, timeout_ms: 1250, output: 5000 }, delta: { retry_limit: 4, timeout_ms: 1500, output: 6000 },
-        epsilon: { retry_limit: 2, timeout_ms: 500, output: 1000 },
-      }, epsilonChoices: [
-        { retry_limit: 2, timeout_ms: 500, output: 1000 }, { retry_limit: 2, timeout_ms: 1000, output: 2000 },
-      ] };
-      await write(jCases);
-      await expect(loadProfile(path)).resolves.toMatchObject({ checkerId: 'dispatch-lab' });
       jCases['j-common'].rows.beta.output = 9999;
       await write(jCases);
       await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE_CASE');
