@@ -7,7 +7,7 @@ import type { InspectionResult, ModuleContext } from '../../src/contracts';
 import { repos } from '../../src/features/repos';
 import { runners } from '../../src/features/runners';
 import { digest as canonicalDigest } from '../../src/http';
-import { ids } from '../../src/repos/model';
+import { ids, pendingInitialToken, type ProvisioningIntent } from '../../src/repos/model';
 import { FakeStorage } from '../../src/storage/fake';
 import { sqlState } from '../../src/state';
 import { apiRequest, mutation, responseBody } from '../helpers';
@@ -189,7 +189,7 @@ describe('repository and change lifecycle', () => {
       expect((await responseBody(second)).data).toEqual(pending);
       const snapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos;
       expect(snapshot.bootstrap).toMatchObject({ jobId: pending.jobId, scratchStorageName: `concord-s-${pending.jobId}`, status: 'provisioning' });
-      expect(snapshot.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'pending' }));
+      expect(snapshot.provisioning).toContainEqual(expect.objectContaining({ storageName: `concord-s-${pending.jobId}`, state: 'creating' }));
       expect(names).toEqual([`concord-s-${pending.jobId}`]);
       ready = true;
       const third = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'slow-scratch-ready'));
@@ -409,7 +409,7 @@ describe('repository and change lifecycle', () => {
       const first = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-first'));
       expect(first.status).toBe(202);
       const pending = (await responseBody(first)).data;
-      expect(pending.provisioning.state).toBe('pending');
+      expect(pending.provisioning.state).toBe('creating');
       const second = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, body, 'slow-fork-second'));
       expect(second.status).toBe(202);
       expect((await responseBody(second)).data.changeId).toBe(pending.changeId);
@@ -495,5 +495,144 @@ describe('repository and change lifecycle', () => {
     });
     const listing = await fetchApi(apiRequest('/v1/repos'));
     expect((await responseBody(listing)).data.items).toContainEqual(expect.objectContaining({ repoId: repo.repoId, status: 'blocked' }));
+  });
+
+  it.each([
+    { result: 'ready', token: false, revoked: true, status: 201, state: 'observed', polls: 0 },
+    { result: 'pending', token: false, revoked: true, status: 202, state: 'creating', polls: 1 },
+    { result: 'pending', token: true, revoked: true, status: 202, state: 'token-held', polls: 1 },
+    { result: 'ready', token: true, revoked: true, status: 201, state: 'observed', polls: 0 },
+    { result: 'ready', token: true, revoked: false, status: 503, state: 'failed', polls: 0 },
+  ])('persists provisioning transition for $result, token=$token, revoked=$revoked', async ({ result, token, revoked, status, state, polls }) => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const visited: string[] = [];
+    let storageName = '';
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      if (!name.startsWith('concord-r-')) return originalEnsure.call(this, name);
+      storageName = name;
+      const persisted = provisioningAtProvider(this, name, 'ensure-repo');
+      visited.push(persisted.get<Record<string, ProvisioningIntent>>('module:repos:provisioning')![`ensure-repo:${name}`].state);
+      const created = await originalEnsure.call(this, name);
+      const observation = result === 'pending' ? { name, remote: '', status: 'provisioning' as const } : created;
+      return token ? Object.assign(observation, { [pendingInitialToken]: 'initial-secret' }) : observation;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const found = await originalInfo.call(this, name);
+      return found && name === storageName && result === 'pending' ? { name, remote: '', status: 'provisioning' } : found;
+    });
+    const revoke = vi.spyOn(FakeStorage.prototype, 'revokeToken').mockImplementation(async function (this: FakeStorage, name, secret) {
+      const persisted = provisioningAtProvider(this, name, 'ensure-repo');
+      visited.push(persisted.get<Record<string, ProvisioningIntent>>('module:repos:provisioning')![`ensure-repo:${name}`].state);
+      expect(persisted.get<string>(`module:repos:initial-token:${name}`)).toBe(secret);
+      return revoked;
+    });
+    try {
+      const name = `transition_${result}_${token}_${revoked}`;
+      const response = await fetchApi(mutation('/v1/repos', { name, policyId: 'local-demo', profileId: 'local-demo' }, `transition-${name}`));
+      expect(response.status).toBe(status);
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+      await runInDurableObject(stub, (_instance, durable) => {
+        const stored = sqlState(durable.storage.sql);
+        expect(stored.get<Record<string, ProvisioningIntent>>('module:repos:provisioning')![`ensure-repo:${storageName}`])
+          .toMatchObject({ state, polls });
+        expect(stored.get<string>(`module:repos:initial-token:${storageName}`)).toBe(token && (!revoked || result === 'pending') ? 'initial-secret' : null);
+      });
+      expect(visited).toEqual(token && result === 'ready' ? ['creating', 'revoking'] : ['creating']);
+    } finally {
+      revoke.mockRestore();
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it('retains a token after false revocation and retries cleanup without creating another repository', async () => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      return Object.assign(await originalEnsure.call(this, name), { [pendingInitialToken]: 'held-secret' });
+    });
+    const revoke = vi.spyOn(FakeStorage.prototype, 'revokeToken').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const body = { name: 'revocation_retry_case', policyId: 'local-demo', profileId: 'local-demo' };
+    try {
+      expect((await fetchApi(mutation('/v1/repos', body, 'revoke-first'))).status).toBe(503);
+      expect(ensure).toHaveBeenCalledTimes(1);
+      const retry = await fetchApi(mutation('/v1/repos', body, 'revoke-retry'));
+      expect(retry.status).toBe(201);
+      expect(ensure).toHaveBeenCalledTimes(1);
+      expect(revoke).toHaveBeenCalledTimes(2);
+      const name = (await responseBody(retry)).data.canonicalStorageName;
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+      await runInDurableObject(stub, (_instance, durable) => {
+        expect(sqlState(durable.storage.sql).get<string>(`module:repos:initial-token:${name}`)).toBeNull();
+      });
+    } finally {
+      revoke.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it.each([false, true])('maps an empty status poll with held token=%s to a persisted pending transition', async held => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      await originalEnsure.call(this, name);
+      const pending = { name, remote: '', status: 'provisioning' as const };
+      return held ? Object.assign(pending, { [pendingInitialToken]: 'pending-secret' }) : pending;
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockResolvedValue(null);
+    try {
+      const body = { name: `empty_poll_${held}`, policyId: 'local-demo', profileId: 'local-demo' };
+      expect((await fetchApi(mutation('/v1/repos', body, `empty-${held}`))).status).toBe(202);
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+      await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+        const context = (instance as unknown as { context(name: 'repos', principal: object, repoId: string): ModuleContext }).context('repos', {
+          tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER,
+        }, '');
+        const all = context.state.get<Record<string, ProvisioningIntent>>('provisioning')!;
+        const intent = Object.values(all).find(item => item.storageName ===
+          (context.state.get<Array<{ repoId: string; canonicalStorageName: string }>>('catalog:index') ?? []).find(repo => repo.repoId === body.name)?.canonicalStorageName)!;
+        intent.retryAt = 0;
+        context.state.put('provisioning', all);
+        await repos.onAlarm!(context);
+        expect(context.state.get<Record<string, ProvisioningIntent>>('provisioning')![`ensure-repo:${intent.storageName}`])
+          .toMatchObject({ state: held ? 'token-held' : 'creating', polls: 2 });
+        expect(context.state.get<string>(`initial-token:${intent.storageName}`)).toBe(held ? 'pending-secret' : null);
+      });
+      expect(ensure).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
+  });
+
+  it('counts 30 pending observations across API retries and resets only after a failed attempt', async () => {
+    const originalEnsure = FakeStorage.prototype.ensureRepo;
+    const originalInfo = FakeStorage.prototype.info;
+    const ensure = vi.spyOn(FakeStorage.prototype, 'ensureRepo').mockImplementation(async function (this: FakeStorage, name) {
+      await originalEnsure.call(this, name);
+      return { name, remote: '', status: 'provisioning' };
+    });
+    const info = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, name) {
+      const found = await originalInfo.call(this, name);
+      return found?.name.startsWith('concord-r-') ? { name, remote: '', status: 'provisioning' } : found;
+    });
+    try {
+      const body = { name: 'poll_limit_case', policyId: 'local-demo', profileId: 'local-demo' };
+      for (let poll = 1; poll <= 31; poll++) {
+        const response = await fetchApi(mutation('/v1/repos', body, `poll-${poll}`));
+        expect(response.status).toBe(poll === 30 ? 503 : 202);
+        const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName('tenant:local'));
+        await runInDurableObject(stub, (_instance, durable) => {
+          const stored = sqlState(durable.storage.sql);
+          const intent = Object.values(stored.get<Record<string, ProvisioningIntent>>('module:repos:provisioning') ?? {})
+            .find(item => item.storageName.startsWith('concord-r-') && item.storageName ===
+              (stored.get<Array<{ repoId: string; canonicalStorageName: string }>>('module:repos:catalog:index') ?? []).find(repo => repo.repoId === body.name)?.canonicalStorageName);
+          expect(intent).toMatchObject({ polls: poll === 31 ? 1 : poll, state: poll === 30 ? 'failed' : 'creating' });
+        });
+      }
+      expect(ensure).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+      ensure.mockRestore();
+    }
   });
 });

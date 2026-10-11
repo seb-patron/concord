@@ -65,39 +65,69 @@ function scheduleBootstrap(context: ModuleContext, request: BootstrapPending, jo
   }
 }
 
+const activeProvisioning = (intent: ProvisioningIntent) => intent.state !== 'observed' && intent.state !== 'failed';
+
 async function reconcile(context: ModuleContext, intent: ProvisioningIntent, retry: boolean): Promise<StorageRepo | null> {
+  const tokenKey = `initial-token:${intent.storageName}`;
   try {
     const expectedDigest = await digest(intent.kind === 'ensure-repo'
       ? { kind: intent.kind, storageName: intent.storageName }
       : { kind: intent.kind, storageName: intent.storageName, sourceName: intent.sourceName });
     if (intent.requestDigest !== expectedDigest) throw new Error('PROVISIONING_INTENT_MISMATCH');
+    if (intent.state === 'failed') {
+      if (!retry) return null;
+      // A caller retry starts a new attempt. Keep any credential from the old attempt.
+      intent.polls = 0;
+      intent.state = context.state.get<string>(tokenKey) ? 'token-held' : 'intent';
+      delete intent.error;
+      saveIntent(context, intent);
+    }
+    if (intent.state !== 'observed' && intent.state !== 'creating' && intent.state !== 'token-held' && intent.state !== 'revoking') {
+      intent.state = 'creating';
+      saveIntent(context, intent);
+    }
     let observed = await context.storage.info(intent.storageName);
     if (!observed && intent.everObserved) throw new Error('PROVIDER_OBJECT_MISSING');
-    if (!observed && retry) observed = intent.kind === 'ensure-repo'
+    if (!observed && retry && !context.state.get<string>(tokenKey)) observed = intent.kind === 'ensure-repo'
       ? await context.storage.ensureRepo(intent.storageName)
       : await context.storage.fork(intent.sourceName!, intent.storageName);
     if (observed && (observed.name !== intent.storageName || (observed.status === 'ready' && !observed.remote))) throw new Error('PROVIDER_IDENTITY_MISMATCH');
-    const tokenKey = `initial-token:${intent.storageName}`;
     const returnedToken = (observed as (StorageRepo & { [pendingInitialToken]?: string }) | null)?.[pendingInitialToken];
-    if (returnedToken) context.state.put(tokenKey, returnedToken);
+    if (returnedToken && context.state.get<string>(tokenKey) && context.state.get<string>(tokenKey) !== returnedToken) throw new Error('INITIAL_TOKEN_CONFLICT');
+    if (returnedToken) {
+      context.state.put(tokenKey, returnedToken);
+      intent.state = 'token-held';
+      saveIntent(context, intent);
+    }
     const heldToken = context.state.get<string>(tokenKey);
-    if (observed?.status === 'ready' && heldToken) {
-      await context.storage.revokeToken(intent.storageName, heldToken);
-      context.state.delete(tokenKey);
+    if (observed?.status === 'ready') {
+      if (intent.state !== 'observed') {
+        intent.state = 'revoking';
+        saveIntent(context, intent);
+        if (heldToken) {
+          if (!await context.storage.revokeToken(intent.storageName, heldToken)) throw new Error('INITIAL_TOKEN_REVOCATION_FAILED');
+          context.state.delete(tokenKey);
+        }
+        if (!intent.everObserved) {
+          await (context.storage as typeof context.storage & { [revokeOrphanTokens]?: (name: string) => Promise<void> })[revokeOrphanTokens]?.(intent.storageName);
+        }
+      }
+      intent.state = 'observed';
+      intent.everObserved = true;
+      intent.retryAt = 0;
+      delete intent.error;
+      saveIntent(context, intent);
+      return observed;
     }
-    if (observed?.status === 'ready' && !intent.everObserved) {
-      await (context.storage as typeof context.storage & { [revokeOrphanTokens]?: (name: string) => Promise<void> })[revokeOrphanTokens]?.(intent.storageName);
-    }
-    intent.polls = retry || observed?.status === 'ready' ? 0 : intent.polls + 1;
-    if (intent.polls >= 30 && observed?.status !== 'ready') {
+    intent.polls += 1;
+    if (intent.polls >= 30) {
       intent.state = 'failed';
       intent.error = 'Provider did not become ready within 30 status polls';
       intent.retryAt = 0;
       saveIntent(context, intent);
       return observed;
     }
-    intent.state = observed?.status === 'ready' ? 'observed' : 'pending';
-    if (intent.state === 'observed') intent.everObserved = true;
+    intent.state = heldToken ? 'token-held' : 'creating';
     intent.retryAt = context.now() + 1000;
     delete intent.error;
     saveIntent(context, intent);
@@ -132,13 +162,13 @@ async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Prom
       if (current.some(item => item.repoId === repoId)) fail(409, 'REPO_NAME_CONFLICT', 'Repository already exists');
       repo!.version = versioned(context, 'repo.provisioning', [repoId], { storageName: repo!.canonicalStorageName });
       context.state.put('catalog:index', [...current, repo!]);
-      saveIntent(context, { kind: 'ensure-repo', storageName: repo!.canonicalStorageName, requestDigest, state: 'pending', retryAt: context.now(), polls: 0 });
+      saveIntent(context, { kind: 'ensure-repo', storageName: repo!.canonicalStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
     });
   }
   const intent = intents(context)[intentKey('ensure-repo', repo.canonicalStorageName)];
   if (!intent) fail(503, 'PROVISIONING_INTENT_MISSING', 'Repository provisioning intent missing');
-  const observed = await reconcile(context, intent, true);
-  const status = observed?.status === 'ready' ? 'ready' : observed ? 'provisioning' : 'blocked';
+  await reconcile(context, intent, true);
+  const status = intent.state === 'observed' ? 'ready' : intent.state === 'failed' ? 'blocked' : 'provisioning';
   if (repo.status !== status) context.transaction(() => {
     repo!.status = status;
     repo!.version = versioned(context, `repo.${status}`, [repoId], {});
@@ -244,11 +274,11 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
     context.state.put('changes', [...all, change]);
     context.state.put('intents', [...list<Intent>(context, 'intents').filter(item => item.intentKey !== input.intentKey),
       { repoId: repo.repoId, intentKey: input.intentKey, changeId, attempt: input.attempt, terminal: false, version: change.version } satisfies Intent]);
-    saveIntent(context, { kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName, requestDigest, state: 'pending', retryAt: context.now(), polls: 0 });
+    saveIntent(context, { kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
   });
-  const result = await reconcile(context, intents(context)[intentKey('fork', candidateStorageName)], true);
+  await reconcile(context, intents(context)[intentKey('fork', candidateStorageName)], true);
   if (intents(context)[intentKey('fork', candidateStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Candidate fork provisioning failed; retry the same intent');
-  return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', candidateStorageName)] }, result?.status === 'ready' ? 201 : 202);
+  return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', candidateStorageName)] }, intents(context)[intentKey('fork', candidateStorageName)].state === 'observed' ? 201 : 202);
 }
 
 async function registerBranch(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
@@ -407,14 +437,14 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
     context.transaction(() => {
       if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
       context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
-      saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'pending', retryAt: context.now(), polls: 0 });
+      saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
     });
   }
   const scratchIntent = intents(context)[intentKey('ensure-repo', scratchStorageName)];
   if (!scratchIntent) fail(503, 'PROVISIONING_INTENT_MISSING', 'Scratch provisioning intent missing');
   const scratch = await reconcile(context, scratchIntent, true);
   if (intents(context)[intentKey('ensure-repo', scratchStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Scratch provisioning failed; retry the same request');
-  if (scratch?.status !== 'ready') return respond(context, { jobId, state: 'provisioning' }, 202);
+  if (scratchIntent.state !== 'observed' || !scratch) return respond(context, { jobId, state: 'provisioning' }, 202);
   const scratchRemote = scratch.remote;
   const job: ValidateStackJob = {
     kind: 'validate-stack', bootstrap: true, ownerAuthorized: true, jobId, repoId: repo.repoId,
@@ -550,9 +580,9 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },
   ],
   snapshot: context => ({ repo: context.state.get<Repo>('repo'), branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes'), provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
-  nextDeadline: context => Object.values(intents(context)).filter(intent => intent.state === 'pending').reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
+  nextDeadline: context => Object.values(intents(context)).filter(activeProvisioning).reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
   onAlarm: async context => {
-    const all = Object.values(intents(context)).filter(intent => intent.state === 'pending' && intent.retryAt <= context.now());
+    const all = Object.values(intents(context)).filter(intent => activeProvisioning(intent) && intent.retryAt <= context.now());
     for (const intent of all) {
       await reconcile(context, intent, false);
       if (context.repoId === '') {

@@ -11,7 +11,7 @@ export interface ProvisioningIntent {
   storageName: string;
   sourceName?: string;
   requestDigest: Digest;
-  state: 'pending' | 'observed' | 'failed';
+  state: 'intent' | 'creating' | 'token-held' | 'revoking' | 'observed' | 'failed';
   everObserved?: boolean;
   polls: number;
   retryAt: number;
