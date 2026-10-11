@@ -1,0 +1,33 @@
+{
+  "name": "concord",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "sh scripts/validate.sh --test-count && tsc --noEmit",
+    "test": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
+    "test:target": "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${TMPDIR:-/tmp}} vitest run",
+    "dev": "wrangler dev --config wrangler.local.jsonc",
+    "concord": "tsx cli/main.ts",
+    "runner": "tsx runner/main.ts",
+    "git-bridge": "tsx local/git-bridge.ts",
+    "aw-mock": "tsx adapters/aw-mock.ts",
+    "replay": "tsx replay/main.ts",
+    "demo": "tsx demo/main.ts",
+    "mirror": "tsx deploy/mirror.ts",
+    "deploy:check": "tsx deploy/preflight.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.0",
+    "@cloudflare/workers-types": "5.20261011.1",
+    "@types/node": "22.20.5",
+    "jsdom": "27.0.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0",
+    "wrangler": "4.149.0"
+  }
+}
