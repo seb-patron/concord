@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
 import { clock, requireRepo, requireTenant } from './auth';
 import { digest, encodeCursor, expectVersion, failure, HttpError, json, parseCursor, readJson, requiresExpectedVersion } from './http';
-import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
+import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState, unfrozenPromotion } from './state';
 import { FakeStorage } from './storage/fake';
 import { artifactsStorage } from './storage/artifacts';
 import { bridgeStorage } from './storage/bridge';
@@ -59,6 +59,20 @@ export class RepoCoordinator extends DurableObject<Env> {
         if (!hook) throw new HttpError(501, 'MODULE_UNAVAILABLE', `${owner} hook unavailable`);
         return (hook as (...values: unknown[]) => ReturnType<ServiceHooks[K]>)(this.context(owner, principal, repoId), ...args);
       },
+      readChange: changeId => {
+        const provider = repos.changeView;
+        if (!provider) return { status: 'blocked', version: context.version(), code: 'MODULE_UNAVAILABLE', reason: 'Repos change view unavailable', evidenceIds: [] };
+        const result = provider(this.context('repos', principal, repoId), changeId);
+        if (result.status === 'blocked') return result;
+        const value = result.value;
+        return {
+          ...result,
+          value: Object.freeze({
+            authorId: value.authorId, headOid: value.headOid, revision: value.revision,
+            status: value.status, unitKeys: Object.freeze([...value.unitKeys]), frozen: value.frozen,
+          }),
+        };
+      },
     };
     return context;
   }
@@ -109,6 +123,15 @@ export class RepoCoordinator extends DurableObject<Env> {
       const moduleRoute = modules.flatMap(module => module.routes.map(route => ({ module, route }))).find(({ route }) =>
         (route.method === '*' || route.method === request.method) && route.pattern.test(url.pathname));
       if (!moduleRoute) throw new HttpError(404, 'NOT_FOUND', 'Unknown repository route');
+      if (!['GET', 'HEAD'].includes(request.method)) {
+        const decision = (queue.promotionFreeze ?? unfrozenPromotion)(this.context('queue', principal, repoId), request);
+        const promoterResult = request.method === 'POST'
+          && new RegExp(`^/v1/repos/${repoId}/jobs/[A-Za-z0-9_-]{1,64}/result$`).test(url.pathname)
+          && principal.roles.includes('promoter');
+        if (decision.frozen && !(decision.exempt && promoterResult)) {
+          throw new HttpError(409, 'PROMOTION_IN_PROGRESS', 'Repository promotion is in progress');
+        }
+      }
 
       let body: Record<string, unknown> | undefined;
       let key: string | null = null;

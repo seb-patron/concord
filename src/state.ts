@@ -1,4 +1,7 @@
-import type { Event, FeatureModule, Migration, ModuleContext, TrustedConfiguration } from './contracts';
+import type { Event, FeatureModule, Migration, ModuleContext, PromotionFreezeProvider, TrustedConfiguration } from './contracts';
+
+/** Queue's slice-01 placeholder until its promotion ticket state exists. */
+export const unfrozenPromotion: PromotionFreezeProvider = () => ({ frozen: false });
 
 export interface StateStore {
   get<T>(key: string): T | null;
