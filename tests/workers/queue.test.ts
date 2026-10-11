@@ -247,11 +247,68 @@ describe('queue state machine', () => {
     expect((await h.state()).entries[0].state).toBe('withdrawn');
   });
 
+  it.each(['reserved', 'checking'])('withdraws a %s admission and releases once', async startingState => {
+    const h = await setup('A');
+    if (startingState === 'checking') await h.tick();
+    const before = (await h.state()).entries[0];
+    expect(before.state).toBe(startingState);
+    const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', reason: 'cancel' });
+    expect(withdrawn.response.status).toBe(200);
+    expect((await h.state()).entries[0]).toMatchObject({ entryId: before.entryId, state: 'withdrawn' });
+    expect(h.releases).toEqual(['A']);
+  });
+
+  it('uses the new admission after withdrawal and re-enqueue, including the new immutable head', async () => {
+    const h = await setup('A');
+    const old = (await h.state()).entries[0];
+    await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version, changeId: 'A', reason: 'replace' });
+    h.views.set('A', { ...h.views.get('A')!, headOid: oid('f'), revision: 2 });
+    const added = await h.fetch('/queue/enqueue', { expectedVersion: (await h.fetch('/queue')).body.version,
+      changeId: 'A', verdictId: 'v-A', leaseFences: { 'row:A': 1 } });
+    expect(added.response.status).toBe(201);
+    const next = (await h.state()).entries[1];
+    expect(next.entryId).not.toBe(old.entryId);
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['withdrawn', 'reserved']);
+    await h.tick();
+    expect((h.jobs[0] as any).candidates).toMatchObject([{ changeId: 'A', revision: 2, headOid: oid('f') }]);
+    expect((await h.state()).entries[1].state).toBe('checking');
+    expect((await h.state()).entries.map((entry: any) => entry.stackMember)).toEqual([false, true]);
+    await h.deliver(h.jobs[0], 'PASS'); await h.tick();
+    expect((await h.state()).promotion.frozenAdmission).toMatchObject([{ revision: 2, headOid: oid('f') }]);
+    expect((await h.state()).entries[0].state).toBe('withdrawn');
+    expect(h.releases.filter(id => id === 'A')).toHaveLength(1);
+  });
+
+  it.each(['before scheduling', 'after scheduling'])('closes a contest when a child withdraws %s', async timing => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`); await h.seed(`scratch-${h.repoId}`, null);
+    for (const id of ['A', 'B']) {
+      await h.seed(`candidate-${h.repoId}-${id}`);
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
+        unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
+        branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+    }
+    expect((await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+      baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
+      leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] })).response.status).toBe(201);
+    if (timing === 'after scheduling') await h.tick();
+    await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version, changeId: 'A', reason: 'cancel' });
+    if (timing === 'after scheduling') expect((await h.deliver(h.jobs[0], 'PASS')).status).toBe('blocked');
+    await h.tick();
+    const state = await h.state();
+    expect(state.contests[0]).toMatchObject({ state: 'blocked', reason: 'CHILD_WITHDRAWN', winnerId: null });
+    expect(state.entries.map((entry: any) => entry.state)).toEqual(['withdrawn', 'blocked']);
+    expect(h.jobs.filter(job => job.kind === 'validate-stack')).toHaveLength(timing === 'after scheduling' ? 2 : 0);
+    expect(h.releases).toEqual(['A', 'B']);
+  });
+
   it('coalesces for two seconds when fewer than four are available', async () => {
     const h = await setup('A');
     await h.tick(false);
     expect(h.jobs).toHaveLength(0);
-    expect((await h.state()).entries[0].state).toBe('waiting');
+    expect((await h.state()).entries[0].state).toBe('reserved');
     await h.tick();
     expect(h.jobs).toHaveLength(1);
   });
@@ -340,6 +397,36 @@ describe('queue state machine', () => {
     await h.deliver(h.jobs[3], 'PASS'); await h.tick();
     expect((await h.state()).diagnosis).toMatchObject({ reason: 'INTERACTION', blame: ['A', 'B'] });
     expect((await h.state()).promotion).toBeNull();
+  });
+
+  it.each([
+    { name: 'red baseline', ids: ['A', 'B'], diagnostic: ['FAIL'], reason: 'BASE_RED' },
+    { name: 'failed survivor check', ids: ['A', 'B'], diagnostic: ['PASS', 'FAIL', 'FAIL'], reason: 'INCONCLUSIVE' },
+    { name: 'interaction inside a subset', ids: ['A', 'B', 'C'], diagnostic: ['PASS', 'PASS', 'FAIL', 'PASS', 'PASS'], reason: 'INTERACTION' },
+  ])('blocks and releases every unresolved member after $name', async ({ ids, diagnostic, reason }) => {
+    const h = await setup(...ids);
+    await h.tick(); await h.deliver(h.jobs[0], 'FAIL'); await h.tick();
+    for (let i = 0; i < diagnostic.length; i++) {
+      expect(h.jobs[i + 1]).toBeDefined();
+      await h.deliver(h.jobs[i + 1], diagnostic[i] as StackResult['outcome']); await h.tick();
+    }
+    const state = await h.state();
+    expect(state.diagnosis.reason).toBe(reason);
+    expect(state.entries.map((entry: any) => entry.state)).toEqual(ids.map(() => 'blocked'));
+    expect(state.activeStackJobId).toBeNull();
+    expect(state.promotion).toBeNull();
+    expect([...h.releases].sort()).toEqual([...ids].sort());
+  });
+
+  it('releases a checking entry when both bounded timeout attempts fail', async () => {
+    const h = await setup('A');
+    await h.tick();
+    await h.deliver(h.jobs[0], 'TIMEOUT'); await h.tick();
+    expect(h.jobs).toHaveLength(2);
+    expect((await h.state()).entries[0].state).toBe('checking');
+    await h.deliver(h.jobs[1], 'TIMEOUT'); await h.tick();
+    expect((await h.state()).entries[0]).toMatchObject({ state: 'blocked', blockedReason: 'ENVIRONMENT_FAILURE' });
+    expect(h.releases).toEqual(['A']);
   });
 
   it('records suspected flake when an environment retry disagrees', async () => {
@@ -444,8 +531,9 @@ describe('queue state machine', () => {
     await h.tick();
     state = await h.state();
     expect(state.promotion.state).toBe('applied');
-    expect(state.entries[0].state).toBe('merged');
+    expect(state.entries[0].state).toBe('landed');
     expect(state.finalCanonicalOid).toBe(oid('e'));
+    expect(h.releases).toEqual(['A']);
   });
 
   it('keeps a third-OID promotion fenced', async () => {
@@ -462,11 +550,11 @@ describe('queue state machine', () => {
     const promote = h.jobs.find(job => job.kind === 'promote')!;
     expect((await h.promoteResult(promote, 'APPLIED', oid('e'))).status).toBe('eligible');
     await h.tick();
-    expect((await h.state()).entries[0].state).not.toBe('merged');
+    expect((await h.state()).entries[0].state).not.toBe('landed');
     expect((await h.state()).promotion.state).toBe('pending');
     expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
     await h.tick();
-    expect((await h.state()).entries[0].state).toBe('merged');
+    expect((await h.state()).entries[0].state).toBe('landed');
   });
 
   it('releases a confirmed old-ref failure for rechecking', async () => {
@@ -477,7 +565,7 @@ describe('queue state machine', () => {
     await h.tick();
     const state = await h.state();
     expect(state.promotion).toMatchObject({ state: 'failed', reconciliation: 'CONFIRMED_OLD_REF' });
-    expect(state.entries[0].state).toBe('waiting');
+    expect(state.entries[0].state).toBe('reserved');
   });
 
   it('allows one explicit empty-repo bootstrap and closes the internal handoff to HTTP callers', async () => {
@@ -544,8 +632,9 @@ describe('queue state machine', () => {
     await h.deliver(h.jobs[0], 'PASS'); await h.tick();
     const state = await h.state();
     expect(state.contests[0]).toMatchObject({ state: 'selected', winnerId: 'B', reason: 'FIRST_VALID_GREEN' });
-    expect(state.entries.find((entry: any) => entry.changeId === 'A').state).toBe('superseded');
-    expect(['waiting', 'checking']).toContain(state.entries.find((entry: any) => entry.changeId === 'B').state);
+    expect(state.entries.find((entry: any) => entry.changeId === 'A').state).toBe('failed');
+    expect(['reserved', 'checking']).toContain(state.entries.find((entry: any) => entry.changeId === 'B').state);
+    expect(h.releases).toEqual(['A']);
     await h.tick();
     expect((h.jobs[2] as any).candidates.map((item: any) => item.changeId)).toEqual(['B']);
   });

@@ -88,6 +88,8 @@ export interface OutboxIntent extends Versioned {
 }
 export interface FrozenAdmission {
   changeId: Id; revision: number; verdictId: Id | null;
+  /** Queue admission identity; distinguishes a re-enqueued change from its withdrawn predecessor. */
+  admissionId?: Id;
   findingSetVersion: number; reservationFences: Record<string, number>;
   headOid?: Oid; baseOid?: Oid | null; policyDigest?: Digest; profileDigest?: Digest;
 }

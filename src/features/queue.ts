@@ -10,7 +10,7 @@ import {
   type Diagnosis, type PlannedEntry,
 } from '../queue/plan';
 
-type EntryState = 'waiting' | 'checking' | 'contesting' | 'blocked' | 'merged' | 'withdrawn' | 'superseded';
+type EntryState = 'admitted' | 'reserved' | 'checking' | 'landed' | 'blocked' | 'withdrawn' | 'failed';
 interface Entry extends PlannedEntry {
   entryId: Id; revision: number; baseOid: string; headOid: string; storageName: string; ref: string;
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
@@ -21,17 +21,19 @@ interface Entry extends PlannedEntry {
 }
 interface JobRecord {
   job: Job; purpose: 'stack' | 'diagnostic' | 'contest' | 'promotion'; memberIds: Id[];
+  admissionIds: Id[];
   contestId?: Id; result?: StackResult | PromotionResult; resultSequence?: number;
   consumed: boolean; retryOf?: Id; retryIssued?: boolean;
 }
 interface ContestState {
-  contestId: Id; childIds: [Id, Id]; creationSequences: [number, number];
+  contestId: Id; childIds: [Id, Id]; admissionIds: [Id, Id]; creationSequences: [number, number];
   intentKey: string; intentText: string; unitKey: string; baseOid: string; policyDigest: Digest; profileDigest: Digest;
   state: 'open' | 'selected' | 'blocked'; winnerId: Id | null; reason: string | null;
   resultIds: Id[];
 }
 interface Ticket extends Promotion {
   jobId: Id; canonicalStorageName: string; scratchStorageName: string; scratchRef: string; memberIds: Id[];
+  admissionIds: Id[];
   resultId: Id; createdAt: number; lastObservedOid: string | null; reconciliation: string | null;
   jobIds: Id[]; retryIssued: boolean;
 }
@@ -60,7 +62,23 @@ function requireGate<T>(gate: Gate<T>): T {
   if (gate.status === 'blocked') throw new HttpError(gate.code === 'MODULE_UNAVAILABLE' ? 501 : 409, gate.code, gate.reason);
   return gate.value;
 }
-const active = (entry: Entry) => ['waiting', 'checking', 'contesting', 'blocked'].includes(entry.state);
+const active = (entry: Entry) => ['admitted', 'reserved', 'checking'].includes(entry.state);
+const current = (state: QueueState, id: Id) => [...state.entries].reverse().find(entry => entry.changeId === id && active(entry));
+const admitted = (state: QueueState, id: Id) => state.entries.find(entry => entry.entryId === id);
+const member = (state: QueueState, record: JobRecord, id: Id) => admitted(state, record.admissionIds[record.memberIds.indexOf(id)]);
+function transition(context: ModuleContext, entry: Entry, next: EntryState, reason: string | null = null): void {
+  if (entry.state === next) return;
+  const allowed: Record<EntryState, EntryState[]> = {
+    admitted: ['reserved'],
+    reserved: ['checking', 'blocked', 'withdrawn', 'failed'],
+    checking: ['reserved', 'landed', 'blocked', 'withdrawn'],
+    landed: [], blocked: [], withdrawn: [], failed: [],
+  };
+  if (!allowed[entry.state].includes(next)) throw new HttpError(409, 'INVALID_QUEUE_TRANSITION', `${entry.state} -> ${next}`);
+  if (['landed', 'blocked', 'withdrawn', 'failed'].includes(next)) requireGate(context.call('leases.releaseReservation', entry.changeId));
+  entry.state = next;
+  entry.blockedReason = reason;
+}
 const ordered = (state: QueueState) => [...state.entries].sort((a, b) => a.sequence - b.sequence);
 const validId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const validOid = (value: unknown): value is string => typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
@@ -95,12 +113,12 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
     throw new HttpError(409, 'INVALID_DEPENDENCY', 'Invalid dependency graph');
   }
   for (const dependency of view.dependencyChangeIds) {
-    if (!state.entries.some(entry => entry.changeId === dependency && ['waiting', 'checking', 'merged'].includes(entry.state))) {
+    if (!state.entries.some(entry => entry.changeId === dependency && ['reserved', 'checking', 'landed'].includes(entry.state))) {
       throw new HttpError(409, 'DEPENDENCY_UNAVAILABLE', 'Prerequisite is not admitted or merged');
     }
   }
   if (view.baseOid !== main && !view.dependencyChangeIds.some(id => state.entries.some(entry =>
-    entry.changeId === id && ['waiting', 'checking'].includes(entry.state) && entry.headOid === view.baseOid))) {
+    entry.changeId === id && ['reserved', 'checking'].includes(entry.state) && entry.headOid === view.baseOid))) {
     throw new HttpError(409, 'STALE_BASE', 'Candidate base is neither canonical main nor an admitted prerequisite head');
   }
   const { policy, profile } = policyAndProfile(context, view.policyId, view.profileId);
@@ -111,7 +129,7 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
     policyDigest: policy.digest, profileDigest: profile.digest,
     dependencyChangeIds: [...view.dependencyChangeIds], authorId: view.authorId, unitKeys: [...view.unitKeys],
     verdictId, findingSetVersion: finding.findingSetVersion, reservationFences: { ...fences },
-    state: contestId ? 'contesting' : 'waiting', blockedReason: null, contestId,
+    state: 'admitted', blockedReason: null, contestId,
   };
 }
 function admissionStillValid(context: ModuleContext, entry: Entry): boolean {
@@ -142,7 +160,7 @@ function bump(context: ModuleContext, state: QueueState, reason: string, ids: Id
   context.appendEvent('queue.generation', ids, { generation: state.generation, reason }, version);
 }
 function admissionSnapshot(entry: Entry): FrozenAdmission {
-  return { changeId: entry.changeId, revision: entry.revision, verdictId: entry.verdictId,
+  return { changeId: entry.changeId, admissionId: entry.entryId, revision: entry.revision, verdictId: entry.verdictId,
     findingSetVersion: entry.findingSetVersion, reservationFences: { ...entry.reservationFences },
     baseOid: entry.baseOid, headOid: entry.headOid,
     policyDigest: entry.policyDigest, profileDigest: entry.profileDigest };
@@ -154,9 +172,9 @@ function policyAndProfile(context: ModuleContext, policyId: Id, profileId: Id) {
   return { policy, profile };
 }
 async function makeStackJob(context: ModuleContext, state: QueueState, memberIds: Id[], bootstrap: boolean): Promise<ValidateStackJob> {
-  const entries = memberIds.map(id => state.entries.find(entry => entry.changeId === id)!);
+  const entries = memberIds.map(id => current(state, id)!);
   const seed = state.bootstrap?.input;
-  const first = entries[0] ?? state.entries.find(entry => entry.changeId === state.diagnosis?.original[0]);
+  const first = entries[0] ?? current(state, state.diagnosis?.original[0] ?? '');
   const canonicalName = bootstrap ? seed!.canonicalStorageName : first?.canonicalStorageName;
   const scratchName = bootstrap ? seed!.scratchStorageName : first?.scratchStorageName;
   const policyId = bootstrap ? seed!.policyId : first?.policyId;
@@ -203,8 +221,19 @@ async function makeStackJob(context: ModuleContext, state: QueueState, memberIds
   return { ...immutable, inputDigest } as ValidateStackJob;
 }
 function schedule(context: ModuleContext, state: QueueState, job: Job, purpose: JobRecord['purpose'], memberIds: Id[], contestId?: Id): JobRecord {
+  const entries = memberIds.map(id => current(state, id));
+  if (entries.some(entry => !entry || !['reserved', 'checking'].includes(entry.state))) {
+    throw new HttpError(409, 'ADMISSION_UNAVAILABLE', 'Scheduled member has no active reservation');
+  }
+  if (contestId) {
+    const contest = state.contests.find(item => item.contestId === contestId && item.state === 'open');
+    if (!contest || entries.some(entry => !contest.admissionIds.includes(entry!.entryId))) {
+      throw new HttpError(409, 'CONTEST_CLOSED', 'Contest admission is no longer active');
+    }
+  }
   requireGate(context.call('runners.schedule', job));
-  const record: JobRecord = { job, purpose, memberIds: [...memberIds], contestId, consumed: false };
+  const record: JobRecord = { job, purpose, memberIds: [...memberIds],
+    admissionIds: entries.map(entry => entry!.entryId), contestId, consumed: false };
   state.jobs.push(record);
   if (purpose === 'stack' || purpose === 'diagnostic') state.activeStackJobId = job.jobId;
   const version = context.nextVersion();
@@ -218,12 +247,11 @@ function emit(context: ModuleContext, kind: string, ids: Id[], payload: Record<s
   return context.appendEvent(kind, ids, payload, version).sequence;
 }
 function invalidate(context: ModuleContext, state: QueueState, reason: string, ids: Id[]): void {
-  for (const entry of state.entries) if (entry.state === 'checking') entry.state = 'waiting';
+  for (const entry of state.entries) if (entry.state === 'checking') transition(context, entry, 'reserved');
   bump(context, state, reason, ids);
 }
 function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, reason: string): void {
-  entry.state = 'blocked'; entry.blockedReason = reason;
-  requireGate(context.call('leases.releaseReservation', entry.changeId));
+  transition(context, entry, 'blocked', reason);
   emit(context, 'queue.entry_blocked', [entry.changeId], { reason, confidence: 'none' });
   invalidate(context, state, reason, [entry.changeId]);
 }
@@ -256,14 +284,15 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     const sequence = emit(context, 'queue.enqueued', [changeId], { revision: checked.revision, headOid: checked.headOid,
       verdictId: checked.verdictId, findingSetVersion: checked.findingSetVersion });
     const entry: Entry = { ...checked, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
+    transition(context, entry, 'reserved');
     state.entries.push(entry);
     bump(context, state, 'ADMITTED', [changeId]);
-    const waiting = ordered(state).filter(item => item.state === 'waiting');
+    const waiting = ordered(state).filter(item => item.state === 'reserved');
     const first = waiting[0];
     if (first) {
       const cohort = waiting.filter(item => item.policyId === first.policyId && item.profileId === first.profileId
         && item.canonicalStorageName === first.canonicalStorageName && item.scratchStorageName === first.scratchStorageName);
-      const available = new Set(state.entries.filter(item => item.state === 'merged').map(item => item.changeId));
+      const available = new Set(state.entries.filter(item => item.state === 'landed').map(item => item.changeId));
       if (selectStack(cohort, available, STACK_WIDTH).length === STACK_WIDTH) state.coalesceUntil = context.now();
     }
     save(context, state);
@@ -274,9 +303,10 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
 function queueProjection(state: QueueState) {
   const activeRecord = state.jobs.find(record => record.job.jobId === state.activeStackJobId);
   const stackIds = activeRecord?.memberIds ?? state.ticket?.memberIds ?? [];
+  const stackAdmissionIds = activeRecord?.admissionIds ?? state.ticket?.admissionIds ?? [];
   return {
     generation: state.generation, observedMain: state.observedMain,
-    entries: ordered(state).map(entry => ({ ...entry, stackMember: stackIds.includes(entry.changeId) })),
+    entries: ordered(state).map(entry => ({ ...entry, stackMember: stackAdmissionIds.includes(entry.entryId) })),
     contests: state.contests, promotion: state.ticket, bootstrap: state.bootstrap,
     activeStackJobId: state.activeStackJobId, stackMembers: stackIds, diagnosis: state.diagnosis,
     blameConfidence: state.diagnosis?.reason === 'SINGLETON' ? 'reproduced-singleton'
@@ -290,11 +320,20 @@ function withdraw(context: ModuleContext, body: Record<string, unknown>): Respon
   if (!validId(body.changeId) || typeof body.reason !== 'string' || !body.reason.trim()) throw new HttpError(400, 'INVALID_WITHDRAW', 'Change and reason required');
   return context.transaction(() => {
     const state = read(context);
-    const entry = state.entries.find(item => item.changeId === body.changeId && active(item));
+    const entry = current(state, body.changeId as Id);
     if (!entry) throw new HttpError(404, 'QUEUE_ENTRY_NOT_FOUND', 'No active entry');
     if (entry.authorId !== context.principal.principalId && !context.principal.roles.includes('owner')) throw new HttpError(403, 'FORBIDDEN', 'Only the author or owner may withdraw');
-    requireGate(context.call('leases.releaseReservation', entry.changeId));
-    entry.state = 'withdrawn'; entry.blockedReason = body.reason as string;
+    transition(context, entry, 'withdrawn', body.reason as string);
+    if (entry.contestId) {
+      const contest = state.contests.find(item => item.contestId === entry.contestId && item.state === 'open');
+      if (contest) {
+        contest.state = 'blocked'; contest.reason = 'CHILD_WITHDRAWN';
+        for (const id of contest.admissionIds) {
+          const sibling = admitted(state, id);
+          if (sibling && active(sibling)) transition(context, sibling, 'blocked', 'CHILD_WITHDRAWN');
+        }
+      }
+    }
     emit(context, 'queue.withdrawn', [entry.changeId], { reason: body.reason });
     bump(context, state, 'WITHDRAWN', [entry.changeId]);
     save(context, state);
@@ -332,14 +371,18 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
     if (prepared[0].policyId !== prepared[1].policyId || prepared[0].canonicalStorageName !== prepared[1].canonicalStorageName
       || prepared[0].scratchStorageName !== prepared[1].scratchStorageName) throw new HttpError(409, 'NON_COMPARABLE_PROFILE', 'Contest policy or storage differs');
     const creationSequences: [number, number] = [0, 0];
+    const admissionIds: [Id, Id] = ['', ''];
     prepared.forEach((candidate, i) => {
       const reservation = requireGate(context.call('leases.reserve', candidate.changeId, candidate.reservationFences));
       if (!candidate.unitKeys.every(key => reservation.reservationFences[key] === candidate.reservationFences[key])) throw new HttpError(409, 'LEASE_FENCE_CHANGED', 'Contest reservation differs');
       const sequence = emit(context, 'queue.contest_child', [candidate.changeId, contestId], { headOid: candidate.headOid });
       creationSequences[i] = sequence;
-      state.entries.push({ ...candidate, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() });
+      const entry: Entry = { ...candidate, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
+      transition(context, entry, 'reserved');
+      admissionIds[i] = entry.entryId;
+      state.entries.push(entry);
     });
-    state.contests.push({ contestId, childIds: [children[0], children[1]], creationSequences,
+    state.contests.push({ contestId, childIds: [children[0], children[1]], admissionIds, creationSequences,
       intentKey: body.intentKey as string, intentText: body.intentText as string,
       unitKey: body.unitKey as string, baseOid: main,
       policyDigest: prepared[0].policyDigest, profileDigest: prepared[0].profileDigest,
@@ -416,11 +459,21 @@ async function checkedScratch(context: ModuleContext, record: JobRecord, result:
 function resultPolicy(_context: ModuleContext, record: JobRecord) {
   return record.job.unitPolicy.digest === record.job.policyDigest ? record.job.unitPolicy : null;
 }
+function failRecord(context: ModuleContext, state: QueueState, record: JobRecord, reason: string): void {
+  if (record.job.generation !== state.generation || record.purpose === 'promotion') return;
+  const contest = record.contestId ? state.contests.find(item => item.contestId === record.contestId && item.state === 'open') : undefined;
+  if (record.purpose === 'contest' && !contest) return;
+  if (contest) { contest.state = 'blocked'; contest.reason = reason; }
+  const ids = contest?.admissionIds ?? (record.purpose === 'diagnostic' && state.diagnosis
+    ? state.diagnosis.admissionIds ?? record.admissionIds : record.admissionIds);
+  for (const id of ids) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', reason); }
+  state.activeStackJobId = null;
+}
 async function makePromotionJob(context: ModuleContext, state: QueueState, checked: JobRecord, result: StackResult, promotionId: Id): Promise<Job> {
   const job = checked.job;
   if (job.kind !== 'validate-stack' || !result.composedOid) throw new HttpError(409, 'INVALID_PROMOTION', 'Checked stack unavailable');
   const canonicalName = job.bootstrap ? state.bootstrap!.input.canonicalStorageName
-    : state.entries.find(entry => entry.changeId === checked.memberIds[0])!.canonicalStorageName;
+    : member(state, checked, checked.memberIds[0])!.canonicalStorageName;
   const immutable = {
     kind: 'promote' as const, version: 1, jobId: crypto.randomUUID(), repoId: context.repoId,
     generation: state.generation, profileDigest: job.profileDigest, policyId: job.policyId,
@@ -448,11 +501,12 @@ async function createTicket(context: ModuleContext, state: QueueState, record: J
   if (!await checkedScratch(context, record, result)) {
     state.blockedReason = 'CHECKED_SCRATCH_MISMATCH';
     emit(context, 'queue.blocked', record.memberIds, { reason: state.blockedReason });
+    failRecord(context, state, record, 'CHECKED_SCRATCH_MISMATCH');
     return;
   }
   if (!record.job.bootstrap && !record.memberIds.every(id => {
-    const entry = state.entries.find(item => item.changeId === id);
-    return entry && ['waiting', 'checking'].includes(entry.state) && admissionStillValid(context, entry);
+    const entry = member(state, record, id);
+    return entry && ['reserved', 'checking'].includes(entry.state) && admissionStillValid(context, entry);
   })) {
     invalidate(context, state, 'ELIGIBILITY_CHANGED', record.memberIds);
     return;
@@ -473,19 +527,19 @@ async function createTicket(context: ModuleContext, state: QueueState, record: J
   context.transaction(() => {
     // The coordinator alarm is exclusive with HTTP mutations. Recheck the authoritative gates before freezing.
     if (!checkedJob.bootstrap && !memberIds.every(id => {
-      const entry = state.entries.find(item => item.changeId === id);
-      return entry && ['waiting', 'checking'].includes(entry.state) && admissionStillValid(context, entry);
+      const entry = member(state, record, id);
+      return entry && ['reserved', 'checking'].includes(entry.state) && admissionStillValid(context, entry);
     })) throw new HttpError(409, 'ELIGIBILITY_CHANGED', 'Admission changed before promotion freeze');
     schedule(context, state, promote, 'promotion', memberIds);
     state.ticket = {
       version: 1, promotionId, expectedOldOid: main, checkedNewOid: result.composedOid!,
       bootstrap: checkedJob.bootstrap, queueGeneration: state.generation,
-      frozenAdmission: memberIds.map(id => admissionSnapshot(state.entries.find(item => item.changeId === id)!)),
+      frozenAdmission: memberIds.map(id => admissionSnapshot(member(state, record, id)!)),
       state: 'pending', jobId: promote.jobId,
       canonicalStorageName: checkedJob.bootstrap ? state.bootstrap!.input.canonicalStorageName
-        : state.entries.find(item => item.changeId === memberIds[0])!.canonicalStorageName,
+        : member(state, record, memberIds[0])!.canonicalStorageName,
       scratchStorageName: checkedJob.scratchStorageName,
-      scratchRef: checkedJob.scratchRef, memberIds, resultId: result.jobId, createdAt: context.now(),
+      scratchRef: checkedJob.scratchRef, memberIds, admissionIds: [...record.admissionIds], resultId: result.jobId, createdAt: context.now(),
       lastObservedOid: main, reconciliation: null, jobIds: [promote.jobId], retryIssued: false,
     };
     state.blockedReason = null;
@@ -502,37 +556,45 @@ function finishDiagnosis(context: ModuleContext, state: QueueState, record: JobR
   emit(context, 'queue.diagnosis', diagnosis.original, { reason, blame: diagnosis.blame,
     confidence: reason === 'SINGLETON' ? 'reproduced-singleton' : 'group-only',
     diagnosticJobs: diagnosis.jobs, survivors: diagnosis.survivors });
-  for (const id of diagnosis.blame) {
-    const entry = state.entries.find(item => item.changeId === id);
-    if (entry && active(entry)) {
-      entry.state = 'blocked'; entry.blockedReason = reason;
-      requireGate(context.call('leases.releaseReservation', id));
+  for (const [index, id] of diagnosis.original.entries()) {
+    const entry = admitted(state, diagnosis.admissionIds?.[index] ?? '');
+    if (entry && active(entry) && (reason !== 'SINGLETON' || diagnosis.blame.includes(id) || diagnosis.survivors.length === 0)) {
+      transition(context, entry, 'blocked', reason);
     }
   }
   if (reason !== 'SINGLETON' || diagnosis.survivors.length === 0) return;
   if (record.memberIds.length !== diagnosis.survivors.length
     || !record.memberIds.every(id => diagnosis.survivors.includes(id))) {
     state.blockedReason = 'DEPENDENCY_GROUP';
+    for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, entry, 'blocked', 'DEPENDENCY_GROUP'); }
     return;
   }
-  if (!diagnosis.survivors.every(id => state.entries.some(entry => entry.changeId === id && admissionStillValid(context, entry)))) return;
-  return createTicket(context, state, record, result, state.observedMain);
+  if (!diagnosis.survivors.every(id => { const entry = member(state, record, id); return entry && admissionStillValid(context, entry); })) {
+    for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, entry, 'blocked', 'ELIGIBILITY_CHANGED'); }
+    return;
+  }
+  return createTicket(context, state, record, result, state.observedMain).then(() => {
+    if (!state.ticket || !['pending', 'reconcile'].includes(state.ticket.state)) {
+      for (const id of diagnosis.survivors) { const entry = admitted(state, diagnosis.admissionIds?.[diagnosis.original.indexOf(id)] ?? ''); if (entry && active(entry)) transition(context, entry, 'blocked', state.blockedReason ?? 'TICKET_UNAVAILABLE'); }
+    }
+  });
 }
 async function processStackResult(context: ModuleContext, state: QueueState, record: JobRecord, result: StackResult, main: string | null): Promise<void> {
   if (record.job.kind !== 'validate-stack' || record.job.generation !== state.generation || record.job.canonicalBaseOid !== main) return;
   if (!record.job.bootstrap && !record.memberIds.every(id => {
-    const entry = state.entries.find(item => item.changeId === id);
-    return entry && admissionStillValid(context, entry);
+    const entry = member(state, record, id);
+    return entry && active(entry) && admissionStillValid(context, entry);
   })) {
     invalidate(context, state, 'ELIGIBILITY_CHANGED', record.memberIds);
     return;
   }
   const policy = resultPolicy(context, record);
-  if (!policy) { state.blockedReason = 'PROFILE_UNAVAILABLE'; return; }
+  if (!policy) { state.blockedReason = 'PROFILE_UNAVAILABLE'; failRecord(context, state, record, 'PROFILE_UNAVAILABLE'); return; }
   const green = accepted(result, policy.acceptance);
   if (green && !await checkedScratch(context, record, result)) {
     state.blockedReason = 'CHECKED_SCRATCH_MISMATCH';
     emit(context, 'queue.blocked', record.memberIds, { reason: state.blockedReason });
+    failRecord(context, state, record, 'CHECKED_SCRATCH_MISMATCH');
     return;
   }
   if (record.purpose === 'contest') {
@@ -549,7 +611,7 @@ async function processStackResult(context: ModuleContext, state: QueueState, rec
       return;
     }
     const started = startDiagnosis(record.memberIds);
-    state.diagnosis = started.diagnosis;
+    state.diagnosis = { ...started.diagnosis, admissionIds: [...record.admissionIds] };
     emit(context, 'queue.diagnosis_started', record.memberIds, { outcome: result.outcome, next: started.next });
     await scheduleDiagnostic(context, state, started.next!);
     return;
@@ -574,6 +636,12 @@ async function scheduleDiagnostic(context: ModuleContext, state: QueueState, ids
 async function processContestResult(context: ModuleContext, state: QueueState, record: JobRecord, _result: StackResult, _main: string | null): Promise<void> {
   const contest = state.contests.find(item => item.contestId === record.contestId);
   if (!contest || contest.state !== 'open') return;
+  if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
+    contest.state = 'blocked'; contest.reason = 'CHILD_UNAVAILABLE';
+    for (const id of contest.admissionIds) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', 'CHILD_UNAVAILABLE'); }
+    bump(context, state, 'CONTEST_BLOCKED', contest.childIds);
+    return;
+  }
   contest.resultIds.push(record.job.jobId);
   const pair = contest.childIds.map(id => state.jobs.find(item => item.purpose === 'contest'
     && item.contestId === contest.contestId && item.memberIds[0] === id && item.result?.kind === 'validate-stack'));
@@ -597,16 +665,13 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
     contest.state = 'blocked';
     state.blockedReason = outcome.reason;
     for (const id of contest.childIds) {
-      const entry = state.entries.find(item => item.changeId === id)!;
-      entry.state = 'blocked'; entry.blockedReason = outcome.reason;
-      requireGate(context.call('leases.releaseReservation', id));
+      const entry = admitted(state, contest.admissionIds[contest.childIds.indexOf(id)])!;
+      transition(context, entry, 'blocked', outcome.reason);
     }
   } else {
     contest.state = 'selected'; contest.winnerId = outcome.winnerId;
-    const winner = state.entries.find(item => item.changeId === outcome.winnerId)!;
-    const loser = state.entries.find(item => item.changeId === outcome.loserId)!;
-    winner.state = 'waiting'; loser.state = 'superseded'; loser.blockedReason = outcome.reason;
-    requireGate(context.call('leases.releaseReservation', loser.changeId));
+    const loser = admitted(state, contest.admissionIds[contest.childIds.indexOf(outcome.loserId)])!;
+    transition(context, loser, 'failed', outcome.reason);
   }
   emit(context, 'queue.contest_arbitrated', contest.childIds, { contestId: contest.contestId,
     winnerId: contest.winnerId, reason: contest.reason, firstResult: first.result?.jobId, secondResult: second.result?.jobId });
@@ -624,12 +689,9 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
       ticket.state = 'applied'; ticket.reconciliation = 'EXACT_NEW_OID';
       state.finalCanonicalOid = observed;
       state.blockedReason = null;
-      for (const id of ticket.memberIds) {
-        const entry = state.entries.find(item => item.changeId === id);
-        if (entry) {
-          entry.state = 'merged'; entry.blockedReason = null;
-          requireGate(context.call('leases.releaseReservation', id));
-        }
+      for (const id of ticket.admissionIds) {
+        const entry = admitted(state, id);
+        if (entry && active(entry)) transition(context, entry, 'landed');
       }
       if (ticket.bootstrap) state.bootstrap!.state = 'merged';
       state.observedMain = observed;
@@ -644,9 +706,9 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
     && results.every(result => result?.outcome === 'OLD_REF' && result.observedCanonicalOid === observed)) {
     ticket.state = 'failed'; ticket.reconciliation = 'CONFIRMED_OLD_REF';
     state.blockedReason = null;
-    for (const id of ticket.memberIds) {
-      const entry = state.entries.find(item => item.changeId === id);
-      if (entry && entry.state === 'checking') entry.state = 'waiting';
+    for (const id of ticket.admissionIds) {
+      const entry = admitted(state, id);
+      if (entry && entry.state === 'checking') transition(context, entry, 'reserved');
     }
     if (ticket.bootstrap) state.bootstrap!.state = 'waiting';
     emit(context, 'queue.promotion_failed', ticket.memberIds, { reason: 'CONFIRMED_OLD_REF', observed });
@@ -693,6 +755,7 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
   if (!await validResultDigest(result)) {
     state.blockedReason = 'RESULT_DIGEST_MISMATCH';
     emit(context, 'queue.result_rejected', record.memberIds, { jobId: result.jobId, reason: state.blockedReason });
+    if (record.purpose !== 'promotion') failRecord(context, state, record, 'RESULT_DIGEST_MISMATCH');
     return;
   }
   if (record.purpose === 'promotion') {
@@ -706,10 +769,7 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
       state.blockedReason = 'SUSPECTED_FLAKE';
       emit(context, 'queue.suspected_flake', record.memberIds, { firstJobId: record.retryOf,
         retryJobId: result.jobId, firstOutcome: previous.outcome, secondOutcome: result.outcome });
-      for (const id of record.memberIds) {
-        const entry = state.entries.find(item => item.changeId === id);
-        if (entry) { entry.state = 'blocked'; entry.blockedReason = 'SUSPECTED_FLAKE'; }
-      }
+      failRecord(context, state, record, 'SUSPECTED_FLAKE');
       return;
     }
   }
@@ -727,6 +787,7 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
     }
     state.blockedReason = 'ENVIRONMENT_FAILURE';
     emit(context, 'queue.blocked', record.memberIds, { reason: state.blockedReason });
+    failRecord(context, state, record, 'ENVIRONMENT_FAILURE');
     return;
   }
   if (result.kind !== 'validate-stack') return;
@@ -764,8 +825,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
     state.observedMain = main;
     invalidate(context, state, 'MAIN_CHANGED', []);
     for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
-      entry.state = 'blocked'; entry.blockedReason = 'STALE_MAIN';
-      requireGate(context.call('leases.releaseReservation', entry.changeId));
+      transition(context, entry, 'blocked', 'STALE_MAIN');
       emit(context, 'queue.entry_blocked', [entry.changeId], { reason: 'STALE_MAIN' });
     }
   }
@@ -782,8 +842,16 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
     || state.blockedReason === 'CHECKED_SCRATCH_MISMATCH') { save(context, state); return; }
   const contest = state.contests.find(item => item.state === 'open');
   if (contest) {
+    if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
+      contest.state = 'blocked'; contest.reason = 'CHILD_UNAVAILABLE';
+      for (const id of contest.admissionIds) { const entry = admitted(state, id); if (entry && active(entry)) transition(context, entry, 'blocked', 'CHILD_UNAVAILABLE'); }
+      bump(context, state, 'CONTEST_BLOCKED', contest.childIds);
+      save(context, state);
+      return;
+    }
     for (const id of contest.childIds) {
-      if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId && record.memberIds[0] === id)) continue;
+      const admissionId = contest.admissionIds[contest.childIds.indexOf(id)];
+      if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId && record.admissionIds[0] === admissionId)) continue;
       const job = await makeStackJob(context, state, [id], false);
       context.transaction(() => { schedule(context, state, job, 'contest', [id], contest.contestId); save(context, state); });
     }
@@ -801,9 +869,10 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   }
   if (state.activeStackJobId || state.diagnosis && state.diagnosis.phase !== 'done'
     || state.coalesceUntil !== null && context.now() < state.coalesceUntil) { save(context, state); return; }
-  const waiting = ordered(state).filter(entry => entry.state === 'waiting' && !entry.contestId || entry.state === 'waiting' && state.contests.some(contest => contest.winnerId === entry.changeId));
+  const waiting = ordered(state).filter(entry => entry.state === 'reserved' && (!entry.contestId
+    || state.contests.some(contest => contest.state === 'selected' && contest.admissionIds.includes(entry.entryId) && contest.winnerId === entry.changeId)));
   if (waiting.length === 0) { save(context, state); return; }
-  const available = new Set(state.entries.filter(entry => entry.state === 'merged').map(entry => entry.changeId));
+  const available = new Set(state.entries.filter(entry => entry.state === 'landed').map(entry => entry.changeId));
   const anchor = waiting[0];
   const comparable = waiting.filter(entry => entry.policyId === anchor.policyId && entry.profileId === anchor.profileId
     && entry.canonicalStorageName === anchor.canonicalStorageName && entry.scratchStorageName === anchor.scratchStorageName);
@@ -812,7 +881,7 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   const job = await makeStackJob(context, state, selected, false);
   context.transaction(() => {
     schedule(context, state, job, 'stack', selected);
-    for (const id of selected) state.entries.find(entry => entry.changeId === id)!.state = 'checking';
+    for (const id of selected) transition(context, current(state, id)!, 'checking');
     state.coalesceUntil = null;
     emit(context, 'queue.stack_checking', selected, { jobId: job.jobId, generation: state.generation, width: selected.length });
     save(context, state);
@@ -847,7 +916,7 @@ export const queue: FeatureModule = {
       return unscheduled && state.coalesceUntil !== null
         ? Math.max(context.now() + 1, state.coalesceUntil) : context.now() + 10_000;
     }
-    if (state.bootstrap?.state === 'waiting' || state.entries.some(entry => entry.state === 'waiting')) {
+    if (state.bootstrap?.state === 'waiting' || state.entries.some(entry => entry.state === 'reserved')) {
       return state.coalesceUntil !== null
         ? Math.max(context.now() + 1, state.coalesceUntil) : context.now() + 10_000;
     }

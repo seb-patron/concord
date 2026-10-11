@@ -35,6 +35,8 @@ export function dependencyClosure(ids: readonly Id[], all: readonly PlannedEntry
 export type DiagnosisReason = 'BASE_RED' | 'INTERACTION' | 'DEPENDENCY_GROUP' | 'INCONCLUSIVE' | 'SINGLETON';
 export interface Diagnosis {
   original: Id[]; suspects: Id[]; excluded: Id[];
+  /** Queue-owned admission IDs parallel to original; planner fixtures need only change IDs. */
+  admissionIds?: Id[];
   phase: 'baseline' | 'left' | 'right' | 'survivors' | 'done';
   left: Id[]; right: Id[]; leftGreen: boolean;
   jobs: number; reason: DiagnosisReason | null; blame: Id[]; survivors: Id[];
