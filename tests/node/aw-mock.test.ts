@@ -227,7 +227,7 @@ describe('AW mock adapter', () => {
   it.each([
     ['opened', 'awaiting_review', 2, 1, 0],
     ['leased', 'awaiting_review', 1, 1, 0],
-    ['registered', 'awaiting_review', 1, 4, 0],
+    ['registered', 'awaiting_review', 1, 2, 0],
     ['published', 'awaiting_review', 1, 1, 0],
     ['ready', 'awaiting_review', 1, 1, 0],
     ['approved', 'queued', 1, 1, 1],
@@ -318,13 +318,12 @@ describe('AW mock adapter', () => {
   it('recovers from a cached 429 capacity refusal after run-state loss', async () => {
     const h = await harness(); h.api.leaseCapacity = true;
     expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { code: 'LEASE_CAPACITY', status: 429 } });
-    expect(h.claimKeys).toHaveLength(3); // Transport retries share one request nonce.
-    expect(new Set(h.claimKeys).size).toBe(1);
+    expect(h.claimKeys).toHaveLength(1); // A response retires its nonce immediately.
     expect(JSON.parse(await readFile(h.statePath, 'utf8')).pendingRequest).toBeUndefined();
     h.api.leaseCapacity = false;
     await rm(h.statePath);
     expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
-    expect(h.claimKeys).toHaveLength(4);
+    expect(h.claimKeys).toHaveLength(2);
     expect(new Set(h.claimKeys).size).toBe(2);
     expect(h.api.publishes).toBe(1);
   });
@@ -356,6 +355,20 @@ describe('AW mock adapter', () => {
     expect(h.changes).toHaveLength(1);
   });
 
+  it('reconciles a retained blocked state after a 501 preparation response', async () => {
+    const h = await harness(); h.api.publishPreparationUnavailable = true;
+    expect(await h.run()).toMatchObject({ phase: 'blocked', blocked: { status: 501 } });
+    expect(h.writeTokenKeys).toHaveLength(1);
+    const firstKey = h.writeTokenKeys[0];
+    h.api.globalVersion++;
+    h.api.publishPreparationUnavailable = false;
+    expect(await h.run()).toMatchObject({ phase: 'awaiting_review', changeId: 'change-1' });
+    expect(h.writeTokenKeys).toHaveLength(2);
+    expect(h.writeTokenKeys[1]).not.toBe(firstKey);
+    expect(h.api.publishes).toBe(1);
+    expect(h.changes).toHaveLength(1);
+  });
+
   it('waits for independent review, then records unavailable queue as a structured blocked terminal run', async () => {
     const h = await harness();
     expect((await h.run()).phase).toBe('awaiting_review');
@@ -364,10 +377,13 @@ describe('AW mock adapter', () => {
     h.api.queueUnavailable = true;
     const result = await h.run();
     expect(result).toMatchObject({ phase: 'blocked', blocked: { code: 'MODULE_UNAVAILABLE', status: 501 } });
-    expect(h.api.enqueues).toBe(3); // The shared client retries a keyed 501 at most three times.
+    expect(h.api.enqueues).toBe(1);
     expect(JSON.parse(await readFile(h.statePath, 'utf8')).mappings['demo/task-7/1'].block.code).toBe('MODULE_UNAVAILABLE');
     await h.run();
-    expect(h.api.enqueues).toBe(3); // A terminal run refusal is not silently retried.
+    expect(h.api.enqueues).toBe(2); // Each run reconciles and sends a fresh request.
+    h.api.queueUnavailable = false;
+    expect(await h.run()).toMatchObject({ phase: 'queued', changeId: 'change-1' });
+    expect(h.api.enqueues).toBe(3);
   });
 
   it('enqueues only after a reviewer verdict exists for the active revision', async () => {
@@ -391,5 +407,16 @@ describe('AW mock adapter', () => {
     expect(await h.run()).toMatchObject({ changeId: 'change-2', identity: 'demo/task-7/2' });
     expect(h.changes).toHaveLength(2);
     expect(h.api.publishes).toBe(2);
+  });
+
+  it('refuses a changed attempt while the first server change remains active', async () => {
+    const h = await harness();
+    expect(await h.run()).toMatchObject({ changeId: 'change-1', phase: 'awaiting_review' });
+    h.fixture.explicitAttempt = 2; await h.saveFixture();
+    await expect(h.run()).rejects.toMatchObject({ kind: 'conflict', status: 409, payload: { error: { code: 'ATTEMPT_CONFLICT' } } });
+    await rm(h.statePath);
+    await expect(h.run()).rejects.toMatchObject({ kind: 'conflict', status: 409, payload: { error: { code: 'ATTEMPT_CONFLICT' } } });
+    expect(h.changes).toHaveLength(1);
+    expect(h.api.creates).toBe(1);
   });
 });

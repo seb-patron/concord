@@ -299,7 +299,7 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
       await saveState(statePath, state);
     }
     try {
-      const response = await client.request<T>('POST', route, { body, expectedVersion, idempotencyKey: state.pendingRequest.key });
+      const response = await client.request<T>('POST', route, { body, expectedVersion, idempotencyKey: state.pendingRequest.key, retryMode: 'transport-only' });
       state.pendingRequest = undefined;
       await saveState(statePath, state);
       return response;
@@ -313,45 +313,32 @@ export async function runAwMock(fixturePath: string, statePath: string, client: 
   };
   let mapping = state.mappings[identity];
   const remember = async () => { state.mappings[identity] = mapping!; await saveState(statePath, state); };
-  if (mapping) {
-    if (mapping.fingerprint !== fingerprint(fixture)) throw new ConcordError('Intent key reused with different task content', 'conflict', 409, { error: { code: 'INTENT_CONFLICT', message: 'Intent key reused with different task content' } });
-    mapping.observedBaseOid = fixture.observedBaseOid;
-    try {
-      if (mapping.phase === 'blocked' && ![409, 429].includes(mapping.block?.status ?? 0) && mapping.block?.code !== 'TRANSPORT') {
-        const change = await getChange(client, fixture, mapping.changeId);
-        ensureTask(change, fixture);
-        if (terminal.has(change.status)) mapping.block = { code: 'ATTEMPT_REQUIRED', reason: 'Terminal change requires the next explicitAttempt.' };
-        mapping.headOid = change.headOid ?? mapping.headOid;
-        await remember();
-        return output(fixture, mapping, client, change);
-      }
-      const change = await getChange(client, fixture, mapping.changeId);
-      const resumed = await resume(client, fixture, mapping, change, remember, false, post);
-      await remember();
-      return output(fixture, mapping, client, resumed);
-    } catch (error) { mapping.phase = 'blocked'; mapping.block = blockFor(error); await remember(); return output(fixture, mapping, client); }
-  }
   const root = path(fixture.project);
   const found = await findIntent(client, fixture);
   const existing = found?.change;
   if (existing) ensureTask(existing, fixture);
+  const serverAttempt = found?.attempt ?? 0;
+  if (serverAttempt !== fixture.explicitAttempt && !(existing && terminal.has(existing.status) && serverAttempt + 1 === fixture.explicitAttempt) &&
+    !(serverAttempt === 0 && fixture.explicitAttempt === 1)) {
+    throw new ConcordError('Explicit attempt differs from the server intent', 'conflict', 409,
+      { error: { code: 'ATTEMPT_CONFLICT', message: 'Explicit attempt differs from the server intent', details: { serverAttempt, explicitAttempt: fixture.explicitAttempt } } });
+  }
+  if (mapping && mapping.fingerprint !== fingerprint(fixture)) throw new ConcordError('Intent key reused with different task content', 'conflict', 409,
+    { error: { code: 'INTENT_CONFLICT', message: 'Intent key reused with different task content' } });
   const repo = (await client.request<Envelope<Repo>>('GET', root)).data;
   if (repo.status !== 'ready' || !repo.observedCanonicalOid) throw new Error('READY_CANONICAL_REPO_REQUIRED');
   let created: Change;
-  if (existing && (!terminal.has(existing.status) || found?.attempt === fixture.explicitAttempt)) created = existing;
-  else try {
+  if (existing && (serverAttempt === fixture.explicitAttempt)) created = existing;
+  else {
     const reply = (await post<Envelope<Change>>(`${root}/changes`,
-      { intentKey: intentKey(fixture), intentText: fixture.intent, baseOid: existing && !terminal.has(existing.status) ? existing.baseOid : repo.observedCanonicalOid,
+      { intentKey: intentKey(fixture), intentText: fixture.intent, baseOid: repo.observedCanonicalOid,
         branch: branch(fixture), unitKeys: [...fixture.unitKeys].sort(), dependencyChangeIds: [], attempt: fixture.explicitAttempt })).data;
     created = reply;
-  } catch (error) {
-    if (!(error instanceof ConcordError) || !existing || !terminal.has(existing.status) || found?.attempt !== fixture.explicitAttempt ||
-      (error.payload as { error?: { code?: string } } | undefined)?.error?.code !== 'ATTEMPT_REQUIRED') throw error;
-    created = existing;
   }
   ensureTask(created, fixture);
-  mapping = { identity, intentKey: intentKey(fixture), fingerprint: fingerprint(fixture), changeId: created.changeId,
+  if (!mapping || mapping.changeId !== created.changeId) mapping = { identity, intentKey: intentKey(fixture), fingerprint: fingerprint(fixture), changeId: created.changeId,
     phase: 'opened', observedBaseOid: fixture.observedBaseOid };
+  else mapping.observedBaseOid = fixture.observedBaseOid;
   await remember();
   try {
     const change = await resume(client, fixture, mapping, created, remember, !!existing && existing.changeId === created.changeId, post);

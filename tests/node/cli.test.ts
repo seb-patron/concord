@@ -114,6 +114,30 @@ describe('Concord agent CLI client', () => {
     expect(keys).toEqual(['retry-this-key', 'retry-this-key']);
   });
 
+  it('supports transport-only retries without retrying an HTTP refusal', async () => {
+    const keys: string[] = [];
+    let calls = 0;
+    const client = new ConcordClient({ url: 'https://concord.invalid', sleep: async () => {}, fetch: async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('idempotency-key') ?? '');
+      if (++calls === 1) throw new TypeError('response lost');
+      return new Response(JSON.stringify({ error: { code: 'LEASE_CAPACITY', message: 'full' } }), { status: 429 });
+    } });
+    await expect(client.request('POST', '/repos/r/leases', { body: {}, idempotencyKey: 'once', retryMode: 'transport-only' }))
+      .rejects.toMatchObject({ status: 429, payload: { error: { code: 'LEASE_CAPACITY' } } });
+    expect(keys).toEqual(['once', 'once']);
+  });
+
+  it('does not retry a nonce after response body reading fails', async () => {
+    let calls = 0;
+    const client = new ConcordClient({ url: 'https://concord.invalid', sleep: async () => {}, fetch: async () => {
+      calls++;
+      return new Response(new ReadableStream({ start(controller) { controller.error(new Error('body lost')); } }), { status: 200 });
+    } });
+    await expect(client.request('POST', '/repos/r/leases', { body: {}, idempotencyKey: 'once', retryMode: 'transport-only' }))
+      .rejects.toMatchObject({ kind: 'server', status: 200 });
+    expect(calls).toBe(1);
+  });
+
   it('classifies expired identity as auth and redacts bearer credentials from transport diagnostics', async () => {
     const expired = new ConcordClient({ url: 'https://concord.invalid', token: 'expired-secret', fetch: async () => new Response(JSON.stringify({ error: { message: 'expired-secret' } }), { status: 401 }) });
     await expect(expired.request('GET', '/repos')).rejects.toMatchObject({ kind: 'auth', exitCode: 4 });
