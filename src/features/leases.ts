@@ -1,5 +1,5 @@
 import type { Change, FeatureModule, Gate, Lease, ModuleContext, Repo, TrustedPolicy } from '../contracts';
-import { failure, HttpError, json, unavailableGate } from '../http';
+import { encodeCursor, failure, HttpError, json, parseCursor, unavailableGate } from '../http';
 import { eventSequence, sqlState } from '../state';
 import { covers, normalizeUnits, overlaps, resolveUnit, unitRegistry, type UnitIdentity } from '../leases/units';
 
@@ -85,18 +85,23 @@ function claim(context: ModuleContext, body: unknown): Response {
     input.intentText.trim().length === 0 || input.intentText.length > 2000) {
     throw new HttpError(422, 'INVALID_CLAIM', 'changeId and nonempty intentText are required');
   }
+  const state = sqlState(context.sql);
+  const repo = state.get<Repo>('module:repos:repo');
+  if (!repo || repo.repoId !== context.repoId || repo.tenantId !== context.tenantId || repo.status !== 'ready') {
+    throw new HttpError(404, 'REPO_NOT_FOUND', 'A ready repository record is required');
+  }
+  if (!context.readChange) throw new HttpError(501, 'MODULE_UNAVAILABLE', 'Repos change view unavailable');
+  const change = context.readChange(input.changeId);
+  if (change.status === 'blocked' && change.code === 'MODULE_UNAVAILABLE') {
+    throw new HttpError(501, 'MODULE_UNAVAILABLE', 'Repos change view unavailable');
+  }
+  if (change.status !== 'eligible' || change.value.authorId !== context.principal.principalId ||
+    !['draft', 'ready'].includes(change.value.status)) {
+    throw new HttpError(403, 'CHANGE_NOT_OWNED', 'An active change owned by the claimant is required');
+  }
   const registry = unitRegistry(policy(context));
   const units = normalizeUnits(registry, input.unitKeys);
   const ttlSeconds = ttl(input.ttlSeconds);
-  const state = sqlState(context.sql);
-  const repo = state.get<Repo>('module:repos:repo');
-  if (repo) {
-    const change = state.get<Change>(`module:repos:change:${input.changeId}`);
-    if (!change || change.repoId !== context.repoId || change.authorId !== context.principal.principalId ||
-      !['draft', 'ready'].includes(change.status)) {
-      throw new HttpError(403, 'CHANGE_NOT_OWNED', 'An active change owned by the claimant is required');
-    }
-  }
   return context.transaction(() => {
     const now = context.now();
     expireDue(context, now);
@@ -189,11 +194,10 @@ function release(context: ModuleContext, leaseId: string, body: unknown): Respon
   });
 }
 
-function projection(context: ModuleContext, limit = 100) {
+function projection(context: ModuleContext, offset = 0) {
   const now = context.now();
-  const latest = rows(context, 'SELECT * FROM leases_claims ORDER BY created_at DESC, lease_id DESC LIMIT ?', limit);
-  const all = new Map([...latest, ...activeRows(context, now)].map(row => [row.lease_id, row]));
-  const items = [...all.values()].sort((a, b) => b.created_at - a.created_at || b.lease_id.localeCompare(a.lease_id))
+  const page = rows(context, "SELECT * FROM leases_claims ORDER BY CASE WHEN state IN ('active','reserved') AND expires_at > ? THEN 0 ELSE 1 END, created_at DESC, lease_id DESC LIMIT 101 OFFSET ?", now, offset);
+  const items = page.slice(0, 100)
     .map(row => ({ ...asLease(row),
       state: row.expires_at <= now && (row.state === 'active' || row.state === 'reserved') ? 'expired' : row.state,
       remainingSeconds: row.state === 'active' || row.state === 'reserved' ?
@@ -206,7 +210,8 @@ function projection(context: ModuleContext, limit = 100) {
       })), createdAt: row.created_at,
       nextAction: 'Wait for the holder to release or the displayed expiry, then retry the claim.' }));
   return { status: items.length || refusals.length || Object.keys(policy(context).units).length ? 'ready' : 'unavailable',
-    items, refusals, renewAfterSeconds: RENEW_AFTER_SECONDS, serverTime: now };
+    items, nextCursor: page.length > 100 ? encodeCursor(offset + items.length) : null,
+    refusals, renewAfterSeconds: RENEW_AFTER_SECONDS, serverTime: now };
 }
 
 function blocked(context: ModuleContext, code: string, reason: string, evidenceIds: string[] = []): Gate<never> {
@@ -349,7 +354,8 @@ export const leases: FeatureModule = {
     'CREATE INDEX IF NOT EXISTS leases_claims_live ON leases_claims(state, expires_at)',
   ] }],
   routes: [
-    { method: 'GET', pattern: collection, handle: context => json(projection(context), context.version(), eventSequence(context.sql)) },
+    { method: 'GET', pattern: collection, handle: (context, request) => json(projection(context,
+      parseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
   ],

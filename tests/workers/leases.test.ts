@@ -3,7 +3,8 @@ import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
 import { leases } from '../../src/features/leases';
-import type { Change, Event, ModuleContext, Principal, TrustedConfiguration } from '../../src/contracts';
+import { repos } from '../../src/features/repos';
+import type { Change, Event, ModuleContext, Principal, Repo, TrustedConfiguration } from '../../src/contracts';
 import { appendEvent, eventSequence, localFixtureConfig, sqlState } from '../../src/state';
 import { changedUnitsForFile, normalizeUnits, overlaps, resolveUnit, unitRegistry } from '../../src/leases/units';
 import { apiRequest, mutation, responseBody } from '../helpers';
@@ -18,17 +19,30 @@ policy.units = {
 };
 const trusted: TrustedConfiguration = { policies: { 'local-demo': policy }, profiles: localFixtureConfig('local').profiles };
 const previousTrustedConfig = (env as Env).TRUSTED_CONFIG;
+const previousChangeView = repos.changeView;
 
-afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; });
+afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; });
 
 function setupPolicy(): void {
   (env as Env).TRUSTED_CONFIG = JSON.stringify(trusted);
+  repos.changeView = (context, changeId) => {
+    const change = sqlState(context.sql).get<Change>(`module:repos:change:${changeId}`);
+    if (!change || change.repoId !== context.repoId || change.changeId !== changeId) {
+      return { status: 'blocked', version: context.version(), code: 'CHANGE_NOT_FOUND', reason: 'Change missing', evidenceIds: [] };
+    }
+    return { status: 'eligible', version: context.version(), evidenceIds: [changeId], value: {
+      authorId: change.authorId, headOid: change.headOid, revision: change.revision,
+      status: change.status, unitKeys: change.unitKeys, frozen: false,
+    } };
+  };
 }
 
 const fetchApi = (request: Request) => worker.fetch(request, env);
 const path = (repo: string) => `/v1/repos/${repo}/leases`;
-const claim = (repo: string, actor: string, changeId: string, unitKeys: string[], key: string, extra: Record<string, unknown> = {}) =>
-  fetchApi(mutation(path(repo), { changeId, unitKeys, intentText: `Work by ${actor}`, ...extra }, key, actor));
+async function claim(repo: string, actor: string, changeId: string, unitKeys: string[], key: string, extra: Record<string, unknown> = {}) {
+  await runInDurableObject(stubFor(repo), async (_instance, state) => seedClaim(state, repo, changeId, actor.replace(/^local-/, '')));
+  return fetchApi(mutation(path(repo), { changeId, unitKeys, intentText: `Work by ${actor}`, ...extra }, key, actor));
+}
 
 async function listing(repo: string) {
   const response = await fetchApi(apiRequest(path(repo), 'local-viewer'));
@@ -55,6 +69,9 @@ function contextFor(state: DurableObjectState, repoId: string, principalId: stri
       put: <T>(key: string, value: T) => base.put(`module:leases:${key}`, value),
       delete: (key: string) => base.delete(`module:leases:${key}`) },
     call: (() => { throw new Error('unused'); }) as ModuleContext['call'],
+    readChange: changeId => repos.changeView?.(context, changeId) ?? {
+      status: 'blocked', version: context.version(), code: 'MODULE_UNAVAILABLE', reason: 'Repos change view unavailable', evidenceIds: [],
+    },
   };
   return context;
 }
@@ -70,6 +87,17 @@ function fakeReadyChange(repo: string, changeId: string, authorId: string, unitK
     branch: 'main', baseOid: 'base', headOid: `head-${changeId}`,
     revision: 1, unitKeys, dependencyChangeIds: [], status: 'ready', version: 1,
   };
+}
+
+function seedClaim(state: DurableObjectState, repoId: string, changeId: string, authorId: string): void {
+  const store = sqlState(state.storage.sql);
+  const repo: Repo = {
+    repoId, tenantId: 'local', displayName: repoId, canonicalStorageName: repoId,
+    defaultBranch: 'main', observedCanonicalOid: null, policyId: 'local-demo',
+    policyDigest: policy.digest, profileId: 'local-demo', status: 'ready', version: 1,
+  };
+  store.put('module:repos:repo', repo);
+  store.put(`module:repos:change:${changeId}`, fakeReadyChange(repoId, changeId, authorId, []));
 }
 
 function addVerified(state: DurableObjectState, change: Change, unitKeys = change.unitKeys): void {
@@ -111,6 +139,77 @@ describe('semantic lease identities', () => {
 });
 
 describe('RepoCoordinator lease routes', () => {
+  it('refuses claims without a repository record or a registered change view', async () => {
+    setupPolicy();
+    const repo = 'lease_missing_repo';
+    const request = (key: string) => mutation(path(repo), {
+      changeId: 'unowned', unitKeys: ['row:families:alpha'], intentText: 'Claim without authority',
+    }, key, 'local-agent-a');
+    const absent = await fetchApi(request('absent-repo'));
+    expect(absent.status).toBe(404);
+    expect((await responseBody(absent)).error.code).toBe('REPO_NOT_FOUND');
+    await runInDurableObject(stubFor(repo), async (_instance, state) => seedClaim(state, repo, 'unowned', 'agent-a'));
+    repos.changeView = undefined;
+    const unavailable = await fetchApi(request('absent-view'));
+    expect(unavailable.status).toBe(501);
+    expect((await responseBody(unavailable)).error.code).toBe('MODULE_UNAVAILABLE');
+    expect((await listing(repo)).items).toEqual([]);
+  });
+
+  it('requires an owned active change from the repos change view', async () => {
+    setupPolicy();
+    const repo = 'lease_change_owner';
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      seedClaim(state, repo, 'other-owner', 'agent-b');
+      seedClaim(state, repo, 'closed', 'agent-a');
+      sqlState(state.storage.sql).put('module:repos:change:closed', {
+        ...fakeReadyChange(repo, 'closed', 'agent-a', []), status: 'closed',
+      });
+    });
+    for (const [changeId, key] of [['other-owner', 'other-owner'], ['closed', 'closed'], ['missing', 'missing']]) {
+      const result = await fetchApi(mutation(path(repo), {
+        changeId, unitKeys: ['row:families:alpha'], intentText: 'Invalid ownership',
+      }, key, 'local-agent-a'));
+      expect(result.status).toBe(403);
+      expect((await responseBody(result)).error.code).toBe('CHANGE_NOT_OWNED');
+    }
+    expect((await listing(repo)).items).toEqual([]);
+  });
+
+  it('pages 127 older live leases and 100 newer released leases without losing any', async () => {
+    setupPolicy();
+    const repo = 'lease_many_live';
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      seedClaim(state, repo, 'seed', 'local-agent-a');
+      const now = Date.now();
+      for (let index = 0; index < 227; index++) {
+        const live = index < 127;
+        state.storage.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          `seed-${index}`, `row:seed:${index}`, 'local-agent-a', 'seed', 'Seeded lease', 1,
+          now + 60_000, live ? 'active' : 'released', 1, now + index, now + index);
+      }
+    });
+    const seen = new Set<string>();
+    const pageSizes: number[] = [];
+    let cursor: string | null = null;
+    do {
+      const response = await fetchApi(apiRequest(`${path(repo)}${cursor ? `?cursor=${cursor}` : ''}`, 'local-viewer'));
+      expect(response.status).toBe(200);
+      const page = (await responseBody(response)).data;
+      expect(page.items.length).toBeLessThanOrEqual(100);
+      pageSizes.push(page.items.length);
+      for (const item of page.items as Array<{ leaseId: string }>) {
+        expect(seen.has(item.leaseId)).toBe(false);
+        seen.add(item.leaseId);
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(pageSizes).toEqual([100, 100, 27]);
+    expect(seen.size).toBe(227);
+    for (let index = 0; index < 127; index++) expect(seen.has(`seed-${index}`)).toBe(true);
+    expect((await fetchApi(apiRequest(`${path(repo)}?cursor=%%%`, 'local-viewer'))).status).toBe(400);
+  });
+
   it('serializes concurrent claims, refuses the entire multi-key request, and isolates repositories', async () => {
     setupPolicy();
     const repo = 'lease_race';
@@ -192,6 +291,7 @@ describe('RepoCoordinator lease routes', () => {
       expect(() => action.handle(oldContext, new Request(`https://concord.test${path(repo)}/${original.leaseId}/renew`),
         `${path(repo)}/${original.leaseId}/renew`.match(action.pattern)!, { fence: original.fence })).toThrow();
       const route = leases.routes.find(item => item.method === 'POST' && item.pattern.test(path(repo)))!;
+      seedClaim(state, repo, 'second', 'agent-b');
       const replacementResponse = await route.handle(newContext, new Request(`https://concord.test${path(repo)}`),
         path(repo).match(route.pattern)!, { changeId: 'second', intentText: 'Second intent', unitKeys: ['row:families:alpha'] });
       expect(replacementResponse.status).toBe(201);
@@ -263,6 +363,7 @@ describe('RepoCoordinator lease routes', () => {
       expect(reserved.expires_at).toBeGreaterThan(item.expiresAt);
       const later = contextFor(state, repo, 'agent-b', () => reserved.expires_at + 1);
       const route = leases.routes.find(entry => entry.method === 'POST' && entry.pattern.test(path(repo)))!;
+      seedClaim(state, repo, 'later', 'agent-b');
       const replacementResponse = await route.handle(later, new Request(`https://concord.test${path(repo)}`),
         path(repo).match(route.pattern)!, { changeId: 'later', intentText: 'Later work', unitKeys: [item.unitKey] });
       expect(replacementResponse.status).toBe(201);
@@ -291,6 +392,7 @@ describe('RepoCoordinator lease routes', () => {
       store.put('module:queue:contest-child:child-a', contest);
       expect(reserve(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'eligible', value: { reservationFences: { [item.unitKey]: item.fence } } });
       const claimRoute = leases.routes.find(route => route.method === 'POST' && route.pattern.test(path(repo)))!;
+      seedClaim(state, repo, 'ordinary', 'agent-b');
       const bypass = await claimRoute.handle(contextFor(state, repo, 'agent-b', Date.now), new Request(`https://concord.test${path(repo)}`),
         path(repo).match(claimRoute.pattern)!, { changeId: 'ordinary', intentText: 'Ordinary overlap', unitKeys: [item.unitKey], contestId: 'contest-one', override: true });
       expect(bypass.status).toBe(409);
