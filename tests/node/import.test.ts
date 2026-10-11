@@ -1,9 +1,10 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { realpathSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
@@ -42,6 +43,51 @@ async function fixture(root: string): Promise<{ source: string; sourceOid: strin
   await git(source, 'add', '.');
   await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'second');
   return { source, sourceOid: await git(source, 'rev-parse', 'HEAD') };
+}
+async function partialClone(root: string, source: string, checkout = false): Promise<string> {
+  const partial = join(root, 'partial');
+  await execFile('git', ['clone', '--quiet', '--filter=blob:none', '--no-checkout',
+    '--upload-pack=git -c uploadpack.allowFilter=true upload-pack',
+    pathToFileURL(source).href, partial], { cwd: root, env: gitEnv, timeout: 30_000 });
+  if (!checkout) {
+    const missing = await execFile('git', ['rev-list', '--objects', '--missing=print', 'HEAD'], {
+      cwd: partial, env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+    expect(missing.stdout).toMatch(/\?[a-f0-9]{40}/);
+    const listing = await execFile('git', ['ls-tree', '-r', '-l', 'HEAD'], { cwd: partial,
+      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+    expect(listing.stdout).toMatch(/ (?:-|BAD)\t/);
+  }
+  if (checkout) await git(partial, 'checkout', '--force', 'main');
+  else await execFile('git', ['read-tree', 'HEAD'], { cwd: partial,
+    env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+  const packs = await readdir(join(partial, '.git', 'objects', 'pack'));
+  expect(packs.some(name => name.endsWith('.promisor'))).toBe(true);
+  expect(await git(partial, 'config', '--get', 'remote.origin.promisor')).toBe('true');
+  return partial;
+}
+async function fileTree(directory: string): Promise<Record<string, Buffer | null>> {
+  const result: Record<string, Buffer | null> = {};
+  async function visit(path: string, prefix: string): Promise<void> {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      const relative = prefix + entry.name;
+      if (entry.isDirectory()) {
+        result[relative + '/'] = null;
+        await visit(join(path, entry.name), relative + '/');
+      } else result[relative] = await readFile(join(path, entry.name));
+    }
+  }
+  await visit(directory, '');
+  return result;
+}
+async function sourceState(source: string): Promise<unknown> {
+  const gitDir = join(source, '.git');
+  return {
+    objects: await fileTree(join(gitDir, 'objects')),
+    refs: await fileTree(join(gitDir, 'refs')),
+    index: await readFile(join(gitDir, 'index')),
+    head: await readFile(join(gitDir, 'HEAD')),
+    packedRefs: await readFile(join(gitDir, 'packed-refs')).catch(() => null),
+  };
 }
 async function port(): Promise<number> {
   const server = createServer();
@@ -111,10 +157,10 @@ describe('adopted root import', () => {
     expect(Object.keys(clean).filter(name => /^GIT_/i.test(name)).sort()).toEqual([
       'GIT_CONFIG_NOSYSTEM', 'GIT_NO_REPLACE_OBJECTS', 'GIT_TERMINAL_PROMPT']);
     const configured = gitEnvironment({ token: 'test-token', alternateObjectDirectory: '/scratch/objects',
-      indexFile: '/scratch/index', identity: true });
+      indexFile: '/scratch/index', identity: true, noLazyFetch: true });
     expect(configured).toMatchObject({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader',
       GIT_CONFIG_VALUE_0: 'Authorization: Bearer test-token', GIT_ALTERNATE_OBJECT_DIRECTORIES: '/scratch/objects',
-      GIT_INDEX_FILE: '/scratch/index', GIT_AUTHOR_NAME: 'Concord Import' });
+      GIT_INDEX_FILE: '/scratch/index', GIT_AUTHOR_NAME: 'Concord Import', GIT_NO_LAZY_FETCH: '1' });
     expect(configured.GIT_DIR).toBeUndefined();
     expect(configured.GIT_WORK_TREE).toBeUndefined();
     expect(configured.GIT_OBJECT_DIRECTORY).toBeUndefined();
@@ -123,12 +169,15 @@ describe('adopted root import', () => {
   it('builds a filtered tree offline, rejects missing exclusions and symlinks', async () => {
     const root = await temporary();
     const { source } = await fixture(root);
+    await writeFile(join(source, 'added.txt'), 'new included file\n');
+    await git(source, 'add', 'added.txt');
+    await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'added');
     const fetcher = vi.fn(() => { throw new Error('API contacted during dry run'); });
     vi.stubGlobal('fetch', fetcher);
     const options = { source, ref: 'main', repo: 'adopted', excludes: ['private/**'], printTree: true };
     const tree = await importRepo(options);
-    expect(tree).toMatchObject({ fileCount: 3, excludedPathCount: 1 });
-    expect(tree.treeOid).toBe(await git(source, 'rev-parse', 'HEAD~1^{tree}'));
+    expect(tree).toMatchObject({ fileCount: 4, excludedPathCount: 1 });
+    await expect(git(source, 'cat-file', '-e', String(tree.treeOid))).rejects.toThrow();
     expect(JSON.stringify(tree)).not.toContain('secret.txt');
     expect(fetcher).not.toHaveBeenCalled();
     await expect(importRepo({ ...options, excludeFile: join(root, 'missing') })).rejects.toThrow(/exclude-file/);
@@ -136,6 +185,24 @@ describe('adopted root import', () => {
     await git(source, 'add', 'link');
     await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'link');
     await expect(importRepo(options)).rejects.toThrow(/symlink/);
+  });
+
+  it('does not fetch unavailable blobs from a local promisor remote', async () => {
+    const root = await temporary();
+    const original = await fixture(root);
+    const source = await partialClone(root, original.source);
+    const before = await sourceState(source);
+    const args = ['--import', 'tsx', 'cli/main.ts', 'import', '--source', source, '--ref', 'main',
+      '--repo', 'adopted', '--print-tree'];
+    await expect(execFile(process.execPath, args, { cwd, env: gitEnv, timeout: 30_000 }))
+      .rejects.toMatchObject({ code: 2, stderr: expect.stringMatching(/unavailable locally/) });
+    expect(await sourceState(source)).toEqual(before);
+    const fetcher = vi.fn(() => { throw new Error('API contacted for unavailable blob'); });
+    const client = new ConcordClient({ url: 'http://127.0.0.1:1', fetch: fetcher });
+    await expect(importRepo({ source, ref: 'main', repo: 'adopted', policyId: 'policy',
+      profileId: 'profile' }, client)).rejects.toThrow(/unavailable locally/);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await sourceState(source)).toEqual(before);
   });
 
   it('rejects malformed exclusion bytes before contacting Concord', async () => {
@@ -174,7 +241,9 @@ describe('adopted root import', () => {
 
   it('imports through the local bridge and Worker as one canonical root, then reconciles', async () => {
     const root = await temporary();
-    const { source, sourceOid } = await fixture(root);
+    const { source: original, sourceOid } = await fixture(root);
+    const source = await partialClone(root, original, true);
+    const beforeSource = await sourceState(source);
     const bridgePort = await port();
     const workerPort = await port();
     const url = `http://127.0.0.1:${workerPort}`;
@@ -219,6 +288,7 @@ describe('adopted root import', () => {
       } else await new Promise(done => setTimeout(done, 150));
     }
     const first = await invocation;
+    expect(await sourceState(source)).toEqual(beforeSource);
     expect(first.stdout).not.toContain('local-owner');
     expect(first.stderr).not.toContain('local-owner');
     const imported = JSON.parse(first.stdout) as { canonicalOid: string; treeOid: string };
@@ -233,6 +303,7 @@ describe('adopted root import', () => {
     await expect(git(root, '--git-dir', canonical, 'show', 'main:private/secret.txt')).rejects.toThrow();
     const second = await execFile(process.execPath, ['--import', 'tsx', ...args],
       { cwd, env, timeout: 40_000, maxBuffer: 1024 * 1024 });
+    expect(await sourceState(source)).toEqual(beforeSource);
     expect(JSON.parse(second.stdout)).toMatchObject({ canonicalOid: imported.canonicalOid, reconciled: true });
     expect(await git(root, '--git-dir', canonical, 'rev-list', '--count', 'refs/heads/main')).toBe('1');
   }, 210_000);

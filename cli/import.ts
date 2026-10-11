@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { ConcordClient, ConcordError, idempotencyKey, rememberCredential } from './client.ts';
-import { git, gitEnvironment, pushCandidate, rejectCanonicalTarget } from './git.ts';
+import { git, gitEnvironment, pushCandidate, rejectCanonicalTarget, type GitOptions } from './git.ts';
 
 const execFile = promisify(execFileCallback);
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
@@ -13,6 +13,8 @@ const oidPattern = /^[a-f0-9]{40}$/;
 const branch = 'concord-import';
 type Entry = { path: string; mode: string; oid: string; bytes: number };
 type Envelope = { version: number; data: Record<string, unknown> };
+const importerGit = (args: string[], options: GitOptions = {}, cwd?: string) =>
+  git(['-c', 'protocol.allow=never', ...args], { ...options, noLazyFetch: true }, cwd);
 
 export interface ImportOptions {
   source: string; ref: string; repo: string; policyId?: string; profileId?: string;
@@ -42,12 +44,12 @@ function glob(pattern: string): RegExp {
 async function treeEntries(source: string, tree: string, alternateObjectDirectory?: string): Promise<Entry[]> {
   let raw: Buffer;
   try {
-    const result = await execFile('git', ['-C', source, 'ls-tree', '-r', '-z', '-l', tree], {
+    const result = await execFile('git', ['-c', 'protocol.allow=never', '-C', source, 'ls-tree', '-r', '-z', '-l', tree], {
       encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, timeout: 120_000,
-      env: gitEnvironment({ alternateObjectDirectory }),
+      env: gitEnvironment({ alternateObjectDirectory, noLazyFetch: true }),
     });
     raw = result.stdout;
-  } catch { throw new ConcordError('Cannot inspect source Git tree', 'usage'); }
+  } catch { throw new ConcordError('Cannot inspect source Git tree; a required object may be unavailable locally', 'usage'); }
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const entries: Entry[] = [];
   try {
@@ -55,13 +57,14 @@ async function treeEntries(source: string, tree: string, alternateObjectDirector
       if (!record) continue;
       const tab = record.indexOf('\t');
       const meta = record.slice(0, tab);
-      const match = /^(\d+) (blob|commit) ([a-f0-9]{40}) +([0-9]+|-)$/.exec(meta);
+      const match = /^(\d+) (blob|commit) ([a-f0-9]{40}) +([0-9]+|-|BAD)$/.exec(meta);
       if (tab < 0 || !match) throw new Error('invalid tree entry');
       const path = decoder.decode(Buffer.from(record.slice(tab + 1), 'binary'));
       if (!path || path.startsWith('/') || path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid path');
       if (match[1] === '120000') throw new ConcordError('Source tree contains a symlink', 'usage');
       if (match[1] === '160000' || match[2] === 'commit') throw new ConcordError('Source tree contains a submodule', 'usage');
-      if (!['100644', '100755'].includes(match[1]) || match[4] === '-') throw new Error('unsupported tree entry');
+      if (match[4] === '-' || match[4] === 'BAD') throw new ConcordError(`Source blob ${match[3]} is unavailable locally; fetch it before importing`, 'usage');
+      if (!['100644', '100755'].includes(match[1])) throw new Error('unsupported tree entry');
       entries.push({ path, mode: match[1], oid: match[3], bytes: Number(match[4]) });
     }
   } catch (error) {
@@ -104,7 +107,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     throw new ConcordError('import requires --policy-id and --profile-id', 'usage');
   }
   const source = await realpath(resolve(options.source)).catch(() => { throw new ConcordError('Source Git repository is unreadable', 'usage'); });
-  const topLevel = await git(['-C', source, 'rev-parse', '--show-toplevel']).catch(() => {
+  const topLevel = await importerGit(['-C', source, 'rev-parse', '--show-toplevel']).catch(() => {
     throw new ConcordError('--source must be a Git repository top level', 'usage');
   });
   const sourceRoot = await realpath(topLevel).catch(() => {
@@ -112,12 +115,14 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
   });
   if (source !== sourceRoot) throw new ConcordError('--source must be the Git repository top level', 'usage');
   const sourceName = basename(source);
-  const sourceOid = await git(['-C', source, 'rev-parse', '--verify', `${options.ref}^{commit}`]).catch(() => {
-    throw new ConcordError('Source ref does not resolve to a commit', 'usage');
+  const sourceOid = await importerGit(['-C', source, 'rev-parse', '--verify', `${options.ref}^{commit}`]).catch(() => {
+    throw new ConcordError('Source ref does not resolve to a locally available commit', 'usage');
   });
   if (!oidPattern.test(sourceOid)) throw new ConcordError('Source must use Git SHA-1 object IDs', 'usage');
-  const sourceTree = await git(['-C', source, 'rev-parse', `${sourceOid}^{tree}`]);
-  const objectDirectory = await git(['-C', source, 'rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+  const sourceTree = await importerGit(['-C', source, 'rev-parse', `${sourceOid}^{tree}`]).catch(() => {
+    throw new ConcordError('Source tree is unavailable locally', 'usage');
+  });
+  const objectDirectory = await importerGit(['-C', source, 'rev-parse', '--path-format=absolute', '--git-path', 'objects']);
   const entries = await treeEntries(source, sourceTree);
   const patterns = [...(options.excludes ?? [])];
   if (options.excludeFile) {
@@ -138,14 +143,14 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
   const included = entries.filter(item => !excludes.some(pattern => pattern.test(item.path)));
   const scratch = await mkdtemp(join(tmpdir(), 'concord-import-'));
   try {
-    await git(['init', '--quiet'], {}, scratch);
+    await importerGit(['init', '--quiet'], {}, scratch);
     const plumbing = { alternateObjectDirectory: objectDirectory, indexFile: join(scratch, '.git', 'index') };
-    await git(['read-tree', '--empty'], plumbing, scratch);
+    await importerGit(['read-tree', '--empty'], plumbing, scratch);
     for (let i = 0; i < included.length; i += 100) {
-      await git(['update-index', '--add', ...included.slice(i, i + 100).flatMap(item =>
+      await importerGit(['update-index', '--add', ...included.slice(i, i + 100).flatMap(item =>
         ['--cacheinfo', `${item.mode},${item.oid},${item.path}`])], plumbing, scratch);
     }
-    const treeOid = await git(['write-tree'], plumbing, scratch);
+    const treeOid = await importerGit(['write-tree'], plumbing, scratch);
     const actual = await treeEntries(scratch, treeOid, objectDirectory);
     if (actual.length !== included.length || actual.some((item, i) =>
       item.path !== included[i].path || item.mode !== included[i].mode || item.oid !== included[i].oid ||
@@ -159,7 +164,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     if (options.printTree) return summary;
     if (!client) throw new ConcordError('CONCORD_URL and CONCORD_TOKEN are required', 'usage');
     const message = `Concord import\n\nSource repository: ${JSON.stringify(sourceName)}\nSource ref: ${JSON.stringify(options.ref)}\nSource commit: ${sourceOid}`;
-    const headOid = await git(['commit-tree', treeOid, '-m', message], { ...plumbing, identity: true }, scratch);
+    const headOid = await importerGit(['commit-tree', treeOid, '-m', message], { ...plumbing, identity: true }, scratch);
     const root = `/repos/${encodeURIComponent(options.repo)}`;
     const repoBody = { name: options.repo, policyId: options.policyId, profileId: options.profileId };
     await poll('repository provisioning', () => client.request('POST', '/repos',
@@ -192,9 +197,9 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     if (assigned.protocol === 'file:' && ['localhost', '127.0.0.1', '::1'].includes(localApi.hostname) &&
         !assigned.username && !assigned.password && !assigned.search && !assigned.hash) {
       await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote,
-        `${headOid}:refs/heads/${branch}`], { token: secret, alternateObjectDirectory: objectDirectory }, scratch);
+        `${headOid}:refs/heads/${branch}`], { token: secret, alternateObjectDirectory: objectDirectory, noLazyFetch: true }, scratch);
     } else {
-      await pushCandidate(scratch, remote, branch, secret, headOid, objectDirectory);
+      await pushCandidate(scratch, remote, branch, secret, headOid, objectDirectory, true);
     }
     const registerDetail = await client.request('GET', root);
     await client.request('POST', `${root}/branches`, { body: { storageName, ref: `refs/heads/${branch}`,
