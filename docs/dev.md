@@ -4,7 +4,7 @@ Use Node 22 or newer. In a fresh checkout, `sh scripts/validate.sh` installs the
 
 ```sh
 npm ci --no-audit --no-fund
-npm run dev
+npm run dev -- --persist-to .wrangler/state/local-dev
 ```
 
 Wrangler serves the local Worker, SQLite Durable Objects, and static shell without an account. The local configuration selects the in-process fake provider. Visit `/health` to see the mode. Local fixture bearer identities are `local-owner`, `local-agent-a`, `local-agent-b`, `local-agent-c`, `local-contest-low`, `local-contest-high`, `local-mock-aw`, `local-reviewer`, `local-checker`, `local-promoter`, and `local-viewer`; they are accepted only in local mode. Example:

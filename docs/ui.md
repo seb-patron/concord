@@ -8,7 +8,7 @@ account settings, no OAuth.
 
 ```sh
 npm ci --no-audit --no-fund
-npm run dev
+npm run dev -- --persist-to .wrangler/state/local-ui
 ```
 
 Open `http://127.0.0.1:8787/` (1280x720 is the presentation layout). The
