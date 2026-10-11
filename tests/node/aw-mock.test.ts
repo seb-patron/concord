@@ -45,9 +45,10 @@ async function harness() {
   type Change = { changeId: string; authorId: string; intentKey: string; intentText: string; branch: string; unitKeys: string[]; baseOid: string; headOid: string | null; revision: number; status: string; version: number; candidateStorageName: string };
   const changes: Change[] = [];
   const api = { creates: 0, claims: 0, publishes: 0, enqueues: 0, registers: 0, leaseConflict: false, leaseCapacity: false, eventsUnavailable: false, queueUnavailable: false, publishPreparationUnavailable: false, badForkRemote: false, publishUnavailable: false,
+    queueResponse: undefined as unknown,
     leases: [] as Array<{ changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }>,
     branches: [] as Array<{ storageName: string; ref: string; observedHead: string }>,
-    queue: [] as Array<{ entryId: string; changeId: string; admittedRevision: number; state: string; blockedReason: string | null }>,
+    queue: [] as Array<{ entryId: string; changeId: string; revision: number; state: string; blockedReason: string | null }>,
     lastEnqueueFences: null as Record<string, number> | null,
     verdicts: [] as Array<{ verdictId: string; revision: number; decision: string }>, lastAttempt: 0, globalVersion: 1, nextFence: 7, canonicalOid: baseOid };
   const createBodies = new Map<string, string>();
@@ -140,7 +141,7 @@ async function harness() {
     }
     const verdictMatch = /^\/v1\/repos\/demo\/changes\/(change-\d+)\/verdicts$/.exec(path);
     if (verdictMatch && method === 'GET') return ok({ items: api.verdicts });
-    if (path === '/v1/repos/demo/queue' && method === 'GET') return ok({ items: api.queue, nextCursor: null });
+    if (path === '/v1/repos/demo/queue' && method === 'GET') return ok(api.queueResponse === undefined ? { entries: api.queue } : api.queueResponse);
     if (path === '/v1/repos/demo/queue/enqueue' && method === 'POST') {
       api.enqueues++;
       if (body.expectedVersion !== api.globalVersion) return fail('STALE_VERSION');
@@ -148,9 +149,9 @@ async function harness() {
       api.lastEnqueueFences = body.leaseFences as Record<string, number>;
       if (api.lastEnqueueFences['unit:a'] !== [...api.leases].reverse().find(item => item.changeId === body.changeId && item.expiresAt > Date.now())?.fence) return fail('LEASE_STALE');
       const enqueued = changes.find(item => item.changeId === body.changeId)!;
-      api.queue.push({ entryId: `queue-${api.enqueues}`, changeId: enqueued.changeId, admittedRevision: enqueued.revision, state: 'waiting', blockedReason: null });
+      api.queue.push({ entryId: `queue-${api.enqueues}`, changeId: enqueued.changeId, revision: enqueued.revision, state: 'reserved', blockedReason: null });
       enqueued.status = 'queued';
-      return ok({ entryId: 'queue-1', state: 'waiting' }, 202);
+      return ok({ entryId: `queue-${api.enqueues}`, state: 'reserved' }, 201);
     }
     return fail('NOT_FOUND', 404);
   };
@@ -200,7 +201,7 @@ describe('AW mock adapter', () => {
     const base = { changeId: 'change-1', authorId: 'mock-aw', intentKey: `aw-mock:${digest}`, intentText: fixture.intent,
       branch: `refs/heads/aw-mock/${digest.slice(0, 24)}`, unitKeys: fixture.unitKeys, baseOid: null, headOid: 'a'.repeat(40),
       revision: 2, status: 'ready', version: 1, candidateStorageName: 'fork-1' };
-    const entry = { entryId: 'queue-1', changeId: base.changeId, admittedRevision: 2, state: 'waiting', blockedReason: null as string | null };
+    const entry = { entryId: 'queue-1', changeId: base.changeId, revision: 2, state: 'reserved', blockedReason: null as string | null };
     const cases = [
       { name: 'owned ready without queue', expected: { kind: 'reuse', queued: false } },
       { name: 'foreign author', change: { authorId: 'other-agent' }, expected: { kind: 'refuse', block: { code: 'INTENT_OWNED' } } },
@@ -208,13 +209,16 @@ describe('AW mock adapter', () => {
       { name: 'changed task content', change: { intentText: 'different' }, expected: { kind: 'refuse', block: { code: 'INTENT_CONFLICT' } } },
       { name: 'checker blocked', change: { status: 'blocked' }, expected: { kind: 'refuse', block: { code: 'CHECKER_BLOCKED' } } },
       { name: 'terminal', change: { status: 'merged' }, expected: { kind: 'refuse', block: { code: 'ATTEMPT_REQUIRED' } } },
-      { name: 'active waiting', queue: [entry], expected: { kind: 'reuse', queued: true } },
+      { name: 'active reserved', queue: [entry], expected: { kind: 'reuse', queued: true } },
+      { name: 'active admitted', queue: [{ ...entry, state: 'admitted' }], expected: { kind: 'reuse', queued: true } },
       { name: 'active checking', queue: [{ ...entry, state: 'checking' }], expected: { kind: 'reuse', queued: true } },
       { name: 'active blocked', queue: [{ ...entry, state: 'blocked', blockedReason: 'dependency failed' }], expected: { kind: 'refuse', block: { code: 'QUEUE_BLOCKED', details: { blockedReason: 'dependency failed' } } } },
-      { name: 'stale waiting', queue: [{ ...entry, admittedRevision: 1 }], expected: { kind: 'reuse', queued: false } },
-      { name: 'stale blocked', queue: [{ ...entry, admittedRevision: 1, state: 'blocked' }], expected: { kind: 'reuse', queued: false } },
+      { name: 'blocked change with queue evidence', change: { status: 'blocked' }, queue: [{ ...entry, state: 'blocked', blockedReason: 'dependency failed' }],
+        expected: { kind: 'refuse', block: { code: 'QUEUE_BLOCKED', details: { blockedReason: 'dependency failed' } } } },
+      { name: 'stale reserved', queue: [{ ...entry, revision: 1 }], expected: { kind: 'reuse', queued: false } },
+      { name: 'stale blocked', queue: [{ ...entry, revision: 1, state: 'blocked' }], expected: { kind: 'reuse', queued: false } },
       { name: 'admitted matching revision', change: { status: 'queued' }, queue: [entry], expected: { kind: 'reuse', queued: true } },
-      { name: 'admitted stale revision', change: { status: 'queued' }, queue: [{ ...entry, admittedRevision: 1 }], expected: { kind: 'refuse', block: { code: 'QUEUE_REVISION_MISMATCH' } } },
+      { name: 'admitted stale revision', change: { status: 'queued' }, queue: [{ ...entry, revision: 1 }], expected: { kind: 'refuse', block: { code: 'QUEUE_REVISION_MISMATCH' } } },
       { name: 'admitted queue unreadable', change: { status: 'queued' }, queue: null, expected: { kind: 'refuse', block: { code: 'QUEUE_UNAVAILABLE' } } },
       { name: 'admitted withdrawn entry', change: { status: 'checking' }, queue: [{ ...entry, state: 'withdrawn' }], expected: { kind: 'refuse', block: { code: 'QUEUE_STATE_CONFLICT' } } },
     ];
@@ -239,21 +243,31 @@ describe('AW mock adapter', () => {
     await h.run();
     h.changes[0].revision = 2;
     h.changes[0].status = 'ready';
-    h.api.queue.push({ entryId: 'queue-old', changeId: 'change-1', admittedRevision: 1, state: 'blocked', blockedReason: 'old checker result' });
+    h.api.queue.push({ entryId: 'queue-old', changeId: 'change-1', revision: 1, state: 'blocked', blockedReason: 'old checker result' });
     h.api.verdicts.push({ verdictId: 'revision-2-approval', revision: 2, decision: 'approve' });
     const result = await h.run();
     expect(result).toMatchObject({ phase: 'queued', revision: 2 });
     expect(result.blocked).toBeUndefined();
     expect(h.api.enqueues).toBe(1);
-    expect(h.api.queue.at(-1)).toMatchObject({ admittedRevision: 2, state: 'waiting' });
+    expect(h.api.queue.at(-1)).toMatchObject({ revision: 2, state: 'reserved' });
   });
 
   it('preserves an active blocked queue entry as a structured refusal', async () => {
     const h = await harness();
     await h.run();
-    h.api.queue.push({ entryId: 'queue-blocked', changeId: 'change-1', admittedRevision: 1, state: 'blocked', blockedReason: 'dependency failed' });
+    h.api.queue.push({ entryId: 'queue-blocked', changeId: 'change-1', revision: 1, state: 'blocked', blockedReason: 'dependency failed' });
     const result = await h.run();
-    expect(result).toMatchObject({ phase: 'blocked', blocked: { code: 'QUEUE_BLOCKED', details: { entryId: 'queue-blocked', admittedRevision: 1, blockedReason: 'dependency failed' } } });
+    expect(result).toMatchObject({ phase: 'blocked', blocked: { code: 'QUEUE_BLOCKED', details: { entryId: 'queue-blocked', revision: 1, blockedReason: 'dependency failed' } } });
+    expect(h.api.enqueues).toBe(0);
+  });
+
+  it.each([{}, { entries: null }, { entries: [{ entryId: 'bad', changeId: 'change-1', admittedRevision: 1, state: 'waiting' }] }])
+  ('refuses a malformed queue projection without a generic mock error', async queueResponse => {
+    const h = await harness();
+    await h.run();
+    h.api.queueResponse = queueResponse;
+    const result = await h.run();
+    expect(result).toMatchObject({ phase: 'blocked', blocked: { code: 'INVALID_QUEUE_RESPONSE', status: 502 } });
     expect(h.api.enqueues).toBe(0);
   });
 
@@ -319,7 +333,7 @@ describe('AW mock adapter', () => {
     if (stage === 'approved-without-lease') h.api.leases.length = 0;
     if (stage === 'queued' || stage === 'checking') await h.run();
     if (stage === 'checking') h.changes[0].status = 'checking';
-    if (stage === 'queue-entry') h.api.queue.push({ entryId: 'queue-existing', changeId: first.changeId, admittedRevision: 1, state: 'waiting', blockedReason: null });
+    if (stage === 'queue-entry') h.api.queue.push({ entryId: 'queue-existing', changeId: first.changeId, revision: 1, state: 'reserved', blockedReason: null });
     if (stage === 'blocked' || stage === 'merged') h.changes[0].status = stage;
     await rm(h.statePath);
     const resumed = await h.run();

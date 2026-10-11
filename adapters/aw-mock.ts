@@ -21,7 +21,7 @@ interface Change { changeId: string; authorId: string; intentKey: string; intent
 interface Repo { canonicalStorageName: string; observedCanonicalOid: string | null; version: number; status: string }
 interface Lease { changeId: string; unitKey: string; fence: number; state: string; expiresAt: number }
 interface Verdict { verdictId: string; revision: number; decision: string }
-interface QueueEntry { entryId?: string; changeId: string; admittedRevision: number; state: string; blockedReason?: string | null }
+interface QueueEntry { entryId: string; changeId: string; revision: number; state: string; blockedReason: string | null }
 interface ServerState { change: Change; attempt: number; queue: QueueEntry[] | null }
 type ReconcileDecision = { kind: 'reuse'; queued: boolean } | { kind: 'refuse'; block: Block };
 const workerPrincipal = 'mock-aw';
@@ -82,18 +82,18 @@ export function reconcile(serverState: ServerState, fixture: AwMockFixture, iden
   if (attempt !== fixture.explicitAttempt)
     return refuse('ATTEMPT_CONFLICT', 'Explicit attempt differs from the server intent', { serverAttempt: attempt, explicitAttempt: fixture.explicitAttempt });
   if (terminal.has(change.status)) return refuse('ATTEMPT_REQUIRED', 'Terminal change requires the next explicitAttempt.');
-  if (change.status === 'blocked') return refuse('CHECKER_BLOCKED', 'Concord marked the candidate blocked; inspect the change and checker evidence.');
-  const active = queue?.find(entry => entry.changeId === change.changeId && entry.admittedRevision === change.revision);
+  const active = queue?.find(entry => entry.changeId === change.changeId && entry.revision === change.revision);
   if (active?.state === 'blocked') return refuse('QUEUE_BLOCKED', 'Concord queue blocked the active revision.', active);
+  if (change.status === 'blocked') return refuse('CHECKER_BLOCKED', 'Concord marked the candidate blocked; inspect the change and checker evidence.');
   if (change.status === 'queued' || change.status === 'checking') {
     if (!queue) return refuse('QUEUE_UNAVAILABLE', 'Queue state is unavailable for an admitted change.');
     if (!active) return refuse('QUEUE_REVISION_MISMATCH', 'No queue entry matches the active revision.',
       { revision: change.revision, entries: queue.filter(entry => entry.changeId === change.changeId) });
-    if (active.state !== 'waiting' && active.state !== 'checking')
+    if (!['admitted', 'reserved', 'checking'].includes(active.state))
       return refuse('QUEUE_STATE_CONFLICT', 'Queue entry is not awaiting admission or checking.', active);
     return { kind: 'reuse', queued: true };
   }
-  return { kind: 'reuse', queued: active?.state === 'waiting' || active?.state === 'checking' };
+  return { kind: 'reuse', queued: active !== undefined && ['admitted', 'reserved', 'checking'].includes(active.state) };
 }
 
 function refusalError(block: Block): ConcordError {
@@ -170,17 +170,20 @@ async function claimLeases(client: ConcordClient, fixture: AwMockFixture, change
 
 async function queueEntries(client: ConcordClient, fixture: AwMockFixture): Promise<QueueEntry[] | null> {
   try {
-    let cursor: string | null = null;
-    const seen = new Set<string>();
+    const queue: unknown = (await client.request<Envelope<unknown>>('GET', `${path(fixture.project)}/queue`)).data;
+    const invalid = () => new ConcordError('Concord queue returned an invalid response', 'server', 502,
+      { error: { code: 'INVALID_QUEUE_RESPONSE', message: 'Concord queue returned an invalid response' } });
+    if (!queue || typeof queue !== 'object' || Array.isArray(queue) || !('entries' in queue) || !Array.isArray(queue.entries)) throw invalid();
     const entries: QueueEntry[] = [];
-    do {
-      const query: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
-      const queue: { items: QueueEntry[]; nextCursor?: string | null } = (await client.request<Envelope<{ items: QueueEntry[]; nextCursor?: string | null }>>('GET', `${path(fixture.project)}/queue${query}`)).data;
-      entries.push(...queue.items);
-      cursor = queue.nextCursor ?? null;
-      if (cursor && seen.has(cursor)) throw new Error('INVALID_QUEUE_CURSOR');
-      if (cursor) seen.add(cursor);
-    } while (cursor);
+    for (const value of queue.entries) {
+      if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        !('entryId' in value) || typeof value.entryId !== 'string' ||
+        !('changeId' in value) || typeof value.changeId !== 'string' ||
+        !('revision' in value) || !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+        !('state' in value) || !['admitted', 'reserved', 'checking', 'landed', 'blocked', 'withdrawn', 'failed'].includes(String(value.state)) ||
+        !('blockedReason' in value) || (value.blockedReason !== null && typeof value.blockedReason !== 'string')) throw invalid();
+      entries.push(value as QueueEntry);
+    }
     return entries;
   } catch (error) {
     // The optional queue module has no readable state until it is installed.
