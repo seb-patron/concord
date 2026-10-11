@@ -196,17 +196,25 @@ function selectedChange() {
   return snapshotCollections(state.snapshot).changes.items.find(change => change?.changeId === state.selectedChangeId);
 }
 
+function observeVersion(version) {
+  if (!Number.isSafeInteger(version) || version < 0) return;
+  state.observedVersion = Math.max(state.observedVersion, version);
+  if (state.version < state.observedVersion && state.snapshotCurrent) {
+    state.snapshotCurrent = false;
+    refreshAffordances();
+  }
+}
+
 async function refreshSnapshot(g = generation()) {
   if (!g.repoId || !current(g)) return false;
   const body = await getSnapshot(g.repoId);
   if (!current(g)) return false;
-  if (Number.isSafeInteger(body?.version) && body.version < state.observedVersion) return false;
+  if (!Number.isSafeInteger(body?.version) || body.version < 0) return false;
+  observeVersion(body.version);
+  if (body.version < state.observedVersion) return false;
   state.snapshot = body;
-  state.snapshotCurrent = Number.isSafeInteger(body?.version) && body.version >= 0;
-  if (state.snapshotCurrent) {
-    state.version = body.version;
-    state.observedVersion = Math.max(state.observedVersion, body.version);
-  }
+  state.snapshotCurrent = true;
+  state.version = body.version;
   if (body && typeof body.eventSeq === 'number') {
     state.eventSeq = Math.max(state.eventSeq, body.eventSeq);
   }
@@ -247,11 +255,9 @@ async function pollOnce(g = generation()) {
       received = true;
     }
     if (body && typeof body.eventSeq === 'number') state.eventSeq = Math.max(state.eventSeq, body.eventSeq);
-    if (Number.isSafeInteger(body?.version)) state.observedVersion = Math.max(state.observedVersion, body.version);
-    if (body && typeof body.version === 'number' && body.version !== state.version) {
+    observeVersion(body?.version);
+    if (Number.isSafeInteger(body?.version) && body.version > state.version) {
       moved = true;
-      state.snapshotCurrent = false;
-      refreshAffordances();
     }
     // Follow pages until the announced head, but stop on a non-advancing page.
     if (!Number.isSafeInteger(last) || last >= state.eventSeq || last <= previousSeq) break;
@@ -625,13 +631,12 @@ async function runMutation(label, call) {
   }
   setStatus(`${label}…`);
   try {
-    await call();
+    const response = await call();
     if (!current(g)) return;
-    state.snapshotCurrent = false;
-    refreshAffordances();
+    observeVersion(response?.version);
     try {
       if (!await refreshSnapshot(g)) {
-        if (current(g)) setStatus(`${label}: accepted; current snapshot unavailable. Refresh before acting again.`);
+        if (current(g)) setStatus(state.snapshotCurrent ? `${label}: accepted.` : `${label}: accepted; current snapshot unavailable. Refresh before acting again.`);
         return;
       }
       renderAll();

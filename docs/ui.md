@@ -97,18 +97,19 @@ for the feature slices when they land; the current placeholders remain
 
 Every asynchronous UI path captures the current session and repository
 generation. Changing tokens, forgetting a token, or switching repositories
-advances a generation; an older completion is ignored. A snapshot whose
-version falls below the latest observed event version is also ignored. A
-failed refresh after observed version movement disables mutation controls
-with a visible reason.
+advances a generation; an older completion is ignored. The UI tracks the
+highest version seen in any snapshot, event response, or successful mutation
+response. A snapshot below that version is ignored; mutation controls stay
+disabled until a snapshot reaches it. An older snapshot cannot replace a
+newer one, including when a mutation response arrives after the newer snapshot.
 
 | Call site | Protection | Test in `tests/node/ui.test.ts` |
 | --- | --- | --- |
 | `refreshBadge` health request | Generation guard before updating the badge; repo switches request a new badge | Delayed health response after Forget |
 | `refreshRepos` catalog request and token form continuation | Generation guard before catalog/error rendering; false result stops the form continuation | Delayed catalog response after Forget |
-| `refreshSnapshot` from repo switch, periodic tick, and mutation refresh | Generation and observed-version guards before storing or rendering; a missing current snapshot disables mutations | Delayed snapshot after Forget; delayed old repo response after switch; stale 409 refresh failure; event version ahead of snapshot |
+| `refreshSnapshot` from repo switch, periodic tick, and mutation refresh | Generation and high-water version guards before storing or rendering; a missing current snapshot disables mutations | Delayed snapshot after Forget; delayed old repo response after switch; stale 409 refresh failure; event and mutation versions ahead of snapshot |
 | `pollOnce` event pages and `tick` recovery/error paths | Generation guard on every page and after awaits; nonadvancing pages stop pagination | Delayed poll after Forget; 101 event pages |
-| `runMutation` success, failure, and refresh paths | Generation guard after mutation and refresh; accepted responses keep controls blocked until a fresh snapshot arrives | Delayed mutation response after Forget; stale 409 and lease conflict fixtures |
+| `runMutation` success, failure, and refresh paths | Generation guard after mutation and refresh; successful response versions advance the required snapshot version; a previously received newer snapshot remains valid | Delayed mutation response after Forget; stale 409 and lease conflict fixtures; mutation-before-snapshot and snapshot-before-mutation assertions |
 | Lease holder links in change details and conflict status | Link only when a matching lease card is rendered | DOM lease conflict links |
 | Parent verdict links | Referenced parent is included in the rendered verdict set | DOM carried verdict parent link |
 | Delta evidence links | Events are indexed by related ID across pages; referenced events evicted from the 100-row visible log get an archive anchor; the index clears on repo/session change | DOM 101-event boundary and Forget assertions |

@@ -317,9 +317,11 @@ describe('app event handlers (full snapshot fixtures)', () => {
     let health = { mode: 'local', storageBackend: 'fake' };
     let events = [{ sequence: 1, kind: 'DELTA', actorId: 'checker', version: 2, relatedIds: ['d9'] }];
     let eventVersion = 2;
+    let snapshotVersion = 2;
+    let snapshotIntent = 'first';
     const snapshot = (repoId = 'demo') => ({ data: { projections: {
       repos: { items: [{ repoId: 'demo', observedCanonicalOid: 'abc' }], changes: [
-        { changeId: 'x', intentText: repoId === 'other' ? 'other repo' : 'first', status: 'ready', revision: 2, ...(omitUnitKeys ? {} : { unitKeys: ['row:a'] }) },
+        { changeId: 'x', intentText: repoId === 'other' ? 'other repo' : snapshotIntent, status: 'ready', revision: 2, ...(omitUnitKeys ? {} : { unitKeys: ['row:a'] }) },
         { changeId: 'y', intentText: 'second', status: 'blocked', revision: 1, unitKeys: ['row:a'] },
       ] },
       leases: { items: [{ leaseId: 'l1', changeId: 'x', unitKey: 'row:a', holderId: 'agent-a', intentText: 'first', fence: 7, expiresAt: Date.now() + 60_000, state: 'active' }] },
@@ -331,7 +333,7 @@ describe('app event handlers (full snapshot fixtures)', () => {
         { verdictId: 'v2', changeId: 'x', decision: 'approve', revision: 2, findingSetVersion: 3, parentVerdictId: 'v1', deltaResultId: 'd9' },
         { verdictId: 'v3', changeId: 'x', decision: 'approve', revision: 2, findingSetVersion: 3, parentVerdictId: 'v0', deltaResultId: 'd9' },
       ] },
-    } }, version: 2, eventSeq: events.length });
+    } }, version: snapshotVersion, eventSeq: events.length });
     globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
       const headers = new Headers(init.headers);
       let status = 200;
@@ -408,6 +410,19 @@ describe('app event handlers (full snapshot fixtures)', () => {
       (byId('verdict-evidence') as HTMLInputElement).value = 'sha256:evidence';
       submit('verdict-form'); await flush();
       expect(sent.at(-1)?.body).toMatchObject({ revision: 2, findingSetVersion: 3, expectedVersion: 2 });
+      expect((byId('enqueue-submit') as HTMLButtonElement).disabled).toBe(true);
+      snapshotIntent = 'stale after accepted verdict';
+      // The tenth poll forces a snapshot refresh without event-version help.
+      for (let i = 0; i < 10; i++) await pollTick!();
+      expect(byId('change-list').textContent).not.toContain(snapshotIntent);
+      const beforeStaleEnqueue = sent.length;
+      submit('enqueue-form'); await flush();
+      expect(sent).toHaveLength(beforeStaleEnqueue);
+      snapshotIntent = 'first';
+      snapshotVersion = 3;
+      eventVersion = 3;
+      await pollTick!();
+      expect((byId('enqueue-submit') as HTMLButtonElement).disabled).toBe(false);
       (byId('verdict-evidence') as HTMLInputElement).value = '';
       const beforeMissingDigest = sent.length;
       submit('verdict-form'); await flush();
@@ -420,7 +435,7 @@ describe('app event handlers (full snapshot fixtures)', () => {
       expect(sent.at(-1)?.body.leaseFences).toEqual({ 'row:a': 7 });
       byId('withdraw-submit').click(); await flush();
       expect(sent.at(-1)?.url).toContain('/queue/withdraw');
-      expect(sent.at(-1)?.body).toMatchObject({ changeId: 'x', expectedVersion: 2 });
+      expect(sent.at(-1)?.body).toMatchObject({ changeId: 'x', expectedVersion: 3 });
       mutationFailure = 'lease'; submit('claim-form'); await flush();
       expect(byId('mutation-status').textContent).toContain('agent-a');
       expect(byId('mutation-status').querySelector('a')?.getAttribute('href')).toBe('#lease-l1');
@@ -460,7 +475,7 @@ describe('app event handlers (full snapshot fixtures)', () => {
       expect(sent).toHaveLength(beforeInvalid);
       expect(byId('mutation-status').textContent).toContain('do not include');
 
-      eventVersion = 3;
+      eventVersion = 4;
       await pollTick!();
       submit('enqueue-form'); await flush();
       expect(sent).toHaveLength(beforeInvalid);
@@ -525,6 +540,30 @@ describe('app event handlers (full snapshot fixtures)', () => {
       releaseHealth(); await flush();
       expect(byId('env-badge').textContent).toContain('local fake');
       expect(byId('env-badge').textContent).not.toContain('live Artifacts');
+
+      // A newer snapshot may arrive while the mutation response is still in flight.
+      snapshotVersion = 2;
+      eventVersion = 2;
+      (byId('token-input') as HTMLInputElement).value = 'local-viewer'; submit('token-form'); await flush(); await flush();
+      (byId('role-select') as HTMLSelectElement).value = 'agent';
+      byId('role-select').dispatchEvent(new dom.window.Event('change'));
+      (byId('change-list').querySelector('[role="option"]') as HTMLElement).click();
+      (byId('enqueue-verdict') as HTMLInputElement).value = 'v1';
+      let releaseLateMutation!: () => void;
+      holdMutation = new Promise(resolve => { releaseLateMutation = resolve; });
+      submit('enqueue-form'); await flush();
+      expect(sent.at(-1)?.body.expectedVersion).toBe(2);
+      snapshotVersion = 4;
+      // A periodic refresh accepts version 4 before the held response says 3.
+      for (let i = 0; i < 10; i++) await pollTick!();
+      expect((byId('enqueue-submit') as HTMLButtonElement).disabled).toBe(false);
+      snapshotVersion = 3;
+      snapshotIntent = 'older than version four';
+      releaseLateMutation(); await flush();
+      expect((byId('enqueue-submit') as HTMLButtonElement).disabled).toBe(false);
+      expect(byId('change-list').textContent).not.toContain(snapshotIntent);
+      submit('enqueue-form'); await flush();
+      expect(sent.at(-1)?.body.expectedVersion).toBe(4);
     } finally {
       clearSessionToken();
       dom.window.close();
