@@ -85,6 +85,7 @@ async function reconcileScratch(directory: string, job: Extract<Job, { kind: 'va
   const ref = job.scratchRef.startsWith('refs/') ? job.scratchRef : 'refs/heads/' + job.scratchRef;
   const observed = await refOid(directory, item.remote, ref, await gitCredentialEnvironment(directory, item.secret));
   if (!observed || observed === job.expectedRefs[job.scratchStorageName] || observed === composed) return composed;
+  if (!job.bootstrap && job.baseCheck) throw new Error('SCRATCH_OLD_REF');
   await fetchInput(directory, job, job.scratchStorageName, observed, tokens);
   if (await treeOid(directory, observed) !== await treeOid(directory, composed) ||
     (job.bootstrap ? observed !== job.candidates[0].headOid :
@@ -134,6 +135,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
         await fetchInput(directory, job, candidate.storageName, candidate.headOid, fetchTokens);
       }
       composed = await compose(directory, job.canonicalBaseOid, job.candidates);
+      if (job.baseCheck && composed !== job.canonicalBaseOid) throw new Error('BASE_CHECK_IDENTITY');
     }
     composed = await reconcileScratch(directory, job, composed, provide);
     const tree = await treeOid(directory, composed);

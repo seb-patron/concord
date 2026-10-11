@@ -305,6 +305,13 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       (await c.storage.readCommit(name, candidate.headOid))?.treeOid !== value.sourceTreeOid) conflict('RESULT_IDENTITY');
     if (candidate.baseOid && !await ancestor(c.storage, name, candidate.baseOid, candidate.headOid)) conflict('RESULT_IDENTITY');
   }
+  if (value.kind === 'validate-stack' && job.kind === 'validate-stack' && !job.bootstrap && job.baseCheck &&
+    (value.composedOid !== null || !['ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT'].includes(value.outcome))) {
+    const canonicalName = Object.keys(job.expectedRefs).find(name => name !== job.scratchStorageName);
+    if (value.composedOid !== job.canonicalBaseOid || value.composedTreeOid !== value.sourceTreeOid ||
+      !canonicalName || (await c.storage.readCommit(canonicalName, job.canonicalBaseOid))?.treeOid !== value.composedTreeOid)
+      conflict('RESULT_IDENTITY');
+  }
   if (value.kind === 'validate-stack' && value.outcome === 'PASS') {
     if (job.kind !== 'validate-stack' || !value.composedOid) throw new HttpError(409, 'RESULT_IDENTITY', 'Stack missing');
     const stack = job;
@@ -315,7 +322,7 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       await c.storage.resolveRef(stack.scratchStorageName, stack.scratchRef) !== composedOid) conflict('RESULT_IDENTITY');
     if (stack.bootstrap) {
       if (composedOid !== stack.candidates[0].headOid) conflict('RESULT_IDENTITY');
-    } else {
+    } else if (!stack.baseCheck) {
       if (!await ancestor(c.storage, stack.scratchStorageName, stack.canonicalBaseOid, composedOid) ||
         (await Promise.all(stack.candidates.map(candidate => ancestor(c.storage, stack.scratchStorageName, candidate.headOid, composedOid)))).some(found => !found)) conflict('RESULT_IDENTITY');
     }

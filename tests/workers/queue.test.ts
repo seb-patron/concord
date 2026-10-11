@@ -224,7 +224,8 @@ async function setup(...ids: string[]): Promise<Harness> {
   return h;
 }
 
-async function deliverChecked(h: Harness, job: Job, outcome: StackResult['outcome']): Promise<void> {
+async function deliverChecked(h: Harness, job: Job, outcome: StackResult['outcome'],
+  options: { composedOid?: string; tree?: string; expectedStatus?: number } = {}): Promise<{ response: Response; body: any }> {
   if (job.kind !== 'validate-stack' || job.bootstrap) throw new Error('expected ordinary stack job');
   const prefix = `/v1/repos/${h.repoId}`;
   const poll = await worker.fetch(mutation(`${prefix}/runner/poll`,
@@ -233,17 +234,19 @@ async function deliverChecked(h: Harness, job: Job, outcome: StackResult['outcom
   if (poll.status !== 200) throw new Error(`runner poll: ${poll.status}`);
   const claimed = (await responseBody(poll)).data.job as Job;
   if (claimed.jobId !== job.jobId) throw new Error(`unexpected runner job: ${claimed.jobId}`);
-  const composedOid = outcome === 'PASS' ? oid((h.jobs.indexOf(job) + 2).toString(16)) : null;
-  const tree = oid('3');
-  if (composedOid) {
+  const composedOid = options.composedOid ?? (job.baseCheck && ['PASS', 'FAIL'].includes(outcome) ? main :
+    outcome === 'PASS' ? oid((h.jobs.indexOf(job) + 2).toString(16)) : null);
+  const tree = options.tree ?? (job.baseCheck ? oid('2') : oid('3'));
+  if (composedOid && ['PASS', 'MATCH'].includes(outcome)) {
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
     await runInDurableObject<RepoCoordinator, void>(stub, instance => {
       const internal = instance as unknown as { context(name: 'runners', actor: Principal, repoId: string): ModuleContext };
       const storage = internal.context('runners', principal, h.repoId).storage as FakeStorage;
-      storage.putCommit(job.scratchStorageName, { oid: main, treeOid: oid('2'), parents: [] });
+      storage.putCommit(job.scratchStorageName, { oid: main,
+        treeOid: job.baseCheck && composedOid === main ? tree : oid('2'), parents: [] });
       for (const candidate of job.candidates) storage.putCommit(job.scratchStorageName,
         { oid: candidate.headOid, treeOid: tree, parents: [candidate.baseOid] });
-      storage.putCommit(job.scratchStorageName, { oid: composedOid!, treeOid: tree,
+      if (composedOid !== main) storage.putCommit(job.scratchStorageName, { oid: composedOid!, treeOid: tree,
         parents: [main, ...job.candidates.map(candidate => candidate.headOid)] });
       if (!storage.conditionalUpdateRef(job.scratchStorageName, job.scratchRef, null, composedOid!))
         throw new Error('scratch ref already exists');
@@ -263,8 +266,10 @@ async function deliverChecked(h: Harness, job: Job, outcome: StackResult['outcom
     { attempt: claimed.attempt, fence: claimed.fence, inputDigest: claimed.inputDigest,
       resultDigest, result: { ...preimage, resultDigest } }, crypto.randomUUID(), 'local-checker'), env);
   const body = await responseBody(response);
-  if (response.status !== 200 || body.data.dispatch.status !== 'eligible')
+  if (response.status !== (options.expectedStatus ?? 200) ||
+    response.status === 200 && body.data.dispatch.status !== 'eligible')
     throw new Error(`runner result: ${response.status} ${JSON.stringify(body)}`);
+  return { response, body };
 }
 
 async function realLeases(h: Harness, changes: Array<{ id: string; unit: string }>, claimedIds: string[]): Promise<void> {
@@ -721,6 +726,24 @@ describe('queue state machine', () => {
     expect(state.diagnosticResults).toHaveLength(5);
     expect(state.promotion.memberIds).toEqual(['A', 'C']);
     expect(state.entries.find((entry: any) => entry.changeId === 'B').state).toBe('blocked');
+  });
+
+  it.each([
+    { name: 'descendant commit', outcome: 'PASS', composedOid: oid('3'), tree: oid('3') },
+    { name: 'canonical OID with a different tree', outcome: 'PASS', composedOid: main, tree: oid('3') },
+    { name: 'matching descendant commit', outcome: 'MATCH', composedOid: oid('5'), tree: oid('3') },
+    { name: 'failed descendant commit', outcome: 'FAIL', composedOid: oid('4'), tree: oid('3') },
+  ] as const)('rejects a baseline $outcome for $name before advancing diagnosis', async ({ outcome, composedOid, tree }) => {
+    const h = await setup('A', 'B');
+    await h.tick();
+    await deliverChecked(h, h.jobs[0], 'FAIL'); await h.tick();
+    const baseline = h.jobs[1];
+    expect(baseline).toMatchObject({ kind: 'validate-stack', baseCheck: true, canonicalBaseOid: main, candidates: [] });
+    const { response, body } = await deliverChecked(h, baseline, outcome, { composedOid, tree, expectedStatus: 409 });
+    expect(response.status).toBe(409);
+    expect(body.error.code).toBe('RESULT_IDENTITY');
+    expect((await h.state()).diagnosis).toMatchObject({ phase: 'baseline' });
+    expect(h.jobs).toHaveLength(2);
   });
 
   it('classifies pairwise interaction, dependency closure, baseline failure, and budget exhaustion without invented singleton blame', () => {
