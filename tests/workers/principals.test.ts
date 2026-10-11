@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import { authenticate } from '../../src/auth';
 import { localFixtureConfig } from '../../src/state';
@@ -19,6 +19,31 @@ const mint = (body: Record<string, unknown>, key = crypto.randomUUID(), token = 
   fetchApi(mutation('/v1/principals', body, key, token));
 
 describe('delegated principals', () => {
+  it('skips the catalog for tokens outside the exact delegated format', async () => {
+    const idFromName = vi.fn(() => { throw new Error('unexpected catalog lookup'); });
+    const get = vi.fn(() => { throw new Error('unexpected catalog lookup'); });
+    const guardedEnv = { CONCORD_MODE: 'production', AUTH_TOKENS: '{}',
+      TENANT_CATALOG: { idFromName, get } } as unknown as Env;
+    const tokens = ['ordinary-token', 'cct_', `cct_local_${'a'.repeat(63)}`,
+      `cct_local_${'a'.repeat(65)}`, `cct_local_${'g'.repeat(64)}`, `cct_${'a'.repeat(65)}_${'a'.repeat(64)}`];
+    for (const token of tokens) {
+      await expect(authenticate(apiRequest('/v1/repos', token), guardedEnv))
+        .rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+    }
+    expect(idFromName).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('does not charge a valid delegated token to the auth-failure limiter', async () => {
+    const created = (await responseBody(await mint({ roles: ['agent'] }))).data;
+    const limit = vi.fn(async () => ({ success: true }));
+    const guardedEnv = { ...runtime, AUTH_RATE_LIMIT: { limit } } as Env;
+    expect((await worker.fetch(apiRequest('/v1/repos', created.token), guardedEnv)).status).toBe(200);
+    expect(limit).not.toHaveBeenCalled();
+    expect((await worker.fetch(apiRequest('/v1/repos', `cct_local_${'a'.repeat(64)}`), guardedEnv)).status).toBe(401);
+    expect(limit).toHaveBeenCalledTimes(1);
+  });
+
   it('mints a scoped token, uses it on existing routes, and lists metadata without secrets', async () => {
     const response = await mint({ roles: ['agent'], repoIds: ['alpha'], ttlSeconds: 3600, name: 'worker' });
     expect(response.status).toBe(201);
