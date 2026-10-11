@@ -238,6 +238,33 @@ describe('cross-module coordinator hooks', () => {
     }
   });
 
+  it('lets only the pending ticket promoter use job lifecycle routes during a freeze', async () => {
+    const repoId = 'hooks_promoter_lifecycle';
+    const base = `/v1/repos/${repoId}`;
+    const allowed = [`${base}/runner/poll`, `${base}/jobs/ticket/heartbeat`,
+      `${base}/jobs/ticket/credentials`, `${base}/jobs/ticket/result`];
+    const prior = queue.promotionFreeze;
+    const routes: ModuleRoute[] = allowed.map(path => ({
+      method: 'POST', pattern: new RegExp(`^${path}$`), handle: () => json({ accepted: true }),
+    }));
+    runners.routes.unshift(...routes);
+    queue.promotionFreeze = (_context, request) => ({ frozen: true,
+      exempt: allowed.includes(new URL(request.url).pathname) });
+    try {
+      for (const path of allowed) {
+        const promoter = await fetchApi(mutation(path, {}, `promoter-${path}`, 'local-promoter'));
+        expect(promoter.status).toBe(200);
+        const owner = await fetchApi(mutation(path, {}, `owner-${path}`, 'local-owner'));
+        expect(['FORBIDDEN', 'PROMOTION_IN_PROGRESS']).toContain((await responseBody(owner)).error.code);
+      }
+      const otherJob = await fetchApi(mutation(`${base}/jobs/other/heartbeat`, {}, 'other-job', 'local-promoter'));
+      expect((await responseBody(otherJob)).error.code).toBe('PROMOTION_IN_PROGRESS');
+    } finally {
+      queue.promotionFreeze = prior;
+      for (const route of routes) runners.routes.splice(runners.routes.indexOf(route), 1);
+    }
+  });
+
   it('returns an unavailable change view before registration and a detached read-only repos record afterward', async () => {
     const prior = repos.changeView;
     const repoId = 'hooks_change';
@@ -245,6 +272,9 @@ describe('cross-module coordinator hooks', () => {
     const stored: ChangeView = {
       authorId: 'agent-a', headOid: 'abc123', revision: 3,
       status: 'ready', unitKeys: ['row:one'], frozen: false,
+      baseOid: 'base123', candidateStorageName: 'fork-one', branch: 'refs/heads/work',
+      dependencyChangeIds: ['prior'], canonicalStorageName: 'canonical-one',
+      scratchStorageName: 'scratch-one', policyId: 'local-demo', profileId: 'local-demo', intentKey: 'one',
     };
     const seed: ModuleRoute = {
       method: 'POST', pattern: /^\/v1\/repos\/hooks_change\/test-seed$/,
@@ -260,7 +290,8 @@ describe('cross-module coordinator hooks', () => {
         if (gate.status === 'blocked') return json(gate);
         const writable = Reflect.set(gate.value, 'authorId', 'intruder');
         const writableUnit = Reflect.set(gate.value.unitKeys, '0', 'row:intruder');
-        return json({ gate, writable, writableUnit, ownState: context.state.get(`change:${changeId}`) });
+        const writableDependency = Reflect.set(gate.value.dependencyChangeIds!, '0', 'intruder');
+        return json({ gate, writable, writableUnit, writableDependency, ownState: context.state.get(`change:${changeId}`) });
       },
     };
     repos.routes.unshift(seed);
@@ -278,7 +309,7 @@ describe('cross-module coordinator hooks', () => {
       expect(available.status).toBe(200);
       expect((await responseBody(available)).data).toEqual({
         gate: { status: 'eligible', version: 0, evidenceIds: [changeId], value: stored },
-        writable: false, writableUnit: false, ownState: null,
+        writable: false, writableUnit: false, writableDependency: false, ownState: null,
       });
       const again = await fetchApi(apiRequest(`/v1/repos/${repoId}/test-view`));
       expect((await responseBody(again)).data.gate.value).toEqual(stored);
