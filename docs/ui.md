@@ -44,10 +44,12 @@ Worker serves `web/` directly; `/health` reports the backend badge.
 - **Findings round**: open vs resolved findings and the repair-round state.
   A partial repair stays `unresolved`; only the independent reviewer moves
   it to `pending-review` and then resolved.
-- **Approval provenance**: direct verdicts show reviewer, revision, and
-  finding-set version. Carried verdicts link the parent review and the
-  delta evidence; refused carry states the concrete reason (for example a
-  changed beta dependency).
+- **Approval provenance**: no verdict records are available in this panel
+  today. The snapshot's verdict projection returns `items: []`, and the UI
+  renders verdicts from that snapshot only. A per-change verdict GET route
+  exists, but the UI does not call it yet. Wiring that route into the panel
+  is a separate slice; until then, the panel cannot show direct or carried
+  verdicts, parent reviews, or delta evidence.
 - **Queue and bisection**: membership, sequence, blocked reasons. A failed
   stack highlights only the supported outcome: the singleton culprit, the
   failing set (`INTERACTION`, never single-blamed), the dependency group,
@@ -70,7 +72,7 @@ event details also come from `GET /v1/repos/:repoId/events?after=`.
 | Queue and bisection | Snapshot `queue` projection from `src/features/queue.ts`; its read route is `GET /v1/repos/:repoId/queue`. |
 | Runner health | Snapshot `runners` projection from `src/features/runners.ts`; job polling and results use that module's runner/job routes. |
 | Findings round | Snapshot `findings` projection from `src/features/findings.ts`; detail reads use `GET /v1/repos/:repoId/changes/:changeId/findings` and `/repairs`. |
-| Approval provenance | Snapshot `verdicts` projection from `src/features/verdicts.ts`; verdict writes use `POST /v1/repos/:repoId/changes/:changeId/verdicts`. |
+| Approval provenance | Snapshot `verdicts` projection from `src/features/verdicts.ts` currently returns `items: []`; the per-change `GET /v1/repos/:repoId/changes/:changeId/verdicts` route exists but the UI does not call it. Verdict writes use `POST /v1/repos/:repoId/changes/:changeId/verdicts`. |
 | Canonical tip | Snapshot `repos` projection from `src/features/repos.ts`. |
 | History and events | History has no replay data route in this screen; the event log reads `GET /v1/repos/:repoId/events?after=`. |
 
@@ -82,7 +84,7 @@ renders the corresponding returned projections and event records:
 | X lease conflict on alpha | Lease board reads the lease projection; a refused claim's conflict evidence identifies the live holder. |
 | B red stack, bisection to singleton B | Queue panel reads queue entries and diagnostic outcomes from the queue projection. |
 | B-repair clears two findings | Findings panel reads finding and repair-round records from the findings projection. |
-| D carried approval, H invalidation | Provenance panel reads verdict records and their parent/delta evidence from the verdict projection and event log. |
+| D carried approval, H invalidation | Backend state includes carried approval and invalidation evidence, but the provenance panel shows no verdict records today: it renders only the empty snapshot verdict projection and does not call the per-change verdict GET route. |
 | J epsilon contest 2/4 vs 4/4 | Queue panel displays the arbitration outcome recorded by the queue module. |
 | AW-task seven attempts, one change | Changes panel displays repo change records; attempt and task evidence is shown only when present in returned records. |
 | Offline runner / flake | Runner state comes from the runner projection; missed health polls show `Disconnected` and disable mutations. |
@@ -101,8 +103,13 @@ The coordinator keys projections by `repos`, `leases`, `queue`, `runners`,
 and `repos.changes` for changes; `findings.items` for findings,
 `findings.rounds` for repair rounds, and `findings.findingSetVersions[changeId]` for
 review evidence. Lease fences come from `leases.items`. Missing evidence blocks
-mutation with a visible message. A projection's availability is reported by
-its owning module; the UI does not infer records absent from the response.
+mutation with a visible message. The verdict snapshot currently returns
+`verdicts.items: []`; the UI renders only this snapshot projection and does
+not call the available per-change verdict GET route. As a result, verdict
+records, parent links, and delta evidence are not displayed today. A separate
+slice must wire that route into the UI before the panel can display them. A
+projection's availability is reported by its owning module; the UI does not
+infer records absent from the response.
 
 ## UI evidence and response audit
 

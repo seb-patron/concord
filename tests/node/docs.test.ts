@@ -193,6 +193,25 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
+describe('UI documentation', () => {
+  it('states that verdict records are unavailable until the UI calls the serving route', async () => {
+    const document = await readFile(join(cwd, 'docs/ui.md'), 'utf8');
+    const provenance = /- \*\*Approval provenance\*\*:([\s\S]*?)(?=\n- \*\*|\n## )/.exec(document)?.[1] ?? '';
+    const snapshotRow = document.split('\n').find(line => line.startsWith('| Approval provenance |')) ?? '';
+    const demoRow = document.split('\n').find(line => line.startsWith('| D carried approval, H invalidation |')) ?? '';
+
+    expect(provenance).toMatch(/no verdict records are available/i);
+    expect(provenance).toContain('`items: []`');
+    expect(provenance).toMatch(/renders verdicts from that snapshot only/i);
+    expect(provenance).toMatch(/per-change verdict GET route\s+exists, but the UI\s+does not call it yet/i);
+    expect(provenance).toMatch(/separate slice/i);
+    expect(snapshotRow).toContain('returns `items: []`');
+    expect(snapshotRow).toMatch(/GET \/v1\/repos\/:repoId\/changes\/:changeId\/verdicts.*UI does not call it/i);
+    expect(demoRow).toMatch(/shows no verdict records today/i);
+    expect(demoRow).not.toMatch(/panel reads verdict records/i);
+  });
+});
+
 describe('documented demo commands', () => {
   it('runs every 12c-tagged block in written order from a clean shell', async () => {
     const root = await externalTempDir('concord-docs-shell-');
