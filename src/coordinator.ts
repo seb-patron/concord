@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import type { FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
+import type { BootstrapHandoff, FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
 import { clock, requireRepo, requireTenant } from './auth';
 import { digest, encodeCursor, expectVersion, failure, HttpError, json, parseCursor, readJson, requiresExpectedVersion } from './http';
 import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState, unfrozenPromotion } from './state';
@@ -71,10 +71,18 @@ export class RepoCoordinator extends DurableObject<Env> {
             authorId: value.authorId, headOid: value.headOid, revision: value.revision,
             status: value.status, unitKeys: Object.freeze([...value.unitKeys]), frozen: value.frozen,
             baseOid: value.baseOid, candidateStorageName: value.candidateStorageName, branch: value.branch,
-            dependencyChangeIds: value.dependencyChangeIds && Object.freeze([...value.dependencyChangeIds]), canonicalStorageName: value.canonicalStorageName,
+            dependencyChangeIds: value.dependencyChangeIds && Object.freeze([...value.dependencyChangeIds]),
+            canonicalStorageName: value.canonicalStorageName, scratchStorageName: value.scratchStorageName,
+            policyId: value.policyId, profileId: value.profileId, intentKey: value.intentKey,
           }),
         };
       },
+      handoffBootstrap: name === 'repos' ? (seed: BootstrapHandoff) => {
+        if (!principal.roles.includes('owner')) return { status: 'blocked', version: context.version(), code: 'FORBIDDEN', reason: 'Owner authorization required', evidenceIds: [] };
+        const provider = queue.bootstrapHandoff;
+        if (!provider) return { status: 'blocked', version: context.version(), code: 'MODULE_UNAVAILABLE', reason: 'Queue bootstrap handoff unavailable', evidenceIds: [] };
+        return provider(this.context('queue', principal, repoId), seed);
+      } : undefined,
     };
     return context;
   }
@@ -128,10 +136,11 @@ export class RepoCoordinator extends DurableObject<Env> {
       const mutation = !['GET', 'HEAD'].includes(request.method);
       const checkFreeze = () => {
         const decision = (queue.promotionFreeze ?? unfrozenPromotion)(this.context('queue', principal, repoId), request);
-        const promoterResult = request.method === 'POST'
-          && new RegExp(`^/v1/repos/${repoId}/jobs/[A-Za-z0-9_-]{1,64}/result$`).test(url.pathname)
+        const promoterOperation = request.method === 'POST'
+          && (new RegExp(`^/v1/repos/${repoId}/jobs/[A-Za-z0-9_-]{1,64}/(?:heartbeat|credentials|result)$`).test(url.pathname)
+            || url.pathname === `/v1/repos/${repoId}/runner/poll`)
           && principal.roles.includes('promoter');
-        if (decision.frozen && !(decision.exempt && promoterResult)) {
+        if (decision.frozen && !(decision.exempt && promoterOperation)) {
           throw new HttpError(409, 'PROMOTION_IN_PROGRESS', 'Repository promotion is in progress');
         }
       };
@@ -192,10 +201,12 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (!identity) return;
     const principal: Principal = { tenantId: identity.tenantId, principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
     let failure: unknown;
-    for (const module of modules) {
-      try { await module.onAlarm(this.context(module.name, principal, identity.repoId)); }
-      catch (error) { failure ??= error; }
-    }
+    await this.ctx.blockConcurrencyWhile(async () => {
+      for (const module of modules) {
+        try { await module.onAlarm(this.context(module.name, principal, identity.repoId)); }
+        catch (error) { failure ??= error; }
+      }
+    });
     await this.scheduleNextAlarm(principal, identity.repoId);
     if (failure) throw failure;
   }
