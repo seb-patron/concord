@@ -301,7 +301,16 @@ function validatePublishPayload(value: unknown, expected: { baseOid: string; hea
 }
 function redactRemote(remote: string): string { try { const url = new URL(remote); return `${url.origin}${url.pathname}`; } catch { return '[remote]'; } }
 async function stdinText(): Promise<string> { let value = ''; for await (const chunk of process.stdin) value += chunk; return value; }
-function writeOutput(stream: NodeJS.WriteStream, value: unknown): void { stream.write(`${JSON.stringify(redactOutput(value ?? null))}\n`); }
+function writeOutput(stream: NodeJS.WriteStream, value: unknown): void {
+  const count = { omittedMembers: 0 };
+  const safe = redactOutput(value ?? null, count);
+  if (count.omittedMembers && safe && typeof safe === 'object' && !Array.isArray(safe)) {
+    stream.write(`${JSON.stringify({ ...safe, omittedMembers: count.omittedMembers })}\n`);
+  } else {
+    stream.write(`${JSON.stringify(safe)}\n`);
+    if (count.omittedMembers) process.stderr.write(`${JSON.stringify({ omittedMembers: count.omittedMembers })}\n`);
+  }
+}
 function print(value: unknown): void { writeOutput(process.stdout, value); }
 
 for (const [name, value] of Object.entries(process.env)) {
@@ -310,7 +319,9 @@ for (const [name, value] of Object.entries(process.env)) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) runCli().catch(error => {
   const err = error instanceof ConcordError ? error : new ConcordError(error instanceof Error ? error.message : String(error), 'transport');
-  const diagnostic: Record<string, unknown> = { error: { kind: err.kind, message: redactOutput(err.message), ...(err.payload === undefined ? {} : { details: redactOutput(err.payload) }), ...(err.status === undefined ? {} : { status: err.status }) } };
+  const count = { omittedMembers: err.omittedMembers };
+  const diagnostic: Record<string, unknown> = { error: { kind: err.kind, message: redactOutput(err.message, count), ...(err.payload === undefined ? {} : { details: redactOutput(err.payload, count) }), ...(err.status === undefined ? {} : { status: err.status }) } };
+  if (count.omittedMembers) diagnostic.omittedMembers = count.omittedMembers;
   if (err.kind === 'conflict') diagnostic.nextAction = 'Inspect the current holder/version, then retry with a fresh idempotency key or renew your own active lease; leases are never stolen automatically.';
   process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
   process.exitCode = err.exitCode;

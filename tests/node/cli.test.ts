@@ -3,7 +3,7 @@ import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
 
@@ -475,6 +475,57 @@ describe('Concord agent CLI client', () => {
     await expect(broken.request('GET', '/echo')).rejects.toMatchObject({ kind: 'transport', message: expect.stringContaining('[REDACTED]'), payload: { message: '[REDACTED]' } });
   });
 
+  it('omits secret-bearing response keys and reports the number on stdout and stderr', async () => {
+    const secret = 'demoSecret42';
+    const allEncoded = [...Buffer.from(secret)].map(byte => `%${byte.toString(16).padStart(2, '0')}`).join('');
+    const doubleEncoded = encodeURIComponent(allEncoded);
+    const base64 = Buffer.from(secret).toString('base64');
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      const members = { [`raw-${secret}`]: 1, [`encoded-${allEncoded}`]: 2, [`base64-${base64}`]: 3, keep: 'safe' };
+      if (request.url === '/v1/ok') response.end(JSON.stringify({ data: { members, nested: [{ [`again-${doubleEncoded}`]: 4, keep: true }] } }));
+      else { response.statusCode = 400; response.end(JSON.stringify({ error: { code: 'BAD', message: 'failure', details: members } })); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: secret };
+    try {
+      const ok = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/ok'], { cwd: process.cwd(), env });
+      expect(JSON.parse(ok.stdout)).toEqual({ data: { members: { keep: 'safe' }, nested: [{ keep: true }] }, omittedMembers: 4 });
+      expect(ok.stdout).not.toContain(secret);
+      expect(ok.stdout).not.toContain(allEncoded);
+      expect(ok.stdout).not.toContain(base64);
+      try {
+        await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/fail'], { cwd: process.cwd(), env });
+        throw new Error('expected HTTP error');
+      } catch (error) {
+        const stderr = (error as { stderr: string }).stderr;
+        const diagnostic = JSON.parse(stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
+        expect(diagnostic).toEqual({ error: { kind: 'server', message: 'BAD: failure', details: { error: { code: 'BAD', message: 'failure', details: { keep: 'safe' } } }, status: 400 }, omittedMembers: 3 });
+        expect(stderr).not.toContain(secret);
+        expect(stderr).not.toContain(allEncoded);
+        expect(stderr).not.toContain(base64);
+      }
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('rejects raw and encoded traversal, backslashes, and origin changes before fetch', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('{}'));
+    const client = new ConcordClient({ url: 'https://concord.invalid/base', fetch: fetcher });
+    for (const path of [
+      '/%2e%2e/admin', '/v1/%2E%2E/admin', '/v1/.%2e/admin', '/v1/%252e%252e/admin',
+      '/v1/./admin', '/v1/../admin', '/v1/%2f..%2fadmin', '/v1/%5c..%5cadmin',
+      '/v1\\..\\admin', '//evil.invalid/v1/repos', '/%2f%2fevil.invalid/v1/repos',
+    ]) {
+      await expect(client.request('GET', path), path).rejects.toMatchObject({ kind: 'usage' });
+      expect(fetcher, path).not.toHaveBeenCalled();
+    }
+    await client.request('GET', '/repos?after=1');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe('https://concord.invalid/v1/repos?after=1');
+  });
+
   it('preserves valid JSON for generated tokens with arbitrary punctuation and quotes', () => {
     const alphabet = Array.from('abcXYZ09"\\\n\r\t+/%=&?[]{}:!@#$^*() é😀');
     let seed = 0x1234abcd;
@@ -503,13 +554,14 @@ describe('Concord agent CLI client', () => {
     const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'e' };
     try {
       const ok = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/ok'], { cwd: process.cwd(), env });
-      expect(JSON.parse(ok.stdout)).toEqual({ data: { message: '[REDACTED]', nested: { echo: '[REDACTED]' } } });
+      expect(JSON.parse(ok.stdout)).toEqual({ data: {}, omittedMembers: 2 });
       try {
         await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'api', 'GET', '/fail'], { cwd: process.cwd(), env });
         throw new Error('expected server failure');
       } catch (error) {
         const diagnostic = JSON.parse((error as { stderr: string }).stderr.split('\n').find(line => line.startsWith('{"error":')) ?? '');
-        expect(diagnostic.error).toMatchObject({ kind: 'server', status: 400, details: { error: { code: 'BAD', message: '[REDACTED]', data: { echo: '[REDACTED]' } } } });
+        expect(diagnostic.error).toMatchObject({ kind: 'server', status: 400 });
+        expect(diagnostic.omittedMembers).toBe(1);
         expect(diagnostic.error.message).not.toContain('secret e');
       }
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

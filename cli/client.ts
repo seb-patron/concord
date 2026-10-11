@@ -5,11 +5,13 @@ export class ConcordError extends Error {
   readonly kind: ConcordErrorKind;
   readonly status?: number;
   readonly payload?: unknown;
-  constructor(message: string, kind: ConcordErrorKind, status?: number, payload?: unknown) {
+  readonly omittedMembers: number;
+  constructor(message: string, kind: ConcordErrorKind, status?: number, payload?: unknown, omittedMembers = 0) {
     super(message);
     this.kind = kind;
     this.status = status;
     this.payload = payload;
+    this.omittedMembers = omittedMembers;
     this.name = 'ConcordError';
   }
   get exitCode(): number {
@@ -53,9 +55,18 @@ function rememberCredentialValues(value: unknown): void {
   else if (value && typeof value === 'object') for (const item of Object.values(value)) rememberCredentialValues(item);
 }
 const normalizedEscapes = (value: string) => value.replace(/%[0-9a-f]{2}/gi, match => match.toUpperCase());
-const percentDecoded = (value: string) => value.replace(/(?:%[0-9a-f]{2})+/gi, run => {
+const decodeEscapesOnce = (value: string) => value.replace(/(?:%[0-9a-f]{2})+/gi, run => {
   try { return decodeURIComponent(run); } catch { return run; }
 });
+function percentDecoded(value: string): string {
+  let decoded = value;
+  for (let i = 0; i < 10; i++) {
+    const next = decodeEscapesOnce(decoded);
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
 export function redactString(value: string): string {
   const normalized = normalizedEscapes(value);
   const decoded = percentDecoded(value);
@@ -66,17 +77,25 @@ export function redactString(value: string): string {
     const formEncoded = new URLSearchParams({ value: secret }).toString().slice('value='.length);
     const base64 = Buffer.from(secret).toString('base64');
     const base64url = Buffer.from(secret).toString('base64url');
-    if (value.includes(secret) || decoded.includes(secret) || decoded.replace(/\+/g, ' ').includes(secret) || (encoded && normalized.includes(normalizedEscapes(encoded))) || normalized.includes(allEncoded) || normalized.includes(normalizedEscapes(formEncoded)) || value.includes(base64) || value.includes(base64url)) return '[REDACTED]';
+    if (value.includes(secret) || decoded.includes(secret) || decoded.replace(/\+/g, ' ').includes(secret) || (encoded && normalized.includes(normalizedEscapes(encoded))) || normalized.includes(allEncoded) || normalized.includes(normalizedEscapes(formEncoded)) || decoded.includes(base64) || decoded.includes(base64url)) return '[REDACTED]';
   }
   if (/Bearer\s+\S+/i.test(value) || /(https?:\/\/)[^\s"'@/]+:[^\s"'@/]+@/i.test(value) || /[?&](?:access_token|token|api_key|secret|password)=[^&\s"']+/i.test(value) || /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{12,})\b/.test(value) || /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/.test(value)) return '[REDACTED]';
   return value;
 }
 // Redact values before JSON.stringify so a credential can never replace JSON syntax.
-export function redactOutput(value: unknown): unknown {
+export interface RedactionCount { omittedMembers: number }
+export function redactOutput(value: unknown, count: RedactionCount = { omittedMembers: 0 }): unknown {
   if (typeof value === 'string') return redactString(value);
   if (typeof value === 'number' || typeof value === 'boolean') return redactString(String(value)) === '[REDACTED]' ? '[REDACTED]' : value;
-  if (Array.isArray(value)) return value.map(redactOutput);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactOutput(item)]));
+  if (Array.isArray(value)) return value.map(item => redactOutput(item, count));
+  if (value && typeof value === 'object') {
+    const safe: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (redactString(key) === '[REDACTED]') { count.omittedMembers++; continue; }
+      Object.defineProperty(safe, key, { value: redactOutput(item, count), enumerable: true, writable: true, configurable: true });
+    }
+    return safe;
+  }
   return value;
 }
 
@@ -97,10 +116,25 @@ export class ConcordClient {
 
   async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
     const verb = method.toUpperCase();
-    if (!/^\/(?:v1\/)?[A-Za-z0-9_./:%?=&-]*$/.test(path) || path.includes('..')) {
-      throw new ConcordError('API path must be an absolute Concord path without traversal', 'usage');
+    const invalidPath = () => new ConcordError('API path must be an absolute Concord path without traversal', 'usage');
+    if (!/^\/(?:v1\/)?[A-Za-z0-9_./:%?=&-]*$/.test(path) || path.includes('\\')) {
+      throw invalidPath();
     }
-    const url = new URL(path.startsWith('/v1/') ? path : `/v1${path.startsWith('/') ? path : `/${path}`}`, `${this.baseUrl}/`);
+    let decodedPath = path.split('?')[0];
+    for (let i = 0; i < 10; i++) {
+      let next: string;
+      try { next = decodeURIComponent(decodedPath); } catch { throw invalidPath(); }
+      if (next === decodedPath) break;
+      decodedPath = next;
+    }
+    if (decodedPath.startsWith('//') || decodedPath.includes('\\') || decodedPath.split('/').some(segment => segment === '.' || segment === '..') || /%[0-9a-f]{2}/i.test(decodedPath)) {
+      throw invalidPath();
+    }
+    const base = new URL(this.baseUrl);
+    const url = new URL(path.startsWith('/v1/') ? path : `/v1${path}`, base);
+    if (url.origin !== base.origin || !url.pathname.startsWith('/v1/')) {
+      throw invalidPath();
+    }
     const headers = new Headers({ accept: 'application/json' });
     if (this.options.token) headers.set('authorization', `Bearer ${this.options.token}`);
     let body: string | undefined;
@@ -131,8 +165,9 @@ export class ConcordClient {
         }
         const kind: ConcordErrorKind = response.status === 409 ? 'conflict' : response.status === 401 || response.status === 403 ? 'auth' : 'server';
         if (url.pathname.endsWith('/git-token')) throw new ConcordError(`Git token request failed with HTTP ${response.status}`, kind, response.status);
-        const safePayload = redactOutput(payload);
-        throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload);
+        const count = { omittedMembers: 0 };
+        const safePayload = redactOutput(payload, count);
+        throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload, count.omittedMembers);
       } catch (error) {
         if (error instanceof ConcordError) throw error;
         lastError = error;
