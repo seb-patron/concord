@@ -85,6 +85,10 @@ The driver also implements **negative** (declared bad row and executable edits r
 
 <!-- verified-by: 12c -->
 ```sh
+export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
+export CONCORD_URL=http://127.0.0.1:8787
+export CONCORD_TOKEN=local-owner
+export CONCORD_SHOW_DECOMPILED_C=0
 npm run demo -- scene isolate --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 npm run demo -- scene negative --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local
 npm run demo -- scene repair --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-local

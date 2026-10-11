@@ -28,21 +28,25 @@ Job `expectedRefs` keys are storage names. The candidate and canonical repositor
 The bridge is an **account-free local fake**, bound to `127.0.0.1` and backed by bare Git repositories under one supplied directory. It uses fixed native Git argv and accepts only an authenticated `/rpc` request. Repo remotes are `file://` paths and are suitable only for local fixtures below 10 MB. They do not enforce token scope as Artifacts HTTPS does.
 
 ```sh
-export CONCORD_BRIDGE_DATA_DIR="$(mktemp -d)"
-export CONCORD_BRIDGE_TOKEN="$(openssl rand -hex 24)"
+export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-repos-01"
+export CONCORD_BRIDGE_DATA_DIR="$CONCORD_RUN_DIR/bridge"
+export CONCORD_BRIDGE_TOKEN="$(node -p 'require("node:crypto").createHash("sha256").update(process.env.CONCORD_RUN_DIR + ":bridge").digest("hex")')"
 export CONCORD_BRIDGE_PORT=8788
 npm run git-bridge
 ```
 
-In a second terminal with the same bridge token, start the local Worker with [Wrangler `--var` overrides](https://developers.cloudflare.com/workers/wrangler/commands/workers/):
+In a second terminal, derive the same local bridge token from the same run directory and start the Worker with [Wrangler `--var` overrides](https://developers.cloudflare.com/workers/wrangler/commands/workers/):
 
 ```sh
+export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-repos-01"
+export CONCORD_BRIDGE_TOKEN="$(node -p 'require("node:crypto").createHash("sha256").update(process.env.CONCORD_RUN_DIR + ":bridge").digest("hex")')"
+: "${CONCORD_BRIDGE_TOKEN:?bridge token required}"
 export CONCORD_WRANGLER_STATE=".wrangler/state/$(node -p 'require("node:crypto").createHash("sha256").update(process.env.CONCORD_BRIDGE_TOKEN).digest("hex").slice(0,12)')"
 npm run dev -- --persist-to "$CONCORD_WRANGLER_STATE" --var 'STORAGE_BACKEND:bridge' \
   --var "BRIDGE_URL:http://127.0.0.1:8788/?token=$CONCORD_BRIDGE_TOKEN"
 ```
 
-The checked-in local Wrangler configuration defaults to `fake`. Keep the bridge data directory and the matching `.wrangler/state/` directory to persist repos and issued fake-token revocation state across restarts. A fresh bridge token gives each run separate Worker state. The Worker adapter uses HTTP only; Node Git and filesystem APIs stay in `local/git-bridge.ts`. Do not deploy the bridge URL: production storage selection accepts only Artifacts.
+The checked-in local Wrangler configuration defaults to `fake`. Keep the bridge data directory and the matching `.wrangler/state/` directory to persist repos and issued fake-token revocation state across restarts. Change `concord-repos-01` in both blocks for a fresh run and separate Worker state. The Worker adapter uses HTTP only; Node Git and filesystem APIs stay in `local/git-bridge.ts`. Do not deploy the bridge URL: production storage selection accepts only Artifacts.
 
 ## Early live Artifacts gate (skipped by default)
 

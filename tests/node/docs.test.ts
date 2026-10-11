@@ -13,6 +13,14 @@ const cwd = realpathSync(resolve('.'));
 const children: ChildProcess[] = [];
 const directories: string[] = [];
 
+function freshShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const fresh = { ...env };
+  for (const key of Object.keys(fresh)) {
+    if (key.startsWith('CONCORD_') || key === 'WRANGLER_SEND_METRICS') delete fresh[key];
+  }
+  return fresh;
+}
+
 async function externalTempDir(prefix: string): Promise<string> {
   for (const base of ['/tmp', join(cwd, '..', 'sandbox-home', 'tmp'), tmpdir()]) {
     if (!relative(cwd, resolve(base)).startsWith('..')) continue;
@@ -135,14 +143,25 @@ describe('documented demo commands', () => {
     const guide = await readFile(join(cwd, 'docs/api-repos.md'), 'utf8');
     const bridgeWorker = /In a second terminal[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1];
     expect(bridgeWorker).toBeDefined();
-    const [stateExport, workerCommand] = bridgeWorker!.replace(/\\\r?\n\s*/g, ' ').split('\n');
-    for (const token of ['first-run-token', 'second-run-token']) {
-      const { args } = await capturedNpm([stateExport], workerCommand,
-        { ...process.env, CONCORD_BRIDGE_TOKEN: token });
+    const bridgeBlock = /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1];
+    expect(bridgeBlock).toBeDefined();
+    for (const suffix of ['first', 'second']) {
+      const root = await externalTempDir(`concord-${suffix}-`);
+      const env = { ...freshShellEnv(process.env), TMPDIR: root };
+      const bridge = await capturedNpm([], bridgeBlock!, env);
+      const worker = await capturedNpm([], bridgeWorker!, env);
+      const runDir = join(root, 'concord-repos-01');
+      const token = createHash('sha256').update(runDir + ':bridge').digest('hex');
       const hash = createHash('sha256').update(token).digest('hex').slice(0, 12);
-      expect(args.slice(0, 5)).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${hash}`]);
-      expect(resolve(cwd, args[4])).toBe(join(cwd, '.wrangler', 'state', hash));
+      expect(bridge.args).toEqual(['run', 'git-bridge']);
+      expect(bridge.values.slice(0, 3)).toEqual([join(runDir, 'bridge'), token, '8788']);
+      expect(worker.args.slice(0, 5)).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${hash}`]);
+      expect(worker.args).toContain(`BRIDGE_URL:http://127.0.0.1:8788/?token=${token}`);
+      expect(worker.values[1]).toBe(token);
+      expect(resolve(cwd, worker.args[4])).toBe(join(cwd, '.wrangler', 'state', hash));
     }
+    const missingToken = bridgeWorker!.replace(/^export CONCORD_BRIDGE_TOKEN=.*\n/m, '');
+    await expect(capturedNpm([], missingToken, freshShellEnv(process.env))).rejects.toMatchObject({ stdout: '' });
   });
 
   it('keeps Wrangler persistence in the clone when TMPDIR is outside it', async () => {
@@ -151,14 +170,19 @@ describe('documented demo commands', () => {
     const demo = await taggedBlocks('docs/DEMO.md');
     const deploy = await taggedBlocks('docs/deploy.md');
     const blocks = [...readme, ...demo, ...deploy];
-    const env = { ...process.env, TMPDIR: root };
+    const env = { ...freshShellEnv(process.env), TMPDIR: root };
     expect(relative(cwd, root).startsWith('..')).toBe(true);
     expect(readme).toHaveLength(5);
     for (const block of readme) expect(block).toContain('cd "$(pwd -P)"');
+    for (const block of blocks) {
+      expect((await capturedNpm([], block, env)).args.length).toBeGreaterThan(0);
+    }
     const { stdout: runDir } = await execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
       { cwd, env });
     expect(isAbsolute(runDir)).toBe(true);
     expect(runDir).toBe(join(resolve(env.TMPDIR), 'concord-demo-01'));
+    const firstDeploy = await capturedNpm([], commandLines(deploy[0]).commands[0], env);
+    expect(firstDeploy.args).toEqual(['run', 'demo', '--', 'seed', '--run', 'demo-01', '--state-dir', runDir]);
     await mkdir(runDir);
     await writeFile(join(runDir, 'trusted-config.json'), '{}\n');
 
@@ -173,7 +197,7 @@ describe('documented demo commands', () => {
     for (const block of blocks.slice(1)) {
       const { exports, commands } = commandLines(block);
       for (const command of commands) {
-        const { args, values } = await capturedNpm(exports, command, { ...env, CONCORD_RUN_DIR: runDir });
+        const { args, values } = await capturedNpm(exports, command, env);
         if (args[1] === 'dev') {
           workers++;
           expect(args).toEqual(['run', 'dev', '--', '--persist-to', `.wrangler/state/${runHash}`,
@@ -188,6 +212,9 @@ describe('documented demo commands', () => {
         } else {
           demos++;
           expect(args.slice(0, 3)).toEqual(['run', 'demo', '--']);
+          if (args[3] !== 'preflight') {
+            expect(values.slice(3, 5)).toEqual(['http://127.0.0.1:8787', 'local-owner']);
+          }
           const stateFlags = args.flatMap((arg, index) => arg === '--state-dir' ? [args[index + 1]] : []);
           expect(stateFlags, command).toEqual([runDir]);
           expect(isAbsolute(stateFlags[0])).toBe(true);
@@ -231,11 +258,10 @@ describe('documented demo commands', () => {
     // Demo and runner need the absolute path for their candidate worktrees.
     const preload = join(root, 'restore-tmp.cjs');
     await writeFile(preload, "if (/(?:demo|runner)\\/main\\.ts$/.test(process.argv[1] ?? '')) process.env.TMPDIR = process.env.CONCORD_DOCS_ABS_TMPDIR;\n");
-    const env = { ...process.env, TMPDIR: relative(cwd, root), XDG_CONFIG_HOME: root,
-      CONCORD_RUN_DIR: join(root, 'concord-demo-01'), CONCORD_URL: 'http://127.0.0.1:8787',
-      CONCORD_TOKEN: 'local-owner', CONCORD_SHOW_DECOMPILED_C: '0', WRANGLER_SEND_METRICS: 'false',
+    const env = { ...freshShellEnv(process.env), TMPDIR: relative(cwd, root), XDG_CONFIG_HOME: root,
       CONCORD_DOCS_ABS_TMPDIR: root, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
     };
+    const workerUrl = 'http://127.0.0.1:8787';
     expect(relative(cwd, resolve(env.TMPDIR)).startsWith('..')).toBe(true);
     const readme = await taggedBlocks('README.md');
     const demo = await taggedBlocks('docs/DEMO.md');
@@ -265,8 +291,8 @@ describe('documented demo commands', () => {
     const bridge = start(readme[2], env);
     await waitFor('bridge', async () => bridge.output().includes('listening on 127.0.0.1:8788'), bridge.output);
     const worker = start(readme[3], env);
-    await waitFor('Worker health', async () => (await fetch(env.CONCORD_URL + '/health')).ok, worker.output);
-    expect((await (await fetch(env.CONCORD_URL + '/health')).json() as any).data.storageBackend).toBe('bridge');
+    await waitFor('Worker health', async () => (await fetch(workerUrl + '/health')).ok, worker.output);
+    expect((await (await fetch(workerUrl + '/health')).json() as any).data.storageBackend).toBe('bridge');
 
     const execute = async (block: string) => {
       const { exports, commands } = commandLines(block);
@@ -286,10 +312,10 @@ describe('documented demo commands', () => {
     let first: any[];
     try { first = await execute(readme[4]); }
     catch (error) {
-      const snapshot = await fetch(env.CONCORD_URL + '/v1/repos/dispatch_demo-01/snapshot',
+      const snapshot = await fetch(workerUrl + '/v1/repos/dispatch_demo-01/snapshot',
         { headers: { authorization: 'Bearer local-owner' } }).then(response => response.json()).catch(() => null) as any;
       const jobId = snapshot?.data?.projections?.runners?.jobs?.[0]?.jobId;
-      const result = jobId ? await fetch(env.CONCORD_URL + `/v1/repos/dispatch_demo-01/jobs/${jobId}/result`,
+      const result = jobId ? await fetch(workerUrl + `/v1/repos/dispatch_demo-01/jobs/${jobId}/result`,
         { headers: { authorization: 'Bearer local-owner' } }).then(response => response.json()).catch(() => null) : null;
       throw new Error(`${String(error)}\nRESULT: ${JSON.stringify(result)}\nQUEUE: ${JSON.stringify(snapshot?.data?.projections?.queue)}\nWORKER: ${worker.output()}\nBRIDGE: ${bridge.output()}`);
     }
