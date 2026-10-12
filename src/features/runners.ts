@@ -4,9 +4,10 @@ import { digest, HttpError, json, stableJson } from '../http';
 import { reserveTokenMint } from './repos';
 
 const CLAIM_MS = 60_000;
-// The bridge, like Artifacts, issues Git credentials for at least 60 seconds.
-// Give its job claim room for that token plus request latency.
-const claimMs = (c: ModuleContext) => c.env?.STORAGE_BACKEND === 'bridge' ? 90_000 : CLAIM_MS;
+// Artifacts and bridge issue Git credentials for at least 60 seconds.
+// Give their claims room for token minting and request latency.
+const providerMinimum = (c: ModuleContext) => c.env?.STORAGE_BACKEND === 'bridge' || c.env?.STORAGE_BACKEND === 'artifacts';
+const claimMs = (c: ModuleContext) => providerMinimum(c) ? 90_000 : CLAIM_MS;
 type Stored = { job: Job; result?: JobResult; dispatch?: Gate<unknown>; completedPrincipalId?: string };
 type RunnerState = { principalId: string; role: 'checker' | 'promoter'; activeJobId: string | null;
   supportedProfileDigests: string[]; lastSeenAt: number };
@@ -16,6 +17,7 @@ const save = (c: ModuleContext, row: Stored) => c.state.put('job:' + row.job.job
 const runner = (c: ModuleContext, id: string) => c.state.get<RunnerState>('runner:' + id);
 const saveRunner = (c: ModuleContext, id: string, value: RunnerState) => c.state.put('runner:' + id, value);
 const conflict = (code: string): never => { throw new HttpError(409, code, code); };
+const renewClaim = (): never => { throw new HttpError(409, 'STALE_JOB', 'Renew the job claim before requesting credentials'); };
 const validId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const validDigest = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 // Scheduling is synchronous (the feature hook and storage transaction are synchronous).
@@ -231,12 +233,14 @@ async function credentials(c: ModuleContext, id: string, body: JobCredentialsBod
   try {
     for (const name of names) {
       const live = current(c, id, fence);
-      const ttlSeconds = Math.min(c.env?.STORAGE_BACKEND === 'bridge' ? 60 : 59,
-        Math.floor((live.job.expiresAt! - c.now() - 1000) / 1000));
+      const minimum = providerMinimum(c);
+      if (minimum && live.job.expiresAt! - c.now() <= 61_000) renewClaim();
+      const ttlSeconds = minimum ? 60 : Math.min(59, Math.floor((live.job.expiresAt! - c.now() - 1000) / 1000));
       if (ttlSeconds < 1) conflict('STALE_JOB');
       await reserveTokenMint(c);
+      if (minimum && current(c, id, fence).job.expiresAt! - c.now() <= 61_000) renewClaim();
       const issued = await c.storage.mintToken(name, body.operation === 'fetch' ? 'read' : 'write', ttlSeconds);
-      if (issued.expiresAt > live.job.expiresAt!) {
+      if (issued.expiresAt > live.job.expiresAt! || minimum && issued.expiresAt === live.job.expiresAt!) {
         await c.storage.revokeToken(name, issued.secret);
         conflict('TOKEN_LIFETIME');
       }
@@ -375,7 +379,15 @@ export const runners: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/runner\/poll$/, handle: (c, _r, _m, b) => poll(c, b as unknown as RunnerPollBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/heartbeat$/, handle: (c, _r, m, b) => heartbeat(c, m[1], b as unknown as JobHeartbeatBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/result$/, handle: (c, _r, m, b) => result(c, m[1], b as unknown as JobResultBody) },
-    { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/credentials$/, handle: (c, _r, m, b) => credentials(c, m[1], b as unknown as JobCredentialsBody & JobHeartbeatBody) },
+    { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/jobs\/([^/]+)\/credentials$/, handle: async (c, _r, m, b) => {
+      try { return await credentials(c, m[1], b as unknown as JobCredentialsBody & JobHeartbeatBody); }
+      catch (error) {
+        if (error instanceof HttpError) {
+          if (error.status >= 500) console.error(error.code === 'CATALOG_UNAVAILABLE' ? 'CATALOG_UNAVAILABLE' : 'RUNNER_CREDENTIALS_HTTP_ERROR', m[1]);
+        } else console.error('RUNNER_CREDENTIALS_UNEXPECTED', m[1]);
+        throw error;
+      }
+    } },
   ],
   snapshot: c => {
     const runnerIds = c.state.get<string[]>('runner-ids') ?? [];
