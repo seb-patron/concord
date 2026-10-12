@@ -21,7 +21,7 @@ function required(value: unknown, name: string): string {
 }
 async function api(client: ConcordClient, path: string, body?: Obj, expectedVersion?: number): Promise<Envelope> {
   let version = expectedVersion;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 20; attempt++) {
     try { return await client.request(body ? 'POST' : 'GET', path, body ? { body, expectedVersion: version, idempotencyKey: idempotencyKey() } : {}); }
     catch (error) {
       const stale = error instanceof ConcordError && body && version !== undefined &&
@@ -29,6 +29,13 @@ async function api(client: ConcordClient, path: string, body?: Obj, expectedVers
       if (stale && attempt < 5) {
         const repo = /^\/repos\/([^/]+)/.exec(path)?.[1];
         if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}/snapshot`)).version; await pause(20 * (attempt + 1)); continue; }
+      }
+      const promotion = error instanceof ConcordError && body && version !== undefined &&
+        (path.endsWith('/verdicts') || path.endsWith('/queue/enqueue')) &&
+        (error.payload as Obj)?.error?.code === 'PROMOTION_IN_PROGRESS';
+      if (promotion && attempt < 19) {
+        const repo = /^\/repos\/([^/]+)/.exec(path)?.[1];
+        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}/snapshot`)).version; await pause(500); continue; }
       }
       if (error instanceof ConcordError) error.message = `${error.message} at ${body ? 'POST' : 'GET'} ${path}`;
       throw error;
@@ -254,13 +261,22 @@ export async function land(input: LandOptions): Promise<Obj> {
         change = (await api(client, path)).data;
         await api(client, `${path}/publish`, { baseOid: targetBase, headOid: prepared.head, branch: change.branch, unitKeys: units, leaseFences: fences() }, (await api(client, path)).version);
         emit({ state: 'published', changeId, headOid: prepared.head });
+        change = (await api(client, path)).data;
       }
+      const publishedRevision = change.revision;
+      const requirePublishedChange = (current: Obj) => {
+        if (current.headOid !== prepared.head || current.baseOid !== targetBase || current.revision !== publishedRevision)
+          throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change head, base, or revision changed during land', 'conflict');
+      };
       change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : renew);
       if (!['ready', 'queued', 'checking', 'landed'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
+      requirePublishedChange(change);
       if (!alreadyQueued) await renew();
       const queue = (await api(client, `${root}/queue`)).data;
       let entry = [...(queue.entries ?? [])].reverse().find((item: Obj) => item.changeId === changeId && !['blocked', 'failed', 'withdrawn'].includes(item.state));
       if (!entry) {
+        change = (await api(client, path)).data;
+        requirePublishedChange(change);
         if (!options.reviewEvidence) { emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
         const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
@@ -283,6 +299,7 @@ export async function land(input: LandOptions): Promise<Obj> {
         const verdicts = (await api(reviewer, `${path}/verdicts`)).data;
         let verdict = (verdicts.items ?? []).find((item: Obj) => item.revision === change.revision && item.decision === 'approve' && item.evidenceDigest === hash(evidence) &&
           (carried ? item.carriedFrom?.sourceOid === commit && item.carriedFrom?.method === 'patch-id' : !item.carriedFrom));
+        requirePublishedChange((await api(client, path)).data);
         if (!verdict) verdict = (await api(reviewer, `${path}/verdicts`, { revision: change.revision, reviewManifestDigest: inspected.reviewManifestDigest, findingSetVersion: findings.findingSetVersion, decision: 'approve', evidenceDigest: hash(evidence),
           ...(carried ? { carriedFrom: { sourceOid: commit, method: 'patch-id' } } : {}) }, await currentVersion(reviewer, root))).data;
         if (carried) emit({ state: 'review-carried', sourceOid: commit, publishedOid: prepared.head });

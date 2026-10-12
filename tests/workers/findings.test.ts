@@ -265,11 +265,18 @@ describe('persistent findings and atomic repair rounds', () => {
     const carriedFrom = { sourceOid: head('b'), method: 'patch-id' };
     for (const [name, invalid] of Object.entries({
       oid: { sourceOid: 'bad', method: 'patch-id' },
+      arrayOid: { sourceOid: [head('b')], method: 'patch-id' },
+      numberOid: { sourceOid: 123, method: 'patch-id' },
+      objectOid: { sourceOid: { oid: head('b') }, method: 'patch-id' },
+      arrayMethod: { sourceOid: head('b'), method: ['patch-id'] },
+      numberMethod: { sourceOid: head('b'), method: 123 },
+      objectMethod: { sourceOid: head('b'), method: { value: 'patch-id' } },
       method: { sourceOid: head('b'), method: 'tree' },
       sameHead: { sourceOid: head('a'), method: 'patch-id' },
     })) {
       const rejected = await h.post('verdicts', { ...readyBody, carriedFrom: invalid }, `verdict-invalid-${name}`, 'local-reviewer');
       expect(rejected.status).toBe(400);
+      expect(rejected.body.error.code).toBe('INVALID_CARRIED_FROM');
     }
     const rejectedCarry = await h.post('verdicts', { ...readyBody, decision: 'reject', carriedFrom }, 'verdict-reject-carry', 'local-reviewer');
     expect(rejectedCarry.status).toBe(400);

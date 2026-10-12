@@ -164,7 +164,8 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
   if (freshDigest !== current.value.record.reviewManifestDigest) return fail('Current inspected content differs from delta evidence');
   const version = context.nextVersion();
   const verdictId = crypto.randomUUID();
-  const derived: Verdict = { ...parent, version, verdictId, revision: job.candidate.revision,
+  const { carriedFrom: _carriedFrom, ...parentWithoutPatchIdProvenance } = parent;
+  const derived: Verdict = { ...parentWithoutPatchIdProvenance, version, verdictId, revision: job.candidate.revision,
     reviewManifest: normalized, reviewManifestDigest: freshDigest, findingSetVersion: job.findingSetVersion,
     parentVerdictId: parent.verdictId, deltaResultId: result.jobId, evidenceDigest: resultDigest };
   save(context, derived, job.candidate.headOid, job.profileDigest, result.jobId);
@@ -208,10 +209,12 @@ export const verdicts: FeatureModule = {
         !Number.isSafeInteger(body?.findingSetVersion) || !['approve', 'reject'].includes(body?.decision as string) ||
         !isDigest(body?.reviewManifestDigest) || !isDigest(body?.evidenceDigest)) throw new HttpError(422, 'INVALID_VERDICT', 'Verdict fields must bind current revision and evidence');
       const carriedFrom = body?.carriedFrom;
+      const sourceOid = (carriedFrom as Record<string, unknown> | null)?.sourceOid;
+      const method = (carriedFrom as Record<string, unknown> | null)?.method;
       if (carriedFrom !== undefined && (!carriedFrom || typeof carriedFrom !== 'object' || Array.isArray(carriedFrom) ||
-        !/^[a-fA-F0-9]{40}$/.test((carriedFrom as Record<string, unknown>).sourceOid as string) ||
-        (carriedFrom as Record<string, unknown>).method !== 'patch-id' || body.decision !== 'approve' ||
-        ((carriedFrom as Record<string, unknown>).sourceOid as string).toLowerCase() === change.value.headOid?.toLowerCase())) {
+        typeof sourceOid !== 'string' || !/^[a-fA-F0-9]{40}$/.test(sourceOid) ||
+        typeof method !== 'string' || method !== 'patch-id' || body.decision !== 'approve' ||
+        sourceOid.toLowerCase() === change.value.headOid?.toLowerCase())) {
         throw new HttpError(400, 'INVALID_CARRIED_FROM', 'carriedFrom requires an approved, distinct 40-hex source OID and patch-id method');
       }
       const current = inspection(context, changeId);
