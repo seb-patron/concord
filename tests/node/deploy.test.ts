@@ -101,7 +101,7 @@ describe('deployment preflight', () => {
     expect(firstDeploy).toMatch(/first deployment with parts[\s\S]*AUTH_TOKENS[\s\S]*every key from that bulk file[\s\S]*Do not include `TRUSTED_CONFIG`/);
     expect(release).toMatch(/versioned release flow[\s\S]*single-secret format only[\s\S]*not supported for parts in this version/);
     expect(refresh).toMatch(/If the Worker uses the single-secret format, install the regenerated config with `npx wrangler secret put TRUSTED_CONFIG[\s\S]*If it uses `TRUSTED_CONFIG_PARTS`, regenerate the bulk file and run `npx wrangler secret bulk[\s\S]*while the latest version is deployed; do not put `TRUSTED_CONFIG`/);
-    expect(smoke).toMatch(/For a Worker using the single-secret format, upload `TRUSTED_CONFIG`[\s\S]*for one using `TRUSTED_CONFIG_PARTS`, regenerate the bulk file and run `npx wrangler secret bulk[\s\S]*while the latest version is deployed, without putting `TRUSTED_CONFIG`/);
+    expect(smoke).toMatch(/For a Worker using the single-secret format, upload the newly generated `AUTH_TOKENS` and `TRUSTED_CONFIG`[\s\S]*For a Worker using `TRUSTED_CONFIG_PARTS`, do not use the versioned flow: run `npx wrangler secret put AUTH_TOKENS[\s\S]*npx wrangler secret bulk "\$TRUSTED_PARTS_FILE"[\s\S]*never put `TRUSTED_CONFIG`/);
     expect(section).toBeDefined();
     expect(section).toMatch(/```sh\nnpx wrangler secret delete TRUSTED_CONFIG --config wrangler\.jsonc\nnpx wrangler secret bulk "\$TRUSTED_PARTS_FILE" --config wrangler\.jsonc\n```/);
     expect(section).toMatch(/```sh\nnpx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler\.jsonc\nnpx wrangler secret put TRUSTED_CONFIG --config wrangler\.jsonc < "\$TRUSTED_CONFIG_FILE"\n```/);

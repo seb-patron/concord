@@ -30,13 +30,14 @@ npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-
 npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 ```
 
-The owner supplies `CLOUDFLARE_ACCOUNT_ID` (32 hex characters), `CLOUDFLARE_API_TOKEN` with Workers and Artifacts permissions, and an existing `concord-demo` namespace. Keep credentials in the operator environment or a secret manager. Never commit them or pass them in URLs. Set `AUTH_TOKENS_FILE` and `TRUSTED_CONFIG_FILE` to operator-owned files **outside this clone**. `AUTH_TOKENS` is the production JSON map from SHA-256 bearer token digests to scoped principal records; `TRUSTED_CONFIG` contains only owner-approved policy and profile records. Do not put local fixture identities in either file. See [auth and trust](ARCHITECTURE.md#auth-and-trust).
+The owner supplies `CLOUDFLARE_ACCOUNT_ID` (32 hex characters), `CLOUDFLARE_API_TOKEN` with Workers and Artifacts permissions, and an existing `concord-demo` namespace. Keep credentials in the operator environment or a secret manager. Never commit them or pass them in URLs. Set `AUTH_TOKENS_FILE` and `TRUSTED_CONFIG_FILE` to operator-owned files **outside this clone**. For a configuration too large for one secret, also set `TRUSTED_PARTS_FILE` to a new path outside the clone where `deploy:trusted-parts` writes its bulk file (it refuses to overwrite an existing file, so remove the previous one or pick a new path before each regeneration); see [Large trusted configurations](#large-trusted-configurations). `AUTH_TOKENS` is the production JSON map from SHA-256 bearer token digests to scoped principal records; `TRUSTED_CONFIG` contains only owner-approved policy and profile records. Do not put local fixture identities in either file. See [auth and trust](ARCHITECTURE.md#auth-and-trust).
 
 ```sh
 export CLOUDFLARE_ACCOUNT_ID='<owner account ID>'
 export CLOUDFLARE_API_TOKEN='<owner provisioned API token>'
 export AUTH_TOKENS_FILE='<absolute private path>'
 export TRUSTED_CONFIG_FILE='<absolute private path>'
+export TRUSTED_PARTS_FILE='<new absolute private path; parts format only>'
 npm run deploy:check -- --remote
 npx wrangler deploy --dry-run --config wrangler.jsonc
 ```
@@ -255,7 +256,7 @@ test -s "$TRUSTED_CONFIG_FILE"
 export CONCORD_TOKEN="$(jq -r '.owner' "$DEMO_TOKENS_FILE")"
 ```
 
-Upload the newly generated `AUTH_TOKENS` with the command in [Provision secrets and deploy](#provision-secrets-and-deploy). For a Worker using the single-secret format, upload `TRUSTED_CONFIG` with the single-secret command there if it fits; for one using `TRUSTED_CONFIG_PARTS`, regenerate the bulk file and run `npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc` while the latest version is deployed, without putting `TRUSTED_CONFIG`. Do not reuse a deployment with an old token mapping. The commands in this section are remote-only and intentionally outside the `verified-by: 12c` local command blocks. Run the health check and seed after Wrangler prints the deployed URL.
+For a Worker using the single-secret format, upload the newly generated `AUTH_TOKENS` and `TRUSTED_CONFIG` with the versioned commands in [Provision secrets and deploy](#provision-secrets-and-deploy). For a Worker using `TRUSTED_CONFIG_PARTS`, do not use the versioned flow: run `npx wrangler secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"` (it deploys immediately), then regenerate the bulk file and run `npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc`, and never put `TRUSTED_CONFIG`. Do not reuse a deployment with an old token mapping. The commands in this section are remote-only and intentionally outside the `verified-by: 12c` local command blocks. Run the health check and seed after Wrangler prints the deployed URL.
 
 ```sh
 curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "production" and .storageBackend == "artifacts"'
