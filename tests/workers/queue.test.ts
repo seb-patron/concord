@@ -952,6 +952,7 @@ describe('queue state machine', () => {
   });
 
   it('blocks old admissions when contest creation observes external main before an alarm', async () => {
+    await dispatchContestFixture();
     const h = await setup('X');
     const nextMain = oid('4');
     expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
