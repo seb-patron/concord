@@ -89,6 +89,66 @@ describe('local runner Git and checker execution', () => {
     });
   }, 20_000);
 
+  it.each(['same-file', 'declared-dependency'] as const)('reports rebased %s byte evidence from Git', async scenario => {
+    await gitFixture(async ({ repo, canonical, candidate }) => {
+      const initial = ['candidate-line', ...Array.from({ length: 12 }, (_, index) => `middle-${index}`),
+        'main-line', ''].join('\n');
+      await writeFile(join(repo, 'example.txt'), initial);
+      await writeFile(join(repo, 'b.txt'), 'dep-before\n');
+      await git(repo, ['add', 'example.txt', 'b.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'fixture'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      for (const remote of [canonical, candidate]) await git(repo, ['push', '--quiet', remote, 'HEAD:refs/heads/main']);
+      await writeFile(join(repo, 'example.txt'), initial.replace('candidate-line', 'candidate-edit'));
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'candidate'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/work']);
+      await git(repo, ['switch', '--detach', base]);
+      if (scenario === 'same-file') {
+        await writeFile(join(repo, 'example.txt'), initial.replace('main-line', 'main-edit'));
+        await git(repo, ['add', 'example.txt']);
+      } else {
+        await writeFile(join(repo, 'b.txt'), 'dep-after\n');
+        await git(repo, ['add', 'b.txt']);
+      }
+      await git(repo, ['commit', '--quiet', '-m', 'main moved'], 30_000, commitEnv);
+      const nextMain = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const unitPolicy: TrustedPolicy = { ...policy, units: {
+        'file:example.txt': { canonicalKey: 'file:example.txt', file: 'example.txt', resources: [],
+          dependencyKeys: scenario === 'declared-dependency' ? ['file:b.txt'] : [] },
+        'file:b.txt': { canonicalKey: 'file:b.txt', file: 'b.txt', resources: [], dependencyKeys: [] },
+      } };
+      const job: Job = { ...jobBase(remotes), kind: 'rebase-candidate', unitPolicy,
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: head,
+          storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: nextMain,
+        canonicalStorageName: 'canonical', targetRef: `refs/heads/rebase-${scenario}`, verdictId: 'verdict',
+        expectedRefs: { canonical: nextMain, candidate: head } };
+      const old = await inspectUnits(repo, base, head, job);
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'rebase-candidate', outcome: 'PASS', unitKeys: ['file:example.txt'] });
+      if (result.kind !== 'rebase-candidate' || !result.reviewManifest) throw new Error('rebase failed');
+      expect(result.patchIdAfter).toBe(result.patchIdBefore);
+      const { resultDigest, ...unsigned } = result;
+      expect(resultDigest).toBe(await digest(unsigned));
+      expect(result.reviewManifestDigest).not.toBe(old.digest);
+      if (scenario === 'same-file') {
+        expect(result.reviewManifest.changedUnits[0].beforeDigest).not.toBe(old.manifest.changedUnits[0].beforeDigest);
+        expect(result.reviewManifest.changedUnits[0].afterDigest).not.toBe(old.manifest.changedUnits[0].afterDigest);
+      } else {
+        expect(result.reviewManifest.changedUnits).toEqual(old.manifest.changedUnits);
+        expect(result.reviewManifest.dependencyScope[0]).toMatchObject({ unitKey: 'file:b.txt',
+          contentDigest: 'sha256:' + createHash('sha256').update('dep-after\n').digest('hex') });
+        expect(result.reviewManifest.dependencyScope).not.toEqual(old.manifest.dependencyScope);
+      }
+    });
+  }, 20_000);
+
   it('uses declared TSV row composition for a rebase and reports a row collision', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
       const original = 'family\tretry_limit\ttimeout_ms\nalpha\t1\t1000\nbeta\t2\t1000\n';

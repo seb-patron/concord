@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
+import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, ModuleContext, RebaseCandidateJob, RebaseResult, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
 import { mechanicallyMergeableRows, verdicts, type InspectedRevision } from '../../src/features/verdicts';
 import { canonicalJson, dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest, trustedDependencyKeys } from '../../src/verdicts/manifest';
 
@@ -27,7 +27,7 @@ function manifest(unitKey: string, options: { dependency?: Digest; after?: Diges
     [{ kind: 'unit', unitKey: 'row:beta', path: 'families.tsv', mode: '100644', contentDigest: options.dependency ?? d('beta:before') }] : [] };
 }
 
-function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
+function harness(unitKey = 'row:alpha', initial = manifest(unitKey), activePolicy = policy) {
   const state = new Map<string, unknown>();
   let version = 0;
   let findingVersion = 0;
@@ -45,13 +45,13 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
   const installInspection = (override?: Partial<InspectedRevision>) => {
     const record: InspectedRevision = { changeId: 'change', revision, candidate: candidate(), canonicalStorageName: 'canonical',
       policyId: 'demo', profileId: 'demo', reviewManifest: activeManifest,
-      reviewManifestDigest: manifestDigest(activeManifest, policy, [unitKey]), outcome: 'PASS', ...override };
+      reviewManifestDigest: manifestDigest(activeManifest, activePolicy, [unitKey]), outcome: 'PASS', ...override };
     state.set('inspection:change', record);
   };
   installInspection();
   const context = {
     repoId: 'repo', tenantId: 'local', principal: { tenantId: 'local', principalId: 'reviewer', roles: ['reviewer'], repoIds: '*', expiresAt: Infinity },
-    trusted: { policies: { demo: policy }, profiles: { demo: trustedProfile } }, now: () => 100,
+    trusted: { policies: { demo: activePolicy }, profiles: { demo: trustedProfile } }, now: () => 100,
     storage: { resolveRef: async () => canonical, info: async (name: string) => ({ name, remote: `https://example.test/${name}`, status: 'ready' }) },
     state: { get: <T>(key: string) => (state.get(key) ?? null) as T | null, put: <T>(key: string, value: T) => { state.set(key, value); }, delete: (key: string) => { state.delete(key); } },
     version: () => version, nextVersion: () => ++version,
@@ -70,20 +70,20 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
     return { status: response.status, payload: await response.json() as { data: any } };
   }
   const approve = async () => {
-    const response = await route('POST', 'verdicts', { revision, findingSetVersion: findingVersion, reviewManifestDigest: manifestDigest(activeManifest, policy, [unitKey]), decision: 'approve', evidenceDigest: d('review-evidence') });
+    const response = await route('POST', 'verdicts', { revision, findingSetVersion: findingVersion, reviewManifestDigest: manifestDigest(activeManifest, activePolicy, [unitKey]), decision: 'approve', evidenceDigest: d('review-evidence') });
     expect(response.status).toBe(201);
     return response.payload.data as Verdict;
   };
   const advance = (next = initial) => { revision++; base = oid('1'); head = oid('b'); canonical = oid('1'); activeManifest = next; installInspection(); };
   const carry = async (parent: Verdict) => route('POST', 'carry', { parentVerdictId: parent.verdictId, revision, newBaseOid: base });
   const result = (job = jobs.at(-1)!, next = activeManifest, outcome: DeltaResult['outcome'] = 'PASS'): DeltaResult => {
-    const normalized = normalizeManifest(next, policy, [unitKey]);
+    const normalized = normalizeManifest(next, activePolicy, [unitKey]);
     const scope = normalized.dependencyScope;
     const preimage = {
       kind: 'delta-check' as const, jobId: job.jobId, attempt: 1, fence: 1, inputDigest: job.inputDigest,
       sourceTreeOid: oid('e'), checkerDigest: job.checkerDigest, toolchainDigest: job.toolchainDigest,
       oracleDigest: job.oracleDigest, environmentDigest: job.environmentDigest, durationMs: 1, log: '',
-      outcome, reviewManifestDigest: manifestDigest(normalized, policy, [unitKey]), reviewManifest: normalized,
+      outcome, reviewManifestDigest: manifestDigest(normalized, activePolicy, [unitKey]), reviewManifest: normalized,
       dependencyScopeDigest: dependencyScopeDigest(scope), dependencyScope: scope,
     };
     return { ...preimage, resultDigest: hashCanonical(preimage) };
@@ -100,6 +100,42 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
 }
 
 describe('content-bound verdicts', () => {
+  it('requires review when an equal patch ID hides different whole-file bytes', async () => {
+    const filePolicy: TrustedPolicy = { ...policy, units: { 'file:a.txt': {
+      canonicalKey: 'file:a.txt', file: 'a.txt', resources: [], dependencyKeys: [] } } };
+    const original = { ...manifest('file:a.txt'), changedUnits: [{ ...manifest('file:a.txt').changedUnits[0],
+      beforePath: 'a.txt', afterPath: 'a.txt' }] } as ReviewManifest;
+    const rebased = { ...original, changedUnits: [{ ...original.changedUnits[0],
+      beforeDigest: d('main changed a distant line'), afterDigest: d('merged file bytes') }] } as ReviewManifest;
+    const h = harness('file:a.txt', original, filePolicy);
+    const parent = await h.approve();
+    const job = {
+      kind: 'rebase-candidate', jobId: 'rebase', repoId: 'repo', inputDigest: d('input'), generation: 1,
+      profileDigest: profile.digest, policyId: 'demo', policyDigest: filePolicy.digest, unitPolicy: filePolicy,
+      expectedRefs: {}, storageRemotes: {}, checkerId: filePolicy.checkerId,
+      checkerDigest: filePolicy.checkerDigest, oracleDigest: profile.oracleDigest,
+      toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+      timeoutMs: 1000, maxOutputBytes: 1024, state: 'completed', attempt: 1,
+      runnerId: null, fence: 1, expiresAt: null, version: 1,
+      candidate: { changeId: 'change', revision: 1, baseOid: oid('0'), headOid: oid('a'),
+        storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: oid('1'),
+      canonicalStorageName: 'canonical', targetRef: 'refs/heads/rebased', verdictId: parent.verdictId,
+    } satisfies RebaseCandidateJob;
+    h.advance(rebased);
+    const result = {
+      kind: 'rebase-candidate', jobId: job.jobId, attempt: 1, fence: 1, inputDigest: job.inputDigest,
+      sourceTreeOid: oid('e'), checkerDigest: job.checkerDigest, oracleDigest: job.oracleDigest,
+      toolchainDigest: job.toolchainDigest, environmentDigest: job.environmentDigest,
+      durationMs: 1, log: '', outcome: 'PASS', baseOid: job.newBaseOid, headOid: oid('b'),
+      patchIdBefore: oid('c'), patchIdAfter: oid('c'), reviewManifest: rebased,
+      reviewManifestDigest: manifestDigest(rebased, filePolicy, ['file:a.txt']),
+      unitKeys: ['file:a.txt'], conflictPaths: [], conflictUnits: [], resultDigest: d('result'),
+    } satisfies RebaseResult;
+    expect(verdicts.hooks['verdicts.carryRebase']!(h.context, job, result, 2, 0))
+      .toMatchObject({ status: 'blocked', code: 'REVIEW_REQUIRED', evidenceIds: ['file:a.txt'] });
+    expect(h.state.get('active:change')).toBe(parent.verdictId);
+  });
+
   it('carries a changed patch identity only for equal rows in a trusted table', () => {
     const table = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'],
       keyColumn: 'family', keySpec: { charset: 'lower' as const, minLength: 1, maxLength: 256 } };

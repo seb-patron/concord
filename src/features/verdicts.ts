@@ -227,7 +227,10 @@ function carryRebase(context: ModuleContext, job: RebaseCandidateJob, result: Re
   if (parent.reviewManifest.coverage !== 'complete' ||
     dependencyScopeDigest(parent.reviewManifest.dependencyScope) !== dependencyScopeDigest(normalized.dependencyScope))
     return reject(context, 'REVIEW_REQUIRED', contentDifference(parent.reviewManifest, normalized));
-  if (result.patchIdBefore !== result.patchIdAfter) {
+  // Patch IDs describe the delta, not the bytes of a whole-file unit. Main
+  // can edit another line in the same file without changing the patch ID.
+  if (result.patchIdBefore !== result.patchIdAfter ||
+    hashCanonical(parent.reviewManifest.changedUnits) !== hashCanonical(normalized.changedUnits)) {
     const old = parent.reviewManifest.changedUnits;
     const next = normalized.changedUnits;
     if (!mechanicallyMergeableRows(inspected.value.policy, parent.reviewManifest, normalized)) {
