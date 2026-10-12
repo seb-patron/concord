@@ -7,6 +7,7 @@ import { eventSequence, sqlState } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
 import { jobInput, visibleCommit, visibleRef } from './runners';
+import { covers, resolveUnit, unitRegistry } from '../leases/units';
 import {
   advanceDiagnosis, COALESCE_MS, MAX_CANDIDATES, selectStack, startDiagnosis, STACK_WIDTH,
   type Diagnosis, type PlannedEntry,
@@ -132,9 +133,13 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
   if (state.entries.some(entry => active(entry) && entry.changeId === changeId)) throw new HttpError(409, 'ALREADY_QUEUED', 'Change already admitted');
   if (!context.principal.roles.includes('agent') && !context.principal.roles.includes('owner')) throw new HttpError(403, 'FORBIDDEN', 'Agent or owner role required');
   if (context.principal.principalId !== view.authorId && !context.principal.roles.includes('owner')) throw new HttpError(403, 'FORBIDDEN', 'Only the author or owner may enqueue');
+  const leasePolicy = context.trusted.policies[view.policyId];
+  const registry = leasePolicy ? unitRegistry(leasePolicy) : null;
   if (!Array.isArray(view.unitKeys) || view.unitKeys.length === 0 || new Set(view.unitKeys).size !== view.unitKeys.length
-    || Object.keys(fences).length !== view.unitKeys.length
-    || !view.unitKeys.every(key => Number.isSafeInteger(fences[key]) && fences[key] > 0)) {
+    || !registry || Object.keys(fences).length === 0
+    || Object.values(fences).some(value => !Number.isSafeInteger(value) || value < 1)
+    || !view.unitKeys.every(key => Object.hasOwn(fences, key) || Object.keys(fences).some(claim =>
+      covers(resolveUnit(registry, claim), resolveUnit(registry, key))))) {
     throw new HttpError(409, 'LEASE_COVERAGE', 'Current lease fences must cover every verified unit');
   }
   const finding = requireGate(context.call('findings.gate', changeId, view.revision));
@@ -378,8 +383,8 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     const checked = checkAdmission(context, state, changeId, body.verdictId as Id, body.leaseFences as Record<string, number>, main, null);
     context.state.delete(`contest-child:${changeId}`);
     const reservation = requireGate(context.call('leases.reserve', changeId, checked.reservationFences));
-    if (Object.keys(reservation.reservationFences).length !== checked.unitKeys.length
-      || !checked.unitKeys.every(key => reservation.reservationFences[key] === checked.reservationFences[key])) {
+    if (Object.keys(reservation.reservationFences).length !== Object.keys(checked.reservationFences).length
+      || !Object.entries(checked.reservationFences).every(([key, fence]) => reservation.reservationFences[key] === fence)) {
       throw new HttpError(409, 'LEASE_FENCE_CHANGED', 'Reservation fences differ from admission');
     }
     const sequence = emit(context, 'queue.enqueued', [changeId], { revision: checked.revision, headOid: checked.headOid,
@@ -492,7 +497,7 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
       throw new HttpError(409, 'LEASE_COVERAGE', 'Contest children must share the same fenced units');
     }
     const parentReservation = requireGate(context.call('leases.reserve', children[0], prepared[0].reservationFences));
-    if (!prepared[0].unitKeys.every(key => parentReservation.reservationFences[key] === prepared[0].reservationFences[key])) {
+    if (!Object.entries(prepared[0].reservationFences).every(([key, fence]) => parentReservation.reservationFences[key] === fence)) {
       throw new HttpError(409, 'LEASE_FENCE_CHANGED', 'Contest parent reservation differs');
     }
     const contest: ContestState = { contestId, childIds: [children[0], children[1]], admissionIds: ['', ''], creationSequences: [0, 0],

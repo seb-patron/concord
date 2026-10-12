@@ -2,7 +2,7 @@ import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody,
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { costLimits, eventSequence } from '../state';
-import { resolveUnit, unitRegistry } from '../leases/units';
+import { covers, resolveUnit, unitRegistry } from '../leases/units';
 import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
@@ -438,11 +438,15 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   const unitKeys = ids(body.unitKeys, 'unitKeys');
   if (!body.leaseFences || typeof body.leaseFences !== 'object' || Array.isArray(body.leaseFences)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must be a map');
   const leaseFences = body.leaseFences as Record<string, unknown>;
-  if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');
+  if (unitKeys.length > 0 && Object.keys(leaseFences).length === 0 ||
+      Object.values(leaseFences).some(value => !Number.isSafeInteger(value) || Number(value) < 1))
+    fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must contain positive fences');
   if (baseOid === null || change.baseOid === null) fail(409, 'SEED_REQUIRES_BOOTSTRAP', 'Seed drafts use owner bootstrap');
   if (ref !== change.branch) fail(409, 'BRANCH_MISMATCH', 'Change branch differs');
   const registry = unitRegistry(context.trusted.policies[repo.policyId]);
   for (const key of unitKeys) resolveUnit(registry, key);
+  const claims = Object.keys(leaseFences).map(key => resolveUnit(registry, key));
+  if (unitKeys.some(key => !claims.some(claim => covers(claim, resolveUnit(registry, key))))) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit');
   const registered = list<Branch>(context, 'branches').find(item => item.storageName === change.candidateStorageName && item.ref === ref && item.ownerId === change.authorId);
   if (!registered || registered.observedHead !== headOid) fail(409, 'BRANCH_NOT_REGISTERED', 'Register the current fork branch before publishing');
   if (await context.storage.resolveRef(change.candidateStorageName, ref) !== headOid) fail(409, 'HEAD_MOVED', 'Registered candidate ref changed');
@@ -669,7 +673,10 @@ export const repos: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },
   ],
-  snapshot: context => ({ repo: context.state.get<Repo>('repo'), branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(changeResponse), provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
+  snapshot: context => ({ repo: context.state.get<Repo>('repo'),
+    unitPolicy: context.trusted.policies[context.state.get<Repo>('repo')?.policyId ?? ''],
+    branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(changeResponse),
+    provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
   nextDeadline: context => Object.values(intents(context)).filter(activeProvisioning).reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
   onAlarm: async context => {
     const all = Object.values(intents(context)).filter(intent => activeProvisioning(intent) && intent.retryAt <= context.now());

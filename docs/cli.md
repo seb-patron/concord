@@ -1,6 +1,16 @@
 # Concord agent CLI
 
-To land a finished commit through Concord, see [Land a finished agent run](land.md).
+For the managing agent, claim before work begins, then land the same intent after review. See [Land a finished agent run](land.md).
+
+```sh
+npm run concord -- start --repo REPO_ID --intent-key task-17 --intent 'Tune gamma safely' --allowed-files allowed-files.txt --hold 2h --json
+# Work only in the returned leases' units; keep the intent key for land.
+npm run concord -- land --repo REPO_ID --source . --commit FULL_OID --intent-key task-17 --intent 'Tune gamma safely' --allowed-files allowed-files.txt
+# If abandoning instead:
+npm run concord -- release --repo REPO_ID --intent-key task-17
+```
+
+The Allowed-files list has one exact repository-relative path per line. Start takes the current observed canonical head unless `--base FULL_OID` is supplied, creates or reuses the change, and atomically claims one whole-file unit per path. It returns the change ID, base, current lease fences, and earliest expiry. A conflict exits 3 with holder, intent, keys, and expiry; no units from that claim are granted. Repeating start with the same inputs reuses the change and live leases. `--hold` accepts positive `s`, `m`, or `h` durations; the server caps it through trusted `costLimits.maxLeaseHoldSeconds` (default four hours). An expired lease can be reacquired. Release abandons all live leases on the change and requires the same author token.
 
 The CLI speaks the Concord HTTP API. It does not require Cloudflare credentials or GitHub pull request conventions. Start with Node 22+, configure `CONCORD_URL` and `CONCORD_TOKEN`, then run commands through the npm script:
 
@@ -68,7 +78,7 @@ npm run concord -- change close --repo REPO_ID --id CHANGE_ID --expected-version
 
 Creation requires `intentKey`, stable `intentText`, `baseOid` (literal JSON `null` only for seed drafts), `branch`, `unitKeys`, and `dependencyChangeIds` (defaults to `[]`). A changed observed base never changes the task's `intentKey`.
 
-Checkout gets the server-assigned candidate fork and fetches the change branch into the local `concord/<branch>` remote-tracking ref. Publish reads the server change and local `HEAD`, verifies the exact base OID is present and is an ancestor of `HEAD`, and validates the complete body and lease fences before requesting write access. The body base, head, branch, and unit set must match the server change and local `HEAD`; the push names that verified head OID explicitly, and the same identity is sent to the publish API. Supply the current fence for every unit in `--lease-fences`; the CLI does not infer ownership from the repository-wide lease list. It refuses a canonical storage name or canonical remote. Authentication is supplied to the Git child process through process-local Git configuration environment variables; no token is added to a remote URL or persistent Git configuration. A seed draft with no base must use the server's owner-only bootstrap flow through `api`.
+Checkout gets the server-assigned candidate fork and fetches the change branch into the local `concord/<branch>` remote-tracking ref. Publish reads the server change and local `HEAD`, verifies the exact base OID is present and is an ancestor of `HEAD`, and validates the complete body and lease fences before requesting write access. The body base, head, branch, and unit set must match the server change and local `HEAD`; the push names that verified head OID explicitly, and the same identity is sent to the publish API. Supply current fences for claims that cover every declared unit; a whole-file claim can cover TSV rows in that file. It refuses a canonical storage name or canonical remote. Authentication is supplied to the Git child process through process-local Git configuration environment variables; no token is added to a remote URL or persistent Git configuration. A seed draft with no base must use the server's owner-only bootstrap flow through `api`.
 
 ## Leases
 
