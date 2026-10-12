@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -245,6 +245,45 @@ export function attemptBudget(family) {
       const outside = await inspectUnits(repo, approvedHead, outsideHead, { ...jobBase({}), unitPolicy: scoped } as Job);
       expect(outside.manifest.coverage).toBe('unknown');
       expect(() => normalizeManifest(outside.manifest, scoped, outside.unitKeys)).toThrow('UNKNOWN_UNIT_SCOPE');
+    });
+  });
+
+  it('resolves quoted Unicode Git paths for exact units and approved prefixes', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await mkdir(join(repo, 'tests'));
+      await writeFile(join(repo, 'tests/é.ts'), 'unicode\n');
+      await git(repo, ['add', 'tests/é.ts']);
+      await git(repo, ['commit', '--quiet', '-m', 'unicode path'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const exact: TrustedPolicy = { ...policy, units: { 'file:tests/é.ts': {
+        canonicalKey: 'file:tests/é.ts', file: 'tests/é.ts', resources: [], dependencyKeys: [],
+      } } };
+      const prefixed: TrustedPolicy = { ...policy, units: {}, newFilePrefixes: ['tests/'] };
+      for (const unitPolicy of [exact, prefixed]) {
+        const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy } as Job);
+        expect(inspected.unitKeys).toEqual(['file:tests/é.ts']);
+        expect(inspected.manifest.coverage).toBe('complete');
+        expect(inspected.manifest.changedUnits[0]).toMatchObject({ afterPath: 'tests/é.ts', afterMode: '100644' });
+        expect(normalizeManifest(inspected.manifest, unitPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
+      }
+    });
+  });
+
+  it('rejects symlinks under an approved prefix and exact file unit', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await mkdir(join(repo, 'tests'));
+      await symlink('../example.txt', join(repo, 'tests/link'));
+      await git(repo, ['add', 'tests/link']);
+      await git(repo, ['commit', '--quiet', '-m', 'symlink'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const exact: TrustedPolicy = { ...policy, units: { 'file:tests/link': {
+        canonicalKey: 'file:tests/link', file: 'tests/link', resources: [], dependencyKeys: [],
+      } } };
+      const prefixed: TrustedPolicy = { ...policy, units: {}, newFilePrefixes: ['tests/'] };
+      for (const unitPolicy of [exact, prefixed]) {
+        await expect(inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy } as Job))
+          .rejects.toThrow('UNSUPPORTED_TREE_ENTRY');
+      }
     });
   });
 
