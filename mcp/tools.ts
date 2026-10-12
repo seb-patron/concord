@@ -3,12 +3,14 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredentialsIn } from '../cli/client.ts';
 import { assertCommit, assertHeadBasedOn, git, rejectCanonicalTarget, resolveHead, validateRemote } from '../cli/git.ts';
+import { MAX_NORMALIZED_UNITS } from '../src/leases/units.ts';
 
 type Args = Record<string, unknown>;
 type Shape = Record<string, Record<string, unknown>>;
 const s = { type: 'string' };
 const n = { type: 'integer', minimum: 0 };
 const strings = { type: 'array', items: s };
+const unitKeys = { ...strings, maxItems: MAX_NORMALIZED_UNITS };
 const fences = { type: 'object', additionalProperties: { type: 'integer', minimum: 1 } };
 function tool(name: string, description: string, properties: Shape, required: string[] = []): Tool {
   return { name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false } };
@@ -19,14 +21,14 @@ export const tools: Tool[] = [
   tool('repo_list', 'List authorized repositories.', { cursor: s }),
   tool('repo_get', 'Get repository detail and canonical head.', repo, ['repoId']),
   tool('repo_context', 'Get repository snapshot, policy state, changes, leases, queue and findings.', repo, ['repoId']),
-  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys: strings, dependencyChangeIds: strings, attempt: n, issueNumber: { type: 'integer', minimum: 1 }, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
+  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys, dependencyChangeIds: strings, attempt: n, issueNumber: { type: 'integer', minimum: 1 }, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
   tool('issue_create', 'Create an issue in the repository inbox.', { ...repo, title: s, body: s, labels: strings, milestoneId: s, allowedFiles: strings, idempotencyKey: s }, ['repoId', 'title', 'body']),
   tool('issue_get', 'Get an issue and its linked changes.', { ...repo, issueNumber: { type: 'integer', minimum: 1 } }, ['repoId', 'issueNumber']),
   tool('issue_list', 'List issues with optional state, label, milestone and cursor.', { ...repo, state: { type: 'string', enum: ['open', 'closed'] }, label: s, milestoneId: s, cursor: s }, ['repoId']),
   tool('issue_close', 'Close an issue with a reason and current issue version.', { ...repo, issueNumber: { type: 'integer', minimum: 1 }, reason: s, expectedVersion: n, idempotencyKey: s }, ['repoId', 'issueNumber', 'reason', 'expectedVersion']),
   tool('milestone_list', 'List milestones with issue and landed change progress.', { ...repo, cursor: s }, ['repoId']),
   tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
-  tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result.', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 300 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
+  tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result.', { ...change, unitKeys, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 300 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
   tool('lease_list', 'List active leases and recent refusals.', { ...repo, cursor: s }, ['repoId']),
   tool('change_checkout', 'Fetch the candidate revision, or create a new local branch at its base, with a short-lived, process-local Git credential.', { ...change, worktree: s }, ['repoId', 'changeId', 'worktree']),

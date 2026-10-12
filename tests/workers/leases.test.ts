@@ -223,13 +223,13 @@ describe('semantic lease identities', () => {
     expect(changedUnitsForFile(registry, 'data/families.tsv', 'alpha\tone\nalpha\ttwo\n', 'alpha\tnew\n')
       .map(unit => unit.key)).toEqual(['file:data/families.tsv']);
     const many = structuredClone(policy);
-    many.units = Object.fromEntries(Array.from({ length: 17 }, (_, index) => [
+    many.units = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [
       `row:many:${index}`, { canonicalKey: `row:many:${index}`, file: 'data/many.tsv', resources: [`${index}`], dependencyKeys: [] },
     ]));
     const manyRegistry = unitRegistry(many);
     const keys = Object.keys(many.units);
-    expect(normalizeUnits(manyRegistry, keys.slice(0, 16))).toHaveLength(16);
-    expect(() => normalizeUnits(manyRegistry, keys)).toThrow();
+    expect(normalizeUnits(manyRegistry, keys.slice(0, 64))).toHaveLength(64);
+    expect(() => normalizeUnits(manyRegistry, keys)).toThrow('65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy');
     const ambiguous = structuredClone(policy);
     ambiguous.units['row:other:alpha'] = { canonicalKey: 'row:other:alpha', file: 'data/families.tsv', resources: ['other-alpha'], dependencyKeys: [] };
     expect(() => unitRegistry(ambiguous)).toThrow('UNIT_REGISTRY_INVALID');
@@ -237,6 +237,32 @@ describe('semantic lease identities', () => {
 });
 
 describe('RepoCoordinator lease routes', () => {
+  it('claims 64 units, detects a shared unit in another 64-unit request, and keeps the 128-live-lease cap', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'lease_cap_64';
+    const keys = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `file:tests/${prefix}-${index}.ts`);
+    const firstKeys = keys('first', 64);
+    const first = await claim(repo, 'local-agent-a', 'first', firstKeys, 'claim-first');
+    expect(first.status).toBe(201);
+    expect((await responseBody(first)).data.leases).toHaveLength(64);
+
+    const shared = await claim(repo, 'local-agent-b', 'rival', [firstKeys[63], ...keys('rival', 63)], 'claim-rival');
+    expect(shared.status).toBe(409);
+    expect((await responseBody(shared)).error).toMatchObject({ code: 'LEASE_CONFLICT', details: { keys: [firstKeys[63]] } });
+
+    const overCap = await claim(repo, 'local-agent-b', 'over', keys('over', 65), 'claim-over');
+    expect(overCap.status).toBe(422);
+    expect((await responseBody(overCap)).error).toMatchObject({ code: 'INVALID_UNITS', message: '65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy' });
+
+    const second = await claim(repo, 'local-agent-b', 'second', keys('second', 64), 'claim-second');
+    expect(second.status).toBe(201);
+    expect((await responseBody(second)).data.leases).toHaveLength(64);
+    const capacity = await claim(repo, 'local-agent-c', 'capacity', keys('extra', 1), 'claim-capacity');
+    expect(capacity.status).toBe(429);
+    expect((await responseBody(capacity)).error.code).toBe('LEASE_CAPACITY');
+  });
+
   it('refuses claims without a repository record or a registered change view', async () => {
     setupPolicy();
     const repo = 'lease_missing_repo';

@@ -10,6 +10,9 @@ export interface UnitIdentity {
 }
 
 export type TsvTable = NonNullable<TrustedPolicy['tables']>[number];
+export const MAX_NORMALIZED_UNITS = 64;
+export const unitsOverCapMessage = (count: number): string =>
+  `${count} normalized units exceed the cap of ${MAX_NORMALIZED_UNITS}; declare coarser prefix or section units in policy`;
 const tableMetadata = new WeakMap<Map<string, UnitIdentity>, TsvTable[]>();
 const prefixMetadata = new WeakMap<Map<string, UnitIdentity>, string[]>();
 
@@ -202,8 +205,8 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
 }
 
 export function normalizeUnits(registry: Map<string, UnitIdentity>, raw: unknown): UnitIdentity[] {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 64) {
-    throw new HttpError(422, 'INVALID_UNITS', 'Supply 1 to 16 registered units');
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new HttpError(422, 'INVALID_UNITS', `Supply 1 to ${MAX_NORMALIZED_UNITS} registered units`);
   }
   const keys = new Map<string, UnitIdentity>();
   for (const key of raw) {
@@ -211,7 +214,7 @@ export function normalizeUnits(registry: Map<string, UnitIdentity>, raw: unknown
     keys.set(identity.key, identity);
   }
   const units = [...keys.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-  if (units.length > 16) throw new HttpError(422, 'INVALID_UNITS', 'At most 16 normalized units are permitted');
+  if (units.length > MAX_NORMALIZED_UNITS) throw new HttpError(422, 'INVALID_UNITS', unitsOverCapMessage(units.length));
   for (let i = 0; i < units.length; i++) {
     for (let j = i + 1; j < units.length; j++) {
       if (overlaps(units[i], units[j])) {

@@ -2,7 +2,7 @@ import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody,
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { costLimits, eventSequence } from '../state';
-import { resolveUnit, unitRegistry } from '../leases/units';
+import { MAX_NORMALIZED_UNITS, resolveUnit, unitRegistry, unitsOverCapMessage } from '../leases/units';
 import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
@@ -239,6 +239,7 @@ function changeInput(body: CreateChangeBody) {
   const baseOid = body.baseOid === null ? null : oid(body.baseOid);
   const ref = branch(body.branch);
   const unitKeys = ids(body.unitKeys, 'unitKeys');
+  if (unitKeys.length > MAX_NORMALIZED_UNITS) fail(422, 'INVALID_UNITS', unitsOverCapMessage(unitKeys.length));
   const dependencyChangeIds = ids(body.dependencyChangeIds, 'dependencyChangeIds');
   const attempt = body.attempt === undefined ? 1 : body.attempt;
   if (body.issueNumber !== undefined && (!Number.isSafeInteger(body.issueNumber) || body.issueNumber < 1)) fail(400, 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer');
@@ -442,6 +443,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   const headOid = oid(body.headOid);
   const ref = branch(body.branch);
   const unitKeys = ids(body.unitKeys, 'unitKeys');
+  if (unitKeys.length > MAX_NORMALIZED_UNITS) fail(422, 'INVALID_UNITS', unitsOverCapMessage(unitKeys.length));
   if (!body.leaseFences || typeof body.leaseFences !== 'object' || Array.isArray(body.leaseFences)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must be a map');
   const leaseFences = body.leaseFences as Record<string, unknown>;
   if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');

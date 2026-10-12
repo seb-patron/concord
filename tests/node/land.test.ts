@@ -304,9 +304,9 @@ describe('land input and evidence gates', () => {
     await expect(land({ ...base, allowedFiles: wider })).rejects.toThrow('--allowed-files conflicts with AW run allowed-files.txt');
     expect(request).not.toHaveBeenCalled();
   });
-  it('refuses 17 normalized units before creating a change or claiming leases', async () => {
+  it.each([17, 64, 65])('applies the 64-unit cap to a %i-file commit', async count => {
     const dir = await temp(); await git(dir, 'init', '-q');
-    const names = Array.from({ length: 17 }, (_, index) => `file-${index}.txt`);
+    const names = Array.from({ length: count }, (_, index) => `file-${index}.txt`);
     for (const name of names) await writeFile(join(dir, name), 'before\n');
     await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
     for (const name of names) await writeFile(join(dir, name), 'after\n');
@@ -316,13 +316,16 @@ describe('land input and evidence gates', () => {
     const request = vi.fn(async (method: string, path: string) => {
       if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: 'a'.repeat(40) } };
       if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [] } } } };
+      if (method === 'POST' && path === '/repos/demo/changes') throw new Error('change create reached');
       throw new Error(`unexpected ${method} ${path}`);
     });
     vi.stubEnv('CONCORD_TOKEN', 'local-test'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
     await expect(land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'test', allowedFiles: allowed,
-      client: { request } as never })).rejects.toThrow('LAND_TOO_MANY_UNITS: 17 units > 16; split the change');
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(request.mock.calls.every(([method]) => method === 'GET')).toBe(true);
+      client: { request } as never })).rejects.toThrow(count === 65
+      ? 'LAND_TOO_MANY_UNITS: 65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy'
+      : 'change create reached');
+    expect(request).toHaveBeenCalledTimes(count === 65 ? 2 : 3);
+    expect(request.mock.calls.some(([method]) => method === 'POST')).toBe(count <= 64);
   });
   it.each(['wait result', 'current readback'])('rejects a concurrent republication in the %s without submitting a verdict', async (race) => {
     const { dir, commit, parent } = await source();
