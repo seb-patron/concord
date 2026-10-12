@@ -117,7 +117,7 @@ export function artifactsStorage(bindingInput: unknown): RepoStorage {
     async resolveRef(name, ref) {
       if (!ref.startsWith('refs/heads/') || ref.slice('refs/heads/'.length).split('/').some(segment => !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(segment) || segment.includes('..') || segment.endsWith('.') || segment.endsWith('.lock'))) throw new Error('INVALID_REF');
       using repo = await binding.get(name);
-      return (await repo.log({ ref, limit: 1 }))[0]?.hash ?? null;
+      return (await repo.log({ ref: ref.slice('refs/heads/'.length), limit: 1 }))[0]?.hash ?? null;
     },
     async readCommit(name, oid) {
       using repo = await binding.get(name);

@@ -150,7 +150,9 @@ The `--force-with-lease` commands above are **only** for the disposable stale-re
 
 Review the [cost guards and owner billing steps](cost.md) before deployment.
 
-First upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
+On a fresh account, first provision a `workers.dev` subdomain. Create a mode-0600 JSON file outside the clone containing `AUTH_TOKENS` and `TRUSTED_CONFIG`, then make the first deployment with `npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"` (where `SECRETS_FILE` is that file's absolute path). `versions upload` and `versions secret put` require an existing Worker and otherwise fail with code 10007.
+
+For later releases, first upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
 
 ```sh
 test -s "$AUTH_TOKENS_FILE" && test -s "$TRUSTED_CONFIG_FILE"
@@ -160,11 +162,13 @@ npx wrangler versions secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUS
 npx wrangler deploy --config wrangler.jsonc
 ```
 
-If versioned secret provisioning reports that no Worker/version exists, stop and resolve that account state with the owner; do not publish a fixture-authenticated substitute. A production secret change is a release action too. Do not run these commands during an account-free local rehearsal.
+If versioned secret provisioning reports that no Worker/version exists, use the first-deploy path above after confirming the account state with the owner; do not publish a fixture-authenticated substitute. A production secret change is a release action too. Do not run these commands during an account-free local rehearsal.
 
 ## Deployed smoke and evidence
 
 Set `CONCORD_URL` to the **deployed** URL printed by Wrangler. `GET /health` must report `mode=production` and `storageBackend=artifacts`; these are necessary, not sufficient. Repeat the disposable create/fork/push/read and stale/token tests above after the deploy, recording actual provider responses and version. The live scenario driver uses fresh bearer credentials and mints short-lived repo-scoped Git tokens through the Worker. Keep all generated files outside the clone. The provisioned principals have distinct roles and a 24-hour expiry; provision again for another recording day. The provision command resolves its output directory with `realpath` and requires it to be outside the physical clone.
+
+The Artifacts binding resolves branch names in `log({ ref })` by short name (for example, `demo`), even when the Worker API receives `refs/heads/demo`.
 
 ```sh
 export CONCORD_URL='<Wrangler deployed HTTPS URL>'
