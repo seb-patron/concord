@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential } from './client.ts';
-import { git, rejectCanonicalTarget, validateRemote } from './git.ts';
+import { git, patchId, rejectCanonicalTarget, validateRemote } from './git.ts';
 import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
 
@@ -134,16 +134,16 @@ async function waitChange(client: ConcordClient, path: string, deadline: number,
   }
   throw new ConcordError('INSPECTION_TIMEOUT: checker did not finish', 'server');
 }
-async function prepareHead(source: string, commit: string, parent: string, base: string, canonical: { remote: string; token: string }): Promise<{ work: string; head: string; cleanup: () => Promise<void> }> {
-  if (parent === base) return { work: source, head: commit, cleanup: async () => {} };
+async function prepareHead(source: string, commit: string, parent: string, base: string, canonical: { remote: string; token: string }): Promise<{ work: string; head: string; cherryPicked: boolean; cleanup: () => Promise<void> }> {
+  if (parent === base) return { work: source, head: commit, cherryPicked: false, cleanup: async () => {} };
   const work = await mkdtemp(join(tmpdir(), 'concord-land-'));
   try {
     await git(['clone', '--quiet', '--shared', '--no-checkout', '--', source, work]);
     await git(['fetch', '--no-tags', '--', canonical.remote, base], { token: canonical.token }, work);
     await git(['checkout', '--quiet', '--detach', base], {}, work);
-    try { await git(['cherry-pick', '--no-gpg-sign', commit], { identity: true }, work); }
+    try { await git(['-c', 'core.hooksPath=/dev/null', 'cherry-pick', '--no-gpg-sign', commit], { identity: true }, work); }
     catch { throw new ConcordError('MERGE_CONFLICT: candidate does not apply to current canonical base', 'conflict'); }
-    return { work, head: await git(['rev-parse', 'HEAD'], {}, work), cleanup: () => rm(work, { recursive: true, force: true }) };
+    return { work, head: await git(['rev-parse', 'HEAD'], {}, work), cherryPicked: true, cleanup: () => rm(work, { recursive: true, force: true }) };
   } catch (error) { await rm(work, { recursive: true, force: true }); throw error; }
 }
 export function approvedHead(evidence: string, head: string): boolean {
@@ -265,14 +265,27 @@ export async function land(input: LandOptions): Promise<Obj> {
         const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
         const evidence = await readFile(options.reviewEvidence, 'utf8');
-        if (!approvedHead(evidence, prepared.head)) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
+        let carried = false;
+        if (!approvedHead(evidence, prepared.head)) {
+          if (prepared.cherryPicked && prepared.head !== commit && approvedHead(evidence, commit)) {
+            const published = await filesChanged(prepared.work, prepared.head);
+            carried = published.parent === targetBase &&
+              published.files.length === changed.files.length &&
+              published.files.every(file => allowed.has(file) && changed.files.includes(file)) &&
+              await patchId(source, commit) === await patchId(prepared.work, prepared.head);
+          }
+          if (!carried) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
+        }
         const reviewer = new ConcordClient({ url, token: reviewerToken });
         const inspected = await inspection(reviewer, root, change);
         if (!inspected || inspected.outcome !== 'PASS' || !inspected.reviewManifestDigest) throw new ConcordError('trusted inspection result is unavailable', 'server');
         const findings = (await api(reviewer, `${path}/findings`)).data;
         const verdicts = (await api(reviewer, `${path}/verdicts`)).data;
-        let verdict = (verdicts.items ?? []).find((item: Obj) => item.revision === change.revision && item.decision === 'approve' && item.evidenceDigest === hash(evidence));
-        if (!verdict) verdict = (await api(reviewer, `${path}/verdicts`, { revision: change.revision, reviewManifestDigest: inspected.reviewManifestDigest, findingSetVersion: findings.findingSetVersion, decision: 'approve', evidenceDigest: hash(evidence) }, await currentVersion(reviewer, root))).data;
+        let verdict = (verdicts.items ?? []).find((item: Obj) => item.revision === change.revision && item.decision === 'approve' && item.evidenceDigest === hash(evidence) &&
+          (carried ? item.carriedFrom?.sourceOid === commit && item.carriedFrom?.method === 'patch-id' : !item.carriedFrom));
+        if (!verdict) verdict = (await api(reviewer, `${path}/verdicts`, { revision: change.revision, reviewManifestDigest: inspected.reviewManifestDigest, findingSetVersion: findings.findingSetVersion, decision: 'approve', evidenceDigest: hash(evidence),
+          ...(carried ? { carriedFrom: { sourceOid: commit, method: 'patch-id' } } : {}) }, await currentVersion(reviewer, root))).data;
+        if (carried) emit({ state: 'review-carried', sourceOid: commit, publishedOid: prepared.head });
         emit({ state: 'reviewed', verdictId: verdict.verdictId, headOid: prepared.head });
         await renew();
         entry = (await api(client, `${root}/queue/enqueue`, { changeId, verdictId: verdict.verdictId, leaseFences: fences() }, await currentVersion(client, root))).data;

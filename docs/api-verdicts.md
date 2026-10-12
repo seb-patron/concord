@@ -27,6 +27,8 @@ Any authenticated principal whose scope includes the repository may read verdict
 
 Missing inspection, a forged digest, unresolved findings, a pending repair, changed pins, or self-review cannot create an eligible approval. `verdicts.gate(changeId, revision)` checks active head/revision, its inspected manifest and trusted pins, and the live finding-set version each time queue admission or promotion freeze calls it. A later finding invalidates an earlier approval even if already resolved. The gate does not waive full composed-stack validation.
 
+An approve request may include `carriedFrom: { "sourceOid": "<40-hex source SHA>", "method": "patch-id" }` when `concord land` has verified a clean cherry-pick of that source onto the published head. The source must differ from the current head. The field is stored on the verdict and returned in full owner and reviewer reads; reduced viewer and agent reads omit it. Requests without the field retain their existing behavior.
+
 `POST /v1/repos/:repoId/changes/:changeId/carry` requests a new checker job:
 
 ```json

@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from 'node:child_process';
+import { execFile as execFileCallback, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ConcordError } from './client.ts';
 
@@ -37,6 +37,19 @@ export async function git(args: string[], options: GitOptions = {}, cwd?: string
     const exitCode = typeof e.code === 'number' && Number.isSafeInteger(e.code) && e.code >= 0 && e.code <= 255 ? e.code : 'unknown';
     throw new ConcordError(`Git failed: ${category} (exit code ${exitCode})`, 'transport');
   }
+}
+
+export async function patchId(worktree: string, oid: string): Promise<string> {
+  if (!/^[0-9a-f]{40}$/i.test(oid)) throw new ConcordError('Patch commit OID is malformed', 'usage');
+  const patch = await git(['show', '--format=', '--no-ext-diff', '--no-renames', '--binary', oid], { preserveOutput: true }, worktree);
+  try {
+    const result = execFileSync('git', ['patch-id', '--stable'], {
+      cwd: worktree, env: gitEnvironment(), input: patch, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024,
+    }).trim();
+    const id = /^([0-9a-f]{40})\s+[0-9a-f]{40}$/.exec(result)?.[1];
+    if (!id) throw new Error('patch-id returned no commit');
+    return id;
+  } catch { throw new ConcordError('Git patch-id calculation failed', 'transport'); }
 }
 
 export async function resolveHead(worktree: string): Promise<string> {

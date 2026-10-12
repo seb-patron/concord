@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { approvedHead, filesChanged, land, parseAllowed, unitKeys } from '../../cli/land.ts';
+import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 
 const execFile = promisify(callback);
@@ -290,6 +291,63 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   for (const value of ['local-agent-a', 'local-reviewer', secret]) {
     expect(landed.stdout + landed.stderr).not.toContain(value);
   }
+  const oldSource = await temp(); await git(oldSource, 'clone', '-q', '-b', 'main', seed, '.');
+  await writeFile(join(oldSource, 'b.txt'), 'b=carried\n');
+  await git(oldSource, 'add', 'b.txt'); await git(oldSource, 'commit', '-qm', 'old-parent update');
+  const sourceOid = await git(oldSource, 'rev-parse', 'HEAD');
+  const carryAllowed = join(dir, 'carry-allowed.txt'); await writeFile(carryAllowed, 'b.txt\n');
+  const carryEvidence = join(dir, 'carry-review.txt');
+  await writeFile(carryEvidence, `# ✅ APPROVED FOR MERGE — head ${sourceOid}\nAPPROVED for merge\n`);
+  const carryArgs = ['--repo', 'landdemo', '--source', oldSource, '--commit', sourceOid,
+    '--intent-key', 'carry-task', '--intent', 'Carry old-parent update', '--allowed-files', carryAllowed,
+    '--wait-seconds', '150', '--json'];
+  const otherEvidence = join(dir, 'other-review.txt');
+  await writeFile(otherEvidence, `# ✅ APPROVED FOR MERGE — head ${'f'.repeat(40)}\nAPPROVED for merge\n`);
+  await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
+    '--review-evidence', otherEvidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') }));
+  const carried = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
+    '--review-evidence', carryEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
+  const carriedEvents = carried.stdout.trim().split('\n').map(line => JSON.parse(line));
+  const carryEvent = carriedEvents.find(item => item.state === 'review-carried');
+  expect(carryEvent).toMatchObject({ sourceOid, publishedOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
+  expect(carryEvent.publishedOid).not.toBe(sourceOid);
+  expect(carriedEvents.findIndex(item => item.state === 'review-carried')).toBeLessThan(carriedEvents.findIndex(item => item.state === 'reviewed'));
+  expect(carriedEvents.at(-1).state).toBe('landed');
+  const carryChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'carry-task');
+  const carryVerdicts = await api(`/changes/${carryChange.changeId}/verdicts`);
+  expect(carryVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid, method: 'patch-id' });
+
+  const contextSource = await temp(); await git(contextSource, 'clone', '-q', '-b', 'main', canonical, '.');
+  const context = await readFile(join(contextSource, 'shared.txt'), 'utf8');
+  await writeFile(join(contextSource, 'shared.txt'), context.replace('line-5\n', 'line-5-canonical\n'));
+  await git(contextSource, 'add', 'shared.txt'); await git(contextSource, 'commit', '-qm', 'change nearby context');
+  const contextOid = await git(contextSource, 'rev-parse', 'HEAD');
+  const sharedAllowed = join(dir, 'shared-allowed.txt'); await writeFile(sharedAllowed, 'shared.txt\n');
+  const contextEvidence = join(dir, 'context-review.txt');
+  await writeFile(contextEvidence, `# ✅ APPROVED FOR MERGE — head ${contextOid}\nAPPROVED for merge\n`);
+  const contextLand = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
+    '--repo', 'landdemo', '--source', contextSource, '--commit', contextOid, '--intent-key', 'context-task',
+    '--intent', 'Update shared context', '--allowed-files', sharedAllowed, '--review-evidence', contextEvidence,
+    '--wait-seconds', '150', '--json'], { cwd: root, env: landEnv, timeout: 155_000 }));
+  expect(contextLand.stdout).toContain('"state":"landed"');
+  const staleContext = await temp(); await git(staleContext, 'clone', '-q', '-b', 'main', seed, '.');
+  const stale = await readFile(join(staleContext, 'shared.txt'), 'utf8');
+  await writeFile(join(staleContext, 'shared.txt'), stale.replace('line-7\n', 'line-7-source\n'));
+  await git(staleContext, 'add', 'shared.txt'); await git(staleContext, 'commit', '-qm', 'old-context patch');
+  const staleOid = await git(staleContext, 'rev-parse', 'HEAD');
+  const staleEvidence = join(dir, 'stale-review.txt');
+  await writeFile(staleEvidence, `# ✅ APPROVED FOR MERGE — head ${staleOid}\nAPPROVED for merge\n`);
+  const staleArgs = ['--repo', 'landdemo', '--source', staleContext, '--commit', staleOid,
+    '--intent-key', 'stale-context-task', '--intent', 'Update nearby line', '--allowed-files', sharedAllowed,
+    '--review-evidence', staleEvidence, '--wait-seconds', '150', '--json'];
+  await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...staleArgs],
+    { cwd: root, env: landEnv, timeout: 155_000 })).rejects.toMatchObject({ code: 2,
+    stderr: expect.stringContaining('exact published head SHA') }));
+  const staleChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'stale-context-task');
+  const staleCandidate = join(dir, 'bridge', `${staleChange.candidateStorageName}.git`);
+  expect((await filesChanged(staleCandidate, staleChange.headOid)).files).toEqual(['shared.txt']);
+  expect(await patchId(staleContext, staleOid)).not.toBe(await patchId(staleCandidate, staleChange.headOid));
   const parallel = await Promise.all(['a.txt', 'b.txt'].map(async (file, index) => {
     const checkout = await temp(); await git(checkout, 'clone', '-q', '-b', 'main', canonical, '.');
     await writeFile(join(checkout, file), `${file}=parallel\n`);
@@ -339,4 +397,4 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     ...sameFile[1].args, '--review-evidence', sameFile[1].review],
   { cwd: root, env: sameFile[1].env, timeout: 155_000 }));
   expect(secondLanded.stdout).toContain('"state":"landed"');
-}, 240_000);
+}, 360_000);
