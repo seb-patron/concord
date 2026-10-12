@@ -7,12 +7,13 @@ import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
+import { createIssueEditor } from './issue.js';
 
 const $ = id => document.getElementById(id);
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
-  awaitingFreshSnapshot: false };
+  issueNumber: null, awaitingFreshSnapshot: false };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
 const node = (tag, value, className) => {
@@ -22,6 +23,12 @@ const node = (tag, value, className) => {
   return n;
 };
 const list = value => Array.isArray(value) ? value : [];
+const issueEditor = createIssueEditor($('issue-editor'), {}, { onBack: () => { state.view = 'desk'; state.issueNumber = null; render(); } });
+function openIssue(number) {
+  if (!state.repoId) return;
+  state.view = 'issue'; state.issueNumber = number; render();
+  void issueEditor.open(state.repoId, number);
+}
 const projections = () => state.snapshot?.data?.projections ?? {};
 const changes = () => snapshotCollections(state.snapshot).changes.items;
 const leases = () => projectionItems(projections().leases).items;
@@ -74,7 +81,8 @@ function signOut(message) {
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
   state.observedVersions.clear();
   state.awaitingFreshSnapshot = false;
-  state.selected = null; state.inboxSelected = null;
+  state.selected = null; state.inboxSelected = null; state.view = 'desk'; state.issueNumber = null;
+  issueEditor.close();
   $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = '';
   $('inbox-detail').replaceChildren(); $('inbox-detail').dataset.itemId = '';
   state.deskMessage = null;
@@ -381,6 +389,10 @@ function renderIssues() {
     if (issue.milestone) card.append(node('p', `Milestone: ${issue.milestone}`, 'muted'));
     for (const change of issue.changes) card.append(node('p', `Change ${change.changeId}: ${change.status}`, 'muted'));
     for (const lease of issue.leases) card.append(node('p', `Held: ${lease.unitKey} by ${lease.holderId}`, 'muted'));
+    const open = node('button', `Open issue ${issue.number}`);
+    open.type = 'button';
+    open.addEventListener('click', () => openIssue(issue.number));
+    card.append(open);
     target.append(card);
   }
 }
@@ -601,7 +613,8 @@ function render() {
     if (!hasToken() || !state.identity) return;
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
-    $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
+    $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox'; $('issue-view').hidden=state.view!=='issue';
+    if (state.view === 'issue' && state.snapshot) issueEditor.setLive({ snapshot: state.snapshot, events: state.events });
     if (!state.snapshot) {
       if (!state.repoId) {
         renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderInbox();renderTabs();

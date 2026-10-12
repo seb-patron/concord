@@ -6,8 +6,12 @@ import { readFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
-  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
-const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
+  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows,
+  parseUnitEntry, unitLeaseState, issueOverlaps, agentSpecText, issueTimeline,
+  parseLabelsInput, formatLabelsInput, renderMarkdown } = require('../../web/views.js') as any;
+const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions,
+  getIssue, listIssues, updateIssue, listMilestones, ApiError } = require('../../web/api.js') as any;
+const { createIssueEditor } = require('../../web/issue.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -511,4 +515,401 @@ describe('layout and token contract', () => {
     expect(allowedActions(['reviewer']).verdict).toBe(true);
     expect(allowedActions(['agent']).verdict).toBe(false);
   });
+  it('mounts the issue editor shell beside the desk and inbox views', () => {
+    const page = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+    expect(page).toContain('id="issue-view"');
+    expect(page).toContain('id="issue-editor"');
+    const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+    expect(css).toContain('#issue-editor .issue-card');
+    expect(css).toContain('.issue-tabs');
+    expect(css).toContain('#issue-title');
+    expect(css).toContain('.issue-unit button');
+    expect(css).toContain('.issue-view');
+    expect(css).toMatch(/#issue-list \.issue-card button\{[^}]*min-height:44px/);
+    expect(css).toMatch(/\.issue-tabs button\{[^}]*min-height:44px/);
+    expect(css).toMatch(/\.issue-unit button\{[^}]*min-height:44px/);
+  });
 });
+
+describe('Issue API helpers', () => {
+  it('fetches one issue, pages issues, patches with a version, and lists milestones', async () => {
+    const seen: Array<{ url: string; init: any }> = [];
+    const fetchImpl = (async (url: string, init: any) => {
+      seen.push({ url, init });
+      return new Response(JSON.stringify({ data: { number: 277 }, version: 3 }));
+    }) as any;
+    await getIssue('demo', 277, fetchImpl);
+    expect(seen[0].url).toBe('/v1/repos/demo/issues/277');
+    await listIssues('demo', { state: 'open', limit: 100 }, fetchImpl);
+    expect(seen[1].url).toBe('/v1/repos/demo/issues?state=open&limit=100');
+    await updateIssue('demo', 277, { expectedVersion: 3, title: 'New' }, 'key-1', fetchImpl);
+    expect(seen[2].url).toBe('/v1/repos/demo/issues/277');
+    expect(seen[2].init.method).toBe('PATCH');
+    expect(JSON.parse(String(seen[2].init.body))).toEqual({ expectedVersion: 3, title: 'New' });
+    expect(new Headers(seen[2].init.headers).get('idempotency-key')).toBe('key-1');
+    await listMilestones('demo', fetchImpl);
+    expect(seen[3].url).toBe('/v1/repos/demo/milestones');
+  });
+});
+
+describe('Issue editor derivations', () => {
+  it('parses file, section, row, and unknown unit entries', () => {
+    expect(parseUnitEntry('src/attention.py')).toMatchObject({ kind: 'file', file: 'src/attention.py' });
+    expect(parseUnitEntry('docs/architecture.md § Components')).toMatchObject({ kind: 'section', file: 'docs/architecture.md' });
+    expect(parseUnitEntry('row:families:alpha')).toMatchObject({ kind: 'row', key: 'row:families:alpha' });
+    expect(parseUnitEntry('/absolute/path')).toMatchObject({ kind: 'unknown' });
+    expect(parseUnitEntry('has spaces')).toMatchObject({ kind: 'unknown' });
+    expect(parseUnitEntry('  ')).toMatchObject({ kind: 'empty' });
+  });
+  it('marks units free or held from live leases only', () => {
+    const now = Date.now();
+    const leases = [
+      { unitKey: 'file:src/attention.py', holderId: 'agent-a', changeId: 'x', issueNumber: 277, issueTitle: 'D3', state: 'active', expiresAt: now + 60000 },
+      { unitKey: 'file:docs/architecture.md', holderId: 'agent-b', changeId: 'y', issueNumber: 280, state: 'reserved', expiresAt: now + 60000 },
+      { unitKey: 'row:families:alpha', holderId: 'agent-c', changeId: 'z', issueNumber: 281, state: 'active', expiresAt: now - 1000 },
+    ];
+    const held = unitLeaseState(parseUnitEntry('src/attention.py'), leases, now);
+    expect(held.state).toBe('held');
+    expect(held.holders[0]).toMatchObject({ holderId: 'agent-a', issueNumber: 277 });
+    // A whole-file lease covers a section entry of the same file.
+    expect(unitLeaseState(parseUnitEntry('docs/architecture.md § Components'), leases, now).state).toBe('held');
+    // Expired rows do not hold.
+    expect(unitLeaseState(parseUnitEntry('row:families:alpha'), leases, now).state).toBe('free');
+    expect(unitLeaseState(parseUnitEntry('src/other.py'), leases, now)).toEqual({ state: 'free', holders: [] });
+    // Symmetric file comparison: a file entry sees a section-keyed lease of the same file.
+    const sectionLease = [{ unitKey: 'src/other.py § Top', holderId: 'agent-d', changeId: 'w', state: 'active', expiresAt: now + 60000 }];
+    expect(unitLeaseState(parseUnitEntry('src/other.py'), sectionLease, now).state).toBe('held');
+  });
+  it('finds overlapping open issues with a plain explanation', () => {
+    const mine: any = { number: 277, state: 'open', allowedFiles: ['src/attention.py', 'docs/architecture.md § Components'] };
+    const others: any[] = [
+      { number: 280, title: 'D5', state: 'open', allowedFiles: ['docs/architecture.md § Storage'] },
+      { number: 281, title: 'J1b', state: 'open', allowedFiles: ['src/unrelated.py'] },
+      { number: 270, title: 'Old', state: 'closed', allowedFiles: ['src/attention.py'] },
+    ];
+    const overlaps = issueOverlaps(mine, others);
+    expect(overlaps).toHaveLength(1);
+    expect(overlaps[0].number).toBe(280);
+    expect(overlaps[0].explanation).toContain('#280 also declares');
+    expect(overlaps[0].explanation).toContain('whichever agent starts first');
+    expect(issueOverlaps({ number: 1, state: 'open', allowedFiles: [] }, others)).toEqual([]);
+  });
+  it('renders the exact agent spec from API fields only', () => {
+    const text = agentSpecText({ number: 277, title: 'D3', state: 'open', body: '## Done', labels: ['a'],
+      allowedFiles: ['src/x.py'], changes: [{ changeId: 'x', status: 'ready' }] }, 'V1');
+    expect(text).toContain('issue: 277');
+    expect(text).toContain('milestone: V1');
+    expect(text).toContain('- src/x.py');
+    expect(text).toContain('## Done');
+    expect(text).toContain('- x: ready');
+    expect(agentSpecText({ number: 1, title: 'T', state: 'open' }, null)).toContain('(none declared)');
+  });
+  it('builds the timeline from issue and linked-change events in order', () => {
+    const events = [
+      { sequence: 9, kind: 'change.published', actorId: 'agent-a', version: 2, timestamp: 1700000009000, relatedIds: ['x'] },
+      { sequence: 2, kind: 'issue.created', actorId: 'owner', version: 1, timestamp: 1700000002000, relatedIds: ['277'] },
+      { sequence: 5, kind: 'queue.promotion_applied', actorId: 'system', version: 2, timestamp: 1700000005000, relatedIds: ['other'] },
+    ];
+    const timeline = issueTimeline(277, [{ changeId: 'x' }], events);
+    expect(timeline.map((entry: any) => entry.sequence)).toEqual([2, 9]);
+    expect(timeline[0]).toMatchObject({ kind: 'issue.created', actorId: 'owner' });
+  });
+  it('previews markdown while rendering markup literally', () => {
+    const html = renderMarkdown('## Outcome\n- one\n- two\n<script>alert(1)</script>');
+    expect(html).toContain('<li>one</li>');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+    expect(renderMarkdown('```\ncode\n```')).toContain('<pre><code>');
+  });
+  it('parses and formats labels without duplicates', () => {
+    expect(parseLabelsInput('a, b, a,')).toEqual(['a', 'b']);
+    expect(formatLabelsInput(['a', 'b'])).toBe('a, b');
+  });
+});
+
+describe('Issue editor DOM', () => {
+  const issueData = {
+    number: 277, title: 'D3: discovery attention scores', body: '## Outcome\nScore filings.',
+    labels: ['discovery'], milestoneId: 'm1', allowedFiles: ['src/attention.py', 'docs/architecture.md § Components'],
+    state: 'open', version: 3, authorId: 'owner', changes: [{ changeId: 'x', status: 'ready' }],
+  };
+  const stubSnapshot = (leases: any[] = []) => ({ data: { projections: {
+    leases: { heldItems: leases },
+    issues: { items: [
+      { ...issueData },
+      { number: 280, title: 'D5', state: 'open', allowedFiles: ['docs/architecture.md § Storage'] },
+    ] },
+    repos: { changes: [{ changeId: 'x', status: 'ready', dependencyChangeIds: ['dep-1'] }] },
+  } }, version: 3 });
+  const stubEvents = () => ({ data: { items: [
+    { sequence: 2, kind: 'issue.created', actorId: 'owner', version: 1, timestamp: 1700000002000, relatedIds: ['277'] },
+    { sequence: 9, kind: 'change.published', actorId: 'agent-a', version: 2, timestamp: 1700000009000, relatedIds: ['x'] },
+  ], version: 1 } });
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+
+  async function mount(overrides: Record<string, any> = {}) {
+    // Local JSDOM only: the editor works off root.ownerDocument, so these
+    // tests never touch the globals the fleet-desk test above relies on.
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost/' });
+    const root = dom.window.document.createElement('div');
+    dom.window.document.body.append(root);
+    const patches: Array<{ body: any }> = [];
+    let serverIssue: any = structuredClone(issueData);
+    const api = {
+      getIssue: async () => ({ data: structuredClone(serverIssue), version: serverIssue.version }),
+      listMilestones: async () => ({ data: { items: [{ milestoneId: 'm1', title: 'V1' }] } }),
+      listIssues: async () => ({ data: { items: [
+        { ...structuredClone(serverIssue) },
+        { number: 280, title: 'D5', state: 'open', allowedFiles: ['docs/architecture.md § Storage'] },
+      ], nextCursor: null } }),
+      getSnapshot: async () => stubSnapshot(overrides.leases ?? []),
+      getEvents: async () => stubEvents(),
+      updateIssue: async (_repo: string, _number: number, body: any, _key: string) => {
+        patches.push({ body });
+        if (overrides.updateImpl) return overrides.updateImpl(body, serverIssue);
+        serverIssue = { ...serverIssue, ...body, version: serverIssue.version + 1 };
+        delete (serverIssue as any).expectedVersion;
+        return { data: structuredClone(serverIssue), version: serverIssue.version };
+      },
+      newIdempotencyKey: () => 'key-1',
+      ...overrides.api,
+    };
+    const editor = createIssueEditor(root, api, overrides.hooks ?? {});
+    await editor.open('demo', 277);
+    await flush(); await flush();
+    return { dom, root, editor, patches, get serverIssue() { return serverIssue; }, setServerIssue(value: any) { serverIssue = value; } };
+  }
+  function unmount(mounted: Awaited<ReturnType<typeof mount>>) {
+    mounted.dom.window.close();
+  }
+
+  it('renders fixture data with tabs, live units, overlaps, and timeline', async () => {
+    const mounted = await mount({ leases: [
+      { unitKey: 'file:src/attention.py', holderId: 'agent-a', changeId: 'x', issueNumber: 277, state: 'active', expiresAt: Date.now() + 60000 },
+    ] });
+    try {
+      const doc = mounted.dom.window.document;
+      expect((doc.getElementById('issue-title') as HTMLInputElement).value).toBe('D3: discovery attention scores');
+      expect(doc.getElementById('issue-body')).toBeTruthy();
+      (doc.getElementById('issue-tab-preview') as HTMLButtonElement).click();
+      expect(doc.querySelector('.issue-preview')?.textContent).toContain('Score filings.');
+      (doc.getElementById('issue-tab-agent') as HTMLButtonElement).click();
+      const agent = doc.getElementById('issue-agent-view')?.textContent ?? '';
+      expect(agent).toContain('issue: 277');
+      expect(agent).toContain('- src/attention.py');
+      expect(agent).toContain('- x: ready');
+      expect(doc.body.textContent).toContain('held by agent-a · issue #277 · change x');
+      expect(doc.body.textContent).toContain('free · no live lease covers it');
+      expect(doc.body.textContent).toContain('#280 D5');
+      expect(doc.body.textContent).toContain('whichever agent starts first');
+      expect(doc.querySelector('.issue-timeline')?.textContent).toContain('issue.created');
+      expect(doc.querySelector('.issue-timeline')?.textContent).toContain('change.published');
+    } finally { unmount(mounted); }
+  });
+
+  it('adds and removes units in the draft and saves them with the version', async () => {
+    const mounted = await mount();
+    try {
+      const doc = mounted.dom.window.document;
+      (doc.getElementById('issue-addunit') as HTMLInputElement).value = 'row:families:alpha';
+      doc.getElementById('issue-addunit')!.dispatchEvent(new mounted.dom.window.Event('input', { bubbles: true }));
+      (doc.getElementById('issue-add') as HTMLButtonElement).click();
+      expect(doc.body.textContent).toContain('row:families:alpha');
+      (doc.getElementById('issue-addunit') as HTMLInputElement).value = 'row:families:alpha';
+      doc.getElementById('issue-addunit')!.dispatchEvent(new mounted.dom.window.Event('input', { bubbles: true }));
+      (doc.getElementById('issue-add') as HTMLButtonElement).click();
+      expect(doc.getElementById('issue-status')?.textContent).toContain('Already listed');
+      const remove = doc.querySelector('[aria-label="Remove src/attention.py"]') as HTMLButtonElement;
+      remove.click();
+      expect(doc.body.textContent).not.toContain('src/attention.py');
+      (doc.getElementById('issue-save') as HTMLButtonElement).click();
+      await flush(); await flush();
+      expect(mounted.patches).toHaveLength(1);
+      expect(mounted.patches[0].body).toMatchObject({ expectedVersion: 3, title: 'D3: discovery attention scores' });
+      expect(mounted.patches[0].body.allowedFiles).toEqual(['docs/architecture.md § Components', 'row:families:alpha']);
+      expect(doc.getElementById('issue-status')?.textContent).toContain('Saved.');
+    } finally { unmount(mounted); }
+  });
+
+  it('merges on a stale version instead of overwriting', async () => {
+    let calls = 0;
+    const mounted = await mount({ updateImpl: (body: any, server: any) => {
+      calls++;
+      if (calls === 1) throw new ApiError(409, 'STALE_VERSION', 'Object version is stale', null, false, { currentVersion: 4 });
+      return { data: { ...server, ...body, version: 4 }, version: 4 };
+    } });
+    try {
+      const doc = mounted.dom.window.document;
+      (doc.getElementById('issue-title') as HTMLInputElement).value = 'Mine';
+      doc.getElementById('issue-title')!.dispatchEvent(new mounted.dom.window.Event('input', { bubbles: true }));
+      mounted.setServerIssue({ ...mounted.serverIssue, title: 'Theirs', version: 4 });
+      (doc.getElementById('issue-save') as HTMLButtonElement).click();
+      await flush(); await flush(); await flush();
+      expect(doc.body.textContent).toContain('Newer version on the server');
+      expect(doc.body.textContent).toContain('Theirs');
+      (doc.getElementById('issue-keep-mine') as HTMLButtonElement).click();
+      await flush(); await flush(); await flush();
+      expect(calls).toBe(2);
+      expect(mounted.patches[1].body).toMatchObject({ expectedVersion: 4, title: 'Mine' });
+      expect(doc.body.textContent).not.toContain('Newer version on the server');
+    } finally { unmount(mounted); }
+  });
+
+  it('discards the draft for the server version on request', async () => {
+    const mounted = await mount({ updateImpl: () => {
+      throw new ApiError(409, 'STALE_VERSION', 'Object version is stale', null, false, { currentVersion: 4 });
+    } });
+    try {
+      const doc = mounted.dom.window.document;
+      mounted.setServerIssue({ ...mounted.serverIssue, title: 'Theirs', version: 4 });
+      (doc.getElementById('issue-save') as HTMLButtonElement).click();
+      await flush(); await flush(); await flush();
+      (doc.getElementById('issue-use-server') as HTMLButtonElement).click();
+      expect((doc.getElementById('issue-title') as HTMLInputElement).value).toBe('Theirs');
+      expect(doc.body.textContent).not.toContain('Newer version on the server');
+    } finally { unmount(mounted); }
+  });
+
+  it('keeps polls cheap, backfills the timeline, and never re-renders under a text field', async () => {
+    let renders = 0;
+    const mounted = await mount({ hooks: { onRender: () => { renders++; } } });
+    try {
+      const doc = mounted.dom.window.document;
+      const settled = renders;
+      mounted.editor.setLive();
+      expect(renders).toBe(settled + 1);
+      mounted.editor.setLive();
+      expect(renders).toBe(settled + 1);
+      const extra = [{ sequence: 12, kind: 'issue.reopened', actorId: 'owner', version: 4, timestamp: 1700000012000, relatedIds: ['277'] }];
+      mounted.editor.setLive({ events: extra });
+      expect(renders).toBe(settled + 2);
+      expect(doc.querySelector('.issue-timeline')?.textContent).toContain('issue.reopened');
+      const area = doc.getElementById('issue-body') as HTMLTextAreaElement;
+      area.focus();
+      const more = [{ sequence: 13, kind: 'issue.closed', actorId: 'owner', version: 5, timestamp: 1700000013000, relatedIds: ['277'] }];
+      mounted.editor.setLive({ events: more });
+      expect(renders).toBe(settled + 2);
+      expect(doc.getElementById('issue-body')).toBe(area);
+      expect(doc.activeElement).toBe(area);
+    } finally { unmount(mounted); }
+  });
+
+  it('keeps id-less leases distinct and prefers newer versions on reopen', async () => {
+    let holder = 'agent-a';
+    let version = 1;
+    const rows = () => stubSnapshot([
+      { leaseId: 'l1', unitKey: 'file:src/attention.py', holderId: holder, changeId: 'x', issueNumber: 277, state: 'active', expiresAt: Date.now() + 60000, version },
+      { unitKey: 'file:docs/architecture.md', holderId: 'agent-b', changeId: 'y', issueNumber: 280, state: 'reserved', expiresAt: Date.now() + 60000 },
+    ]);
+    const mounted = await mount({ api: { getSnapshot: async () => rows() } });
+    try {
+      const doc = mounted.dom.window.document;
+      expect(doc.body.textContent).toContain('held by agent-a · issue #277 · change x');
+      expect(doc.body.textContent).toContain('held by agent-b · issue #280 · change y');
+      holder = 'agent-c'; version = 2;
+      await mounted.editor.open('demo', 277);
+      expect(doc.body.textContent).toContain('held by agent-c · issue #277 · change x');
+      expect(doc.body.textContent).toContain('held by agent-b · issue #280 · change y');
+    } finally { unmount(mounted); }
+  });
+
+  it('names missing linked changes in Depends on instead of staying silent', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost/' });
+    try {
+      const root = dom.window.document.createElement('div');
+      dom.window.document.body.append(root);
+      const ghost = { ...issueData, changes: [{ changeId: 'x', status: 'ready' }, { changeId: 'ghost', status: 'ready' }] };
+      const editor = createIssueEditor(root, {
+        getIssue: async () => ({ data: structuredClone(ghost), version: 3 }),
+        listMilestones: async () => ({ data: { items: [] } }),
+        listIssues: async () => ({ data: { items: [structuredClone(ghost)], nextCursor: null } }),
+        getSnapshot: async () => ({ data: { projections: { leases: {}, issues: { items: [] },
+          repos: { changes: [{ changeId: 'x', status: 'ready', dependencyChangeIds: ['dep-1'] }] } } }, version: 1 }),
+        getEvents: async () => ({ data: { items: [] } }),
+        updateIssue: async () => { throw new Error('unreachable'); },
+        newIdempotencyKey: () => 'key-1',
+      });
+      await editor.open('demo', 277);
+      await flush(); await flush();
+      const disabled = [...dom.window.document.querySelectorAll('.issue-details input')]
+        .filter((el) => (el as HTMLInputElement).disabled);
+      expect(disabled.map((el) => (el as HTMLInputElement).value)).toContain('dep-1 (+1 linked change not in snapshot)');
+      const alone = dom.window.document.createElement('div');
+      dom.window.document.body.append(alone);
+      const solo = { ...issueData, changes: [{ changeId: 'ghost', status: 'ready' }] };
+      const second = createIssueEditor(alone, {
+        getIssue: async () => ({ data: structuredClone(solo), version: 3 }),
+        listMilestones: async () => ({ data: { items: [] } }),
+        listIssues: async () => ({ data: { items: [structuredClone(solo)], nextCursor: null } }),
+        getSnapshot: async () => ({ data: { projections: { leases: {}, issues: { items: [] }, repos: { changes: [] } } }, version: 1 }),
+        getEvents: async () => ({ data: { items: [] } }),
+        updateIssue: async () => { throw new Error('unreachable'); },
+        newIdempotencyKey: () => 'key-1',
+      });
+      await second.open('demo', 277);
+      await flush(); await flush();
+      const soloDisabled = [...alone.querySelectorAll('.issue-details input')]
+        .filter((el) => (el as HTMLInputElement).disabled);
+      expect(soloDisabled.map((el) => (el as HTMLInputElement).value)).toContain('(+1 linked change not in snapshot)');
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  it('shows the server refusal reason when a save is rejected', async () => {
+    const mounted = await mount({ updateImpl: () => {
+      throw new ApiError(422, 'INVALID_LABELS', 'labels must be unique strings', null, false, null);
+    } });
+    try {
+      const doc = mounted.dom.window.document;
+      (doc.getElementById('issue-save') as HTMLButtonElement).click();
+      await flush(); await flush();
+      expect(doc.getElementById('issue-status')?.textContent).toContain('INVALID_LABELS');
+    } finally { unmount(mounted); }
+  });
+
+  it('covers empty and error states without sample data', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost/' });
+    try {
+      const root = dom.window.document.createElement('div');
+      dom.window.document.body.append(root);
+      const empty = { ...issueData, allowedFiles: [], labels: [], milestoneId: null, changes: [] };
+      const editor = createIssueEditor(root, {
+        getIssue: async () => ({ data: structuredClone(empty), version: 3 }),
+        listMilestones: async () => ({ data: { items: [] } }),
+        listIssues: async () => ({ data: { items: [structuredClone(empty)], nextCursor: null } }),
+        getSnapshot: async () => ({ data: { projections: { leases: {}, issues: { items: [] }, repos: {} } }, version: 1 }),
+        getEvents: async () => ({ data: { items: [] } }),
+        updateIssue: async () => { throw new Error('unreachable'); },
+        newIdempotencyKey: () => 'key-1',
+      });
+      await editor.open('demo', 277);
+      await flush(); await flush();
+      expect(docBody(dom)).toContain('No units declared');
+      expect(docBody(dom)).toContain('Declare units above');
+      expect(docBody(dom)).toContain('No observed events');
+      (dom.window.document.getElementById('issue-tab-agent') as HTMLButtonElement).click();
+      expect(docBody(dom)).toContain('(none declared)');
+      const failing = dom.window.document.createElement('div');
+      dom.window.document.body.append(failing);
+      const broken = createIssueEditor(failing, {
+        getIssue: async () => { throw new ApiError(0, 'NETWORK_UNREACHABLE', 'offline', null, true, null); },
+        listMilestones: async () => ({ data: { items: [] } }),
+        listIssues: async () => ({ data: { items: [] } }),
+        getSnapshot: async () => ({}),
+        getEvents: async () => ({}),
+        updateIssue: async () => { throw new Error('unreachable'); },
+        newIdempotencyKey: () => 'key-1',
+      });
+      await broken.open('demo', 999);
+      await flush(); await flush();
+      expect(failing.textContent).toContain('Could not load issue #999 (NETWORK_UNREACHABLE)');
+    } finally {
+      dom.window.close();
+    }
+  });
+});
+
+function docBody(dom: any): string {
+  return dom.window.document.body.textContent ?? '';
+}

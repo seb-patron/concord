@@ -26,3 +26,17 @@ When `/v1/me` responds, actions follow its roles and principal; when it is absen
 # Issues panel
 
 The read-only Issues panel lists open Concord issues for the selected repository. It shows each issue's milestone, linked change status, and live held leases. The panel reads the coordinator snapshot's complete `leases.heldItems` projection (the paged `leases.items` list can stop at 100 records) and renders task text as plain text.
+
+# Issue editor
+
+Each issue card has an `Open issue N` button that switches the desk to the issue editor (`web/issue.js`, mounted at `#issue-view`). The editor loads `GET /v1/repos/:repo/issues/:number` plus milestones, the open issue list, the snapshot (leases, linked changes), and recent events, then renders title, spec tabs, units, details, overlaps, and timeline from those responses only.
+
+Title, markdown body, labels, milestone, and units save together through `PATCH /v1/repos/:repo/issues/:number` with the loaded issue `version` as `expectedVersion` (`updateIssue` in `web/api.js`). A `409 STALE_VERSION` never overwrites: the editor fetches the newer server copy and offers `Discard mine, use server version` or `Save mine over the server version`, which retries once against the fresh version. Other refusals (for example a `422` for an invalid field) show the server's redacted code and message beside Save.
+
+The spec tabs are Write (plain textarea), Preview (a dependency-free heading/list/code renderer that escapes markup first, so spec text renders literally), and What the agent sees (a read-only block rendering the exact issue fields an agent fetches: number, title, state, labels, milestone, declared units, body, and linked changes with status).
+
+The units editor edits the issue's `allowedFiles` array. Each entry parses as a file path, a `path § Section` entry, or a `row:table:key` row (`parseUnitEntry` in `web/views.js`); anything else is kept verbatim and the server decides at claim time. Each row shows live state from the snapshot's complete `leases.heldItems` projection: `free` when no live active/reserved lease covers it, or `held by` with the holder, issue number, and change ID. Add appends to the draft (duplicates rejected); remove buttons delete from the draft; both need Save to persist. Units shown here are declarations — only a live lease says who holds what.
+
+The details panel edits milestone (a select over `GET /milestones`, empty clears it) and labels (comma separated, deduped). Priority has no field in the issues API, so its control is disabled and says so; Depends on is read-only, derived from the linked snapshot changes' queue dependencies, because the issues API stores no dependency field. Linked changes missing from the snapshot are counted in the field rather than silently dropped. The overlaps panel compares draft units against other open issues on exact keys or shared files and explains each overlap in plain words (`issueOverlaps` in `web/views.js`). The timeline lists observed repository events whose related IDs name the issue number or a linked change ID, oldest first (`issueTimeline` in `web/views.js`).
+
+Per-second desk polls refresh the editor's leases, overlaps, and timeline through `setLive`, which skips re-rendering when nothing changed and never re-renders while a text field has focus, so typing keeps its caret. Empty states name what is missing (no units, no overlaps, no observed events); load and save failures quote the redacted API code.
