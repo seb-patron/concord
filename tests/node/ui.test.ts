@@ -16,7 +16,10 @@ const fixture = {
     leases: { items: [{ leaseId: 'l1', changeId: 'x', holderId: 'agent-a', unitKey: 'fn:retry', fence: 3, expiresAt: Date.now() + 120000, state: 'active' }],
       refusals: [{ changeId: 'x', requesterId: 'agent-c', keys: ['fn:retry'], createdAt: Date.now(), conflicts: [{ holderId: 'agent-a', expiresAt: Date.now() + 120000 }] }] },
     queue: { entries: [{ changeId: 'y', state: 'blocked', sequence: 1 }], diagnosis: { reason: 'SINGLETON', blame: ['y'] }, observedMain: 'main123' },
-    findings: { findingSetVersions: { x: 0 } },
+    findings: { findingSetVersions: { x: 0 }, findings: [
+      { findingId: 'f1', changeId: 'x', status: 'open', unitKey: 'fn:retry', originRevision: 1, text: 'Retry evidence needs repair' },
+    ], rounds: [] },
+    runners: { items: [{ runnerId: 'checker-1', role: 'checker', state: 'idle', lastSeenAt: 1700000000000, activeJobId: null }] },
   } },
   version: 7, eventSeq: 0,
 };
@@ -45,12 +48,16 @@ describe('Fleet desk DOM', () => {
     Object.assign(globalThis, { document: dom.window.document, window: dom.window });
     dom.window.HTMLElement.prototype.scrollIntoView = () => {};
     dom.window.scrollTo = () => {};
-    dom.window.setInterval = (() => 1) as any;
+    let tick: (() => void) | undefined;
+    dom.window.setInterval = ((callback: () => void) => { tick = callback; return 1; }) as any;
     const doc = dom.window.document;
     const byId = (id: string) => doc.getElementById(id)!;
     const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     const requests: Array<{ url: string; init: RequestInit }> = [];
     let forbiddenVerdicts = false;
+    let snapshotVersion = 7;
+    let eventVersion = 7;
+    let releaseSnapshot8: (() => void) | undefined;
     const history = [
       { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
       { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
@@ -70,9 +77,22 @@ describe('Fleet desk DOM', () => {
       } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
       else if (url.endsWith('/snapshot')) {
         if (token === 'Bearer restricted') { status = 403; body = { error: { code: 'FORBIDDEN', message: 'no scope' } }; }
-        else body = fixture;
+        else if (snapshotVersion === 8) return await new Promise<Response>(resolve => {
+          releaseSnapshot8 = () => resolve(new Response(JSON.stringify({ ...fixture, version: 8,
+            data: { projections: { ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
+              changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x' ? { ...c, intentText: 'Stale version 8' } : c) } } } })));
+        });
+        else body = { ...fixture, version: snapshotVersion, data: { projections: {
+          ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
+            changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x'
+              ? { ...c, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c) },
+        } } };
       }
-      else if (url.includes('/events?')) body = { data: { items: [] }, version: 7, eventSeq: 0 };
+      else if (url.includes('/events?')) body = { data: { items: eventVersion === 6
+        ? [{ sequence: 2, kind: 'stale.event', actorId: 'old', version: 6, relatedIds: ['x'] }]
+        : eventVersion === 7 && url.includes('after=0')
+          ? [{ sequence: 1, kind: 'change.published', actorId: 'agent-a', version: 7, relatedIds: ['x', 'delta-1'] }]
+          : [] }, version: eventVersion, eventSeq: eventVersion === 6 ? 2 : 1 };
       else if (url.includes('/changes/x/verdicts') && init.method !== 'POST' && (forbiddenVerdicts || token === 'Bearer local-agent-a')) {
         status = 403; body = { error: { code: 'FORBIDDEN', message: 'reviewers only' } };
       }
@@ -107,6 +127,25 @@ describe('Fleet desk DOM', () => {
       byId('inbox-alert').click();
       expect(byId('inbox-view').hidden).toBe(false);
       expect(byId('inbox-list').textContent).toContain('Waiting on a lease');
+      (byId('inbox-list').querySelector('button:last-child') as HTMLButtonElement).click();
+      expect(byId('inbox-detail').textContent).toContain('Cap retries');
+      expect(byId('inbox-detail').textContent).toContain('ready for independent review');
+      expect(byId('inbox-detail').textContent).toContain('Head: abc123');
+      expect(byId('inbox-detail').textContent).toContain('Approval history');
+      expect(byId('inbox-detail').textContent).toContain('Direct approve');
+      expect(byId('inbox-detail').querySelector('.inbox-actions')).toBeTruthy();
+      (byId('inbox-detail').querySelector('button') as HTMLButtonElement).click();
+      expect(byId('inbox-view').hidden).toBe(true);
+      expect(byId('change-detail').hidden).toBe(false);
+      expect(byId('finding-list').textContent).toContain('Retry evidence needs repair');
+      expect(byId('finding-list').textContent).toContain('Repair state: unresolved');
+      expect(byId('runner-list').textContent).toContain('checker-1 (checker) · idle');
+      expect(byId('runner-summary').textContent).toContain('checker-1');
+      expect(byId('replay-body').textContent).toContain('Historical simulation: unavailable');
+      expect(byId('event-log').textContent).toContain('change.published by agent-a (v7)');
+      expect(byId('verdict-list').querySelector('a[href="#event-1"]')?.textContent).toBe('delta-1');
+      byId('detail-close').click();
+      expect(byId('change-detail').hidden).toBe(true);
       byId('back-desk').click();
       (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       await flush();
@@ -185,6 +224,25 @@ describe('Fleet desk DOM', () => {
       expect(byId('queue-list').textContent).toContain('Merge queue empty');
       expect(byId('main-footer').textContent).toContain('No repositories yet');
       expect(byId('inbox-alert').hidden).toBe(true);
+      // A poll can be waiting for v8 while a mutation refresh accepts v9.
+      byId('token-clear').click();
+      (byId('token-input') as HTMLInputElement).value = 'local-agent-a';
+      byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      eventVersion = 8; snapshotVersion = 8;
+      tick!(); await flush();
+      expect(releaseSnapshot8).toBeTypeOf('function');
+      snapshotVersion = 9; eventVersion = 9;
+      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      const raceClaim = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Claim'))!;
+      raceClaim.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(byId('work-board').textContent).toContain('Current version 9');
+      releaseSnapshot8!(); await flush();
+      expect(byId('work-board').textContent).toContain('Current version 9');
+      expect(byId('work-board').textContent).not.toContain('Stale version 8');
+      eventVersion = 6; tick!(); await flush();
+      expect(byId('event-log').textContent).not.toContain('stale.event');
     } finally {
       clearSessionToken();
       Object.assign(globalThis, previous);

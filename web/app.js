@@ -5,12 +5,12 @@ import {
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
-  normalizeDiagnosis, projectionItems, safeText, snapshotCollections, verdictProvenance,
+  normalizeDiagnosis, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
 
 const $ = id => document.getElementById(id);
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
-  events: [], seq: 0, version: 0, verdicts: {}, verdictErrors: {}, selected: null,
+  events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
@@ -68,7 +68,8 @@ function showSession() {
 function signOut(message) {
   ++state.generation; clearSessionToken();
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = [];
-  state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0;
+  state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
+  state.observedVersions.clear();
   state.selected = null; state.inboxSelected = null;
   state.deskMessage = null;
   $('token-input').value = '';
@@ -117,7 +118,8 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
   try {
     const body = await getSnapshot(state.repoId);
     if (gen !== state.generation) return;
-    state.snapshot = body; state.version = body.version ?? 0; state.connected = true;
+    if (!acceptSnapshot(body, state.repoId)) return;
+    state.connected = true;
     state.deskMessage = null;
     render();
     await Promise.allSettled([refreshVerdicts(gen), poll(gen)]);
@@ -128,6 +130,16 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
       `Snapshot unavailable (${redactError(error).code}).`;
     render();
   }
+}
+function observeVersion(repoId, version) {
+  if (!Number.isSafeInteger(version) || version < 0) return;
+  state.observedVersions.set(repoId, Math.max(state.observedVersions.get(repoId) ?? 0, version));
+}
+function acceptSnapshot(body, repoId) {
+  if (!Number.isSafeInteger(body?.version) || body.version < (state.observedVersions.get(repoId) ?? 0)) return false;
+  observeVersion(repoId, body.version);
+  state.snapshot = body; state.version = body.version;
+  return true;
 }
 async function refreshVerdicts(gen = state.generation) {
   const ids = new Set(changes().filter(c => c?.status === 'ready').map(c => c.changeId));
@@ -166,8 +178,11 @@ async function poll(gen = state.generation) {
   try {
     let page;
     for (let i = 0; i < 20; i++) {
-      page = await getEvents(state.repoId, state.seq);
+      const repoId = state.repoId;
+      page = await getEvents(repoId, state.seq);
       if (gen !== state.generation) return;
+      if (!Number.isSafeInteger(page?.version) || page.version < (state.observedVersions.get(repoId) ?? 0)) return;
+      observeVersion(repoId, page.version);
       const items = list(page?.data?.items);
       if (items.length === 0) break;
       const last = items.at(-1)?.sequence;
@@ -176,9 +191,9 @@ async function poll(gen = state.generation) {
       if (last >= (page.eventSeq ?? last)) break;
     }
     if (page?.version > state.version) {
-      const body = await getSnapshot(state.repoId);
-      if (gen !== state.generation || body.version < page.version) return;
-      state.snapshot = body; state.version = body.version;
+      const repoId = state.repoId;
+      const body = await getSnapshot(repoId);
+      if (gen !== state.generation || !acceptSnapshot(body, repoId)) return;
       await refreshVerdicts(gen);
     }
     state.connected = true; render();
@@ -271,6 +286,77 @@ function renderFleet() {
   }
   if (!byAgent.size) box.append(node('li',state.repoId ? 'No agents in this repo yet.' : 'No agents yet. Create a repository to get started.','muted'));
 }
+function renderRunners() {
+  const projection = projectionItems(projections().runners);
+  const box = $('runner-summary'); box.replaceChildren();
+  if (projection.state === 'unavailable' || projection.state === 'unknown') {
+    const copy = panelCopy(projection.state);
+    box.append(node('strong', 'Runners: '), node('span', `${copy.title} — ${copy.hint}`));
+  } else {
+    box.append(node('strong', 'Runners: '), node('span', projection.items.length
+      ? projection.items.map(r => `${r.runnerId ?? 'runner'} (${r.role ?? '?'}, ${r.state ?? 'unknown'})`).join(' · ')
+      : 'No runners reported.'));
+  }
+  const detail = $('runner-list'); detail.replaceChildren();
+  if (projection.state === 'unavailable' || projection.state === 'unknown') {
+    const copy = panelCopy(projection.state);
+    detail.append(node('p', `${copy.title} — ${copy.hint}`, 'muted'));
+    return;
+  }
+  if (!projection.items.length) detail.append(node('p', 'No runners reported.', 'muted'));
+  for (const runner of projection.items) {
+    const card = node('div', null, 'evidence-record');
+    card.append(node('strong', `${runner.runnerId ?? 'runner'} (${runner.role ?? '?'}) · ${runner.state ?? 'unknown'}`),
+      node('p', `Last seen: ${runner.lastSeenAt ? new Date(runner.lastSeenAt).toISOString() : 'never'}`),
+      node('p', `Active job: ${runner.activeJobId ?? 'none'}`));
+    detail.append(card);
+  }
+}
+function renderFindings(changeId) {
+  const box = $('finding-list'); box.replaceChildren();
+  const findings = projectionItems(projections().findings);
+  const repairs = snapshotCollections(state.snapshot).repairs;
+  if (findings.state === 'unavailable' || findings.state === 'unknown' || repairs.state === 'unknown') {
+    const copy = panelCopy(findings.state === 'unavailable' ? 'unavailable' : 'unknown');
+    box.append(node('p', `${copy.title} — ${copy.hint}`, 'muted'));
+    return;
+  }
+  const scoped = findings.items.filter(f => f?.changeId === changeId);
+  const rounds = repairs.items.filter(r => r?.changeId === changeId);
+  const status = repairStatus(scoped, rounds);
+  box.append(node('p', `Repair state: ${status.status} — ${status.summary}`));
+  if (!scoped.length) box.append(node('p', 'No findings for the selected change.', 'muted'));
+  for (const finding of scoped) {
+    const card = node('div', null, 'evidence-record');
+    card.append(node('strong', `${finding.status ?? 'unknown'} · ${finding.findingId ?? 'finding'}`),
+      node('p', `Unit: ${finding.unitKey ?? '?'}`),
+      node('p', `Origin revision: r${finding.originRevision ?? '?'}`),
+      node('p', `Text: ${finding.text ?? ''}`));
+    box.append(card);
+  }
+}
+function renderHistory() {
+  $('replay-body').replaceChildren(node('p',
+    'Historical simulation: unavailable — no replay dataset ships with this view. Recorded aggregates are owner-reported and never computed here.', 'muted'));
+}
+function renderEvents(changeId) {
+  const box = $('event-log'); box.replaceChildren();
+  const related = state.events.filter(event => list(event.relatedIds).includes(changeId));
+  if (!related.length) box.append(node('li', 'No events for the selected change.', 'muted'));
+  for (const event of related.slice(-100)) {
+    const item = node('li', `#${event.sequence} ${event.kind} by ${event.actorId ?? 'unknown'} (v${event.version ?? '?'})`);
+    item.id = `event-${event.sequence}`;
+    box.append(item);
+  }
+  const archive = $('event-evidence'); archive.replaceChildren();
+  for (const verdict of list(state.verdicts[changeId])) {
+    if (!verdict.deltaResultId) continue;
+    const event = [...state.events].reverse().find(e => list(e.relatedIds).includes(verdict.deltaResultId));
+    if (!event || related.slice(-100).includes(event) || archive.querySelector(`[id="event-${event.sequence}"]`)) continue;
+    const item = node('li', `#${event.sequence} ${event.kind} by ${event.actorId ?? 'unknown'} (v${event.version ?? '?'})`);
+    item.id = `event-${event.sequence}`; archive.append(item);
+  }
+}
 function renderLeases() {
   const box=$('lease-list'); box.replaceChildren();
   const active=leases().filter(l => ['active','reserved'].includes(l.state) && l.expiresAt > Date.now());
@@ -312,8 +398,19 @@ function renderVerdicts(id, target) {
   if (!items.length) { target.append(node('p','No verdict recorded.','muted')); return; }
   for (const v of items) {
     const card=node('div',null,'verdict-record');
+    if (v.verdictId) card.id=`verdict-${encodeURIComponent(v.verdictId)}`;
     card.append(node('strong',`${v.decision} · ${v.reviewerId}`),node('p',verdictProvenance(v).summary));
-    if (v.parentVerdictId) card.append(node('p',`Parent review: ${v.parentVerdictId} · delta evidence: ${v.deltaResultId ?? 'unavailable'}`));
+    if (v.parentVerdictId) {
+      const provenance=node('p'); provenance.append(document.createTextNode('Parent review: '));
+      const parent=items.find(item=>item.verdictId===v.parentVerdictId);
+      if (parent) { const link=node('a',v.parentVerdictId); link.href=`#verdict-${encodeURIComponent(v.parentVerdictId)}`; provenance.append(link); }
+      else provenance.append(document.createTextNode(`${v.parentVerdictId} (record unavailable)`));
+      provenance.append(document.createTextNode(' · delta evidence: '));
+      const event=state.events.find(item=>list(item.relatedIds).includes(v.deltaResultId));
+      if (event) { const link=node('a',v.deltaResultId); link.href=`#event-${event.sequence}`; provenance.append(link); }
+      else provenance.append(document.createTextNode(`${v.deltaResultId ?? 'missing'} (record unavailable)`));
+      card.append(provenance);
+    }
     target.append(card);
   }
 }
@@ -373,7 +470,8 @@ function renderDetail() {
     if (value===null || value===undefined || value==='') continue;
     const p=node('p'); p.append(node('strong',`${label}: `),node('span',value)); grid.append(p);
   }
-  body.append(grid); renderVerdicts(change.changeId,$('verdict-list')); renderActions($('action-panel'),change);
+  body.append(grid); renderFindings(change.changeId); renderHistory(); renderEvents(change.changeId);
+  renderVerdicts(change.changeId,$('verdict-list')); renderActions($('action-panel'),change);
 }
 function renderInbox() {
   const items=deriveInbox(state.snapshot);
@@ -396,8 +494,13 @@ function renderInbox() {
   detail.append(node('span',item.kind,`tone-${item.tone}`),node('h2',item.title),node('p',item.why),node('div',item.evidence,'evidence'));
   const c=changeFor(item.changeId);
   if (c) {
-    const approval=node('div'); approval.append(node('h3','Approval history')); renderVerdicts(c.changeId,approval); detail.append(approval);
-    renderActions(detail,c);
+    const approval=node('div'); approval.append(node('h3','Approval history'));
+    const records=node('div'); approval.append(records); renderVerdicts(c.changeId,records); detail.append(approval);
+    const open=node('button','Open change details'); open.type='button';
+    open.addEventListener('click',()=>{state.view='desk';selectChange(c.changeId);$('detail-heading').focus();});
+    detail.append(open);
+    const actionPanel=node('div',null,'inbox-actions'); detail.append(actionPanel);
+    renderActions(actionPanel,c);
   }
 }
 function renderTabs() {
@@ -413,11 +516,11 @@ function render() {
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
     if (!state.snapshot) {
       if (!state.repoId) {
-        renderStats();renderBoard();renderFleet();renderLeases();renderQueue();renderInbox();renderTabs();
+        renderStats();renderBoard();renderFleet();renderRunners();renderLeases();renderQueue();renderInbox();renderTabs();
       }
       return;
     }
-    renderStats();renderBoard();renderFleet();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
+    renderStats();renderBoard();renderFleet();renderRunners();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
   });
 }
 function selectChange(id) {
@@ -471,6 +574,7 @@ function boot() {
   $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
+  $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});
   for(const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click',()=>{state.tab=b.dataset.tab;renderTabs();});
   $('work-board').addEventListener('keydown',e=>{
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter'].includes(e.key))return;
