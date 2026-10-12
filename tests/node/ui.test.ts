@@ -149,6 +149,7 @@ describe('Fleet desk DOM', () => {
     let interaction = false;
     let changeStatus = 'ready';
     let ownerPreview = false;
+    let previewTruncated = false;
     const history = [
       { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
       { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
@@ -196,7 +197,7 @@ describe('Fleet desk DOM', () => {
         } } };
       }
       else if (url.endsWith('/changes/x/human-approval/diff')) body = { data: { revision: 2,
-        reviewManifestDigest: 'sha256:manifest', items: [{ beforePath: 'AGENTS.md', afterPath: 'AGENTS.md', summary: '- old rule\n+ new rule' }] } };
+        reviewManifestDigest: 'sha256:manifest', items: [{ beforePath: 'AGENTS.md', afterPath: 'AGENTS.md', summary: '- old rule\n+ new rule', truncated: previewTruncated }] } };
       else if (url.includes('/events?')) body = { data: { items: eventVersion === 6
         ? [{ sequence: 2, kind: 'stale.event', actorId: 'old', version: 6, relatedIds: ['x'] }]
         : eventVersion === 7 && url.includes('after=0')
@@ -458,6 +459,12 @@ describe('Fleet desk DOM', () => {
       expect(byId('action-panel').querySelector('.protected-preview')?.textContent).toContain('- old rule\n+ new rule');
       expect(requests.some(request => request.url.endsWith('/changes/x/human-approval/diff'))).toBe(true);
       expect((byId('action-panel').querySelector('.human-approval button') as HTMLButtonElement).disabled).toBe(false);
+      previewTruncated = true;
+      ownerPreview = false; snapshotVersion = 14; eventVersion = 14; tick!(); await flush(); await flush();
+      ownerPreview = true; snapshotVersion = 15; eventVersion = 15; tick!(); await flush(); await flush();
+      expect(byId('action-panel').querySelector('.protected-preview')?.textContent).toContain('- old rule\n+ new rule');
+      expect(byId('action-panel').querySelector('.protected-preview')?.textContent).toContain('Preview incomplete');
+      expect((byId('action-panel').querySelector('.human-approval button') as HTMLButtonElement).disabled).toBe(true);
     } finally {
       releaseSnapshot10?.();
       clearSessionToken();

@@ -58,7 +58,21 @@ describe('repository path settings', () => {
         } as ModuleContext['storage'] };
         const preview = await diffRoute.handle(previewContext, new Request(`https://concord.test${diffPath}`),
           diffPath.match(diffRoute.pattern)!, null);
-        expect((await responseBody(preview)).data.items[0].summary).toContain('- rule: old\n+ rule: new');
+        expect((await responseBody(preview)).data.items[0]).toMatchObject({ truncated: false,
+          summary: expect.stringContaining('- rule: old\n+ rule: new') });
+        const oldLines = Array.from({ length: 40 }, (_, index) => `line ${index}`);
+        const newLines = [...oldLines];
+        newLines[1] = 'early change';
+        newLines[38] = 'late change';
+        const longPreviewContext: ModuleContext = { ...context, storage: { ...context.storage,
+          readFile: async (_name, oid) => new TextEncoder().encode((oid === head ? newLines : oldLines).join('\n')),
+        } as ModuleContext['storage'] };
+        const longPreview = await diffRoute.handle(longPreviewContext, new Request(`https://concord.test${diffPath}`),
+          diffPath.match(diffRoute.pattern)!, null);
+        const longItem = (await responseBody(longPreview)).data.items[0];
+        expect(longItem.truncated).toBe(true);
+        expect(longItem.summary).toContain('early change');
+        expect(longItem.summary).not.toContain('late change');
       });
       const route = `/v1/repos/${id}/changes/${changeId}/human-approval`;
       const body = { expectedVersion: 1, revision: 1, reviewManifestDigest: digest, evidenceDigest: `sha256:${'3'.repeat(64)}`, decision: 'approve' };
@@ -75,6 +89,20 @@ describe('repository path settings', () => {
       const history = await worker.fetch(apiRequest(route, 'local-owner'), env);
       expect((await responseBody(history)).data.items.map((item: { evidenceDigest: string; decision: string }) =>
         [item.decision, item.evidenceDigest])).toEqual([['approve', body.evidenceDigest], ['reject', rejectedDigest]]);
+      await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+        const principal: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+        const context = (instance as unknown as { context(name: 'verdicts', principal: Principal, repoId: string): ModuleContext }).context('verdicts', principal, id);
+        context.appendEvent('verdict.human_approval', [changeId], { decision: 'approve', evidenceDigest: rejectedDigest }, context.nextVersion());
+      });
+      const viewerEvents = await worker.fetch(apiRequest(`/v1/repos/${id}/events`, 'local-viewer'), env);
+      expect(viewerEvents.status).toBe(200);
+      const approvalEvents = (await responseBody(viewerEvents)).data.items.filter((item: { kind: string }) => item.kind === 'verdict.human_approval');
+      expect(approvalEvents).toHaveLength(3);
+      expect(approvalEvents.every((item: { payload: Record<string, unknown> }) => !('evidenceDigest' in item.payload))).toBe(true);
+      expect(JSON.stringify(approvalEvents)).not.toContain(rejectedDigest);
+      const ownerEvents = await worker.fetch(apiRequest(`/v1/repos/${id}/events`, 'local-owner'), env);
+      expect(JSON.stringify((await responseBody(ownerEvents)).data.items)).toContain(rejectedDigest);
+      expect((await worker.fetch(apiRequest(route, 'local-viewer'), env)).status).toBe(403);
       await runInDurableObject<RepoCoordinator, void>(stub, instance => {
         const principal: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
         const context = (instance as unknown as { context(name: 'verdicts', principal: Principal, repoId: string): ModuleContext }).context('verdicts', principal, id);

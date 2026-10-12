@@ -207,7 +207,7 @@ const carryPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{
 const humanPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/human-approval$/;
 const humanDiffPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/human-approval\/diff$/;
 
-function textPreview(before: Uint8Array | null, after: Uint8Array | null): string {
+function textPreview(before: Uint8Array | null, after: Uint8Array | null): { summary: string; truncated: boolean } {
   const decode = (bytes: Uint8Array | null) => {
     if (bytes === null) return '';
     if (bytes.length > 256 * 1024) return null;
@@ -217,8 +217,8 @@ function textPreview(before: Uint8Array | null, after: Uint8Array | null): strin
     } catch { return null; }
   };
   const oldText = decode(before), newText = decode(after);
-  if (oldText === null || newText === null) return 'Binary or large file; inspect the repository diff before deciding.';
-  if (oldText === newText) return 'Text unchanged; path or mode changed.';
+  if (oldText === null || newText === null) return { summary: 'Binary or large file; inspect the repository diff before deciding.', truncated: true };
+  if (oldText === newText) return { summary: 'Text unchanged; path or mode changed.', truncated: false };
   const oldLines = oldText.split('\n'), newLines = newText.split('\n');
   let first = 0;
   while (first < oldLines.length && first < newLines.length && oldLines[first] === newLines[first]) first++;
@@ -233,7 +233,8 @@ function textPreview(before: Uint8Array | null, after: Uint8Array | null): strin
     }
   }
   if (end < Math.max(oldLines.length, newLines.length)) output.push('… more lines in repository diff');
-  return output.join('\n').slice(0, 4096);
+  const summary = output.join('\n');
+  return { summary: summary.slice(0, 4096), truncated: end < Math.max(oldLines.length, newLines.length) || summary.length > 4096 };
 }
 
 export const verdicts: FeatureModule = {
@@ -250,8 +251,9 @@ export const verdicts: FeatureModule = {
         const before = unit.beforePath ? await context.storage.readFile(record.canonicalStorageName, record.candidate.baseOid, unit.beforePath) : null;
         const after = unit.afterPath ? await context.storage.readFile(record.candidate.storageName, record.candidate.headOid, unit.afterPath) : null;
         return { beforePath: unit.beforePath, afterPath: unit.afterPath,
-          summary: (unit.beforePath && before === null) || (unit.afterPath && after === null)
-            ? 'Preview unavailable; inspect the repository diff before deciding.' : textPreview(before, after) };
+          ...((unit.beforePath && before === null) || (unit.afterPath && after === null)
+            ? { summary: 'Preview unavailable; inspect the repository diff before deciding.', truncated: true }
+            : textPreview(before, after)) };
       }));
       return json({ revision: record.revision, reviewManifestDigest: record.reviewManifestDigest, items }, context.version());
     } },
@@ -278,7 +280,7 @@ export const verdicts: FeatureModule = {
       context.state.put(`human:${changeId}`, approval);
       context.state.put(`human-history:${changeId}`, [...(context.state.get<HumanApproval[]>(`human-history:${changeId}`) ?? []), approval]);
       const event = context.appendEvent('verdict.human_approval', [changeId], { decision: approval.decision,
-        revision: approval.revision, evidenceDigest: approval.evidenceDigest, patterns: approval.patterns }, version);
+        revision: approval.revision, patterns: approval.patterns }, version);
       return json(approval, version, event.sequence, 201);
     } },
     { method: 'GET', pattern: verdictPath, handle: (context, request, match) => {

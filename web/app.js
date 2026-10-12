@@ -512,10 +512,12 @@ function renderActions(target,change) {
       preview.replaceChildren();
       for (const item of items) {
         preview.append(node('h4',`${item.beforePath ?? '(new)'} → ${item.afterPath ?? '(deleted)'}`),node('pre',item.summary));
+        if (item.truncated!==false) preview.append(node('p','Preview incomplete; inspect the repository diff before deciding.'));
       }
       if (!items.length) preview.append(node('p','No protected text changes were returned.'));
       panel.dataset.previewReady=items.length>0 && items.every(item=>
-        typeof item.summary==='string' && !item.summary.startsWith('Preview unavailable') && !item.summary.startsWith('Binary or large')) ? 'true' : 'false';
+        item.truncated===false && typeof item.summary==='string' &&
+        !item.summary.startsWith('Preview unavailable') && !item.summary.startsWith('Binary or large')) ? 'true' : 'false';
       for (const button of panel.querySelectorAll('button')) button.disabled=!snapshotCurrent() || panel.dataset.previewReady!=='true';
     }).catch(()=>{ if (panel.isConnected) preview.textContent='Protected text preview unavailable. Refresh and inspect the repository diff.'; });
     const evidence=node('input'); evidence.placeholder='Evidence digest (sha256:…)'; evidence.setAttribute('aria-label','Owner approval evidence digest');
