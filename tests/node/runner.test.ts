@@ -229,14 +229,16 @@ export function attemptBudget(family) {
     });
   });
 
-  it('uses whole-file scope for a Git mode-only change to a TSV', async () => {
+  it('uses whole-file scope when a Git TSV changes mode and row content', async () => {
     await gitFixture(async ({ repo }) => {
       await writeFile(join(repo, 'jobs.tsv'), 'job\tvalue\nalpha\told\n');
       await git(repo, ['add', 'jobs.tsv']);
       await git(repo, ['commit', '--quiet', '-m', 'table'], 30_000, commitEnv);
       const base = await git(repo, ['rev-parse', 'HEAD']);
+      await writeFile(join(repo, 'jobs.tsv'), 'job\tvalue\nalpha\tnew\n');
+      await git(repo, ['add', 'jobs.tsv']);
       await git(repo, ['update-index', '--chmod=+x', 'jobs.tsv']);
-      await git(repo, ['commit', '--quiet', '-m', 'mode'], 30_000, commitEnv);
+      await git(repo, ['commit', '--quiet', '-m', 'mode and row'], 30_000, commitEnv);
       const head = await git(repo, ['rev-parse', 'HEAD']);
       const rowPolicy: TrustedPolicy = { ...policy, tables: [{ name: 'jobs', file: 'jobs.tsv',
         header: ['job', 'value'], keyColumn: 'job', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }],
@@ -244,6 +246,28 @@ export function attemptBudget(family) {
       const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: rowPolicy } as Job);
       expect(inspected.unitKeys).toEqual(['file:jobs.tsv']);
       expect(inspected.manifest.changedUnits[0]).toMatchObject({ beforeMode: '100644', afterMode: '100755' });
+    });
+  });
+
+  it('uses whole-file scope when a Git TSV row edit adds a final newline', async () => {
+    await gitFixture(async ({ repo }) => {
+      await writeFile(join(repo, 'jobs.tsv'), 'job\tvalue\nalpha\told\nbeta\told');
+      await git(repo, ['add', 'jobs.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'table without final newline'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await writeFile(join(repo, 'jobs.tsv'), 'job\tvalue\nalpha\tnew\nbeta\told\n');
+      await git(repo, ['add', 'jobs.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'row and newline'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const rowPolicy: TrustedPolicy = { ...policy, tables: [{ name: 'jobs', file: 'jobs.tsv',
+        header: ['job', 'value'], keyColumn: 'job', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }],
+      units: { 'row:jobs:alpha': { canonicalKey: 'row:jobs:alpha', file: 'jobs.tsv',
+        resources: ['jobs.tsv#alpha'], dependencyKeys: [] } } };
+      const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: rowPolicy } as Job);
+      expect(inspected.unitKeys).toEqual(['file:jobs.tsv']);
+      expect(inspected.manifest.coverage).toBe('complete');
+      expect(() => normalizeManifest(inspected.manifest, rowPolicy, ['row:jobs:alpha'])).toThrow('MANIFEST_UNIT_SCOPE_MISMATCH');
+      expect(normalizeManifest(inspected.manifest, rowPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
     });
   });
 

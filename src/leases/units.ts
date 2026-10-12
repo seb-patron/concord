@@ -235,7 +235,7 @@ export function changedUnitsForFile(
       const cells = line.split('\t');
       const key = declared ? cells[declared.header.indexOf(declared.keyColumn)] : cells[0];
       if (declared && cells.length !== declared.header.length) return null;
-      if (!key || table.has(key)) return null;
+      if (!key || declared && !matchesTableKey(declared, key) || table.has(key)) return null;
       table.set(key, line);
     }
     return table;

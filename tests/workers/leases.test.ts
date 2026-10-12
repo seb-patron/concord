@@ -123,6 +123,8 @@ describe('semantic lease identities', () => {
       'job\tvalue\nalpha\told\nzeta\tnew\n').map(unit => unit.key)).toEqual(['row:jobs:zeta']);
     expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nalpha\told\n',
       'job\tvalue\nalpha\told\nzeta7\tnew\n').map(unit => unit.key)).toEqual(['file:data/jobs.tsv']);
+    expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nbad7\tunchanged\nalpha\told\n',
+      'job\tvalue\nbad7\tunchanged\nalpha\tnew\n').map(unit => unit.key)).toEqual(['file:data/jobs.tsv']);
     expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nalpha\told\n',
       'job\tchanged\nalpha\told\n').map(unit => unit.key)).toEqual(['file:data/jobs.tsv']);
     const config = { policies: { 'local-demo': declared }, profiles: trusted.profiles };

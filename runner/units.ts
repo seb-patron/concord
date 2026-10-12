@@ -81,7 +81,8 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     const rowUnits = table ? units.filter(([key]) => rowId(key, table)) : [];
     const beforeText = before && decode(before);
     const afterText = after && decode(after);
-    if (table && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode) {
+    if (table && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode &&
+      beforeText.endsWith('\n') === afterText.endsWith('\n')) {
       let oldRows: Map<string, string> | null = null;
       let newRows: Map<string, string> | null = null;
       try { oldRows = parseTsv(beforeText, table); newRows = parseTsv(afterText, table); } catch { coverage = 'unknown'; }
