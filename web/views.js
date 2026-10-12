@@ -65,7 +65,7 @@ export function boardStage(change) {
 }
 
 /** Every decision comes from live snapshot evidence, never illustrative mockup data. */
-export function deriveInbox(snapshot, verdictsByChange = {}) {
+export function deriveInbox(snapshot) {
   const p = snapshot?.data?.projections ?? {};
   const changes = snapshotCollections(snapshot).changes.items;
   const queue = p.queue ?? {};
@@ -103,12 +103,9 @@ export function deriveInbox(snapshot, verdictsByChange = {}) {
   }
   for (const change of changes) {
     if (change?.status !== 'ready' || !change.headOid) continue;
-    const verdicts = verdictsByChange[change.changeId];
-    if (!Array.isArray(verdicts)) continue;
-    if (Array.isArray(verdicts) && verdicts.some(v => v?.decision === 'approve' && v.revision === change.revision)) continue;
     items.push({ id: `review:${change.changeId}`, kind: 'Review requested', tone: 'blue',
       changeId: change.changeId, title: change.intentText ?? change.intentKey ?? change.changeId,
-      why: 'The published revision has passed inspection and awaits an independent verdict.',
+      why: 'The published revision is ready for independent review or enqueue with an approved verdict ID.',
       evidence: `Head: ${change.headOid}\nRevision: ${change.revision}\nUnits: ${(change.unitKeys ?? []).join(', ') || 'none'}` });
   }
   return items;

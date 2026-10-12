@@ -22,14 +22,13 @@ const fixture = {
 };
 
 describe('Fleet desk derivation', () => {
-  it('derives blamed changes, lease waits, and awaiting verdicts from API data', () => {
-    const items = deriveInbox(fixture, { x: [] });
+  it('derives blamed changes, lease waits, and ready changes without reading verdicts', () => {
+    const items = deriveInbox(fixture);
     expect(items.map((item: any) => item.kind)).toEqual(['Blamed by bisection', 'Waiting on a lease', 'Review requested']);
     expect(items[0].title).toBe('Rename logs');
     expect(items[1].evidence).toContain('agent-a');
     expect(items[2].title).toBe('Cap retries');
-    expect(deriveInbox(fixture, { x: [{ decision: 'approve', revision: 2 }] })).toHaveLength(2);
-    expect(deriveInbox(fixture, {})).toHaveLength(2); // No readable verdict record: do not claim it awaits review.
+    expect(deriveInbox(fixture).map((item: any) => item.kind)).toContain('Review requested');
   });
   it('keeps queue classifications honest', () => {
     expect(normalizeDiagnosis({ reason: 'INTERACTION', blame: ['a', 'b'] })).toEqual({ reason: 'INTERACTION', ids: ['a', 'b'] });
@@ -52,6 +51,11 @@ describe('Fleet desk DOM', () => {
     const flush = () => new Promise(resolve => setTimeout(resolve, 0));
     const requests: Array<{ url: string; init: RequestInit }> = [];
     let forbiddenVerdicts = false;
+    const history = [
+      { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
+      { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
+      ...Array.from({ length: 98 }, (_, index) => ({ verdictId: `old-${index}`, changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: null })),
+    ];
     globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
       requests.push({ url, init });
       const token = new Headers(init.headers).get('authorization');
@@ -60,20 +64,22 @@ describe('Fleet desk DOM', () => {
       if (url === '/health') body = { data: { mode: 'production', storageBackend: 'artifacts' } };
       else if (url === '/v1/me') {
         if (token === 'Bearer bad') { status = 401; body = { error: { code: 'UNAUTHORIZED', message: 'bad token' } }; }
+        else if (token === 'Bearer local-agent-a') { status = 404; body = { error: { code: 'NOT_FOUND' } }; }
+        else if (token === 'Bearer empty') body = { data: { principalId: 'owner', roles: ['owner'], repoIds: '*', model: null } };
         else body = { data: { principalId: 'reviewer', roles: ['reviewer'], repoIds: ['demo'], model: null } };
-      } else if (url === '/v1/repos') body = { data: { items: [{ repoId: 'demo', displayName: 'Demo' }] } };
+      } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
       else if (url.endsWith('/snapshot')) {
         if (token === 'Bearer restricted') { status = 403; body = { error: { code: 'FORBIDDEN', message: 'no scope' } }; }
         else body = fixture;
       }
       else if (url.includes('/events?')) body = { data: { items: [] }, version: 7, eventSeq: 0 };
-      else if (url.endsWith('/changes/x/verdicts') && forbiddenVerdicts) {
+      else if (url.includes('/changes/x/verdicts') && init.method !== 'POST' && (forbiddenVerdicts || token === 'Bearer local-agent-a')) {
         status = 403; body = { error: { code: 'FORBIDDEN', message: 'reviewers only' } };
       }
-      else if (url.endsWith('/changes/x/verdicts')) body = { data: { items: [
-        { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
-        { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
-      ] } };
+      else if (url.endsWith('/changes/x/verdicts')) body = { data: { items: history, nextCursor: 'MTAw' } };
+      else if (url.endsWith('/changes/x/verdicts?cursor=MTAw')) body = { data: { items: [
+        { verdictId: 'v101', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 2, findingSetVersion: 0, parentVerdictId: null },
+      ], nextCursor: null } };
       else body = { data: {}, version: 8 };
       return new Response(JSON.stringify(body), { status });
     }) as any;
@@ -107,6 +113,9 @@ describe('Fleet desk DOM', () => {
       expect(byId('verdict-list').textContent).toContain('Direct approve');
       expect(byId('verdict-list').textContent).toContain('Parent review: v1');
       expect(byId('verdict-list').textContent).toContain('delta-1');
+      expect(byId('verdict-list').querySelectorAll('.verdict-record')).toHaveLength(101);
+      expect(byId('verdict-list').textContent).toContain('revision 2');
+      expect(requests.some(r => r.url === '/v1/repos/demo/changes/x/verdicts?cursor=MTAw')).toBe(true);
       expect(requests.some(r => r.url === '/v1/repos/demo/changes/x/verdicts')).toBe(true);
       const manifest = doc.querySelector('input[name="manifest"]') as HTMLInputElement;
       const evidence = doc.querySelector('input[name="evidence"]') as HTMLInputElement;
@@ -126,12 +135,56 @@ describe('Fleet desk DOM', () => {
       await flush(); await flush();
       (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       expect(byId('verdict-list').textContent).toContain('Approval history is visible to reviewers');
+      expect(byId('inbox-list').textContent).toContain('Review requested');
+      byId('token-clear').click();
+      (byId('token-input') as HTMLInputElement).value = 'local-agent-a';
+      byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(byId('principal').textContent).toContain('role unverified');
+      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      expect(byId('action-panel').textContent).toContain('Enqueue');
+      expect(byId('action-panel').textContent).toContain('Claim');
+      const claimForm = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Claim'))!;
+      (claimForm.querySelector('[name="unitKeys"]') as HTMLInputElement).value = 'fn:retry, fn:retry';
+      claimForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      expect(requests.filter(r => r.url === '/v1/repos/demo/leases' && r.init.method === 'POST')).toHaveLength(0);
+      (claimForm.querySelector('[name="unitKeys"]') as HTMLInputElement).value = 'fn:retry';
+      claimForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      const claim = requests.find(r => r.url === '/v1/repos/demo/leases' && r.init.method === 'POST')!;
+      expect(JSON.parse(String(claim.init.body))).toEqual({ changeId: 'x', unitKeys: ['fn:retry'], intentText: 'Cap retries' });
+      expect(new Headers(claim.init.headers).get('idempotency-key')).toBeTruthy();
+      await flush();
+      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      const enqueueForm = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
+      (enqueueForm.querySelector('[name="verdictId"]') as HTMLInputElement).value = 'v101';
+      enqueueForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      const enqueue = requests.find(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')!;
+      expect(JSON.parse(String(enqueue.init.body))).toEqual({ changeId: 'x', expectedVersion: 7, verdictId: 'v101', leaseFences: { 'fn:retry': 3 } });
+      expect(new Headers(enqueue.init.headers).get('idempotency-key')).toBeTruthy();
       byId('token-clear').click();
       (byId('token-input') as HTMLInputElement).value = 'restricted';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
       expect(byId('desk-message').textContent).toBe('Your token cannot see this repository.');
       expect(doc.body.textContent).not.toContain('Unknown state');
+      byId('token-clear').click();
+      (byId('token-input') as HTMLInputElement).value = 'empty';
+      byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(byId('principal').textContent).toContain('Signed in as owner');
+      expect(byId('principal').textContent).toContain('owner · token in memory');
+      expect(byId('repo-select').textContent).toContain('No repositories yet');
+      expect(byId('desk-message').textContent).toContain('Create one');
+      expect(byId('stat-strip').textContent).toContain('Agents working0');
+      expect(byId('stat-strip').textContent).toContain('In queue0');
+      expect(byId('work-board').textContent).toContain('No changes yet');
+      expect(byId('fleet-list').textContent).toContain('No agents yet');
+      expect(byId('lease-list').textContent).toContain('No active leases yet');
+      expect(byId('queue-list').textContent).toContain('Merge queue empty');
+      expect(byId('main-footer').textContent).toContain('No repositories yet');
+      expect(byId('inbox-alert').hidden).toBe(true);
     } finally {
       clearSessionToken();
       Object.assign(globalThis, previous);

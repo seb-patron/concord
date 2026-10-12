@@ -201,10 +201,14 @@ describe('UI documentation', () => {
 
     expect(desk).toContain('Select a change for its head, units, actions, and approval history.');
     expect(history).toContain('Verdict history comes from `GET /v1/repos/:repo/changes/:change/verdicts`');
+    expect(history).toContain('following `nextCursor` through all pages');
     expect(history).toContain('including direct and carried approvals with parent review and delta evidence.');
+    expect(history).toContain('A `/v1/me` 404 leaves the role unverified and offers server-checked actions');
     expect(history).toContain('A verdict 403 reads “Approval history is visible to reviewers.”');
     expect(history).toContain('A 401 returns to sign-in; a 403 on a repository says the token cannot see it.');
     expect(document).not.toMatch(/no verdict records are available|UI does not call it yet|shows no verdict records today/i);
+    expect(document).toContain('Claim accepts distinct unit keys and a nonempty intent');
+    expect(document).toContain('a zero-decision alert is hidden');
   });
 });
 

@@ -158,14 +158,16 @@ export function listRepos(fetchImpl) {
   return apiFetch('/v1/repos', {}, fetchImpl);
 }
 
-/** Identity is optional during rollout; callers handle a 404 with viewer-safe UI. */
+/** Identity is optional during rollout; callers handle a 404 with server-checked actions. */
 export function getMe(fetchImpl) {
   return apiFetch('/v1/me', {}, fetchImpl);
 }
 
 /** Per-change approval records, including carried verdict provenance. */
-export function getVerdicts(repoId, changeId, fetchImpl) {
-  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/verdicts`, {}, fetchImpl);
+export function getVerdicts(repoId, changeId, cursor = null, fetchImpl) {
+  const query = typeof cursor === 'string' && cursor ? `?${new URLSearchParams({ cursor })}` : '';
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/verdicts${query}`,
+    {}, typeof cursor === 'function' ? cursor : fetchImpl);
 }
 
 export function getSnapshot(repoId, fetchImpl) {

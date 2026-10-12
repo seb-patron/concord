@@ -1,5 +1,5 @@
 import {
-  allowedActions, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
+  allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
   getSnapshot, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
   redactError, setSessionToken, submitVerdict, withdrawChange,
 } from './api.js';
@@ -26,11 +26,14 @@ const changes = () => snapshotCollections(state.snapshot).changes.items;
 const leases = () => projectionItems(projections().leases).items;
 const entries = () => projectionItems(projections().queue).items;
 const roles = () => list(state.identity?.roles);
-const actions = () => allowedActions(roles());
+const actions = () => state.identity?.unverified
+  ? { claim: true, enqueue: true, withdraw: true, verdict: true }
+  : allowedActions(roles());
 const changeFor = id => changes().find(c => c?.changeId === id);
 const modelFor = change => change?.authorModel ?? change?.model ?? null;
-const canWithdraw = change => actions().withdraw &&
-  (roles().includes('owner') || state.identity?.principalId === change?.authorId);
+const canManage = change => state.identity?.unverified || roles().includes('owner') ||
+  state.identity?.principalId === change?.authorId;
+const canWithdraw = change => actions().withdraw && canManage(change);
 const fmtTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '—';
 const age = change => {
   const event = [...state.events].reverse().find(e => list(e.relatedIds).includes(change.changeId));
@@ -59,7 +62,7 @@ function showSession() {
   $('principal').hidden = !signedIn;
   $('token-clear').hidden = !signedIn;
   if (signedIn) $('principal').textContent = state.identity.principalId
-    ? `Signed in as ${state.identity.principalId}${state.identity.model ? ` · ${state.identity.model}` : ''} · token in memory`
+    ? `Signed in as ${state.identity.principalId} · ${roles().join(', ') || 'role unverified'}${state.identity.model ? ` · ${state.identity.model}` : ''} · token in memory`
     : `Signed in · ${roles().join(', ') || 'role unverified'} · token in memory`;
 }
 function signOut(message) {
@@ -79,13 +82,16 @@ async function signIn(token, preferredRepo) {
     try { identity = (await getMe()).data; }
     catch (error) {
       if (error.status !== 404) throw error;
-      identity = { principalId: null, roles: ['viewer'], repoIds: null };
+      identity = { principalId: null, roles: [], repoIds: null, unverified: true };
     }
     const page = await listRepos();
     if (gen !== state.generation) return;
     state.identity = identity;
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
     const select = $('repo-select'); select.replaceChildren();
+    if (!state.repos.length) {
+      const option = node('option', 'No repositories yet'); option.value = ''; select.append(option);
+    }
     for (const repo of state.repos) {
       const option = node('option', repo.displayName ?? repo.repoId);
       option.value = repo.repoId; select.append(option);
@@ -94,7 +100,7 @@ async function signIn(token, preferredRepo) {
     if (state.repoId) select.value = state.repoId;
     showSession();
     if (state.repoId) await loadRepo(gen);
-    else render();
+    else { state.deskMessage = 'No repositories yet. Create one with concord repo create or the MCP tool.'; render(); }
   } catch (error) {
     if (gen !== state.generation) return;
     const message = error.status === 403 ? 'Your token cannot see this repository.' :
@@ -127,14 +133,24 @@ async function refreshVerdicts(gen = state.generation) {
   const ids = new Set(changes().filter(c => c?.status === 'ready').map(c => c.changeId));
   if (state.selected) ids.add(state.selected);
   if (state.inboxSelected) {
-    const item = deriveInbox(state.snapshot, state.verdicts).find(i => i.id === state.inboxSelected);
+    const item = deriveInbox(state.snapshot).find(i => i.id === state.inboxSelected);
     if (item?.changeId) ids.add(item.changeId);
   }
   await Promise.all([...ids].map(async id => {
     try {
-      const page = await getVerdicts(state.repoId, id);
+      const items = [];
+      const seen = new Set();
+      let cursor = null;
+      do {
+        const page = await getVerdicts(state.repoId, id, cursor);
+        if (gen !== state.generation) return;
+        items.push(...list(page?.data?.items));
+        cursor = page?.data?.nextCursor ?? null;
+        if (cursor && seen.has(cursor)) throw new Error('Repeated verdict cursor');
+        if (cursor) seen.add(cursor);
+      } while (cursor);
       if (gen !== state.generation) return;
-      state.verdicts[id] = list(page?.data?.items);
+      state.verdicts[id] = items;
       delete state.verdictErrors[id];
     } catch (error) {
       if (gen !== state.generation) return;
@@ -197,19 +213,25 @@ function renderStats() {
     stat('Leases held', live.length, live.length ? `shortest ${leaseCountdown(live.reduce((a,b) => a.expiresAt < b.expiresAt ? a : b), Date.now()).text}` : 'no active leases'),
     stat('In queue', queued.length, 'ordered for checking'),
     stat('Landed today', landed.length, 'from observed events'),
-    stat('Main', mainState, main ? `tip ${String(main).slice(0,9)}` : 'tip unavailable'),
+    stat('Main', !state.repoId ? '0' : mainState, main ? `tip ${String(main).slice(0,9)}` : 'tip unavailable'),
   );
   const red = state.events.filter(e => e.kind === 'queue.diagnosis' && e.payload?.reason === 'BASE_RED' && new Date(e.timestamp).toDateString() === today).length;
-  $('main-footer').replaceChildren(node('strong','main'), document.createTextNode(`${landed.length} landings today · ${red} red events · tip ${main ? String(main).slice(0,9) : 'unavailable'}`));
+  $('main-footer').replaceChildren(node('strong','main'), document.createTextNode(!state.repoId
+    ? 'No repositories yet. Create one to see main branch activity.'
+    : `${landed.length} landings today · ${red} red events · tip ${main ? String(main).slice(0,9) : 'unavailable'}`));
 }
 function statusFor(change) {
   const diag = normalizeDiagnosis(projections().queue?.diagnosis);
   if (diag.reason === 'SINGLETON' && diag.ids.includes(change.changeId)) return ['Blamed by bisection','red'];
-  if (change.status === 'ready' && Array.isArray(state.verdicts[change.changeId]) && !state.verdicts[change.changeId].some(v => v.decision === 'approve' && v.revision === change.revision)) return ['Ready for review','blue'];
+  if (change.status === 'ready') return ['Ready for review or enqueue','blue'];
   return [change.status === 'merged' ? 'Landed' : change.status ?? 'Unknown','green'];
 }
 function renderBoard() {
   const board = $('work-board'); board.replaceChildren();
+  if (!changes().length) {
+    board.append(node('p','No changes yet. Agents start one with concord change create or the MCP tool.','empty-state'));
+    return;
+  }
   const stages = [['Working','Holds a lease, editing.'],['Checking','Checker on the exact head.'],['Queued','Approved, landing in order.'],['Landed','On main.']];
   for (const [stage,hint] of stages) {
     const cards = changes().filter(c => boardStage(c) === stage);
@@ -247,7 +269,7 @@ function renderFleet() {
     middle.append(node('div',c.intentText ?? c.intentKey,'row-sub'));
     row.append(middle,node('span',c.status,'row-sub')); box.append(row);
   }
-  if (!byAgent.size) box.append(node('li','No agents in this repo.','muted'));
+  if (!byAgent.size) box.append(node('li',state.repoId ? 'No agents in this repo yet.' : 'No agents yet. Create a repository to get started.','muted'));
 }
 function renderLeases() {
   const box=$('lease-list'); box.replaceChildren();
@@ -257,7 +279,7 @@ function renderLeases() {
     row.append(node('code',lease.unitKey),node('span',lease.holderId),node('span',leaseCountdown(lease,Date.now()).text));
     box.append(row);
   }
-  if (!active.length) box.append(node('p','No active leases.','muted'));
+  if (!active.length) box.append(node('p','No active leases yet. Agents claim units before editing.','muted'));
   for (const refusal of list(projections().leases?.refusals)) {
     const conflict=list(refusal.conflicts)[0];
     if (!conflict || conflict.expiresAt <= Date.now() ||
@@ -278,7 +300,7 @@ function renderQueue() {
       node('span',highlight ? diag.reason === 'SINGLETON' ? 'culprit' : 'failing set' : entry.state,highlight ? 'tone-red' : 'tone-green'));
     box.append(row);
   });
-  if (!active.length) box.append(node('p','Queue empty.','muted'));
+  if (!active.length) box.append(node('p','Merge queue empty. Approved changes enter through Enqueue.','muted'));
   const labels={SINGLETON:'One change failed alone',INTERACTION:'Interaction set failed together',DEPENDENCY_GROUP:'Dependency group blocked',BASE_RED:'Main baseline failed',INCONCLUSIVE:'Diagnosis inconclusive'};
   $('diagnosis').textContent=diag.reason ? `${labels[diag.reason] ?? diag.reason}: ${diag.ids.join(', ') || 'no change blamed'}` : '';
 }
@@ -302,8 +324,28 @@ function renderActions(target,change) {
   target.replaceChildren();
   if (!change || !state.connected) return;
   const buttons=node('div',null,'action-buttons');
-  const approved=list(state.verdicts[change.changeId]).find(v => v.decision==='approve' && v.revision===change.revision);
-  if (change.status==='ready' && actions().enqueue && approved) addAction(buttons,'Enqueue',()=>doEnqueue(change,approved.verdictId),true);
+  if (change.status==='ready' && actions().enqueue && canManage(change) && change.headOid) {
+    const form=node('form',null,'action-form');
+    const label=node('label','Approved verdict ID');
+    const id=node('input'); id.name='verdictId'; id.required=true; id.placeholder='Verdict ID from reviewer';
+    label.append(id); form.append(label);
+    const submit=node('button','Enqueue','primary'); submit.type='submit'; form.append(submit);
+    form.addEventListener('submit',e=>{e.preventDefault();doEnqueue(change,id.value.trim());});
+    target.append(form);
+  }
+  if (['draft','ready'].includes(change.status) && actions().claim &&
+    (state.identity?.unverified || state.identity?.principalId===change.authorId)) {
+    const form=node('form',null,'action-form');
+    const units=node('input'); units.name='unitKeys'; units.required=true; units.value=list(change.unitKeys).join(', ');
+    const intent=node('input'); intent.name='intentText'; intent.required=true; intent.maxLength=2000;
+    intent.value=change.intentText ?? '';
+    for (const [title,input] of [['Unit keys (comma separated)',units],['Claim intent',intent]]) {
+      const label=node('label',title); label.append(input); form.append(label);
+    }
+    const submit=node('button','Claim'); submit.type='submit'; form.append(submit);
+    form.addEventListener('submit',e=>{e.preventDefault();doClaim(change,units.value,intent.value);});
+    target.append(form);
+  }
   if (canWithdraw(change) && entries().some(e => e.changeId===change.changeId && !['withdrawn','landed'].includes(e.state))) addAction(buttons,'Withdraw',()=>doWithdraw(change));
   target.append(buttons);
   if (change.status==='ready' && actions().verdict && state.identity?.principalId !== change.authorId) {
@@ -334,7 +376,8 @@ function renderDetail() {
   body.append(grid); renderVerdicts(change.changeId,$('verdict-list')); renderActions($('action-panel'),change);
 }
 function renderInbox() {
-  const items=deriveInbox(state.snapshot,state.verdicts);
+  const items=deriveInbox(state.snapshot);
+  $('inbox-alert').hidden=items.length===0;
   $('alert-count').textContent=`${items.length} decision${items.length===1?'':'s'} need you`;
   $('alert-preview').textContent=items.slice(0,3).map(i=>i.kind).join(' · ');
   $('inbox-count').textContent=`${items.length} decisions · ${state.repos.find(r=>r.repoId===state.repoId)?.displayName ?? state.repoId ?? ''}`;
@@ -368,7 +411,12 @@ function render() {
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
-    if (!state.snapshot) return;
+    if (!state.snapshot) {
+      if (!state.repoId) {
+        renderStats();renderBoard();renderFleet();renderLeases();renderQueue();renderInbox();renderTabs();
+      }
+      return;
+    }
     renderStats();renderBoard();renderFleet();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
   });
 }
@@ -386,16 +434,26 @@ async function mutate(label,call) {
     await loadRepo(gen,false); mutationStatus(`${label}: accepted.`);
   } catch(error) {
     if(gen!==state.generation)return;
-    mutationStatus(`${label}: ${error.status===409?'stale or conflicting context':'failed'} (${redactError(error).code}). Refreshing.`);
+    const refusal=redactError(error);
+    mutationStatus(`${label}: ${error.status===409?'stale or conflicting context':'failed'} (${refusal.code}: ${refusal.message}). Refreshing.`);
     await loadRepo(gen,false);
   }
 }
 function doEnqueue(change,verdictId) {
+  if (!verdictId) return mutationStatus('Approved verdict ID is required.');
   const version=state.snapshot?.version;
   const findingSetVersion=projections().findings?.findingSetVersions?.[change.changeId];
   const evidence=mutationEvidence(change,leases(),findingSetVersion);
   if(evidence.error || !Number.isSafeInteger(version)) return mutationStatus(evidence.error ?? 'Current version unavailable.');
   void mutate('Enqueue',()=>enqueueChange(state.repoId,{changeId:change.changeId,expectedVersion:version,verdictId,leaseFences:evidence.leaseFences},newIdempotencyKey()));
+}
+function doClaim(change,rawUnits,rawIntent) {
+  const unitKeys=rawUnits.split(',').map(key=>key.trim());
+  const intentText=rawIntent.trim();
+  if (!unitKeys.length || unitKeys.some(key=>!key) || new Set(unitKeys).size!==unitKeys.length)
+    return mutationStatus('Enter distinct, nonempty unit keys separated by commas.');
+  if (!intentText || intentText.length>2000) return mutationStatus('Claim intent must be 1–2000 characters.');
+  void mutate('Claim',()=>claimUnits(state.repoId,{changeId:change.changeId,unitKeys,intentText},newIdempotencyKey()));
 }
 function doWithdraw(change) {
   void mutate('Withdraw',()=>withdrawChange(state.repoId,{changeId:change.changeId,expectedVersion:state.snapshot.version,reason:'withdrawn from Fleet desk'},newIdempotencyKey()));
