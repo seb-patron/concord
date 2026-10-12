@@ -1,5 +1,5 @@
 import { execFile as callback, execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -33,6 +33,20 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
+  it('derives an exact new file unit from an Allowed-files list under an approved prefix', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    await writeFile(join(dir, 'first.txt'), 'base\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    const path = 'tests/new.test.ts';
+    await mkdir(join(dir, 'tests'));
+    await writeFile(join(dir, path), 'new\n');
+    await git(dir, 'add', path); await git(dir, 'commit', '-qm', 'new file');
+    const head = await git(dir, 'rev-parse', 'HEAD');
+    expect([...parseAllowed(`${path}\n`)]).toEqual([path]);
+    expect(await unitKeys(dir, parent, head, [path], { newFilePrefixes: ['tests/'], units: {} }))
+      .toEqual([`file:${path}`]);
+  });
   it.each(['ENV_ERROR', 'FAIL', 'TIMEOUT'])(`fails immediately with the completed %s inspection log`, async (outcome) => {
     const change = { changeId: 'change', revision: 3, status: 'draft' };
     const request = vi.fn(async (_method: string, path: string) => {

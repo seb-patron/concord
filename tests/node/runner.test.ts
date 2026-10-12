@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -222,6 +222,68 @@ export function attemptBudget(family) {
       expect(inspected.manifest.coverage).toBe('complete');
       expect(inspected.manifest.changedUnits[0].afterDigest).toBe('sha256:' + createHash('sha256').update(bytes).digest('hex'));
       expect(inspected.digest).toBe(await digest(inspected.manifest));
+    });
+  });
+
+  it('inspects new files under approved prefixes with complete coverage and refuses unknown paths', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await mkdir(join(repo, 'tests'));
+      await mkdir(join(repo, 'other'));
+      await writeFile(join(repo, 'tests/new.test.ts'), 'approved\n');
+      await git(repo, ['add', 'tests/new.test.ts']);
+      await git(repo, ['commit', '--quiet', '-m', 'approved new file'], 30_000, commitEnv);
+      const approvedHead = await git(repo, ['rev-parse', 'HEAD']);
+      const scoped: TrustedPolicy = { ...policy, units: {}, newFilePrefixes: ['tests/'] };
+      const approved = await inspectUnits(repo, base, approvedHead, { ...jobBase({}), unitPolicy: scoped } as Job);
+      expect(approved.unitKeys).toEqual(['file:tests/new.test.ts']);
+      expect(approved.manifest.coverage).toBe('complete');
+      expect(normalizeManifest(approved.manifest, scoped, approved.unitKeys)).toEqual(approved.manifest);
+      await writeFile(join(repo, 'other/new.ts'), 'unapproved\n');
+      await git(repo, ['add', 'other/new.ts']);
+      await git(repo, ['commit', '--quiet', '-m', 'unapproved new file'], 30_000, commitEnv);
+      const outsideHead = await git(repo, ['rev-parse', 'HEAD']);
+      const outside = await inspectUnits(repo, approvedHead, outsideHead, { ...jobBase({}), unitPolicy: scoped } as Job);
+      expect(outside.manifest.coverage).toBe('unknown');
+      expect(() => normalizeManifest(outside.manifest, scoped, outside.unitKeys)).toThrow('UNKNOWN_UNIT_SCOPE');
+    });
+  });
+
+  it('resolves quoted Unicode Git paths for exact units and approved prefixes', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await mkdir(join(repo, 'tests'));
+      await writeFile(join(repo, 'tests/é.ts'), 'unicode\n');
+      await git(repo, ['add', 'tests/é.ts']);
+      await git(repo, ['commit', '--quiet', '-m', 'unicode path'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const exact: TrustedPolicy = { ...policy, units: { 'file:tests/é.ts': {
+        canonicalKey: 'file:tests/é.ts', file: 'tests/é.ts', resources: [], dependencyKeys: [],
+      } } };
+      const prefixed: TrustedPolicy = { ...policy, units: {}, newFilePrefixes: ['tests/'] };
+      for (const unitPolicy of [exact, prefixed]) {
+        const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy } as Job);
+        expect(inspected.unitKeys).toEqual(['file:tests/é.ts']);
+        expect(inspected.manifest.coverage).toBe('complete');
+        expect(inspected.manifest.changedUnits[0]).toMatchObject({ afterPath: 'tests/é.ts', afterMode: '100644' });
+        expect(normalizeManifest(inspected.manifest, unitPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
+      }
+    });
+  });
+
+  it('rejects symlinks under an approved prefix and exact file unit', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await mkdir(join(repo, 'tests'));
+      await symlink('../example.txt', join(repo, 'tests/link'));
+      await git(repo, ['add', 'tests/link']);
+      await git(repo, ['commit', '--quiet', '-m', 'symlink'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const exact: TrustedPolicy = { ...policy, units: { 'file:tests/link': {
+        canonicalKey: 'file:tests/link', file: 'tests/link', resources: [], dependencyKeys: [],
+      } } };
+      const prefixed: TrustedPolicy = { ...policy, units: {}, newFilePrefixes: ['tests/'] };
+      for (const unitPolicy of [exact, prefixed]) {
+        await expect(inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy } as Job))
+          .rejects.toThrow('UNSUPPORTED_TREE_ENTRY');
+      }
     });
   });
 

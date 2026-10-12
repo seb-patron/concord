@@ -15,6 +15,7 @@ type PolicyTemplate = TrustedPolicy & Record<string, unknown>;
 interface Options {
   repo: string; template: string; oid?: string; readBackOid?: string;
   allowPaths: string[]; pathFiles: string[]; compareFile?: string;
+  allowNewUnder: string[];
 }
 
 function fail(message: string): never { throw new Error(message); }
@@ -24,8 +25,8 @@ function decodeUtf8(bytes: Uint8Array, error: string): string {
   catch { fail(error); }
 }
 
-function validPath(path: string): void {
-  if (!path || path.length > 512 || `file:${path}`.length > 512 || path.startsWith('/') ||
+function validPath(path: string, keyLimit = true): void {
+  if (!path || path.length > 512 || keyLimit && `file:${path}`.length > 512 || path.startsWith('/') ||
     path.includes('\\') || /[\s\0]/u.test(path) ||
     path.split('/').some(part => !part || part === '.' || part === '..' || part === '.git') ||
     path.normalize('NFC') !== path) fail(`UNSAFE_PATH: ${JSON.stringify(path)}`);
@@ -51,10 +52,10 @@ function validateRegistry(policy: TrustedPolicy, label: string): void {
 }
 
 function parseArgs(argv: string[]): Options {
-  const options: Options = { repo: '', template: '', allowPaths: [], pathFiles: [] };
+  const options: Options = { repo: '', template: '', allowPaths: [], pathFiles: [], allowNewUnder: [] };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (!['--repo', '--template', '--oid', '--read-back-oid', '--allow-path', '--allow-path-file', '--compare'].includes(flag)) {
+    if (!['--repo', '--template', '--oid', '--read-back-oid', '--allow-path', '--allow-path-file', '--allow-new-under', '--compare'].includes(flag)) {
       fail(`UNKNOWN_ARGUMENT: ${flag}`);
     }
     const value = argv[++i];
@@ -68,6 +69,7 @@ function parseArgs(argv: string[]): Options {
       case '--read-back-oid': if (options.readBackOid) fail('DUPLICATE_ARGUMENT: --read-back-oid'); options.readBackOid = value; break;
       case '--allow-path': options.allowPaths.push(value); break;
       case '--allow-path-file': options.pathFiles.push(value); break;
+      case '--allow-new-under': options.allowNewUnder.push(value); break;
       case '--compare': if (options.compareFile) fail('DUPLICATE_ARGUMENT: --compare'); options.compareFile = value; break;
     }
   }
@@ -222,6 +224,12 @@ function templateFrom(file: string): PolicyTemplate {
   return policy;
 }
 
+function validPrefix(prefix: string): void {
+  if (!prefix.endsWith('/') || prefix.length > 512) fail(`UNSAFE_PREFIX: ${JSON.stringify(prefix)}`);
+  try { validPath(prefix.slice(0, -1), false); }
+  catch { fail(`UNSAFE_PREFIX: ${JSON.stringify(prefix)}`); }
+}
+
 function generate(options: Options): { sourceOid: string; generatorVersion: number; policy: PolicyTemplate; policyDigest: string } {
   const oid = (options.oid ?? options.readBackOid)!;
   const tracked = trackedPaths(options.repo, oid);
@@ -236,6 +244,8 @@ function generate(options: Options): { sourceOid: string; generatorVersion: numb
     }
   }
   const template = templateFrom(options.template);
+  for (const prefix of options.allowNewUnder) validPrefix(prefix);
+  const prefixes = [...new Set([...(template.newFilePrefixes ?? []), ...options.allowNewUnder])].sort(compareKeys);
   for (const [alias, unit] of Object.entries(template.units)) {
     if (!pathSet.has(unit.file)) fail(`UNAPPROVED_TEMPLATE_PATH: ${alias} -> ${JSON.stringify(unit.file)}`);
   }
@@ -255,7 +265,8 @@ function generate(options: Options): { sourceOid: string; generatorVersion: numb
     }
   }
   validateRegistry({ ...template, units }, 'AMBIGUOUS_GENERATED_METADATA');
-  const { digest: _oldDigest, ...withoutDigest } = { ...template, units };
+  const { digest: _oldDigest, ...withoutDigest } = { ...template, units,
+    ...(prefixes.length ? { newFilePrefixes: prefixes } : {}) };
   const digest = hashCanonical(withoutDigest);
   const policy = { ...withoutDigest, digest };
   return { sourceOid: oid, generatorVersion: GENERATOR_VERSION, policy, policyDigest: digest };

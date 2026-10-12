@@ -21,7 +21,7 @@ const trusted: TrustedConfiguration = { policies: { 'local-demo': policy }, prof
 const previousTrustedConfig = (env as Env).TRUSTED_CONFIG;
 const previousChangeView = repos.changeView;
 
-afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; });
+afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; delete policy.newFilePrefixes; });
 
 function setupPolicy(): void {
   (env as Env).TRUSTED_CONFIG = JSON.stringify(trusted);
@@ -110,6 +110,21 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('claims exact new paths under a prefix and conflicts only on the same path', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'lease_new_file_prefix';
+    const first = await claim(repo, 'local-agent-a', 'first', ['file:tests/new.test.ts'], 'first');
+    expect(first.status).toBe(201);
+    expect((await responseBody(first)).data.leases[0].unitKey).toBe('file:tests/new.test.ts');
+    expect((await claim(repo, 'local-agent-b', 'other', ['file:tests/other.test.ts'], 'other')).status).toBe(201);
+    const rival = await claim(repo, 'local-agent-b', 'rival', ['file:tests/new.test.ts'], 'rival');
+    expect(rival.status).toBe(409);
+    expect((await responseBody(rival)).error.code).toBe('LEASE_CONFLICT');
+    const outside = await claim(repo, 'local-agent-b', 'outside', ['file:src/new.ts'], 'outside');
+    expect(outside.status).toBe(422);
+    expect((await responseBody(outside)).error.code).toBe('UNKNOWN_UNIT');
+  });
   it('validates owner TSV declarations and maps only matching new keys', () => {
     const declared = structuredClone(policy);
     declared.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],

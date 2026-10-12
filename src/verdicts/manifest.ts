@@ -1,11 +1,11 @@
 import type { DependencyScopeEntry, Digest, ReviewManifest, TrustedPolicy } from '../contracts';
-import { patternRow, tableForFile } from '../leases/units';
+import { patternRow, prefixFileUnit, tableForFile } from '../leases/units';
 
 const sha256 = /^sha256:[a-f0-9]{64}$/;
 const oid = /^[a-f0-9]{40,64}$/;
 export const compareKeys = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const unitSpec = (policy: TrustedPolicy, key: string) => policy.units[key] ?? (() => {
-  if (key.startsWith('file:') && tableForFile(policy, key.slice(5))) return {
+  if (key.startsWith('file:') && (tableForFile(policy, key.slice(5)) || prefixFileUnit(policy, key))) return {
     canonicalKey: key, file: key.slice(5), resources: [], dependencyKeys: [],
   };
   const row = patternRow(policy, key);
