@@ -185,14 +185,27 @@ After changing `TRUSTED_CONFIG`, existing Durable Object instances, especially `
 
 ### Large trusted configurations
 
-For a trusted configuration too large for one Worker secret, set `TRUSTED_PARTS_FILE` to a new absolute path outside the clone, then create a private bulk file and upload its numbered secrets:
+For a trusted configuration too large for one Worker secret, set `TRUSTED_PARTS_FILE` to a new absolute path outside the clone and create a private bulk file:
 
 ```sh
 npm run deploy:trusted-parts -- --in "$TRUSTED_CONFIG_FILE" --out "$TRUSTED_PARTS_FILE"
-  npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc
 ```
 
-The helper creates a mode-0600 file and refuses to overwrite one. `wrangler secret bulk` uploads the parts and count in one call. When switching from the single secret, run `npx wrangler secret delete TRUSTED_CONFIG --config wrangler.jsonc` so both formats are never present together. When switching back to `TRUSTED_CONFIG`, delete `TRUSTED_CONFIG_PARTS` with `npx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler.jsonc`; the Worker then ignores leftover numbered parts. Keep the bulk file private and outside the clone.
+The helper creates a mode-0600 file and refuses to overwrite one. To switch an existing Worker from the single secret, delete `TRUSTED_CONFIG` **first**, then upload the numbered parts and count:
+
+```sh
+npx wrangler secret delete TRUSTED_CONFIG --config wrangler.jsonc
+npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc
+```
+
+Between the two commands, requests fail closed because the trusted config is unavailable for about a minute. Bulk upload adds or updates only the named secrets; `AUTH_TOKENS` and other existing secrets stay in place. Never activate both trusted-config formats at once. Durable Objects may keep the previous config for a few minutes; wait about 150 seconds with no traffic after the upload before creating repositories. Keep the bulk file private and outside the clone.
+
+To switch back to the single secret, delete `TRUSTED_CONFIG_PARTS` **before** putting `TRUSTED_CONFIG`. The Worker ignores leftover numbered parts:
+
+```sh
+npx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler.jsonc
+npx wrangler secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"
+```
 
 ## Deployed smoke and evidence
 
