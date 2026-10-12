@@ -27,9 +27,9 @@ async function rereadUntil<T>(read: () => Promise<T>, matches: (value: T) => boo
   }
   return value;
 }
-const visibleCommit = (storage: RepoStorage, name: string, oid: string) =>
+export const visibleCommit = (storage: RepoStorage, name: string, oid: string) =>
   rereadUntil(() => storage.readCommit(name, oid), commit => commit !== null);
-const visibleRef = (storage: RepoStorage, name: string, ref: string, oid: string | null) =>
+export const visibleRef = (storage: RepoStorage, name: string, ref: string, oid: string | null) =>
   rereadUntil(() => storage.resolveRef(name, ref), actual => actual === oid);
 function identityConflict(job: Job, reason: string, observed: 'null' | 'different-oid' | 'different-value'): never {
   console.error('RESULT_IDENTITY', reason, job.jobId, job.attempt, observed);
