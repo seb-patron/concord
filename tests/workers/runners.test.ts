@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Digest, Job, JobResult, ModuleContext, Principal } from '../../src/contracts';
 import { runners } from '../../src/features/runners';
+import { artifactsStorage } from '../../src/storage/artifacts';
 import { digest, failure, HttpError } from '../../src/http';
 import { localFixtureConfig } from '../../src/state';
+import { pendingResultFailure } from '../../src/repos/model';
 
 const oid = 'a'.repeat(40);
 const tree = 'b'.repeat(40);
@@ -48,7 +50,7 @@ async function fixture() {
     try { return await entry.handle(context, new Request('https://test' + path, { method: 'POST' }), path.match(entry.pattern)!, body); }
     catch (error) { return failure(error instanceof HttpError ? error : new HttpError(503, 'ERROR', String(error))); }
   };
-  return { context, job: await seal(job), calls, route, advance: (ms: number) => { now += ms; }, principal };
+  return { context, job: await seal(job), calls, route, advance: (ms: number) => { now += ms; }, now: () => now, principal };
 }
 
 async function acceptedResult(job: Job): Promise<{ result: JobResult; resultDigest: string; attempt: number; fence: number; inputDigest: string }> {
@@ -202,6 +204,143 @@ describe('durable runner protocol', () => {
     expect(job.expiresAt).toBe(91_000);
     const credential = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
     expect(credential.status).toBe(200);
+  });
+
+  it.each(['fetch', 'scratch-push', 'canonical-push'] as const)(
+    'mints a 60-second Artifacts credential for %s within a 90-second claim', async operation => {
+      const f = await fixture();
+      Object.defineProperty(f.context, 'env', { value: { STORAGE_BACKEND: 'artifacts' } as Env });
+      const minted: Array<{ name: string; scope: string; ttl: number }> = [];
+      const revoked: string[] = [];
+      Object.defineProperty(f.context, 'storage', { value: artifactsStorage({
+        create: vi.fn(),
+        get: vi.fn(async (name: string) => ({
+          [Symbol.dispose]: () => undefined,
+          createToken: async (scope: string, ttl: number) => {
+            if (ttl < 60) throw new Error('INVALID_TTL: must be at least 60 seconds');
+            minted.push({ name, scope, ttl });
+            return { plaintext: `${name}-token`, expiresAt: new Date(f.now() + ttl * 1000).toISOString() };
+          },
+          revokeToken: async (secret: string) => { revoked.push(secret); return true; },
+        })),
+      } as unknown as Artifacts) });
+      let scheduled: Job = f.job;
+      if (operation === 'scratch-push') {
+        scheduled = await seal({ ...f.job, kind: 'validate-stack', stackId: 'stack1', canonicalBaseOid: oid,
+          candidates: [], baseCheck: true, bootstrap: false, scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+          expectedRefs: { canonical: oid, scratch: null },
+          storageRemotes: { canonical: 'https://example.test/canonical.git', scratch: 'https://example.test/scratch.git' } } as Job);
+      } else if (operation === 'canonical-push') {
+        f.principal.roles = ['promoter'];
+        scheduled = await seal({ ...f.job, kind: 'promote', promotionId: 'promotion1', bootstrap: false,
+          expectedOldOid: oid, checkedNewOid: oid, scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+          expectedRefs: { canonical: oid, scratch: oid },
+          storageRemotes: { canonical: 'https://example.test/canonical.git', scratch: 'https://example.test/scratch.git' } } as Job);
+      }
+      expect(runners.hooks['runners.schedule']!(f.context, scheduled).status).toBe('eligible');
+      const polled = await f.route('runner/poll', { runnerId: 'one', role: operation === 'canonical-push' ? 'promoter' : 'checker', supportedProfileDigests: [pin] });
+      expect(polled.status).toBe(200);
+      const job = (await polled.json() as { data: { job: Job } }).data.job;
+      expect(job.expiresAt).toBe(91_000);
+      const body = { attempt: job.attempt, fence: job.fence, operation };
+      const granted = await f.route('jobs/job1/credentials', body);
+      expect(granted.status).toBe(200);
+      const credentials = (await granted.json() as { data: { credentials: Array<{ expiresAt: number }> } }).data.credentials;
+      expect(credentials).toHaveLength(operation === 'fetch' ? Object.keys(job.storageRemotes).length : 1);
+      expect(credentials.every(token => token.expiresAt < job.expiresAt!)).toBe(true);
+      expect(minted).toEqual((operation === 'fetch' ? Object.keys(job.storageRemotes) :
+        [operation === 'scratch-push' ? 'scratch' : 'canonical']).map(name => ({ name, scope: operation === 'fetch' ? 'read' : 'write', ttl: 60 })));
+      f.advance(30_000);
+      const stale = await f.route('jobs/job1/credentials', body);
+      expect(stale.status).toBe(409);
+      expect((await stale.json() as { error: { code: string } }).error.code).toBe('STALE_JOB');
+      expect(minted).toHaveLength(credentials.length);
+      expect(revoked).toEqual([]);
+      expect((await f.route('jobs/job1/heartbeat', { attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest })).status).toBe(200);
+      expect((await f.route('jobs/job1/credentials', body)).status).toBe(200);
+    },
+  );
+
+  it('revokes a provider token whose lifetime reaches the end of the claim', async () => {
+    const f = await fixture();
+    Object.defineProperty(f.context, 'env', { value: { STORAGE_BACKEND: 'artifacts' } as Env });
+    const revoked: string[] = [];
+    f.context.storage.mintToken = async () => ({ secret: 'held-token', expiresAt: 91_000 });
+    f.context.storage.revokeToken = async (_name, token) => { revoked.push(token); return true; };
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const response = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+    expect(response.status).toBe(409);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe('TOKEN_LIFETIME');
+    expect(revoked).toEqual(['held-token']);
+  });
+
+  it('rejects a malformed Artifacts expiry, keeps failed cleanup for retry, and never returns the secret', async () => {
+    const f = await fixture();
+    Object.defineProperty(f.context, 'env', { value: { STORAGE_BACKEND: 'artifacts' } as Env });
+    const createToken = vi.fn()
+      .mockResolvedValueOnce({ plaintext: 'held-token', expiresAt: 'invalid' })
+      .mockImplementation(async () => ({ plaintext: 'valid-token', expiresAt: new Date(f.now() + 60_000).toISOString() }));
+    const revokeToken = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    Object.defineProperty(f.context, 'storage', { value: artifactsStorage({
+      create: vi.fn(),
+      get: vi.fn(async () => ({ [Symbol.dispose]: () => undefined, createToken, revokeToken })),
+    } as unknown as Artifacts) });
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(response.status).toBe(502);
+      expect(await response.clone().text()).not.toContain('held-token');
+      expect(await response.json()).toMatchObject({ error: { code: 'TOKEN_RESULT_INVALID' } });
+      expect(errorLog).toHaveBeenCalledExactlyOnceWith('TOKEN_RESULT_INVALID', 'job1');
+      expect(f.context.state.get('mint-token:candidate')).toBe('held-token');
+      expect(revokeToken).toHaveBeenCalledWith('held-token');
+      const pending = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(pending.status).toBe(503);
+      expect(await pending.json()).toMatchObject({ error: { code: 'TOKEN_REVOCATION_FAILED' } });
+      expect(createToken).toHaveBeenCalledTimes(1);
+      expect(f.context.state.get('mint-token:candidate')).toBe('held-token');
+      const retry = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(retry.status).toBe(200);
+      expect((await retry.json() as { data: { credentials: Array<{ secret: string }> } }).data.credentials[0].secret).toBe('valid-token');
+      expect(f.context.state.get('mint-token:candidate')).toBeNull();
+      expect(revokeToken).toHaveBeenCalledTimes(3);
+      expect(errorLog).toHaveBeenLastCalledWith('TOKEN_REVOCATION_FAILED', 'job1');
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it.each([
+    ['non-finite expiry', { secret: 'held-token', expiresAt: NaN }],
+    ['failure marker', { secret: 'held-token', expiresAt: 61_000, [pendingResultFailure]: 'ARTIFACTS_DISPOSE_FAILED' }],
+  ])('rejects a credential with %s', async (_case, issued) => {
+    const f = await fixture();
+    const revoked: string[] = [];
+    f.context.storage.mintToken = async () => issued;
+    f.context.storage.revokeToken = async (_name, secret) => { revoked.push(secret); return true; };
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({ error: { code: 'TOKEN_RESULT_INVALID' } });
+      expect(revoked).toEqual(['held-token']);
+      expect(errorLog).toHaveBeenCalledExactlyOnceWith('TOKEN_RESULT_INVALID', 'job1');
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it('logs only a fixed code and job id for unexpected credential errors', async () => {
+    const f = await fixture();
+    runners.hooks['runners.schedule']!(f.context, f.job);
+    await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    f.context.storage.mintToken = async () => { throw new Error('private-token-value'); };
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' })).status).toBe(503);
+      expect(errorLog).toHaveBeenCalledExactlyOnceWith('RUNNER_CREDENTIALS_UNEXPECTED', 'job1');
+    } finally { errorLog.mockRestore(); }
   });
 
   it('exposes a completed result to a reviewer through a read-only route', async () => {
