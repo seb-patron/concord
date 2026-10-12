@@ -2,6 +2,8 @@
 
 This slice implements repository provisioning, owned candidate forks, branch registration, and publication requests. All routes use `Authorization: Bearer <Concord credential>`. Every mutation needs an `Idempotency-Key`; mutations of existing objects also need `expectedVersion` from the latest response envelope. Success responses are `{ "data": ..., "version": number, "eventSeq": number }`; failures are `{ "error": { "code", "message" }, "requestId" }`. A replay of one successful key and body returns the original response. Provider failures return `503`, keep their intent visible, and can be retried with the same key and body.
 
+An `AUTH_TOKENS` principal may have an optional `model` label of 1–64 characters from `A–Z`, `a–z`, `0–9`, `.`, `_`, `:`, `/`, or `-`. A new change records that label once as `authorModel`, or `null` when absent; change creation, detail, list, and repository snapshot responses include `authorModel`. Later credential changes do not rewrite an existing change.
+
 | Method and path | Role | Request / result |
 | --- | --- | --- |
 | `GET /v1/repos` | Any authorized principal | Page of tenant repos; `?cursor=` advances. |

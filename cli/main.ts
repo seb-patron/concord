@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential, rememberCredentialsIn, type RequestOptions } from './client.ts';
 import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
+import { importRepo } from './import.ts';
 
 const HELP = `Concord agent CLI
 
@@ -18,6 +19,7 @@ Commands and required fields:
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
   repo clone --repo ID --path PATH                 (read-only canonical clone)
+  import --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID [--exclude GLOB ...] [--exclude-file FILE] [--require-match] [--print-tree]
   change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
   change get --repo ID --id ID
   change checkout --repo ID --id ID --worktree PATH
@@ -43,21 +45,36 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
   try {
-    const options: Record<string, { type: 'string' } | { type: 'boolean' }> = {};
+    const options: Record<string, { type: 'string'; multiple?: boolean } | { type: 'boolean' }> = {};
     for (const name of OPTION_NAMES) options[name] = { type: 'string' };
+    options.exclude = { type: 'string', multiple: true };
     options.json = { type: 'boolean' };
     options.help = { type: 'boolean' };
+    options['print-tree'] = { type: 'boolean' };
+    options['require-match'] = { type: 'boolean' };
+    options.verbose = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
     parsed = parseArgs({ args: argv, options, allowPositionals: true, strict: true });
   } catch (error) { throw new ConcordError(`${error instanceof Error ? error.message : error}\n\n${HELP}`, 'usage'); }
   const [noun, verb, ...args] = parsed.positionals;
   const flags = parsed.values as Flags;
   if (!noun || noun === 'help' || flags.help) { print({ help: HELP }); return; }
+  if (noun === 'import' && !verb && !args.length) {
+    const values = parsed.values;
+    const printTree = values['print-tree'] === true;
+    const result = await importRepo({ source: required(flags, 'source'), ref: required(flags, 'ref'),
+      repo: required(flags, 'repo'), policyId: typeof flags['policy-id'] === 'string' ? flags['policy-id'] : undefined,
+      profileId: typeof flags['profile-id'] === 'string' ? flags['profile-id'] : undefined,
+      excludes: Array.isArray(values.exclude) ? values.exclude : [], excludeFile: typeof flags['exclude-file'] === 'string' ? flags['exclude-file'] : undefined,
+      requireMatch: values['require-match'] === true,
+      printTree, verbose: values.verbose === true }, printTree ? undefined : await clientFor(flags));
+    return print(result);
+  }
   if (noun === 'api') {
     const method = verb;
     const path = args[0];

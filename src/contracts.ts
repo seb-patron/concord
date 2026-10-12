@@ -11,6 +11,7 @@ export interface Principal {
   roles: Role[];
   repoIds: Id[] | '*';
   expiresAt: number;
+  model?: string | null;
 }
 
 export interface Repo extends Versioned {
@@ -25,6 +26,7 @@ export interface Branch extends Versioned {
 }
 export interface Change extends Versioned {
   changeId: Id; repoId: Id; authorId: Id; intentKey: string; intentText: string;
+  authorModel?: string | null;
   candidateStorageName: string; branch: string; baseOid: Oid | null;
   headOid: Oid | null; revision: number; unitKeys: string[];
   dependencyChangeIds: Id[];
@@ -111,6 +113,9 @@ export type AcceptancePolicy =
 export interface TrustedPolicy {
   id: Id; digest: Digest; version: number;
   units: Record<string, { canonicalKey: string; file: string; resources: string[]; dependencyKeys: string[] }>;
+  /** Owner-declared TSV row namespaces. These are never supplied by a change author. */
+  tables?: Array<{ name: string; file: string; header: string[]; keyColumn: string;
+    keySpec: { charset: 'lower' | 'alnum' | 'alnum-dash-dot' | string[]; minLength: number; maxLength: number } }>;
   checkerId: string; checkerDigest: Digest;
   acceptance: AcceptancePolicy;
 }

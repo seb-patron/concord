@@ -412,11 +412,31 @@
     },
     "aw-only": {
       "rows": {
-        "alpha": { "retry_limit": 3, "timeout_ms": 1000, "output": 3000 },
-        "beta": { "retry_limit": 3, "timeout_ms": 1000, "output": 3000 },
-        "gamma": { "retry_limit": 5, "timeout_ms": 1250, "output": 6250 },
-        "delta": { "retry_limit": 4, "timeout_ms": 1500, "output": 6000 },
-        "epsilon": { "retry_limit": 2, "timeout_ms": 1000, "output": 2000 }
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        }
       }
     },
     "j-common": {
@@ -459,6 +479,229 @@
           "output": 2000
         }
       ]
+    },
+    "rows-zeta": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "zeta": {
+          "retry_limit": 2,
+          "timeout_ms": 750,
+          "output": 1500
+        }
+      }
+    },
+    "rows-eta": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "eta": {
+          "retry_limit": 3,
+          "timeout_ms": 750,
+          "output": 2250
+        }
+      }
+    },
+    "rows-retire": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        }
+      }
+    },
+    "rows-zeta-eta": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "epsilon": {
+          "retry_limit": 2,
+          "timeout_ms": 1000,
+          "output": 2000
+        },
+        "zeta": {
+          "retry_limit": 2,
+          "timeout_ms": 750,
+          "output": 1500
+        },
+        "eta": {
+          "retry_limit": 3,
+          "timeout_ms": 750,
+          "output": 2250
+        }
+      }
+    },
+    "rows-zeta-retire": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "zeta": {
+          "retry_limit": 2,
+          "timeout_ms": 750,
+          "output": 1500
+        }
+      }
+    },
+    "rows-eta-retire": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "eta": {
+          "retry_limit": 3,
+          "timeout_ms": 750,
+          "output": 2250
+        }
+      }
+    },
+    "rows-all": {
+      "rows": {
+        "alpha": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "beta": {
+          "retry_limit": 3,
+          "timeout_ms": 1000,
+          "output": 3000
+        },
+        "gamma": {
+          "retry_limit": 5,
+          "timeout_ms": 1250,
+          "output": 6250
+        },
+        "delta": {
+          "retry_limit": 4,
+          "timeout_ms": 1500,
+          "output": 6000
+        },
+        "zeta": {
+          "retry_limit": 2,
+          "timeout_ms": 750,
+          "output": 1500
+        },
+        "eta": {
+          "retry_limit": 3,
+          "timeout_ms": 750,
+          "output": 2250
+        }
+      }
     }
   }
 }

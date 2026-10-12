@@ -83,10 +83,12 @@ npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-
 npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 ```
 
-`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The docs-command test executes these exact blocks and checks their state barriers.
+`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The rows scene in the demo guide captures plain Git append conflict and Concord checked composition. The docs-command test executes these exact blocks and checks their state barriers.
 
 ## Status and safety
 
 The local Worker, bridge, fixture checker, runner, scenario driver, CLI, and browser UI run without an account. Cloudflare Artifacts hosting, a public deployment, and any mirror require the owner's account, credentials, authorization, and the live evidence in the [deployment runbook](docs/deploy.md); a local bridge run is not that evidence. The AW scene uses a public mock adapter, not the private launcher. Historical improvement claims require an approved sanitized timeline and are not inferred from the supplied aggregates.
+
+Agents can follow [AGENTS.md](AGENTS.md) and connect through the [MCP server](docs/mcp.md).
 
 The default is `CONCORD_SHOW_DECOMPILED_C=0`. The public fixture contains no ROM bytes, proprietary compiler inputs, or decompiled C. Licensed under [MIT](LICENSE).
