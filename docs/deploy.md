@@ -148,11 +148,22 @@ The `--force-with-lease` commands above are **only** for the disposable stale-re
 
 ## Provision secrets and deploy
 
-Review the [cost guards and owner billing steps](cost.md) before deployment.
+Review the [cost guards and owner billing steps](cost.md) before deployment. Its limits come from the configured Worker and trusted tenant caps; actual billable usage and dollar totals come from the Cloudflare account's Billing → Billable Usage dashboard, not from the Fleet desk (`docs/cost.md`, `wrangler.jsonc`, `src/state.ts`).
 
-On a fresh account, first provision a `workers.dev` subdomain. Create a mode-0600 JSON file outside the clone containing `AUTH_TOKENS` and `TRUSTED_CONFIG`, then make the first deployment with `npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"` (where `SECRETS_FILE` is that file's absolute path). `versions upload` and `versions secret put` require an existing Worker and otherwise fail with code 10007.
+On a fresh account, register a `workers.dev` subdomain in Cloudflare before deploying. Wrangler could not automatically register the name `concord` for this deployment. The **first** deployment must create the Worker and its secrets together; `versions upload` and `versions secret put` fail beforehand with code 10007 (`Worker does not exist`). From the repository root, with the two private input files above and `jq` installed, create a mode-0600 secrets JSON file outside the clone and deploy it:
 
-For later releases, first upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
+```sh
+umask 077
+SECRETS_FILE="$(mktemp "${TMPDIR:-/tmp}/concord-secrets.XXXXXX")"
+jq -n --rawfile auth "$AUTH_TOKENS_FILE" --rawfile trusted "$TRUSTED_CONFIG_FILE" \
+  '{AUTH_TOKENS:$auth,TRUSTED_CONFIG:$trusted}' > "$SECRETS_FILE"
+chmod 600 "$SECRETS_FILE"
+test -s "$SECRETS_FILE" && npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"
+```
+
+Remove the temporary file from the operator machine after recording the deployed URL. The two JSON values are Worker secret strings containing the contents of the private files; `jq --rawfile` preserves that shape. See `src/state.ts` and `src/auth.ts` for how the Worker reads them.
+
+For later releases, use the versioned flow below when changing secrets, or run `npx wrangler deploy --config wrangler.jsonc` for a code-only release; existing secrets persist. The versioned flow first uploads an undeployed version, then attaches secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
 
 ```sh
 test -s "$AUTH_TOKENS_FILE" && test -s "$TRUSTED_CONFIG_FILE"
@@ -163,6 +174,14 @@ npx wrangler deploy --config wrangler.jsonc
 ```
 
 If versioned secret provisioning reports that no Worker/version exists, use the first-deploy path above after confirming the account state with the owner; do not publish a fixture-authenticated substitute. A production secret change is a release action too. Do not run these commands during an account-free local rehearsal.
+
+### Refresh trusted digests before creating repositories
+
+For the demo policy, `demo/scenarios.ts` preflight reads `demo/profile.json` and hashes the bytes of `demo/checker.mjs` for `checkerDigest`; it does **not** hash `runner/profiles.ts` for that field. It builds `profileDigest` from the profile template, that checker hash, `dispatchArgv` from `runner/profiles.ts`, the local Node executable's byte hash, and the runtime's platform/architecture/Node version. It builds the demo `policyDigest` from `demo/units.json` plus the checker hash. The committed case matrix in `runner/profiles.ts` validates the profile cases, so a matrix change also requires a matching `demo/profile.json` update. For non-demo generated policies, `runner/generate-units.ts` instead hashes the policy template plus file units derived from the pinned repository tree and approved planned paths. These inputs and digest checks are implemented in `demo/scenarios.ts`, `runner/profiles.ts`, `runner/generate-units.ts`, and `src/features/leases.ts`.
+
+After a change to `demo/profile.json`, `demo/checker.mjs`, `demo/units.json`, the `dispatchArgv` or required case matrix in `runner/profiles.ts`, or the pinned Node executable/runtime, rerun `npm run demo -- preflight --local --state-dir <dir>` and `npx wrangler secret put TRUSTED_CONFIG < <dir>/trusted-config.json`, or runners stay idle on a digest mismatch. Use an absolute `<dir>` outside the clone, then run the health check below. A generated policy likewise needs regeneration and installation whenever its template or pinned path set changes.
+
+After changing `TRUSTED_CONFIG`, existing Durable Object instances, especially `TenantCatalog`, can continue using the previous binding until restart or idle eviction; the observed delay was roughly 2–3 minutes. Allow about 90 seconds with no traffic before creating repositories, and retry only after the new config is active. A repo created against the old policy digest can fail with `UNIT_POLICY_UNAVAILABLE` (`src/catalog.ts`, `src/features/leases.ts`).
 
 ## Deployed smoke and evidence
 
