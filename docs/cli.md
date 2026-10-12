@@ -1,5 +1,7 @@
 # Concord agent CLI
 
+To land a finished commit through Concord, see [Land a finished agent run](land.md).
+
 The CLI speaks the Concord HTTP API. It does not require Cloudflare credentials or GitHub pull request conventions. Start with Node 22+, configure `CONCORD_URL` and `CONCORD_TOKEN`, then run commands through the npm script:
 
 ```sh
