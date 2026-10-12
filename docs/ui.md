@@ -26,3 +26,15 @@ When `/v1/me` responds, actions follow its roles and principal; when it is absen
 # Issues panel
 
 The read-only Issues panel lists open Concord issues for the selected repository. It shows each issue's milestone, linked change status, and live held leases. The panel reads the coordinator snapshot's complete `leases.heldItems` projection (the paged `leases.items` list can stop at 100 records) and renders task text as plain text.
+
+# Plan screen
+
+After sign-in, the Plan button in the header opens the batch planner (`web/plan.js`, mounted at `#plan-view`; ← Fleet desk or the Plan button returns). The screen edits the repository's open issues like a spreadsheet: title, touches, depends on, and milestone, with a collision column, a "+ Add a row" button for new issues, and "Import from spec files", which reads local Markdown or text files in the browser and turns headings and list items into draft rows — files never leave the tab.
+
+Touches is persisted as the issue's `allowedFiles`. Entries are separated by `·`, `,`, or newlines. A repository path or `file:path` is a whole-file unit that covers `path § section`, `row:path:name`, `fn:path:name`, and `section:path:name`; a bare `§ name` is its own unit. Two rows collide when they share a unit or one declares a whole-file unit covering the other's section or row. Depends on accepts `#275` or `275` and is persisted as `dep:NUMBER` labels; other labels are preserved on publish. A dependency on a closed issue is satisfied, on an open issue it waits, on a missing number it is unknown and blocks the row, and a dependency loop back to the row is called out.
+
+The Collides with column shows "none", "waits #N", or "#N · shared unit". Selecting a row number explains why it can or cannot start and suggests a fix. "How many agents can start now" is the size of a greedy maximal set of rows with no unresolved dependency and no collision with an earlier startable row, in table order; the note names up to two blocked rows and why.
+
+Publish sends the batch as per-row writes: `POST /v1/repos/:repo/issues` for drafts and `PATCH /v1/repos/:repo/issues/:number` with the issue's own `expectedVersion` for edits, each with a fresh Idempotency-Key. Rows with client-side validation errors (empty title, duplicate or oversized units, unparseable or unknown dependencies, unknown milestone) are skipped before any request; the rest still publish, and per-row failures appear in the row. A stale-version refusal adopts the server's current issue version so an explicit retry can proceed. The view then refreshes the snapshot; published rows still missing from the projection are labelled "awaiting refresh", and rows whose issues closed while edits were pending keep their text marked closed.
+
+The planner only rebuilds the table when issue data actually changes, so typing survives background polling. An issue edited elsewhere is reloaded on the next change; the in-progress edit is replaced. Viewer roles get a read-only table and no publish affordance; missing snapshots say loading, an unavailable projection says unavailable, and an unrecognized shape says unknown rather than faking rows.

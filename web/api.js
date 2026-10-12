@@ -185,6 +185,17 @@ export function claimUnits(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/leases`, { method: 'POST', body, idempotencyKey }, fetchImpl);
 }
 
+/** POST /v1/repos/:r/issues — human-planned issue creation. */
+export function createIssue(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues`, { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
+/** PATCH /v1/repos/:r/issues/:n — requires the issue's own expectedVersion. */
+export function updateIssue(repoId, number, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(number)}`,
+    { method: 'PATCH', body, idempotencyKey }, fetchImpl);
+}
+
 /** POST /v1/repos/:r/queue/enqueue — requires expectedVersion. */
 export function enqueueChange(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/queue/enqueue`, { method: 'POST', body, idempotencyKey }, fetchImpl);

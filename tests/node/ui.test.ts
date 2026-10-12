@@ -8,6 +8,8 @@ const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
+const { mountPlan, parseUnits, parseDepends, depNumbers, normalizeUnit, sharedUnit,
+  planIssues, analyzePlan, explainRow, planNote, specTitles } = require('../../web/plan.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -510,5 +512,259 @@ describe('layout and token contract', () => {
     expect(allowedActions(['viewer'])).toEqual({ claim: false, enqueue: false, withdraw: false, verdict: false });
     expect(allowedActions(['reviewer']).verdict).toBe(true);
     expect(allowedActions(['agent']).verdict).toBe(false);
+  });
+});
+
+const planFixture = {
+  data: { projections: {
+    issues: {
+      status: 'ready',
+      items: [
+        { number: 275, title: 'Landed base', body: '', labels: [], milestoneId: null, allowedFiles: ['base.py'], state: 'closed', authorId: 'owner', version: 9 },
+        { number: 280, title: 'D5: discovery refresh job', body: '', labels: [], milestoneId: 'm1', allowedFiles: ['refresh.py', '§ Storage and time'], state: 'open', authorId: 'owner', version: 3 },
+        { number: 281, title: 'J1b: job admissions', body: '', labels: ['dep:275'], milestoneId: null, allowedFiles: ['admissions.py', 'seq:schema'], state: 'open', authorId: 'owner', version: 1 },
+        { number: 284, title: 'R3: reader interface v2', body: '', labels: [], milestoneId: null, allowedFiles: ['readers/base.py', '§ Contracts'], state: 'open', authorId: 'owner', version: 2 },
+        { number: 285, title: 'R4: SEC reader on v2', body: '', labels: ['dep:284'], milestoneId: null, allowedFiles: ['readers/sec.py', '§ Contracts'], state: 'open', authorId: 'owner', version: 2 },
+        { number: 286, title: '<task> browse page', body: '', labels: [], milestoneId: null, allowedFiles: ['web/browse.py'], state: 'open', authorId: 'owner', version: 1 },
+      ],
+      milestones: [{ milestoneId: 'm1', title: 'Release', state: 'open', version: 1 }],
+    },
+  } },
+  version: 7, eventSeq: 0,
+};
+
+function mountPlanDom(overrides: Record<string, any> = {}) {
+  const dom = new JSDOM('<!doctype html><html><body><section id="plan-view"></section></body></html>', { url: 'http://localhost/' });
+  const section = dom.window.document.getElementById('plan-view')!;
+  const ctx = {
+    snapshot: () => planFixture,
+    repoId: () => 'demo',
+    identity: () => ({ principalId: 'owner', roles: ['owner'], unverified: false }),
+    refresh: async () => {},
+    onClose: () => {},
+    ...overrides,
+  };
+  const screen = mountPlan(section, ctx)!;
+  screen.render();
+  const doc = dom.window.document;
+  const rows = () => [...section.querySelectorAll('tr[data-row-key]')] as HTMLElement[];
+  const rowFor = (num: number | 'new') =>
+    rows().find(row => (row.querySelector('.plan-num') as HTMLElement).textContent === String(num))!;
+  const cell = (num: number | 'new') => rowFor(num).querySelector('.plan-collides')!;
+  const field = (num: number | 'new', part: string) =>
+    rowFor(num).querySelector(`input[id^="plan-${part}-"], select[id^="plan-${part}-"]`) as HTMLInputElement;
+  const type = (input: HTMLInputElement, value: string) => {
+    input.value = value;
+    input.dispatchEvent(new dom.window.Event(input.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+  };
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+  return { dom, doc, section, ctx, screen, rows, rowFor, cell, field, type, flush };
+}
+
+describe('Plan screen derivations', () => {
+  it('parses touches and depends-on cells like the prototype shows them', () => {
+    expect(parseUnits('refresh.py · § Storage and time, row:families.tsv:alpha\nseq:schema').map((unit: any) => unit.label))
+      .toEqual(['refresh.py', '§ Storage and time', 'row:families.tsv:alpha', 'seq:schema']);
+    expect(parseDepends('#275, #280')).toEqual([275, 280]);
+    expect(parseDepends('275 275')).toEqual([275]);
+    expect(depNumbers(['dep:275', 'bug', 'dep:280', 'dep:275'])).toEqual([275, 280]);
+    expect(depNumbers(null)).toEqual([]);
+  });
+  it('collides on the same unit and on whole-file units covering sections and rows', () => {
+    expect(sharedUnit(normalizeUnit('§ Contracts'), normalizeUnit('§ Contracts'))).toBe('§ Contracts');
+    expect(sharedUnit(normalizeUnit('families.tsv'), normalizeUnit('row:families.tsv:alpha'))).toBe('row:families.tsv:alpha');
+    expect(sharedUnit(normalizeUnit('file:readers/base.py'), normalizeUnit('readers/base.py § Contracts'))).toBe('readers/base.py § Contracts');
+    expect(sharedUnit(normalizeUnit('readers/base.py'), normalizeUnit('readers/base.py'))).toBe('readers/base.py');
+    expect(sharedUnit(normalizeUnit('refresh.py'), normalizeUnit('admissions.py'))).toBeNull();
+    expect(sharedUnit(normalizeUnit('readers/sec.py'), normalizeUnit('§ Contracts'))).toBeNull();
+    expect(sharedUnit(normalizeUnit('row:families.tsv:alpha'), normalizeUnit('row:families.tsv:beta'))).toBeNull();
+  });
+  it('computes collisions, waits, and the greedy startable set', () => {
+    const { open, byNumber } = planIssues(planFixture);
+    const rows = open.map((issue: any, index: number) => ({
+      key: `issue:${issue.number}`, number: issue.number, title: issue.title,
+      units: (issue.allowedFiles ?? []).map((label: string) => normalizeUnit(label)),
+      deps: depNumbers(issue.labels), state: issue.state, closed: false, index,
+    }));
+    const analysis = analyzePlan(rows, byNumber);
+    expect(analysis.collides.get('issue:284')).toEqual([{ ref: '#285', unit: '§ Contracts' }]);
+    expect(analysis.waits.get('issue:285')).toEqual([{ dep: 284, state: 'open' }]);
+    expect(analysis.waits.has('issue:281')).toBe(false); // #275 is closed, so the dependency is satisfied
+    expect([...analysis.startable].sort()).toEqual(['issue:280', 'issue:281', 'issue:284', 'issue:286']);
+    const explain = explainRow(rows.find((row: any) => row.number === 285), analysis);
+    expect(explain.why).toContain('Depends on #284');
+    expect(explain.why).toContain('§ Contracts');
+    expect(planNote(rows, analysis)).toBe('#285 waits for #284 (both edit § Contracts).');
+  });
+  it('flags unknown and cyclic dependencies without starting them', () => {
+    const rows = [
+      { key: 'issue:9', number: 9, title: 'A', units: [normalizeUnit('a.py')], deps: [999], state: 'open' },
+      { key: 'issue:10', number: 10, title: 'B', units: [normalizeUnit('b.py')], deps: [11], state: 'open' },
+      { key: 'issue:11', number: 11, title: 'C', units: [normalizeUnit('c.py')], deps: [10], state: 'open' },
+      { key: 'issue:12', number: 12, title: 'D', units: [normalizeUnit('a.py')], deps: [], state: 'open' },
+    ];
+    const analysis = analyzePlan(rows, new Map());
+    expect(analysis.waits.get('issue:9')).toEqual([{ dep: 999, state: 'unknown' }]);
+    expect(analysis.cycles.has('issue:10')).toBe(true);
+    expect(analysis.cycles.has('issue:11')).toBe(true);
+    expect([...analysis.startable].sort()).toEqual(['issue:12']);
+    expect(explainRow(rows[0], analysis).fix).toContain('Correct the number');
+    expect(explainRow(rows[1], analysis).why).toContain('loop back');
+  });
+  it('reads titles from spec files without trusting markup', () => {
+    const text = '# Batch\n\n- [ ] Discovery refresh\n- [x] Done already\n1. Ship it\n```\n- not a title\n```\n**Bold heading** is not a heading\n## Second task\n';
+    expect(specTitles(text)).toEqual(['Batch', 'Discovery refresh', 'Done already', 'Ship it', 'Second task']);
+  });
+});
+
+describe('Plan screen DOM', () => {
+  it('renders fixture issues with collisions, waits, and the startable count', () => {
+    const { section, rowFor, cell, doc } = mountPlanDom();
+    expect(section.querySelectorAll('tr[data-row-key]')).toHaveLength(5);
+    expect((doc.getElementById('plan-count') as HTMLElement).textContent).toBe('4 of 5');
+    expect((doc.getElementById('plan-note') as HTMLElement).textContent).toBe('#285 waits for #284 (both edit § Contracts).');
+    expect(cell(280).textContent).toBe('none');
+    expect(cell(281).textContent).toBe('none');
+    expect(cell(284).textContent).toBe('#285 · § Contracts');
+    expect(cell(285).textContent).toContain('waits #284');
+    expect(cell(285).textContent).toContain('#284 · § Contracts');
+    expect(cell(286).textContent).toBe('none');
+    expect(section.querySelector('task')).toBeNull();
+    expect((doc.getElementById('plan-sel-num') as HTMLElement).textContent).toBe('#280');
+    expect((doc.getElementById('plan-sel-why') as HTMLElement).textContent).toContain('Its units are free');
+    expect((doc.getElementById('plan-sel-fix') as HTMLElement).textContent).toBe('Nothing to do.');
+    (rowFor(285).querySelector('.plan-num') as HTMLButtonElement).click();
+    expect((doc.getElementById('plan-sel-num') as HTMLElement).textContent).toBe('#285');
+    expect((doc.getElementById('plan-sel-why') as HTMLElement).textContent).toContain('Depends on #284, still open.');
+    expect((doc.getElementById('plan-sel-why') as HTMLElement).textContent).toContain('Shares § Contracts with #284.');
+    expect((doc.getElementById('plan-sel-fix') as HTMLElement).textContent).toContain('#284 lands');
+    const publish = doc.getElementById('plan-publish') as HTMLButtonElement;
+    expect(publish.textContent).toBe('Publish 0 issues');
+    expect(publish.disabled).toBe(true);
+    expect((rowFor(280).querySelector('select') as HTMLSelectElement).value).toBe('m1');
+  });
+
+  it('edits rows, adds a draft, and publishes one batch with per-row errors', async () => {
+    const { section, doc, rowFor, cell, field, type, flush } = mountPlanDom();
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    let failPatch = false;
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+      requests.push({ url, init });
+      if (init.method === 'PATCH') {
+        if (failPatch) return new Response(JSON.stringify({ error: { code: 'STALE_VERSION', message: 'Issue moved', details: { currentVersion: 8 } } }), { status: 409 });
+        return new Response(JSON.stringify({ data: { number: 280, version: 4 } }));
+      }
+      return new Response(JSON.stringify({ data: { number: 290, version: 1 } }), { status: 201 });
+    }) as any;
+    try {
+      type(field(280, 'title'), 'D5 revised');
+      (doc.getElementById('plan-add') as HTMLButtonElement).click();
+      const draft = rowFor('new');
+      expect(draft).toBeTruthy();
+      type(field('new', 'title'), 'N5: alert digest');
+      type(field('new', 'units'), 'digest.py · § Contracts');
+      type(field('new', 'deps'), '#280');
+      type(field('new', 'milestone'), 'm1');
+      expect((doc.getElementById('plan-publish') as HTMLButtonElement).textContent).toBe('Publish 2 issues');
+      // The draft now collides with #284 and #285 over § Contracts before publishing.
+      expect(cell('new').textContent).toContain('§ Contracts');
+      failPatch = true;
+      (doc.getElementById('plan-publish') as HTMLButtonElement).click();
+      await flush(); await flush();
+      const patch = requests.find(request => request.init.method === 'PATCH')!;
+      expect(patch.url).toBe('/v1/repos/demo/issues/280');
+      expect(JSON.parse(String(patch.init.body))).toEqual({
+        expectedVersion: 3, title: 'D5 revised', labels: [], milestoneId: 'm1',
+        allowedFiles: ['refresh.py', '§ Storage and time'],
+      });
+      expect(new Headers(patch.init.headers).get('idempotency-key')).toBeTruthy();
+      const post = requests.find(request => request.init.method === 'POST')!;
+      expect(post.url).toBe('/v1/repos/demo/issues');
+      expect(JSON.parse(String(post.init.body))).toEqual({
+        title: 'N5: alert digest', body: '', labels: ['dep:280'], milestoneId: 'm1',
+        allowedFiles: ['digest.py', '§ Contracts'],
+      });
+      expect(cell(280).textContent).toContain('STALE_VERSION');
+      expect((doc.getElementById('plan-status') as HTMLElement).textContent).toContain('1 row needs attention');
+      // Row #280 keeps its edited title and error; the draft became issue #290.
+      expect(field(280, 'title').value).toBe('D5 revised');
+      expect(rowFor(290)).toBeTruthy();
+      failPatch = false;
+      (doc.getElementById('plan-publish') as HTMLButtonElement).click();
+      await flush(); await flush();
+      expect(JSON.parse(String(requests.filter(r => r.init.method === 'PATCH').at(-1)!.init.body)).expectedVersion).toBe(8);
+      expect(cell(280).textContent).not.toContain('STALE_VERSION');
+      expect((doc.getElementById('plan-status') as HTMLElement).textContent).toContain('Published 1 issue');
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  it('blocks invalid rows before any publish request', async () => {
+    const { doc, field, type, cell, flush } = mountPlanDom();
+    const requests: Array<{ url: string }> = [];
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => { requests.push({ url }); return new Response('{}'); }) as any;
+    try {
+      (doc.getElementById('plan-add') as HTMLButtonElement).click();
+      type(field('new', 'deps'), '#999');
+      (doc.getElementById('plan-publish') as HTMLButtonElement).click();
+      await flush();
+      expect(requests).toHaveLength(0);
+      expect(cell('new').textContent).toContain('Title is required');
+      type(field('new', 'title'), 'Orphan task');
+      (doc.getElementById('plan-publish') as HTMLButtonElement).click();
+      await flush();
+      expect(requests).toHaveLength(0);
+      expect(cell('new').textContent).toContain('#999, which is not an issue');
+      type(field('new', 'deps'), 'not-a-number');
+      (doc.getElementById('plan-publish') as HTMLButtonElement).click();
+      await flush();
+      expect(cell('new').textContent).toContain('issue numbers like #275');
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  it('shows empty, unavailable, loading, and read-only states honestly', () => {
+    const empty = structuredClone(planFixture) as any;
+    empty.data.projections.issues.items = [];
+    const emptyMount = mountPlanDom({ snapshot: () => empty });
+    expect(emptyMount.section.querySelector('.plan-empty')?.textContent).toContain('No issues yet');
+    expect((emptyMount.doc.getElementById('plan-count') as HTMLElement).textContent).toBe('0 of 0');
+    expect((emptyMount.doc.getElementById('plan-note') as HTMLElement).textContent).toBe('Add a row to plan the batch.');
+
+    const unavailable = structuredClone(planFixture) as any;
+    unavailable.data.projections.issues = { status: 'unavailable', items: [] };
+    const unavailableMount = mountPlanDom({ snapshot: () => unavailable });
+    expect((unavailableMount.doc.getElementById('plan-status') as HTMLElement).textContent).toContain('unavailable');
+
+    const loading = mountPlanDom({ snapshot: () => null });
+    expect((loading.doc.getElementById('plan-status') as HTMLElement).textContent).toBe('Loading issues…');
+    const noRepo = mountPlanDom({ snapshot: () => null, repoId: () => null });
+    expect((noRepo.doc.getElementById('plan-status') as HTMLElement).textContent).toContain('Choose a repository');
+
+    const viewer = mountPlanDom({ identity: () => ({ principalId: 'v', roles: ['viewer'], unverified: false }) });
+    const publish = viewer.doc.getElementById('plan-publish') as HTMLButtonElement;
+    expect(publish.disabled).toBe(true);
+    expect((viewer.doc.getElementById('plan-status') as HTMLElement).textContent).toContain('Read-only');
+    expect([...viewer.section.querySelectorAll('tr[data-row-key] input, tr[data-row-key] select')]
+      .every((field: any) => field.disabled)).toBe(true);
+  });
+
+  it('imports draft rows from spec files', async () => {
+    const { dom, section, doc, rowFor, flush } = mountPlanDom();
+    const file = new dom.window.File(['# Milestone work\n\n- [ ] First task\n- Second task'], 'spec.md', { type: 'text/markdown' });
+    const input = doc.getElementById('plan-files') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await flush(); await flush();
+    const titles = [...section.querySelectorAll('tr[data-row-key] input[id^="plan-title-"]')] as HTMLInputElement[];
+    expect(titles.map(field => field.value)).toContain('Milestone work');
+    expect(titles.map(field => field.value)).toContain('First task');
+    expect(titles.map(field => field.value)).toContain('Second task');
+    expect(rowFor('new')).toBeTruthy();
+    expect((doc.getElementById('plan-publish') as HTMLButtonElement).textContent).toBe('Publish 3 issues');
   });
 });

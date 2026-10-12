@@ -18,3 +18,43 @@
 .queue-evidence{grid-column:2 / -1;color:#b4bbc8;overflow-wrap:anywhere}.queue-history{border-top:1px solid #292f39;padding-top:9px}.queue-history summary{cursor:pointer;color:#b4bbc8}.queue-history .queue-row{margin-left:8px}
 .issue-card { padding: .7rem 0; border-bottom: 1px solid var(--line, #ddd); }
 .issue-card p { margin: .3rem 0 0; overflow-wrap: anywhere; }
+.plan-view{max-width:1440px;margin:0 auto;padding:24px 28px 48px}
+.plan-head{display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;margin-bottom:16px}
+.plan-head-text{flex:1 1 480px}
+.plan-head h1{margin:0;font-size:26px}
+.plan-head p{margin:6px 0 0;color:#b4bbc8;max-width:720px;line-height:1.5}
+.plan-actions{display:flex;gap:8px;flex-wrap:wrap}
+.plan-actions button{min-height:44px;border-radius:8px;padding:0 16px;border:1px solid #3a414d;color:#e7e9ee;background:#222832}
+.plan-status{min-height:20px;margin:0 0 12px;color:#f5c97a}
+.plan-grid{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.plan-table-wrap{flex:999 1 760px;min-width:0;background:#14181e;border:1px solid #2b313b;border-radius:12px;overflow-x:auto}
+.plan-table{width:100%;min-width:960px;border-collapse:collapse;font-size:13px}
+.plan-table th{text-align:left;color:#b4bbc8;background:#10141a;padding:10px 12px;font-weight:600}
+.plan-table td{padding:6px 8px;border-top:1px solid #23272f;vertical-align:top}
+.plan-table tr[data-selected=true]{background:#1a1f27}
+.plan-num{font:12px 'Geist Mono',monospace;color:#d4d9e2;background:none;border:1px solid #3a414d;border-radius:6px;min-width:44px;min-height:40px}
+.plan-table tr[data-selected=true] .plan-num{border-color:#f5a524;color:#f5c97a}
+.plan-label{position:absolute;left:-9999px}
+.plan-table input,.plan-table select{font:inherit;width:100%;box-sizing:border-box;padding:8px;min-height:40px;border:1px solid transparent;border-radius:6px;background:transparent;color:#e7e9ee}
+.plan-table input:focus,.plan-table select:focus{border-color:#3a414d;background:#0d0f12;outline:none}
+.plan-table input:disabled,.plan-table select:disabled{opacity:.6}
+.plan-mono{font-family:'Geist Mono',monospace;font-size:12px}
+.plan-collides{min-width:140px}
+.plan-col{display:inline-block;font-size:12px;padding:3px 8px;border-radius:999px;margin:2px 4px 2px 0}
+.plan-col-free{color:#7ee2a8}
+.plan-col-hit{background:#3a2a14;color:#f5c97a}
+.plan-row-error{display:block;color:#ff9b8f;font-size:12px;margin:2px 0}
+.plan-empty td{color:#b4bbc8;padding:14px 12px}
+.plan-addrow{padding:10px 12px;border-top:1px solid #23272f}
+.plan-addrow button{font:inherit;color:#8ab4ff;background:none;border:0;padding:10px 4px;min-height:44px}
+.plan-aside{flex:1 1 320px;max-width:420px;display:flex;flex-direction:column;gap:16px}
+.plan-card{background:#14181e;border:1px solid #2b313b;border-radius:12px;padding:16px}
+.plan-card h2{margin:0 0 4px;font-size:14px}
+.plan-count{font-size:40px;font-weight:700;font-family:'Geist Mono',monospace}
+.plan-count span{font-size:16px;font-weight:400;color:#b4bbc8}
+.plan-note{margin:4px 0 0;font-size:13px;color:#b4bbc8;line-height:1.5}
+.plan-numline{font-family:'Geist Mono',monospace;font-size:12px;color:#b4bbc8}
+.plan-card h2#plan-sel-title{font-size:16px;margin:2px 0 10px}
+.plan-why-label{font-size:12px;color:#b4bbc8;margin:12px 0 4px}
+.plan-why{margin:0;font-size:13px;line-height:1.5}
+@media(max-width:767px){.plan-view{padding:16px}.plan-head h1{font-size:22px}.plan-aside{flex-basis:100%;max-width:none}}
