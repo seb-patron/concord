@@ -11,6 +11,7 @@ import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
 import { ConcordClient } from '../../cli/client.ts';
 import { gitEnvironment } from '../../cli/git.ts';
 import { importRepo } from '../../cli/import.ts';
+import { mirrorGit } from '../../deploy/mirror.ts';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
@@ -43,6 +44,24 @@ async function fixture(root: string): Promise<{ source: string; sourceOid: strin
   await git(source, 'add', '.');
   await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'second');
   return { source, sourceOid: await git(source, 'rev-parse', 'HEAD') };
+}
+async function mergeFixture(root: string): Promise<{ source: string; sourceOid: string; ancestor: string }> {
+  const source = join(root, 'source');
+  await mkdir(source);
+  await git(source, 'init', '--quiet', '-b', 'main');
+  for (const name of ['families.tsv', 'dispatch.mjs', 'README.md']) {
+    await copyFile(join(cwd, 'demo/dispatch-lab', name), join(source, name));
+  }
+  await git(source, 'add', '.');
+  await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'first');
+  const ancestor = await git(source, 'rev-parse', 'HEAD');
+  await git(source, 'switch', '-c', 'feature');
+  await writeFile(join(source, 'feature.txt'), 'feature\n');
+  await git(source, 'add', 'feature.txt');
+  await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'feature');
+  await git(source, 'switch', 'main');
+  await git(source, '-c', 'core.hooksPath=/dev/null', 'merge', '--quiet', '--no-ff', 'feature', '-m', 'merge feature');
+  return { source, sourceOid: await git(source, 'rev-parse', 'HEAD'), ancestor };
 }
 async function partialClone(root: string, source: string, checkout = false): Promise<string> {
   const partial = join(root, 'partial');
@@ -122,6 +141,56 @@ async function stop(child: ChildProcess): Promise<void> {
     await closed;
   }
 }
+async function importWithLocalStack(root: string, source: string, extraArgs: string[]) {
+  const bridgePort = await port();
+  const workerPort = await port();
+  const url = `http://127.0.0.1:${workerPort}`;
+  const env = { ...process.env, TMPDIR: root, XDG_CONFIG_HOME: root, CONCORD_RUN_DIR: root,
+    CONCORD_URL: url, CONCORD_TOKEN: 'local-owner', CONCORD_SHOW_DECOMPILED_C: '0' };
+  const { profile, trustedConfig } = await prepareLocal(root);
+  const bridge = start(process.execPath, ['--import', 'tsx', 'local/git-bridge.ts'],
+    { ...env, CONCORD_BRIDGE_DATA_DIR: join(root, 'bridge'), CONCORD_BRIDGE_TOKEN: 'local-bridge-fixture-2026',
+      CONCORD_BRIDGE_PORT: String(bridgePort) });
+  await waitFor(async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`), Boolean, bridge.output);
+  const worker = start(wrangler, ['dev', '--config', 'wrangler.local.jsonc', '--port', String(workerPort),
+    '--persist-to', wranglerStateDir(root), '--var', 'STORAGE_BACKEND:bridge',
+    '--var', `BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=local-bridge-fixture-2026`,
+    '--var', `TRUSTED_CONFIG:${trustedConfig.trim()}`], { ...env, WRANGLER_SEND_METRICS: 'false' });
+  await waitFor(async () => (await fetch(url + '/health')).ok, Boolean, worker.output);
+  const args = ['cli/main.ts', 'import', '--source', source, '--ref', 'main', '--repo', 'adopted',
+    '--policy-id', 'dispatch-lab', '--profile-id', 'dispatch-lab', ...extraArgs];
+  const invocation = execFile(process.execPath, ['--import', 'tsx', ...args],
+    { cwd, env, timeout: 180_000, maxBuffer: 1024 * 1024 });
+  const api = async (path: string) => {
+    const response = await fetch(url + '/v1/repos/adopted' + (path ? '/' + path : ''),
+      { headers: { authorization: 'Bearer local-owner' } });
+    return response.ok ? response.json() as Promise<any> : null;
+  };
+  let finished = false;
+  invocation.finally(() => { finished = true; }).catch(() => {});
+  const until = Date.now() + 150_000;
+  const handled = new Set<string>();
+  while (!finished && Date.now() < until) {
+    const snapshot = await api('snapshot').catch(() => null);
+    const pending = snapshot?.data?.projections?.runners?.jobs?.find((job: any) =>
+      job.state === 'pending' && !handled.has(job.jobId));
+    if (pending) {
+      handled.add(pending.jobId);
+      const role = pending.kind === 'promote' ? 'promoter' : 'checker';
+      const runnerArgs = ['runner/main.ts', '--repo', 'adopted', '--role', role, '--once'];
+      if (role === 'checker') runnerArgs.push('--profile', profile.sourcePath!);
+      const run = await execFile(process.execPath, ['--import', 'tsx', ...runnerArgs],
+        { cwd, env: { ...env, CONCORD_TOKEN: `local-${role}`, CONCORD_PROFILE_DIGEST: profile.digest },
+          timeout: 40_000, maxBuffer: 1024 * 1024 });
+      expect(run.stdout).toContain('Completed 1 job(s)');
+    } else await new Promise(done => setTimeout(done, 150));
+  }
+  const first = await invocation;
+  const imported = JSON.parse(first.stdout) as { canonicalOid: string; treeOid: string };
+  const detail = (await api(''))?.data;
+  const canonical = join(root, 'bridge', detail.canonicalStorageName + '.git');
+  return { args, env, first, imported, detail, canonical };
+}
 afterEach(async () => {
   await Promise.all(children.splice(0).map(stop));
   await Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true })));
@@ -188,6 +257,17 @@ describe('adopted root import', () => {
     await git(source, 'add', 'link');
     await git(source, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'link');
     await expect(importRepo(options)).rejects.toThrow(/symlink/);
+  });
+
+  it('rejects exclusions with history mode as a CLI usage error', async () => {
+    const root = await temporary();
+    const { source } = await fixture(root);
+    const args = ['--import', 'tsx', 'cli/main.ts', 'import', '--source', source, '--ref', 'main',
+      '--repo', 'adopted', '--with-history', '--print-tree'];
+    for (const extra of [['--exclude', 'private/**'], ['--exclude-file', join(root, 'missing')]]) {
+      await expect(execFile(process.execPath, [...args, ...extra], { cwd, env: gitEnv, timeout: 30_000 }))
+        .rejects.toMatchObject({ code: 2, stderr: expect.stringMatching(/--with-history cannot be combined/) });
+    }
   });
 
   it('does not fetch unavailable blobs from a local promisor remote', async () => {
@@ -309,5 +389,32 @@ describe('adopted root import', () => {
     expect(await sourceState(source)).toEqual(beforeSource);
     expect(JSON.parse(second.stdout)).toMatchObject({ canonicalOid: imported.canonicalOid, reconciled: true });
     expect(await git(root, '--git-dir', canonical, 'rev-list', '--count', 'refs/heads/main')).toBe('1');
+  }, 210_000);
+
+  it('imports a three-commit merge unchanged and can mirror to an ancestor', async () => {
+    const root = await temporary();
+    const { source, sourceOid, ancestor } = await mergeFixture(root);
+    expect(await git(source, 'rev-list', '--count', sourceOid)).toBe('3');
+    expect((await git(source, 'rev-list', '--parents', '-n', '1', sourceOid)).split(' ')).toHaveLength(3);
+    const beforeSource = await sourceState(source);
+    const { args, env, first, imported, detail, canonical } = await importWithLocalStack(root, source, ['--with-history']);
+    expect(first.stderr).not.toContain('local-owner');
+    expect(imported.canonicalOid).toBe(sourceOid);
+    expect(detail.observedCanonicalOid).toBe(sourceOid);
+    expect(await git(root, '--git-dir', canonical, 'rev-list', '--count', 'refs/heads/main')).toBe('3');
+    expect(await git(root, '--git-dir', canonical, 'rev-parse', 'refs/heads/main')).toBe(sourceOid);
+    expect(await sourceState(source)).toEqual(beforeSource);
+    const second = await execFile(process.execPath, ['--import', 'tsx', ...args],
+      { cwd, env, timeout: 40_000, maxBuffer: 1024 * 1024 });
+    expect(JSON.parse(second.stdout)).toMatchObject({ canonicalOid: sourceOid, reconciled: true });
+
+    const destination = join(root, 'destination.git');
+    await git(root, 'init', '--quiet', '--bare', destination);
+    await git(source, 'push', destination, `${ancestor}:refs/heads/main`);
+    const input = { sourceRemote: pathToFileURL(canonical).href, sourceOid,
+      destinationRemote: pathToFileURL(destination).href };
+    expect(await mirrorGit(input)).toMatchObject({ destinationOid: ancestor, action: 'advance', executed: false });
+    expect(await mirrorGit({ ...input, execute: true })).toMatchObject({ destinationOid: ancestor, action: 'advance', executed: true });
+    expect(await git(root, '--git-dir', destination, 'rev-parse', 'refs/heads/main')).toBe(sourceOid);
   }, 210_000);
 });

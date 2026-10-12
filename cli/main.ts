@@ -25,7 +25,7 @@ Commands and required fields:
   principals list [--cursor CURSOR]
   principals revoke ID
   repo clone --repo ID --path PATH                 (read-only canonical clone)
-  import --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID [--exclude GLOB ...] [--exclude-file FILE] [--require-match] [--print-tree]
+  import --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID [--with-history] [--exclude GLOB ...] [--exclude-file FILE] [--require-match] [--print-tree]
   change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
   change get --repo ID --id ID
   change checkout --repo ID --id ID --worktree PATH
@@ -65,6 +65,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     options.help = { type: 'boolean' };
     options['print-tree'] = { type: 'boolean' };
     options['require-match'] = { type: 'boolean' };
+    options['with-history'] = { type: 'boolean' };
     options.verbose = { type: 'boolean' };
     options.tenant = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
@@ -97,7 +98,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       profileId: typeof flags['profile-id'] === 'string' ? flags['profile-id'] : undefined,
       excludes: Array.isArray(values.exclude) ? values.exclude : [], excludeFile: typeof flags['exclude-file'] === 'string' ? flags['exclude-file'] : undefined,
       requireMatch: values['require-match'] === true,
-      printTree, verbose: values.verbose === true }, printTree ? undefined : await clientFor(flags));
+      printTree, verbose: values.verbose === true, withHistory: values['with-history'] === true }, printTree ? undefined : await clientFor(flags));
     return print(result);
   }
   if (noun === 'api') {

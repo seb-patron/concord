@@ -142,7 +142,7 @@ export interface Page<T> { items: T[]; nextCursor: string | null }
 export interface MutationBody { expectedVersion?: number }
 export interface CreateRepoBody { name: string; policyId: Id; profileId: Id }
 export interface BootstrapBody extends MutationBody {
-  seedStorageName: string; seedRef: string; headOid: Oid; policyId: Id; profileId: Id;
+  seedStorageName: string; seedRef: string; headOid: Oid; policyId: Id; profileId: Id; withHistory?: boolean;
 }
 export interface CreateChangeBody {
   intentKey: string; intentText: string; baseOid: Oid | null; branch: string;

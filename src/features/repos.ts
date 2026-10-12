@@ -511,7 +511,8 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   const registered = list<Branch>(context, 'branches').find(item => item.storageName === seedStorageName && item.ref === seedRef && item.observedHead === headOid);
   if (!registered || await context.storage.resolveRef(seedStorageName, seedRef) !== headOid) fail(422, 'SEED_REF_MISMATCH', 'Registered seed ref does not match');
   const head = await context.storage.readCommit(seedStorageName, headOid);
-  if (!head || head.parents.length !== 0) fail(422, 'SEED_NOT_ROOT', 'Seed must be an existing root commit');
+  if (body.withHistory !== undefined && typeof body.withHistory !== 'boolean') fail(400, 'INVALID_INPUT', 'withHistory must be a boolean');
+  if (!head || (!body.withHistory && head.parents.length !== 0)) fail(422, 'SEED_NOT_ROOT', 'Seed must be an existing root commit');
   const policy = context.trusted.policies[repo.policyId];
   const profile = context.trusted.profiles[repo.profileId];
   const seedRemote = (await context.storage.info(seedStorageName))?.remote;
@@ -519,7 +520,7 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (!seedRemote || !canonicalRemote) fail(409, 'STORAGE_NOT_READY', 'Storage remote is not ready');
   const existing = context.state.get<BootstrapPending>('bootstrap');
   if (existing) {
-    if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
+    if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName || Boolean(existing.withHistory) !== Boolean(body.withHistory)) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
     if (existing.status === 'requested') return respond(context, { jobId: existing.jobId, state: 'requested' }, 202);
   }
   const jobId = existing?.jobId ?? crypto.randomUUID();
@@ -528,7 +529,7 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
     const requestDigest = await digest({ kind: 'ensure-repo', storageName: scratchStorageName });
     context.transaction(() => {
       if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
-      context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
+      context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, withHistory: body.withHistory === true, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
       saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
     });
   }
