@@ -55,6 +55,24 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('requests a bounded metrics window through the CLI', async () => {
+    const paths: string[] = [];
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      paths.push(request.url ?? '');
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ data: { changesLanded: { value: 2, n: 2, eventKinds: ['queue.promotion_applied'] } }, version: 3, eventSeq: 4 }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server unavailable');
+    try {
+      const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'metrics', '--repo', 'repo-1',
+        '--since', '2026-10-01T00:00:00.000Z', '--until', '2026-10-02T00:00:00.000Z'], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'viewer-token' },
+      });
+      expect(JSON.parse(result.stdout).data.changesLanded.value).toBe(2);
+      expect(paths).toEqual(['/v1/repos/repo-1/metrics?since=2026-10-01T00%3A00%3A00.000Z&until=2026-10-02T00%3A00%3A00.000Z']);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
   it('sends issue, milestone and linked change CLI commands', async () => {
     const calls: Array<{ method: string; path: string; body: any }> = [];
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {

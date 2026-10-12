@@ -1,6 +1,6 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
-  getSnapshot, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
+  getSnapshot, getMetrics, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
   redactError, setSessionToken, submitVerdict, withdrawChange,
 } from './api.js';
 import {
@@ -12,7 +12,7 @@ const $ = id => document.getElementById(id);
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
-  awaitingFreshSnapshot: false };
+  awaitingFreshSnapshot: false, metrics: null, metricsFetchedAt: 0 };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
 const node = (tag, value, className) => {
@@ -72,6 +72,7 @@ function signOut(message) {
   ++state.generation; clearSessionToken();
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
+  state.metrics = null; state.metricsFetchedAt = 0;
   state.observedVersions.clear();
   state.awaitingFreshSnapshot = false;
   state.selected = null; state.inboxSelected = null;
@@ -120,6 +121,7 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
   if (resetSelection) {
     state.snapshot = null; state.verdicts = {}; state.verdictErrors = {}; state.events = [];
     state.seq = 0; state.version = 0;
+    state.metrics = null; state.metricsFetchedAt = 0;
   }
   state.deskMessage = null;
   if (resetSelection) { state.selected = null; state.inboxSelected = null; }
@@ -210,6 +212,22 @@ async function poll(gen = state.generation) {
       if (gen !== state.generation || !acceptSnapshot(body, repoId)) return;
       await refreshVerdicts(gen);
     }
+    if (Date.now() - state.metricsFetchedAt >= 60_000) {
+      const day = new Date().toISOString().slice(0, 10);
+      const since = `${day}T00:00:00.000Z`;
+      const until = new Date(Date.parse(since) + 86_400_000).toISOString();
+      try {
+        const metrics = await getMetrics(state.repoId, since, until);
+        if (gen !== state.generation) return;
+        state.metrics = metrics.data?.changesLanded && metrics.data?.publishToLand &&
+          metrics.data?.leaseClaimsRefused && metrics.data?.automaticRebases &&
+          metrics.data?.approvalsCarriedByPatchId ? metrics.data : null;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        state.metrics = null;
+      }
+      state.metricsFetchedAt = Date.now();
+    }
     state.connected = true; render();
   } catch (error) {
     if (gen !== state.generation) return;
@@ -241,7 +259,13 @@ function renderStats() {
     stat('Agents working', working.size, 'active changes'),
     stat('Leases held', live.length, live.length ? `shortest ${leaseCountdown(live.reduce((a,b) => a.expiresAt < b.expiresAt ? a : b), Date.now()).text}` : 'no active leases'),
     stat('In queue', queued.length, 'ordered for checking'),
-    stat('Landed today', landed.length, 'from observed events'),
+    stat('Landed today', state.metrics?.changesLanded?.value ?? landed.length, state.metrics ? 'from repo metrics' : 'from observed events'),
+    ...(state.metrics ? [
+      stat('Median lead time', state.metrics.publishToLand.n ? `${Math.round(state.metrics.publishToLand.medianMs / 60000)}m` : '0m', `${state.metrics.publishToLand.n} landed changes`),
+      stat('Claims refused', state.metrics.leaseClaimsRefused.value, 'conflicts caught before edit'),
+      stat('Auto rebases', state.metrics.automaticRebases.value, 'recorded rebase events'),
+      stat('Approvals carried', state.metrics.approvalsCarriedByPatchId.value, 'patch-id evidence'),
+    ] : []),
     stat('Main', !state.repoId ? '0' : mainState, main ? `tip ${String(main).slice(0,9)}` : 'tip unavailable'),
   );
   const red = state.events.filter(e => e.kind === 'queue.diagnosis' && e.payload?.reason === 'BASE_RED' && new Date(e.timestamp).toDateString() === today).length;

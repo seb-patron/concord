@@ -34,3 +34,7 @@ Status: validated against current main `e868839`.
 # Issues and milestones
 
 Agents can use `issue_create` for repository inbox tasks, `issue_get` and `issue_list` for specs, `issue_close` for manual closure, and `milestone_list` for progress. `change_create` accepts `issueNumber`. The change and lease tools then return the link, and a lease conflict identifies the holder issue number and title. See the [issues API](api-issues.md).
+
+# Repository metrics
+
+`repo_metrics` reads event-derived flow metrics for `repoId`, `since`, and `until` (UTC ISO strings, at most 31 days). See [metrics API](api-metrics.md).
