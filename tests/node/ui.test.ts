@@ -16,7 +16,11 @@ const fixture = {
     ], repo: { observedCanonicalOid: 'main123' } },
     leases: { items: [{ leaseId: 'l1', changeId: 'x', holderId: 'agent-a', intentText: 'Protect retry path', unitKey: 'fn:retry', fence: 3, expiresAt: Date.now() + 120000, state: 'active' }],
       refusals: [{ changeId: 'x', requesterId: 'agent-c', keys: ['fn:retry'], createdAt: Date.now(), conflicts: [{ holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: Date.now() + 120000 }] }] },
-    queue: { entries: [{ changeId: 'y', state: 'blocked', sequence: 1 }], diagnosis: { reason: 'SINGLETON', blame: ['y'] }, observedMain: 'main123',
+    queue: { entries: [
+      { changeId: 'y', state: 'blocked', revision: 1, sequence: 41, blockedReason: 'CHECK_FAILED' },
+      { changeId: 'landed-id', state: 'landed', admittedRevision: 2, sequence: 42, blockedReason: null },
+      { changeId: 'withdrawn-id', state: 'withdrawn', admittedRevision: 3, sequence: 43, blockedReason: 'author request' },
+    ], diagnosis: { reason: 'SINGLETON', blame: ['y'] }, observedMain: 'main123',
       activeStackJobId: 'job-2', stackMembers: ['x', 'y'], diagnosticResults: [{ jobId: 'job-1', memberIds: ['x', 'y'], outcome: 'FAIL', sequence: 4 }] },
     findings: { findingSetVersions: { x: 0 }, findings: [
       { findingId: 'f1', changeId: 'x', status: 'open', unitKey: 'fn:retry', originRevision: 1, text: 'Retry evidence needs repair' },
@@ -100,9 +104,10 @@ describe('Fleet desk DOM', () => {
     let eventVersion = 7;
     let releaseSnapshot8: (() => void) | undefined;
     let delayNextSnapshot8 = true;
-    let mutationVersion = 8;
+    let mutationVersion = 7;
     let claimConflict = false;
     let interaction = false;
+    let changeStatus = 'ready';
     const history = [
       { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
       { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
@@ -131,7 +136,7 @@ describe('Fleet desk DOM', () => {
         else body = { ...fixture, version: snapshotVersion, data: { projections: {
           ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
             changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x'
-              ? { ...c, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c) },
+              ? { ...c, status: changeStatus, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c) },
           queue: interaction ? { ...fixture.data.projections.queue, diagnosis: { reason: 'INTERACTION', blame: ['x', 'y'] },
             diagnosticResults: [{ jobId: 'job-1', memberIds: ['x'], outcome: 'PASS', sequence: 4 },
               { jobId: 'job-2', memberIds: ['y'], outcome: 'PASS', sequence: 5 },
@@ -202,10 +207,20 @@ describe('Fleet desk DOM', () => {
       expect(byId('finding-list').textContent).toContain('Repair state: unresolved');
       expect(byId('runner-list').textContent).toContain('checker-1 (checker) · idle');
       expect(byId('runner-summary').textContent).toContain('checker-1');
-      expect(byId('lease-list').textContent).toContain('Intent: Protect retry path');
-      expect(byId('lease-list').textContent).toContain('Fence: 3');
-      expect(byId('lease-list').textContent).toContain('Expires:');
-      expect(byId('queue-tree').textContent).toContain('Stack job: job-2 · Members: x, y');
+      const activeLease = byId('lease-list').querySelector('.lease-row')!;
+      expect(activeLease.textContent).toContain('Intent: Protect retry path');
+      expect(activeLease.textContent).toContain('Change: x');
+      expect(activeLease.textContent).toContain('State: active');
+      expect(activeLease.textContent).toContain('Fence: 3');
+      expect(activeLease.textContent).toContain('Expires:');
+      expect(byId('queue-list').querySelector('.queue-row')?.textContent).toContain('Admitted revision: 1 · Sequence: 41 · Blocked reason: CHECK_FAILED');
+      expect(byId('queue-list').querySelector('.queue-row')?.textContent).toContain('blocked · culprit');
+      const queueHistory = byId('queue-list').querySelector('details')!;
+      expect(queueHistory.open).toBe(false);
+      expect(queueHistory.textContent).toContain('landed-id');
+      expect(queueHistory.textContent).toContain('withdrawn-id');
+      expect(queueHistory.textContent).toContain('Admitted revision: 3 · Sequence: 43 · Blocked reason: author request');
+      expect(byId('queue-tree').textContent).toContain('Active job: job-2 · Members: x, y');
       expect(byId('queue-tree').textContent).toContain('Diagnostic job job-1 · Members: x, y · Outcome: FAIL');
       expect(byId('replay-body').textContent).toContain('Historical simulation: unavailable');
       expect(byId('event-log').textContent).toContain('change.published by agent-a (v7)');
@@ -299,27 +314,32 @@ describe('Fleet desk DOM', () => {
       expect(byId('queue-list').textContent).toContain('Merge queue empty');
       expect(byId('main-footer').textContent).toContain('No repositories yet');
       expect(byId('inbox-alert').hidden).toBe(true);
-      // A poll can be waiting for v8 while a mutation refresh accepts v9.
+      // A mutation reports v9 before its refresh receives an older v8 snapshot.
       byId('token-clear').click();
       (byId('token-input') as HTMLInputElement).value = 'local-agent-a';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
-      eventVersion = 8; snapshotVersion = 8;
-      tick!(); await flush();
-      expect(releaseSnapshot8).toBeTypeOf('function');
-      // The mutation itself reports v9 while both the refresh and older poll still see v8.
-      mutationVersion = 9; eventVersion = 9;
+      snapshotVersion = 8; mutationVersion = 9;
       (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
-      const raceClaim = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Claim'))!;
-      raceClaim.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      const raceEnqueue = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
+      (raceEnqueue.querySelector('[name="verdictId"]') as HTMLInputElement).value = 'v101';
+      raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
+      expect(releaseSnapshot8).toBeTypeOf('function');
       releaseSnapshot8!(); await flush();
       expect(byId('work-board').textContent).toContain('Cap retries');
       expect(byId('work-board').textContent).not.toContain('Stale version 8');
-      snapshotVersion = 9;
-      raceClaim.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      expect((raceEnqueue.querySelector('button') as HTMLButtonElement).disabled).toBe(true);
+      const requestsBeforeRetry = requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST').length;
+      raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(requestsBeforeRetry);
+      snapshotVersion = 9; eventVersion = 9;
+      tick!(); await flush(); await flush();
+      expect((raceEnqueue.querySelector('button') as HTMLButtonElement).disabled).toBe(false);
+      raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
-      expect(byId('work-board').textContent).toContain('Current version 9');
+      expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(requestsBeforeRetry + 1);
       expect(byId('work-board').textContent).toContain('Current version 9');
       expect(byId('work-board').textContent).not.toContain('Stale version 8');
       interaction = true; snapshotVersion = 10; eventVersion = 10;
@@ -327,6 +347,18 @@ describe('Fleet desk DOM', () => {
       expect(byId('diagnosis').textContent).toContain('Interaction set failed together: x, y');
       expect(byId('queue-tree').textContent).toContain('Diagnostic job job-3 · Members: x, y · Outcome: FAIL');
       expect(byId('queue-tree').querySelectorAll('li.highlight')).toHaveLength(3);
+      const retainedClaim = byId('action-panel').querySelector('input[name="intentText"]') as HTMLInputElement;
+      retainedClaim.value = 'Unsubmitted lease intent';
+      tick!(); await flush();
+      expect(byId('action-panel').querySelector('input[name="intentText"]')).toBe(retainedClaim);
+      expect(retainedClaim.value).toBe('Unsubmitted lease intent');
+      changeStatus = 'merged'; snapshotVersion = 11; eventVersion = 11;
+      tick!(); await flush(); await flush();
+      expect(byId('detail-body').textContent).toContain('Status: merged');
+      expect(byId('action-panel').textContent).not.toContain('Claim');
+      expect(byId('action-panel').textContent).not.toContain('Enqueue');
+      expect(byId('action-panel').textContent).not.toContain('Submit verdict');
+      expect(byId('action-panel').querySelectorAll('form')).toHaveLength(0);
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
     } finally {
@@ -338,6 +370,13 @@ describe('Fleet desk DOM', () => {
 });
 
 describe('layout and token contract', () => {
+  it('documents the restored lease, queue, and action freshness fields', () => {
+    const guide = readFileSync(new URL('../../docs/ui.md', import.meta.url), 'utf8');
+    expect(guide).toContain('Active leases retain unit, change ID, state, holder');
+    expect(guide).toContain('admitted revision, backend sequence, and blocked reason');
+    expect(guide).toContain('including landed and withdrawn rows in a collapsed history');
+    expect(guide).toContain('Actions remain disabled after a newer mutation or event version');
+  });
   it('has a phone breakpoint, tabs, horizontal stat strip and 44px touch targets', () => {
     const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
     expect(css).toContain('@media(max-width:767px)');

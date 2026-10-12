@@ -25,6 +25,8 @@ const projections = () => state.snapshot?.data?.projections ?? {};
 const changes = () => snapshotCollections(state.snapshot).changes.items;
 const leases = () => projectionItems(projections().leases).items;
 const entries = () => projectionItems(projections().queue).items;
+const snapshotCurrent = () => !!state.snapshot && state.connected &&
+  state.snapshot.version >= (state.observedVersions.get(state.repoId) ?? 0);
 const roles = () => list(state.identity?.roles);
 const actions = () => state.identity?.unverified
   ? { claim: true, enqueue: true, withdraw: true, verdict: true }
@@ -124,17 +126,19 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
   try {
     const body = await getSnapshot(state.repoId);
     if (gen !== state.generation) return;
-    if (!acceptSnapshot(body, state.repoId)) return;
+    if (!acceptSnapshot(body, state.repoId)) { render(); return false; }
     state.connected = true;
     state.deskMessage = null;
     render();
     await Promise.allSettled([refreshVerdicts(gen), poll(gen)]);
+    return true;
   } catch (error) {
     if (gen !== state.generation) return;
     if (error.status === 401) return signOut('Sign in again: this token is invalid or expired.');
     state.deskMessage = error.status === 403 ? 'Your token cannot see this repository.' :
       `Snapshot unavailable (${redactError(error).code}).`;
     render();
+    return false;
   }
 }
 function observeVersion(repoId, version) {
@@ -189,6 +193,7 @@ async function poll(gen = state.generation) {
       if (gen !== state.generation) return;
       if (!Number.isSafeInteger(page?.version) || page.version < (state.observedVersions.get(repoId) ?? 0)) return;
       observeVersion(repoId, page.version);
+      render();
       const items = list(page?.data?.items);
       if (items.length === 0) break;
       const last = items.at(-1)?.sequence;
@@ -369,6 +374,7 @@ function renderLeases() {
   for (const lease of active) {
     const row=node('div',null,'lease-row');
     row.append(node('code',lease.unitKey),node('span',`Holder: ${lease.holderId ?? 'unknown'}`),
+      node('span',`Change: ${lease.changeId ?? 'unknown'}`),node('span',`State: ${lease.state ?? 'unknown'}`),
       node('span',`Intent: ${lease.intentText ?? 'not recorded'}`),node('span',`Fence: ${lease.fence ?? 'unknown'}`),
       node('span',`Expires: ${fmtTime(lease.expiresAt)} (${leaseCountdown(lease,Date.now()).text})`));
     box.append(row);
@@ -385,16 +391,25 @@ function renderQueue() {
   const box=$('queue-list'); box.replaceChildren();
   const diag=normalizeDiagnosis(projections().queue?.diagnosis);
   const active=entries().filter(e => !['withdrawn','landed'].includes(e.state));
-  active.forEach((entry,index)=>{
+  const historical=entries().filter(e => ['withdrawn','landed'].includes(e.state));
+  const renderEntry=(entry,index,parent)=>{
     const c=changeFor(entry.changeId);
     const row=node('div',null,'queue-row');
     const highlight=diag.ids.includes(entry.changeId);
     if (highlight) row.classList.add('highlight');
     row.append(node('span',index+1),node('span',c?.intentText ?? entry.changeId,'row-main'),
-      node('span',highlight ? diag.reason === 'SINGLETON' ? 'culprit' : 'failing set' : entry.state,highlight ? 'tone-red' : 'tone-green'));
-    box.append(row);
-  });
+      node('span',highlight ? `${entry.state} · ${diag.reason === 'SINGLETON' ? 'culprit' : 'failing set'}` : entry.state,highlight ? 'tone-red' : 'tone-green'));
+    row.append(node('span',`Change: ${entry.changeId} · Admitted revision: ${entry.admittedRevision ?? entry.revision ?? 'unknown'} · Sequence: ${entry.sequence ?? 'unknown'} · Blocked reason: ${entry.blockedReason ?? 'none'}`,'queue-evidence'));
+    parent.append(row);
+  };
+  active.forEach((entry,index)=>renderEntry(entry,index,box));
   if (!active.length) box.append(node('p','Merge queue empty. Approved changes enter through Enqueue.','muted'));
+  if (historical.length) {
+    const archive=node('details',null,'queue-history');
+    archive.append(node('summary',`Landed and withdrawn (${historical.length})`));
+    historical.forEach((entry,index)=>renderEntry(entry,index,archive));
+    box.append(archive);
+  }
   const labels={SINGLETON:'One change failed alone',INTERACTION:'Interaction set failed together',DEPENDENCY_GROUP:'Dependency group blocked',BASE_RED:'Main baseline failed',INCONCLUSIVE:'Diagnosis inconclusive'};
   $('diagnosis').textContent=diag.reason ? `${labels[diag.reason] ?? diag.reason}: ${diag.ids.join(', ') || 'no change blamed'}` : '';
   const tree=$('queue-tree'); tree.replaceChildren();
@@ -404,7 +419,7 @@ function renderQueue() {
   if (!members.length && !results.length && !queue.activeStackJobId) return;
   const heading=node('h3','Queue bisection tree'); tree.append(heading);
   const root=node('ul',null,'diagnostic-tree');
-  const stack=node('li',`Stack job: ${queue.activeStackJobId ?? 'none'} · Members: ${members.join(', ') || 'none'}`);
+  const stack=node('li',`Active job: ${queue.activeStackJobId ?? 'none'} · Members: ${members.join(', ') || 'none'}`);
   root.append(stack);
   const branches=node('ul'); stack.append(branches);
   for (const result of results) {
@@ -443,26 +458,45 @@ function addAction(target,label,handler,primary=false) {
   const b=node('button',label,primary?'primary':''); b.type='button'; b.addEventListener('click',handler); target.append(b);
 }
 function renderActions(target,change) {
-  if (change && target.dataset.changeId===change.changeId) return;
+  const eligibility = change ? {
+    enqueue: change.status==='ready' && actions().enqueue && canManage(change) && !!change.headOid,
+    claim: ['draft','ready'].includes(change.status) && actions().claim &&
+      (state.identity?.unverified || state.identity?.principalId===change.authorId),
+    withdraw: !['merged','withdrawn'].includes(change.status) && canWithdraw(change) &&
+      entries().some(e => e.changeId===change.changeId && !['withdrawn','landed'].includes(e.state)),
+    verdict: change.status==='ready' && actions().verdict && state.identity?.principalId !== change.authorId,
+  } : {};
+  const signature=JSON.stringify([change?.changeId ?? null,eligibility]);
+  if (target.dataset.actionSignature===signature && target.dataset.changeId===(change?.changeId ?? '')) {
+    for (const button of target.querySelectorAll('button')) button.disabled=!snapshotCurrent();
+    return;
+  }
+  const retained={};
+  if (target.dataset.changeId===change?.changeId) for (const form of target.querySelectorAll('form[data-action]')) {
+    retained[form.dataset.action]=Object.fromEntries([...form.elements].filter(el=>el.name).map(el=>[el.name,el.value]));
+  }
   target.replaceChildren();
   target.dataset.changeId=change?.changeId ?? '';
-  if (!change || !state.connected) return;
+  target.dataset.actionSignature=signature;
+  if (!change) return;
   const buttons=node('div',null,'action-buttons');
-  if (change.status==='ready' && actions().enqueue && canManage(change) && change.headOid) {
+  if (eligibility.enqueue) {
     const form=node('form',null,'action-form');
+    form.dataset.action='enqueue';
     const label=node('label','Approved verdict ID');
     const id=node('input'); id.name='verdictId'; id.required=true; id.placeholder='Verdict ID from reviewer';
+    id.value=retained.enqueue?.verdictId ?? '';
     label.append(id); form.append(label);
     const submit=node('button','Enqueue','primary'); submit.type='submit'; form.append(submit);
     form.addEventListener('submit',e=>{e.preventDefault();doEnqueue(changeFor(change.changeId) ?? change,id.value.trim());});
     target.append(form);
   }
-  if (['draft','ready'].includes(change.status) && actions().claim &&
-    (state.identity?.unverified || state.identity?.principalId===change.authorId)) {
+  if (eligibility.claim) {
     const form=node('form',null,'action-form');
-    const units=node('input'); units.name='unitKeys'; units.required=true; units.value=list(change.unitKeys).join(', ');
+    form.dataset.action='claim';
+    const units=node('input'); units.name='unitKeys'; units.required=true; units.value=retained.claim?.unitKeys ?? list(change.unitKeys).join(', ');
     const intent=node('input'); intent.name='intentText'; intent.required=true; intent.maxLength=2000;
-    intent.value=change.intentText ?? '';
+    intent.value=retained.claim?.intentText ?? change.intentText ?? '';
     for (const [title,input] of [['Unit keys (comma separated)',units],['Claim intent',intent]]) {
       const label=node('label',title); label.append(input); form.append(label);
     }
@@ -470,14 +504,18 @@ function renderActions(target,change) {
     form.addEventListener('submit',e=>{e.preventDefault();doClaim(changeFor(change.changeId) ?? change,units.value,intent.value);});
     target.append(form);
   }
-  if (canWithdraw(change) && entries().some(e => e.changeId===change.changeId && !['withdrawn','landed'].includes(e.state))) addAction(buttons,'Withdraw',()=>doWithdraw(changeFor(change.changeId) ?? change));
+  if (eligibility.withdraw) addAction(buttons,'Withdraw',()=>doWithdraw(changeFor(change.changeId) ?? change));
   target.append(buttons);
-  if (change.status==='ready' && actions().verdict && state.identity?.principalId !== change.authorId) {
+  if (eligibility.verdict) {
     const form=node('form',null,'action-form');
+    form.dataset.action='verdict';
     const decision=node('select'); decision.name='decision';
     for(const v of ['approve','reject']) {const o=node('option',v); o.value=v; decision.append(o);}
+    decision.value=retained.verdict?.decision ?? 'approve';
     const manifest=node('input'); manifest.name='manifest'; manifest.required=true; manifest.placeholder='sha256:…';
     const evidence=node('input'); evidence.name='evidence'; evidence.required=true; evidence.placeholder='sha256:…';
+    manifest.value=retained.verdict?.manifest ?? '';
+    evidence.value=retained.verdict?.evidence ?? '';
     for(const [label,input] of [['Decision',decision],['Review manifest digest',manifest],['Evidence digest',evidence]]) {
       const wrapper=node('label',label); wrapper.append(input); form.append(wrapper);
     }
@@ -485,6 +523,7 @@ function renderActions(target,change) {
     form.addEventListener('submit',e=>{e.preventDefault(); void doVerdict(changeFor(change.changeId) ?? change,decision.value,manifest.value,evidence.value);});
     target.append(form);
   }
+  for (const button of target.querySelectorAll('button')) button.disabled=!snapshotCurrent();
 }
 function renderDetail() {
   const change=changeFor(state.selected);
@@ -563,12 +602,14 @@ function selectChange(id) {
 }
 function mutationStatus(message) { $('mutation-status').textContent=message; }
 async function mutate(label,call) {
-  if (!state.connected || !state.snapshot) return mutationStatus('Current snapshot is unavailable. Refresh before acting.');
+  if (!snapshotCurrent()) return mutationStatus('Current snapshot is unavailable. Refresh before acting.');
   const gen=state.generation; const repoId=state.repoId; mutationStatus(`${label}…`);
   try {
     const response=await call(); if(gen!==state.generation)return;
     observeVersion(repoId,response?.version);
-    await loadRepo(gen,false); mutationStatus(`${label}: accepted.`);
+    render();
+    const refreshed=await loadRepo(gen,false);
+    mutationStatus(refreshed ? `${label}: accepted.` : `${label}: accepted; waiting for a current snapshot.`);
   } catch(error) {
     if(gen!==state.generation)return;
     const refusal=redactError(error);
