@@ -949,6 +949,13 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
     failRecord(context, state, record, 'ENVIRONMENT_FAILURE');
     return;
   }
+  if (result.outcome === 'GENERATOR_FAILED' || result.outcome === 'GENERATOR_NONDETERMINISTIC') {
+    state.blockedReason = result.outcome;
+    emit(context, 'queue.generator_finding', record.memberIds, { jobId: result.jobId,
+      code: result.outcome, log: result.log });
+    failRecord(context, state, record, result.outcome);
+    return;
+  }
   if (result.kind !== 'validate-stack') return;
   await processStackResult(context, state, record, result, main);
 }

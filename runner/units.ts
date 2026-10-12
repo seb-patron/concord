@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
 import { compareKeys, trustedDependencyKeys } from '../src/verdicts/manifest';
-import { matchesTableKey, patternRow, prefixFileUnit, tableForFile, type TsvTable } from '../src/leases/units';
+import { declaredGenerators, generatorForFile, matchesTableKey, patternRow, prefixFileUnit, tableForFile, type TsvTable } from '../src/leases/units';
+import type { GeneratedOutput } from './generators';
 import { command, git, MAX_INSPECTED_BLOB_BYTES, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
@@ -79,7 +80,7 @@ async function changedPaths(repo: string, base: string | null, head: string): Pr
 }
 
 export async function inspectUnits(repo: string, base: string | null, head: string, job: Job,
-  maxInspectedBlobBytes = MAX_INSPECTED_BLOB_BYTES): Promise<{ unitKeys: string[]; manifest: ReviewManifest; digest: Digest }> {
+  maxInspectedBlobBytes = MAX_INSPECTED_BLOB_BYTES, generatedOutputs: GeneratedOutput[] = []): Promise<{ unitKeys: string[]; manifest: ReviewManifest; digest: Digest }> {
   if (!Number.isSafeInteger(maxInspectedBlobBytes) || maxInspectedBlobBytes < 1 || maxInspectedBlobBytes > MAX_INSPECTED_BLOB_BYTES)
     throw new Error('INVALID_INSPECTION_LIMIT');
   const policy: TrustedPolicy = job.unitPolicy;
@@ -87,6 +88,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
   let coverage: 'complete' | 'unknown' = 'complete';
   const paths = await changedPaths(repo, base, head);
   for (const path of paths) {
+    if (generatorForFile(policy, path)) continue;
     const before = await content(repo, base, path, maxInspectedBlobBytes);
     const after = await content(repo, head, path, maxInspectedBlobBytes);
     const beforeMode = await mode(repo, base, path);
@@ -150,7 +152,8 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     }
   }
   const common = { changedUnits: evidence, policyVersion: policy.version, policyDigest: job.policyDigest,
-    checkerDigest: job.checkerDigest, oracleDigest: job.oracleDigest, toolchainDigest: job.toolchainDigest };
+    checkerDigest: job.checkerDigest, oracleDigest: job.oracleDigest, toolchainDigest: job.toolchainDigest,
+    ...(declaredGenerators(policy).length ? { generatedOutputs } : {}) };
   const manifest: ReviewManifest = coverage === 'complete'
     ? { ...common, coverage, dependencyScope }
     : { ...common, coverage: 'unknown', dependencyScope: [{ kind: 'tree', treeOid: await treeOid(repo, head) }] };

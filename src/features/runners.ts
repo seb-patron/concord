@@ -311,7 +311,8 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
     value.oracleDigest !== job.oracleDigest || value.environmentDigest !== job.environmentDigest ||
     typeof value.log !== 'string' || new TextEncoder().encode(value.log).length > Math.min(16 * 1024, job.maxOutputBytes) ||
     !Number.isSafeInteger(value.durationMs) || value.durationMs < 0) throw new HttpError(400, 'INVALID_RESULT', 'Result identity or evidence invalid');
-  const checkOutcomes = ['PASS', 'FAIL', 'MATCH', 'MISMATCH', 'COMPILE_ERROR', 'UNVERIFIED_TARGET', 'ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT'];
+  const checkOutcomes = ['PASS', 'FAIL', 'MATCH', 'MISMATCH', 'COMPILE_ERROR', 'UNVERIFIED_TARGET', 'ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT',
+    'GENERATOR_FAILED', 'GENERATOR_NONDETERMINISTIC'];
   if (value.kind === 'promote' ? !['APPLIED', 'OLD_REF', 'THIRD_REF', 'ENV_ERROR'].includes(value.outcome) :
     !checkOutcomes.includes(value.outcome)) throw new HttpError(400, 'INVALID_RESULT', 'Unknown result outcome');
   if (value.kind === 'validate-stack' && (!Array.isArray(value.gateResults) || value.bootstrap !== (job.kind === 'validate-stack' && job.bootstrap) ||
@@ -360,7 +361,7 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
     }
   }
   if (value.kind === 'validate-stack' && job.kind === 'validate-stack' && !job.bootstrap && job.baseCheck &&
-    (value.composedOid !== null || !['ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT'].includes(value.outcome))) {
+    (value.composedOid !== null || !['ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT', 'GENERATOR_FAILED', 'GENERATOR_NONDETERMINISTIC'].includes(value.outcome))) {
     const canonicalName = Object.keys(job.expectedRefs).find(name => name !== job.scratchStorageName);
     if (value.composedOid !== job.canonicalBaseOid || value.composedTreeOid !== value.sourceTreeOid || !canonicalName)
       identityConflict(job, 'stack-base', 'different-value');
@@ -379,7 +380,8 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
     const scratchRef = await visibleRef(c.storage, stack.scratchStorageName, stack.scratchRef, composedOid);
     if (scratchRef !== composedOid) identityConflict(job, 'stack-scratch-ref', oidVisibility(scratchRef));
     if (stack.bootstrap) {
-      if (composedOid !== stack.candidates[0].headOid) identityConflict(job, 'stack-bootstrap-head', 'different-oid');
+      const bootstrapAncestry = await ancestor(c.storage, stack.scratchStorageName, stack.candidates[0].headOid, composedOid);
+      if (bootstrapAncestry !== 'found') identityConflict(job, 'stack-bootstrap-head', bootstrapAncestry);
     } else if (!stack.baseCheck) {
       const baseAncestry = await ancestor(c.storage, stack.scratchStorageName, stack.canonicalBaseOid, composedOid);
       if (baseAncestry !== 'found') identityConflict(job, 'stack-ancestry', baseAncestry);

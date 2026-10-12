@@ -1,11 +1,13 @@
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '../src/contracts';
 import { digest } from '../src/http';
 import { compareKeys } from '../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
-import { tableForFile } from '../src/leases/units';
+import { declaredGenerators, generatorForFile, tableForFile } from '../src/leases/units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
+import { commitGenerated, regenerate, type GeneratedOutput } from './generators';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
 const tailLog = (value: string, cap: number): string => {
@@ -54,7 +56,7 @@ async function fetchInput(directory: string, job: Job, name: string, oid: string
   await fetchOid(directory, item.remote, oid, await gitCredentialEnvironment(directory, item.secret));
 }
 
-async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
+async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job, profile: LocalProfile): Promise<string> {
   await git(directory, ['switch', '--detach', base]);
   const env = childEnvironment({ GIT_AUTHOR_NAME: 'Concord Runner', GIT_AUTHOR_EMAIL: 'runner@concord.invalid',
     GIT_COMMITTER_NAME: 'Concord Runner', GIT_COMMITTER_EMAIL: 'runner@concord.invalid',
@@ -68,6 +70,12 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
     const conflicts = (await git(directory, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
     if (!conflicts.length) throw new Error('MERGE_CONFLICT');
     for (const path of conflicts) {
+      if (generatorForFile(job.unitPolicy, path)) {
+        const present = await git(directory, ['ls-tree', 'HEAD', '--', path]);
+        if (present) await git(directory, ['restore', '--source=HEAD', '--staged', '--worktree', '--', path]);
+        else await git(directory, ['rm', '-f', '--', path]);
+        continue;
+      }
       const table = tableForFile(job.unitPolicy, path);
       if (!table) throw new Error('MERGE_CONFLICT');
       const stages = await git(directory, ['ls-files', '--stage', '--', path]);
@@ -84,7 +92,24 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
     }
     await git(directory, ['commit', '--no-edit'], 60_000, env);
   }
+  if (inputs.length) {
+    await regenerate(directory, job.unitPolicy, profile, job.maxOutputBytes);
+    return commitGenerated(directory, job.unitPolicy);
+  }
   return git(directory, ['rev-parse', 'HEAD']);
+}
+
+/** Delta review records the candidate's derived digest while checking the new combined tree. */
+async function candidateGenerated(directory: string, job: Job, profile: LocalProfile, head: string): Promise<GeneratedOutput[]> {
+  if (!declaredGenerators(job.unitPolicy).length) return [];
+  await git(directory, ['switch', '--detach', head]);
+  const generated = await regenerate(directory, job.unitPolicy, profile, job.maxOutputBytes);
+  for (const path of declaredGenerators(job.unitPolicy).flatMap(entry => entry.outputs)) {
+    const tracked = await command('git', ['ls-files', '--error-unmatch', '--', path], directory, 30_000);
+    if (tracked.code === 0) await git(directory, ['restore', '--source=HEAD', '--staged', '--worktree', '--', path]);
+    else await rm(resolve(directory, path), { force: true });
+  }
+  return generated;
 }
 
 async function runGates(profile: LocalProfile, job: Job, directory: string): Promise<{ outcome: CheckOutcome; gates: StackResult['gateResults']; log: string; score: StackResult['score'] }> {
@@ -148,7 +173,9 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     if (candidate.baseOid) await fetchInput(directory, job, name, candidate.baseOid, fetchTokens);
     const actual = await git(directory, ['rev-parse', candidate.headOid + '^{commit}']);
     if (candidate.baseOid && !await isAncestor(directory, candidate.baseOid, actual)) throw new Error('CANDIDATE_ANCESTRY');
-    const inspected = await inspectUnits(directory, candidate.baseOid, actual, job);
+    await git(directory, ['switch', '--detach', actual]);
+    const generated = await regenerate(directory, job.unitPolicy, profile!, job.maxOutputBytes);
+    const inspected = await inspectUnits(directory, candidate.baseOid, actual, job, undefined, generated);
     // A command profile validates the inspected tree as well as composed stacks.
     // Dispatch-lab inspection retains its existing manifest-only behavior.
     let outcome: CheckOutcome = 'PASS';
@@ -172,6 +199,8 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
       await fetchInput(directory, job, seed.seedStorageName, seed.headOid, fetchTokens);
       composed = seed.headOid;
       await git(directory, ['switch', '--detach', composed]);
+      await regenerate(directory, job.unitPolicy, profile, job.maxOutputBytes);
+      composed = await commitGenerated(directory, job.unitPolicy);
     } else {
       checkOid(job.canonicalBaseOid);
       const candidates = new Set(job.candidates.map(candidate => candidate.storageName));
@@ -183,7 +212,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
         await fetchInput(directory, job, candidate.storageName, candidate.baseOid, fetchTokens);
         await fetchInput(directory, job, candidate.storageName, candidate.headOid, fetchTokens);
       }
-      composed = await compose(directory, job.canonicalBaseOid, job.candidates, job);
+      composed = await compose(directory, job.canonicalBaseOid, job.candidates, job, profile);
       if (job.baseCheck && composed !== job.canonicalBaseOid) throw new Error('BASE_CHECK_IDENTITY');
     }
     composed = await reconcileScratch(directory, job, composed, provide);
@@ -209,8 +238,9 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     await fetchInput(directory, job, baseName, job.newBaseOid, fetchTokens);
     await fetchInput(directory, job, job.candidate.storageName, job.candidate.baseOid, fetchTokens);
     await fetchInput(directory, job, job.candidate.storageName, job.candidate.headOid, fetchTokens);
-    const composed = await compose(directory, job.newBaseOid, [job.candidate], job);
-    const inspected = await inspectUnits(directory, job.newBaseOid, composed, job);
+    const generated = await candidateGenerated(directory, job, profile, job.candidate.headOid);
+    const composed = await compose(directory, job.newBaseOid, [job.candidate], job, profile);
+    const inspected = await inspectUnits(directory, job.newBaseOid, composed, job, undefined, generated);
     const checked = inspected.manifest.coverage === 'complete' ? await runAffected(profile, job, directory, inspected.unitKeys) :
       { outcome: 'UNVERIFIED_TARGET' as CheckOutcome, log: 'Unknown review dependency scope' };
     return { ...common, kind: 'delta-check', outcome: checked.outcome, sourceTreeOid: await treeOid(directory, composed),
@@ -259,7 +289,9 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
     value = await withJobDeadline(began + job.timeoutMs, () => temporaryWork(directory => executeIn(directory, job, profile, tracked)));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown runner failure';
-    const outcome = message.includes('MERGE_CONFLICT') || message.includes('TSV_COLLISION') || message.includes('INVALID_TSV') ? 'MERGE_CONFLICT' :
+    const outcome = message.includes('GENERATOR_NONDETERMINISTIC') ? 'GENERATOR_NONDETERMINISTIC' :
+      message.includes('GENERATOR_FAILED') ? 'GENERATOR_FAILED' :
+      message.includes('MERGE_CONFLICT') || message.includes('TSV_COLLISION') || message.includes('INVALID_TSV') ? 'MERGE_CONFLICT' :
       message.includes('TIMEOUT') ? 'TIMEOUT' : 'ENV_ERROR';
     const common = { jobId: job.jobId, attempt: job.attempt, inputDigest: job.inputDigest, fence: job.fence,
       checkerDigest: job.checkerDigest, toolchainDigest: job.toolchainDigest, oracleDigest: job.oracleDigest,

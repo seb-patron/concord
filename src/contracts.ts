@@ -128,6 +128,8 @@ export interface TrustedPolicy {
   /** Owner-declared TSV row namespaces. These are never supplied by a change author. */
   tables?: Array<{ name: string; file: string; header: string[]; keyColumn: string;
     keySpec: { charset: 'lower' | 'alnum' | 'alnum-dash-dot' | string[]; minLength: number; maxLength: number } }>;
+  /** Derived files are owned by the runner. The command names an argv entry in the trusted profile. */
+  generators?: Array<{ id: string; outputs: string[]; command: string }>;
   checkerId: string; checkerDigest: Digest;
   acceptance: AcceptancePolicy;
 }
@@ -246,7 +248,7 @@ export interface BootstrapPromoteJob extends JobBase {
 }
 export type PromoteJob = OrdinaryPromoteJob | BootstrapPromoteJob;
 export type Job = InspectCandidateJob | ValidateStackJob | DeltaCheckJob | PromoteJob;
-export type CheckOutcome = 'PASS' | 'FAIL' | 'MATCH' | 'MISMATCH' | 'COMPILE_ERROR' | 'UNVERIFIED_TARGET' | 'ENV_ERROR' | 'MERGE_CONFLICT' | 'TIMEOUT';
+export type CheckOutcome = 'PASS' | 'FAIL' | 'MATCH' | 'MISMATCH' | 'COMPILE_ERROR' | 'UNVERIFIED_TARGET' | 'ENV_ERROR' | 'MERGE_CONFLICT' | 'TIMEOUT' | 'GENERATOR_FAILED' | 'GENERATOR_NONDETERMINISTIC';
 export interface ChangedUnitEvidence {
   unitKey: string; beforePath: string | null; afterPath: string | null;
   beforeMode: string | null; afterMode: string | null;
@@ -259,6 +261,7 @@ export interface TreeDependencyScopeEntry { kind: 'tree'; treeOid: Oid }
 export type DependencyScopeEntry = UnitDependencyScopeEntry | TreeDependencyScopeEntry;
 export interface ReviewManifestBase {
   changedUnits: ChangedUnitEvidence[];
+  generatedOutputs?: Array<{ id: string; outputDigest: Digest }>;
   policyVersion: number; policyDigest: Digest; checkerDigest: Digest;
   oracleDigest: Digest; toolchainDigest: Digest;
 }

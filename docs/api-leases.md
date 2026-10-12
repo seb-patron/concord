@@ -18,6 +18,14 @@ An owner can also declare TSV tables in trusted policy metadata:
 
 The header is an exact ordered column list. `keyColumn` names one header column. `keySpec` matches the entire key, character by character, with `minLength` at least 1 and `maxLength` at most 256. `charset` is `lower`, `alnum`, `alnum-dash-dot`, or an explicit list of unique printable nonspace ASCII characters. Regular expressions and other fields are rejected. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Non-TSV changes use the file footprint.
 
+An owner can declare derived files in the digest-covered policy template:
+
+```json
+"generators": [{ "id": "counts", "outputs": ["tests/counts.txt"], "command": "count-tests" }]
+```
+
+Each output is an exact repository-relative file path, owned by one generator. The command ID must occur in the runner's owner-installed `generatorCommands` argv allowlist. A generator also resolves as `gen:<id>` for unit identity; its footprint covers all of its outputs. Agents editing generator inputs claim only their source units. They need no lease on generated outputs, and candidate edits to outputs are ignored when the runner regenerates the combined tree. The reviewed manifest omits generated outputs from its write footprint and records the generator ID and output digest. The owner file-unit generator requires every output to exist in the canonical tree or in an owner-approved planned path list.
+
 ### Owner file-unit policy generation
 
 An owner may add `"newFilePrefixes": ["src/mother_base/", "tests/"]` to the template or pass a repeatable `--allow-new-under DIR/` flag. Prefixes are normalized relative directories ending in `/`, sorted in the generated policy, and covered by its digest. The generator does not list future files as units. At claim and inspection time, an unregistered `file:<path>` under an approved prefix resolves to a whole-file unit for that exact path. Registered units keep their identity. Claims for the same new path conflict; distinct paths can be leased separately. Paths outside approved prefixes return `UNKNOWN_UNIT`. Use the same flags for generation and read-back comparison. A policy without prefixes retains its existing shape and digest.

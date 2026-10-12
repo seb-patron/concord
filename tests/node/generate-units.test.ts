@@ -64,6 +64,18 @@ beforeEach(() => {
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
 describe('owner file-unit generator', () => {
+  it('covers generator declarations in the policy digest and requires approved output paths', () => {
+    const generators = [{ id: 'counts', outputs: ['derived/counts.txt'], command: 'count' }];
+    writeFileSync(template, JSON.stringify({ ...baseTemplate, generators }));
+    const missing = run(['--oid', oid]);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain('UNAPPROVED_GENERATOR_OUTPUT');
+    const approved = generated(['--oid', oid, '--allow-path', 'derived/counts.txt']);
+    expect(approved.policy.generators).toEqual(generators);
+    const { digest, ...preimage } = approved.policy;
+    expect(digest).toBe(`sha256:${createHash('sha256').update(canonicalJson(preimage)).digest('hex')}`);
+  });
+
   it('is deterministic, hashes policy alone and preserves declared rows and tables', () => {
     const a = run(['--oid', oid, '--allow-path', 'new/one.txt', '--allow-path', 'new/two.rs']);
     const b = run(['--oid', oid, '--allow-path', 'new/two.rs', '--allow-path', 'new/one.txt']);
