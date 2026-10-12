@@ -6,6 +6,7 @@ import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCred
 import { git, gitBytes, patchId, rejectCanonicalTarget, validateRemote } from './git.ts';
 import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
+import { changeByIntent, leaseCovers } from './start.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
@@ -248,16 +249,26 @@ export async function land(input: LandOptions): Promise<Obj> {
   const repository = (await api(client, root)).data;
   if (!repository.observedCanonicalOid || !sha.test(repository.observedCanonicalOid)) throw new ConcordError('canonical main is unavailable', 'server');
   const initialSnapshot = (await api(client, `${root}/snapshot`)).data;
-  const policy = (initialSnapshot.projections?.runners?.jobs ?? []).map((job: Obj) => job.unitPolicy)
+  const policy = initialSnapshot.projections?.repos?.unitPolicy ?? (initialSnapshot.projections?.runners?.jobs ?? []).map((job: Obj) => job.unitPolicy)
     .find((item: Obj | undefined) => item?.digest === repository.policyDigest);
   const units = await unitKeys(source, changed.parent, commit, changed.files, policy);
   if (units.length > 16) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${units.length} units > 16; split the change`, 'usage');
   const branch = `refs/heads/land/${hash(intentKey).slice(7, 23)}`;
   const createBody = { intentKey, intentText: intent, baseOid: repository.observedCanonicalOid, branch, unitKeys: units, dependencyChangeIds: options.dependsOn ?? [] };
-  let created = (await api(client, `${root}/changes`, createBody)).data;
+  let started: Obj | undefined;
+  let created: Obj;
+  try { created = (await api(client, `${root}/changes`, createBody)).data; }
+  catch (error) {
+    if (!(error instanceof ConcordError) || (error.payload as Obj)?.error?.code !== 'INTENT_CONFLICT') throw error;
+    started = await changeByIntent(client, root, intentKey);
+    if (!started || started.intentText !== intent || started.branch !== branch ||
+        JSON.stringify([...(started.dependencyChangeIds ?? [])].sort()) !== JSON.stringify([...(options.dependsOn ?? [])].sort())) throw error;
+    created = started;
+  }
   while (created.provisioning?.state !== 'observed' && Date.now() < deadline) {
     await pause(1000);
-    created = (await api(client, `${root}/changes`, createBody)).data;
+    created = started ? (await api(client, `${root}/changes/${encodeURIComponent(started.changeId)}`)).data :
+      (await api(client, `${root}/changes`, createBody)).data;
   }
   if (created.provisioning?.state !== 'observed') throw new ConcordError('FORK_TIMEOUT: candidate fork was not provisioned', 'server');
   const changeId = required(created.changeId, 'changeId'); const path = `${root}/changes/${encodeURIComponent(changeId)}`;
@@ -266,7 +277,8 @@ export async function land(input: LandOptions): Promise<Obj> {
   const alreadyQueued = (existingQueue.entries ?? []).some((item: Obj) => item.changeId === changeId &&
     ['admitted', 'reserved', 'checking', 'landed'].includes(item.state));
   let held: Obj[] = [];
-  const refresh = async () => { held = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active' && units.includes(item.unitKey)); };
+  const refresh = async () => { held = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active' &&
+    units.some(unit => leaseCovers(item.unitKey, unit, policy))); };
   const renew = async () => {
     await refresh();
     for (const item of held.filter(value => value.remainingSeconds < 60)) {
@@ -275,15 +287,19 @@ export async function land(input: LandOptions): Promise<Obj> {
     }
   };
   const fences = () => Object.fromEntries(held.map(item => [item.unitKey, item.fence]));
+  let awaitingReview = false;
+  let adoptedLease = false;
+  let firstLeaseRead = true;
   try {
     let attempt = 0;
     while (!alreadyQueued) {
       await refresh();
-      const missing = units.filter(unit => !held.some(item => item.unitKey === unit));
+      if (firstLeaseRead) { adoptedLease = held.length > 0; firstLeaseRead = false; }
+      const missing = units.filter(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy)));
       if (!missing.length) break;
       try {
         const result = (await api(client, `${root}/leases`, { changeId, unitKeys: missing, intentText: intent, ttlSeconds: 300 }, await currentVersion(client, root))).data;
-        held.push(...result.leases); emit({ state: 'leased', unitKeys: result.leases.map((item: Obj) => item.unitKey) });
+        held.push(...result.leases); emit({ state: 'leased', unitKeys: result.leases.map((item: Obj) => item.unitKey), missingUnits: missing });
       } catch (error) {
         if (!(error instanceof ConcordError)) throw error;
         const code = (error.payload as Obj)?.error?.code;
@@ -332,7 +348,7 @@ export async function land(input: LandOptions): Promise<Obj> {
       if (!entry) {
         change = (await api(client, path)).data;
         requirePublishedChange(change);
-        if (!options.reviewEvidence) { emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
+        if (!options.reviewEvidence) { awaitingReview = true; emit({ state: 'awaiting-review', changeId, headOid: prepared.head, url: `${client.baseUrl}/v1/repos/${repo}/changes/${changeId}` }); return { status: 'awaiting-review', changeId, headOid: prepared.head }; }
         const reviewerToken = required(process.env.CONCORD_REVIEWER_TOKEN, 'CONCORD_REVIEWER_TOKEN');
         if (reviewerToken === token) throw new ConcordError('reviewer token must differ from author token', 'usage');
         const evidence = await readFile(options.reviewEvidence, 'utf8');
@@ -391,7 +407,7 @@ export async function land(input: LandOptions): Promise<Obj> {
     } finally { await prepared.cleanup(); }
   } finally {
     await refresh().catch(() => {});
-    for (const item of held) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
+    if (!started && !adoptedLease && !awaitingReview) for (const item of held) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
   }
   } finally { await squash?.cleanup(); }
 }

@@ -33,6 +33,57 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
+  it.each(['live', 'expired', 'renew'])('adopts a started TSV change with a %s file lease', async mode => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\told\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\tnew\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'row edit');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const allowedFiles = join(await temp(), 'allowed.txt');
+    await writeFile(allowedFiles, 'families.tsv\n');
+    const policy = { digest: 'digest', units: {}, tables: [{ name: 'families', file: 'families.tsv',
+      header: ['family', 'value'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }] };
+    const change = { changeId: 'started', intentKey: 'task', intentText: 'work', provisioning: { state: 'observed' },
+      candidateStorageName: 'candidate', branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`, authorId: 'agent', baseOid: parent,
+      headOid: commit, revision: 1, status: 'ready' };
+    let leaseActive = mode !== 'expired';
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}`, policyDigest: 'digest' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: policy }, runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'started', revision: 1, jobId: 'pass-job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') throw new ConcordError('INTENT_CONFLICT', 'conflict', 409,
+        { error: { code: 'INTENT_CONFLICT' } });
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: leaseActive ? [{
+        changeId: 'started', state: 'active', unitKey: mode === 'expired' ? 'row:families:alpha' : 'file:families.tsv',
+        leaseId: 'lease', fence: 1, remainingSeconds: mode === 'renew' ? 30 : 7200,
+      }] : [] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases') {
+        leaseActive = true; return { data: { leases: [{ changeId: 'started', state: 'active', unitKey: 'row:families:alpha',
+          leaseId: 'lease', fence: 1, remainingSeconds: 300 }] }, version: 1 };
+      }
+      if (method === 'POST' && path === '/repos/demo/leases/lease/renew') return { data: { lease: {
+        leaseId: 'lease', unitKey: 'file:families.tsv', changeId: 'started', fence: 2, state: 'active',
+        expiresAt: Date.now() + 300000, remainingSeconds: 300 } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result') throw new ConcordError('denied', 'auth', 403);
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    vi.stubEnv('CONCORD_REVIEWER_TOKEN', '');
+    const result = await land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
+      waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+    expect(result).toMatchObject({ status: 'awaiting-review', changeId: 'started' });
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toHaveLength(mode === 'expired' ? 1 : 0);
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path.endsWith('/renew'))).toHaveLength(mode === 'renew' ? 1 : 0);
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/release'))).toBe(false);
+  });
   it.each(['ENV_ERROR', 'FAIL', 'TIMEOUT'])(`fails immediately with the completed %s inspection log`, async (outcome) => {
     const change = { changeId: 'change', revision: 3, status: 'draft' };
     const request = vi.fn(async (_method: string, path: string) => {
@@ -486,11 +537,13 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const profile = { ...profileInput, digest: await digest(profileInput) };
   const profilePath = join(dir, 'profile.json'); await writeFile(profilePath, JSON.stringify(profile));
   const bulkFiles = Array.from({ length: 15 }, (_, index) => `bulk-${index}.txt`);
-  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'shared.txt', 'range-a.txt', 'range-b.txt', ...bulkFiles].map(file => [`file:${file}`, {
+  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'families.tsv', 'shared.txt', 'range-a.txt', 'range-b.txt', ...bulkFiles].map(file => [`file:${file}`, {
     canonicalKey: `file:${file}`, file, resources: [], dependencyKeys: [],
   }]));
   const policyInput = { id: 'generic-land', version: 1, checkerId: 'generic-land', checkerDigest: binary,
-    acceptance: { kind: 'hard-gates', gates: [{ id: 'default', requiredOutcome: 'PASS' }] }, units };
+    acceptance: { kind: 'hard-gates', gates: [{ id: 'default', requiredOutcome: 'PASS' }] }, units,
+    tables: [{ name: 'families', file: 'families.tsv', header: ['family', 'value'], keyColumn: 'family',
+      keySpec: { charset: 'lower', minLength: 1, maxLength: 64 } }] };
   const policy = { ...policyInput, digest: await digest(policyInput) };
   const trusted = JSON.stringify({ policies: { 'generic-land': policy }, profiles: { 'generic-land': {
     id: profile.id, digest: profile.digest, toolchainDigest: profile.toolchainDigest,
@@ -537,6 +590,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(join(seed, 'check.sh'), 'exit 0\n');
   await writeFile(join(seed, 'a.txt'), 'a=0\n');
   await writeFile(join(seed, 'b.txt'), 'b=0\n');
+  await writeFile(join(seed, 'families.tsv'), 'family\tvalue\nalpha\told\n');
   for (const file of bulkFiles) await writeFile(join(seed, file), 'before\n');
   await writeFile(join(seed, 'shared.txt'), Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n') + '\n');
   await git(seed, 'add', '.'); await git(seed, 'commit', '-qm', 'seed');
@@ -559,10 +613,15 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
   const authorEnv: NodeJS.ProcessEnv = { ...landEnv };
   delete authorEnv.CONCORD_REVIEWER_TOKEN;
+  const startedRun = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'start', '--repo', 'landdemo',
+    '--intent-key', 'generic-task', '--intent', 'Update a value', '--allowed-files', allowed, '--hold', '2h', '--json'],
+  { cwd: root, env: authorEnv, timeout: 30_000 });
+  const started = JSON.parse(startedRun.stdout);
+  expect(started.leases).toHaveLength(16);
   const first = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs],
     { cwd: root, env: authorEnv, timeout: 155_000 }));
   expect(first.stdout).toContain('"state":"awaiting-review"');
-  expect(first.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.state === 'leased').unitKeys).toHaveLength(16);
+  expect(first.stdout.trim().split('\n').map(line => JSON.parse(line))).not.toContainEqual(expect.objectContaining({ state: 'leased' }));
   const beforeResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
   const wrongEvidence = join(dir, 'wrong-review.txt');
   await writeFile(wrongEvidence, `APPROVED for merge: ${'f'.repeat(40)}\n`);
@@ -576,20 +635,25 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     ...baseArgs, '--review-evidence', evidence], { cwd: root, env: landEnv, timeout: 155_000 }))
     .catch(error => { throw new Error(`land failed after: ${(error as { stdout?: string }).stdout ?? ''}\n${(error as Error).message}`); });
   const afterResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
+  expect(afterResume.changeId).toBe(started.changeId);
   expect(afterResume.changeId).toBe(beforeResume.changeId);
   expect(afterResume.revision).toBe(beforeResume.revision);
   const events = landed.stdout.trim().split('\n').map(line => JSON.parse(line));
   expect([...first.stdout.trim().split('\n').map(line => JSON.parse(line)), ...events].map(item => item.state))
-    .toEqual(expect.arrayContaining(['created', 'leased', 'published', 'reviewed', 'enqueued', 'landed']));
+    .toEqual(expect.arrayContaining(['created', 'published', 'reviewed', 'enqueued', 'landed']));
   expect(events.at(-1).canonicalOid).toBe((await api('')).data.observedCanonicalOid);
   for (const value of ['local-agent-a', 'local-reviewer', secret]) {
     expect(landed.stdout + landed.stderr).not.toContain(value);
   }
   const oldSource = await temp(); await git(oldSource, 'clone', '-q', '-b', 'main', seed, '.');
-  await writeFile(join(oldSource, 'b.txt'), 'b=carried\n');
-  await git(oldSource, 'add', 'b.txt'); await git(oldSource, 'commit', '-qm', 'old-parent update');
+  const carryAllowed = join(dir, 'carry-allowed.txt'); await writeFile(carryAllowed, 'families.tsv\n');
+  const rowStarted = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'start', '--repo', 'landdemo',
+    '--intent-key', 'carry-task', '--intent', 'Carry old-parent update', '--allowed-files', carryAllowed, '--hold', '2h', '--json'],
+  { cwd: root, env: authorEnv, timeout: 30_000 });
+  expect(JSON.parse(rowStarted.stdout).leases).toMatchObject([{ unitKey: 'file:families.tsv' }]);
+  await writeFile(join(oldSource, 'families.tsv'), 'family\tvalue\nalpha\tnew\n');
+  await git(oldSource, 'add', 'families.tsv'); await git(oldSource, 'commit', '-qm', 'old-parent row update');
   const sourceOid = await git(oldSource, 'rev-parse', 'HEAD');
-  const carryAllowed = join(dir, 'carry-allowed.txt'); await writeFile(carryAllowed, 'b.txt\n');
   const carryEvidence = join(dir, 'carry-review.txt');
   await writeFile(carryEvidence, `# ✅ APPROVED FOR MERGE — head ${sourceOid}\nAPPROVED for merge\n`);
   const carryArgs = ['--repo', 'landdemo', '--source', oldSource, '--commit', sourceOid,
@@ -603,6 +667,8 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const carried = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
     '--review-evidence', carryEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
   const carriedEvents = carried.stdout.trim().split('\n').map(line => JSON.parse(line));
+  expect(carriedEvents.some(item => item.state === 'leased')).toBe(false);
+  expect(carriedEvents.at(-1).changeId).toBe(JSON.parse(rowStarted.stdout).changeId);
   const carryEvent = carriedEvents.find(item => item.state === 'review-carried');
   expect(carryEvent).toMatchObject({ sourceOid, publishedOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
   expect(carryEvent.publishedOid).not.toBe(sourceOid);

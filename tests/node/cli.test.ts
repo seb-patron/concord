@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
+import { holdSeconds, releaseByIntent, start } from '../../cli/start.ts';
 
 const execFile = promisify(execFileCallback);
 const tempDirs: string[] = [];
@@ -55,6 +56,59 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('starts once, reuses its change and lease, and releases by intent key', async () => {
+    const dir = await tempDir('start'); const allowedFiles = join(dir, 'allowed.txt');
+    await writeFile(allowedFiles, 'families.tsv\n');
+    const base = 'a'.repeat(40); let change: Record<string, unknown> | undefined;
+    let lease: Record<string, unknown> | undefined; const calls: string[] = [];
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, unknown> }) => {
+      calls.push(`${method} ${path}`);
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: base } };
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: change ? [change] : [], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: lease ? [lease] : [], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        change = { ...options?.body, changeId: 'change', status: 'draft' }; return { data: change };
+      }
+      if (method === 'POST' && path === '/repos/demo/leases') {
+        expect(options?.body).toMatchObject({ unitKeys: ['file:families.tsv'], ttlSeconds: 7200 });
+        lease = { changeId: 'change', leaseId: 'lease', unitKey: 'file:families.tsv', fence: 1,
+          expiresAt: Date.now() + 7200000, state: 'active' }; return { data: { leases: [lease] } };
+      }
+      if (method === 'POST' && path === '/repos/demo/leases/lease/release') {
+        lease = { ...lease, state: 'released' }; return { data: { lease } };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const client = { request } as never;
+    const input = { repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles, client };
+    expect(await start(input)).toMatchObject({ changeId: 'change', base, leases: [{ unitKey: 'file:families.tsv' }] });
+    expect(await start(input)).toMatchObject({ changeId: 'change', leases: [{ fence: 1 }] });
+    expect(calls.filter(call => call === 'POST /repos/demo/changes')).toHaveLength(2);
+    expect(calls.filter(call => call === 'POST /repos/demo/leases')).toHaveLength(1);
+    expect(await releaseByIntent('demo', 'task', client)).toEqual({ changeId: 'change', released: ['file:families.tsv'] });
+    expect(holdSeconds('2h')).toBe(7200);
+  });
+  it('reports a start conflict without retrying a partial claim', async () => {
+    const dir = await tempDir('start-conflict'); const allowedFiles = join(dir, 'allowed.txt');
+    await writeFile(allowedFiles, 'a.txt\nb.txt\n');
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, unknown> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: 'a'.repeat(40) } };
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [], nextCursor: null } };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: { changeId: 'change' } };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases') {
+        expect(options?.body?.unitKeys).toEqual(['file:a.txt', 'file:b.txt']);
+        throw new ConcordError('LEASE_CONFLICT', 'conflict', 409, { error: { code: 'LEASE_CONFLICT',
+          details: { holderId: 'other', intentText: 'other work', keys: ['file:a.txt'], expiresAt: 123 } } });
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    await expect(start({ repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles,
+      client: { request } as never })).rejects.toMatchObject({ kind: 'conflict', exitCode: 3 });
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toHaveLength(1);
+  });
   it('requests tenant events without a repository and forwards the page cursor', async () => {
     const paths: string[] = [];
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
