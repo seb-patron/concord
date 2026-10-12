@@ -1,6 +1,10 @@
 import type { TrustedPolicy } from '../contracts';
 import { HttpError } from '../http';
 
+export const MAX_UNITS_PER_CHANGE = 64;
+export const unitCapMessage = (count: number): string =>
+  `${count} units > ${MAX_UNITS_PER_CHANGE}; declare coarser prefix/section units in policy`;
+
 /** A policy is the only source of unit identity. Paths never become claims by parsing input. */
 export interface UnitIdentity {
   key: string;
@@ -202,16 +206,16 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
 }
 
 export function normalizeUnits(registry: Map<string, UnitIdentity>, raw: unknown): UnitIdentity[] {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 64) {
-    throw new HttpError(422, 'INVALID_UNITS', 'Supply 1 to 16 registered units');
-  }
+  if (!Array.isArray(raw) || raw.length === 0) throw new HttpError(422, 'INVALID_UNITS', `Supply 1 to ${MAX_UNITS_PER_CHANGE} registered units`);
+  if (raw.length > 128) throw new HttpError(422, 'INVALID_UNITS',
+    `${raw.length} supplied keys > 128 preprocessing limit; normalized cap ${MAX_UNITS_PER_CHANGE}; declare coarser prefix/section units in policy`);
   const keys = new Map<string, UnitIdentity>();
   for (const key of raw) {
     const identity = resolveUnit(registry, key);
     keys.set(identity.key, identity);
   }
   const units = [...keys.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-  if (units.length > 16) throw new HttpError(422, 'INVALID_UNITS', 'At most 16 normalized units are permitted');
+  if (units.length > MAX_UNITS_PER_CHANGE) throw new HttpError(422, 'INVALID_UNITS', unitCapMessage(units.length));
   for (let i = 0; i < units.length; i++) {
     for (let j = i + 1; j < units.length; j++) {
       if (overlaps(units[i], units[j])) {

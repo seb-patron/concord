@@ -6,7 +6,7 @@ import { leases } from '../../src/features/leases';
 import { repos } from '../../src/features/repos';
 import type { Change, Event, ModuleContext, Principal, Repo, TrustedConfiguration } from '../../src/contracts';
 import { appendEvent, eventSequence, loadTrustedConfig, localFixtureConfig, sqlState } from '../../src/state';
-import { changedUnitsForFile, normalizeUnits, overlaps, resolveUnit, unitRegistry } from '../../src/leases/units';
+import { MAX_UNITS_PER_CHANGE, changedUnitsForFile, normalizeUnits, overlaps, resolveUnit, unitRegistry } from '../../src/leases/units';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
 const policy = localFixtureConfig('local').policies['local-demo'];
@@ -223,13 +223,13 @@ describe('semantic lease identities', () => {
     expect(changedUnitsForFile(registry, 'data/families.tsv', 'alpha\tone\nalpha\ttwo\n', 'alpha\tnew\n')
       .map(unit => unit.key)).toEqual(['file:data/families.tsv']);
     const many = structuredClone(policy);
-    many.units = Object.fromEntries(Array.from({ length: 17 }, (_, index) => [
+    many.units = Object.fromEntries(Array.from({ length: MAX_UNITS_PER_CHANGE + 1 }, (_, index) => [
       `row:many:${index}`, { canonicalKey: `row:many:${index}`, file: 'data/many.tsv', resources: [`${index}`], dependencyKeys: [] },
     ]));
     const manyRegistry = unitRegistry(many);
     const keys = Object.keys(many.units);
-    expect(normalizeUnits(manyRegistry, keys.slice(0, 16))).toHaveLength(16);
-    expect(() => normalizeUnits(manyRegistry, keys)).toThrow();
+    expect(normalizeUnits(manyRegistry, keys.slice(0, MAX_UNITS_PER_CHANGE))).toHaveLength(MAX_UNITS_PER_CHANGE);
+    expect(() => normalizeUnits(manyRegistry, keys)).toThrow('65 units > 64; declare coarser prefix/section units in policy');
     const ambiguous = structuredClone(policy);
     ambiguous.units['row:other:alpha'] = { canonicalKey: 'row:other:alpha', file: 'data/families.tsv', resources: ['other-alpha'], dependencyKeys: [] };
     expect(() => unitRegistry(ambiguous)).toThrow('UNIT_REGISTRY_INVALID');
@@ -237,6 +237,27 @@ describe('semantic lease identities', () => {
 });
 
 describe('RepoCoordinator lease routes', () => {
+  it('accepts 64 units, rejects 65, detects a shared unit, and preserves the 128 live-lease cap', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'lease_sixty_four';
+    const keys = (start: number, count: number) => Array.from({ length: count }, (_, index) => `file:tests/${start + index}.txt`);
+    const first = await claim(repo, 'local-agent-a', 'first', keys(0, 64), 'first');
+    expect(first.status).toBe(201);
+    expect((await responseBody(first)).data.leases).toHaveLength(64);
+    const over = await claim(repo, 'local-agent-b', 'over', keys(128, 65), 'over');
+    expect(over.status).toBe(422);
+    expect((await responseBody(over)).error).toMatchObject({ code: 'INVALID_UNITS', message: expect.stringContaining('65 units > 64') });
+    const rival = await claim(repo, 'local-agent-b', 'rival', [keys(0, 1)[0], ...keys(128, 63)], 'rival');
+    expect(rival.status).toBe(409);
+    expect((await responseBody(rival)).error).toMatchObject({ code: 'LEASE_CONFLICT', details: { keys: [keys(0, 1)[0]] } });
+    const second = await claim(repo, 'local-agent-b', 'second', keys(64, 64), 'second');
+    expect(second.status).toBe(201);
+    expect((await responseBody(second)).data.leases).toHaveLength(64);
+    const capacity = await claim(repo, 'local-agent-b', 'capacity', keys(193, 1), 'capacity');
+    expect(capacity.status).toBe(429);
+    expect((await responseBody(capacity)).error.code).toBe('LEASE_CAPACITY');
+  });
   it('refuses claims without a repository record or a registered change view', async () => {
     setupPolicy();
     const repo = 'lease_missing_repo';

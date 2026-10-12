@@ -2,7 +2,7 @@ import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody,
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { costLimits, eventSequence } from '../state';
-import { resolveUnit, unitRegistry } from '../leases/units';
+import { MAX_UNITS_PER_CHANGE, resolveUnit, unitCapMessage, unitRegistry, type UnitIdentity } from '../leases/units';
 import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
@@ -246,6 +246,19 @@ function changeInput(body: CreateChangeBody) {
   return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt, issueNumber: body.issueNumber ?? null };
 }
 
+function enforceUnitCap(registry: Map<string, UnitIdentity>, keys: string[]): void {
+  if (keys.length <= MAX_UNITS_PER_CHANGE) return;
+  const normalized = new Set(keys.map(key => {
+    try { return resolveUnit(registry, key).key; }
+    catch (error) {
+      // Import drafts use the synthetic import:root key before their policy exists.
+      if (error instanceof HttpError && error.code === 'UNKNOWN_UNIT') return key;
+      throw error;
+    }
+  }));
+  if (normalized.size > MAX_UNITS_PER_CHANGE) fail(422, 'INVALID_UNITS', unitCapMessage(normalized.size));
+}
+
 async function authorizeIntentContest(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
   requireRole(context.principal, 'owner');
   const repo = await catalogRepo(context);
@@ -273,6 +286,8 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const repo = await catalogRepo(context);
   requireReady(repo);
   const input = changeInput(body);
+  if (input.unitKeys.length > MAX_UNITS_PER_CHANGE)
+    enforceUnitCap(unitRegistry(context.trusted.policies[repo.policyId]), input.unitKeys);
   if (input.issueNumber !== null) {
     const linked = context.call('issues.validate', input.issueNumber);
     if (linked.status === 'blocked') fail(409, linked.code, linked.reason);
@@ -442,12 +457,13 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   const headOid = oid(body.headOid);
   const ref = branch(body.branch);
   const unitKeys = ids(body.unitKeys, 'unitKeys');
+  const registry = unitRegistry(context.trusted.policies[repo.policyId]);
+  enforceUnitCap(registry, unitKeys);
   if (!body.leaseFences || typeof body.leaseFences !== 'object' || Array.isArray(body.leaseFences)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must be a map');
   const leaseFences = body.leaseFences as Record<string, unknown>;
   if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');
   if (baseOid === null || change.baseOid === null) fail(409, 'SEED_REQUIRES_BOOTSTRAP', 'Seed drafts use owner bootstrap');
   if (ref !== change.branch) fail(409, 'BRANCH_MISMATCH', 'Change branch differs');
-  const registry = unitRegistry(context.trusted.policies[repo.policyId]);
   for (const key of unitKeys) resolveUnit(registry, key);
   const registered = list<Branch>(context, 'branches').find(item => item.storageName === change.candidateStorageName && item.ref === ref && item.ownerId === change.authorId);
   if (!registered || registered.observedHead !== headOid) fail(409, 'BRANCH_NOT_REGISTERED', 'Register the current fork branch before publishing');
