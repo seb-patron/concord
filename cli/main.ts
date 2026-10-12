@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential, rememberCredentialsIn, type RequestOptions } from './client.ts';
-import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
+import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, git, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 import { importRepo } from './import.ts';
 import { land } from './land.ts';
 
@@ -30,7 +30,7 @@ Commands and required fields:
   issue create|list|get|edit|close|reopen --repo ID [--id NUMBER] [--title TEXT] [--body TEXT] [--labels JSON_ARRAY] [--milestone-id ID] [--reason TEXT]
   milestone create|list|get|close --repo ID [--id ID] [--title TEXT] [--description TEXT] [--due-date YYYY-MM-DD]
   change get --repo ID --id ID
-  change checkout --repo ID --id ID --worktree PATH
+  change checkout --repo ID --id ID --worktree PATH [--revision N]
   change publish --repo ID --id ID --worktree PATH --lease-fences JSON_OBJECT
   change close --repo ID --id ID --expected-version N [--reason TEXT]
   lease claim --repo ID --change-id ID --unit-keys JSON_ARRAY --intent-text TEXT --expected-version N [--ttl-seconds N]
@@ -121,6 +121,20 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     if (options.expectedVersion === undefined) throw new ConcordError('--expected-version is required when mutating an existing resource', 'usage');
     return client.request('POST', path, options);
   };
+  const requestGitToken = async (path: string, payload: Record<string, unknown>, expectedVersion?: number): Promise<Record<string, unknown>> => {
+    const freshVersion = async () => numberField(await send('GET', path) as Record<string, unknown>, 'version');
+    let version = expectedVersion ?? await freshVersion();
+    for (let retries = 0; ; retries++) {
+      try {
+        return unwrap(await client.request('POST', `${path}/git-token`, requestOptions(flags, payload, version))) as Record<string, unknown>;
+      } catch (error) {
+        const conflict = error instanceof ConcordError ? (error.payload as { error?: { code?: unknown; details?: { currentVersion?: unknown } } } | undefined)?.error : undefined;
+        const moved = conflict?.details?.currentVersion;
+        if (!(error instanceof ConcordError) || error.status !== 409 || conflict?.code !== 'STALE_VERSION' || retries >= 3) throw error;
+        version = typeof moved === 'number' && Number.isSafeInteger(moved) ? moved : await freshVersion();
+      }
+    }
+  };
 
   if (noun === 'principals') {
     if (verb === 'list') return print(await client.request('GET', `/principals${query({ cursor: flags.cursor })}`));
@@ -158,9 +172,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   if (noun === 'repo' && verb === 'clone') {
     const id = requireRepo();
     const destination = required(flags, 'path');
-    const repoResult = unwrap(await send('GET', `/repos/${id}`)) as Record<string, unknown>;
-    const storageName = stringField(repoResult, 'canonicalStorageName');
-    const tokenResult = unwrap(await client.request('POST', `/repos/${id}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoResult, 'version')))) as Record<string, unknown>;
+    const repoResult = await send('GET', `/repos/${id}`);
+    const repository = unwrap(repoResult) as Record<string, unknown>;
+    const storageName = stringField(repository, 'canonicalStorageName');
+    const tokenResult = await requestGitToken(`/repos/${id}`, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoResult as Record<string, unknown>, 'version'));
     const remote = stringField(tokenResult, 'remote', true);
     const token = tokenField(tokenResult);
     await cloneRepo(remote, destination, token);
@@ -209,19 +224,42 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const id = encodeURIComponent(required(flags, 'id'));
     const worktree = required(flags, 'worktree');
     const change = unwrap(await send('GET', `${root}/changes/${id}`)) as Record<string, unknown>;
-    const repository = unwrap(await send('GET', `/repos/${rid}`)) as Record<string, unknown>;
+    const repoDetail = await send('GET', `/repos/${rid}`);
     const storageName = stringField(change, 'candidateStorageName');
     const branch = stringField(change, 'branch');
-    const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
+    const publishedHead = async (revision: number): Promise<string> => {
+      if (revision < 1) throw new ConcordError('--revision must be a published revision number', 'usage');
+      const changeId = typeof change.changeId === 'string' ? change.changeId : String(flags.id);
+      if (change.revision === revision && typeof change.headOid === 'string') return change.headOid;
+      let after = 0;
+      for (;;) {
+        const page = unwrap(await send('GET', `${root}/events?after=${after}`)) as { items?: Array<{ sequence?: number; kind?: string; relatedIds?: unknown; payload?: { revision?: unknown; headOid?: unknown } }>; nextCursor?: unknown };
+        const items = page.items ?? [];
+        const match = items.find(item => item.kind === 'change.published' && Array.isArray(item.relatedIds) && item.relatedIds.includes(changeId) && item.payload?.revision === revision);
+        if (match && typeof match.payload?.headOid === 'string') return match.payload.headOid;
+        const last = items[items.length - 1];
+        if (page.nextCursor === null || page.nextCursor === undefined || !last || typeof last.sequence !== 'number') break;
+        after = last.sequence;
+      }
+      throw new ConcordError(`Change has no published revision ${revision}`, 'usage');
+    };
+    const revision = flags.revision === undefined ? undefined : numberFlag(flags, 'revision');
+    const headOid = revision === undefined ? undefined : await publishedHead(revision);
+    const access = await requestGitToken(root, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoDetail as Record<string, unknown>, 'version'));
     const remote = stringField(access, 'remote', true);
     await fetchFork(worktree, remote, branch, tokenField(access));
-    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, remote: redactRemote(remote) });
+    if (headOid !== undefined) {
+      const resolved = await git(['rev-parse', '--verify', `${headOid}^{commit}`], {}, worktree).catch(() => null);
+      if (resolved !== headOid.toLowerCase()) throw new ConcordError(`Published head ${headOid} is not available from the candidate fork`, 'server');
+    }
+    return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, ...(revision === undefined ? {} : { revision, headOid }), remote: redactRemote(remote) });
   }
   if (noun === 'change' && verb === 'publish') {
     const id = encodeURIComponent(required(flags, 'id'));
     const worktree = required(flags, 'worktree');
     const change = unwrap(await send('GET', `${root}/changes/${id}`)) as Record<string, unknown>;
-    const repository = unwrap(await send('GET', `/repos/${rid}`)) as Record<string, unknown>;
+    const repoDetail = await send('GET', `/repos/${rid}`);
+    const repository = unwrap(repoDetail) as Record<string, unknown>;
     const storageName = stringField(change, 'candidateStorageName');
     if (storageName === repository.canonicalStorageName) throw new ConcordError('Refusing to push: server assigned canonical storage as the candidate target', 'server');
     const branch = stringField(change, 'branch');
@@ -234,7 +272,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const unitKeys = change.unitKeys as string[];
     const fences = parseFences(required(flags, 'lease-fences'));
     const payload = validatePublishPayload(body ?? { baseOid, headOid, branch, unitKeys, leaseFences: fences }, { baseOid, headOid, branch, unitKeys, fences });
-    const access = unwrap(await client.request('POST', `${root}/git-token`, requestOptions(flags, { storageName, scope: 'write', ttlSeconds: 300 }, numberField(repository, 'version')))) as Record<string, unknown>;
+    const access = await requestGitToken(root, { storageName, scope: 'write', ttlSeconds: 300 }, numberField(repoDetail as Record<string, unknown>, 'version'));
     const remote = stringField(access, 'remote', true);
     rejectCanonicalTarget(storageName, repository.canonicalStorageName, remote,
       typeof repository.canonicalRemote === 'string' ? repository.canonicalRemote : typeof repository.remote === 'string' ? repository.remote : undefined);
