@@ -7,7 +7,7 @@ import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
 import { queue } from '../../src/features/queue';
 import { leases } from '../../src/features/leases';
-import { runners } from '../../src/features/runners';
+import { jobInput, runners } from '../../src/features/runners';
 import { findings } from '../../src/features/findings';
 import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
@@ -195,7 +195,7 @@ afterEach(async () => {
   (env as Env).TRUSTED_CONFIG = originalTrustedConfig;
 });
 
-async function addChange(h: Harness, id: string, deps: string[] = [], profileId = 'local-demo') {
+async function addChange(h: Harness, id: string, deps: string[] = [], profileId = 'local-demo', intentKey = 'shared-intent') {
   await h.seed(`candidate-${h.repoId}-${id}`);
   h.views.set(id, {
     authorId: 'agent-a', headOid: oid(id.toLowerCase().replace(/[^a-f0-9]/g, 'a').slice(0, 1)),
@@ -203,7 +203,7 @@ async function addChange(h: Harness, id: string, deps: string[] = [], profileId 
     candidateStorageName: `candidate-${h.repoId}-${id}`, branch: 'refs/heads/work',
     dependencyChangeIds: deps, canonicalStorageName: `canonical-${h.repoId}`,
     scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId,
-    intentKey: 'shared-intent',
+    intentKey,
   });
   for (let attempt = 0; attempt < 3; attempt++) {
     const version = (await h.fetch('/queue')).body.version;
@@ -295,7 +295,7 @@ async function realLeases(h: Harness, changes: Array<{ id: string; unit: string 
     for (const { id, unit } of changes) {
       const view = h.views.get(id)!;
       store.put(`module:repos:change:${id}`, { changeId: id, repoId: h.repoId, authorId: 'agent-a',
-        intentKey: 'shared-intent', intentText: id, candidateStorageName: view.candidateStorageName,
+        intentKey: 'J', intentText: id, candidateStorageName: view.candidateStorageName,
         branch: view.branch, baseOid: view.baseOid, headOid: view.headOid, revision: 1,
         unitKeys: [unit], dependencyChangeIds: [], status: 'ready', version: 1 });
       store.put(`module:repos:verified:${id}`, { changeId: id, revision: 1, headOid: view.headOid,
@@ -368,10 +368,35 @@ async function prepareReal(changes: Array<{ id: string; unit: string }>, claimed
       status: 'ready', unitKeys: [unit], frozen: false, baseOid: main,
       candidateStorageName: `candidate-${h.repoId}-${id}`, branch: 'refs/heads/work',
       dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-      scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+      scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
   }
   await realLeases(h, changes, claimedIds);
   return h;
+}
+
+async function dispatchContestFixture(): Promise<void> {
+  const config = (env as Env).TRUSTED_CONFIG
+    ? JSON.parse((env as Env).TRUSTED_CONFIG!) as ReturnType<typeof localFixtureConfig>
+    : localFixtureConfig('local');
+  config.policies['local-demo'].checkerId = 'dispatch-lab';
+  (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+}
+
+async function contest(h: Harness, body: Record<string, unknown>): Promise<{ response: Response; body: any }> {
+  await dispatchContestFixture();
+  const created = await h.fetch('/contests', body);
+  if (created.response.status === 201) {
+    // Contest fixtures start at the dispatch scene immediately before J.
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const state = context.state.get<any>('data');
+      state.dispatchCaseId = 'i-only';
+      context.state.put('data', state);
+    });
+  }
+  return created;
 }
 
 async function enqueueReal(h: Harness, id: string, unit: string): Promise<void> {
@@ -381,7 +406,7 @@ async function enqueueReal(h: Harness, id: string, unit: string): Promise<void> 
 }
 
 async function contestReal(h: Harness): Promise<void> {
-  const response = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+  const response = await contest(h, { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
     baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
     leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
   expect(response.response.status).toBe(201);
@@ -410,7 +435,7 @@ describe('queue with real lease hooks', () => {
 
   it('shares one contest reservation, keeps it after a loss, and releases it on landing', async () => {
     const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
-    const created = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+    const created = await contest(h, { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
       baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
       leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
     expect(created.response.status).toBe(201);
@@ -522,7 +547,7 @@ describe('queue with real lease hooks', () => {
 
   it('blocks both contest children and releases the shared reservation when one withdraws', async () => {
     const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
-    expect((await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+    expect((await contest(h, { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
       baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
       leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] })).response.status).toBe(201);
     const withdrawn = await h.fetch('/queue/withdraw', { expectedVersion: (await h.fetch('/queue')).body.version,
@@ -534,7 +559,7 @@ describe('queue with real lease hooks', () => {
 
   it('blocks an expired reservation before scheduling a contest child', async () => {
     const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
-    expect((await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+    expect((await contest(h, { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
       baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
       leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] })).response.status).toBe(201);
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
@@ -654,9 +679,9 @@ describe('queue state machine', () => {
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
         unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
         branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
     }
-    expect((await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+    expect((await contest(h, { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
       baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
       leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] })).response.status).toBe(201);
     if (timing === 'after scheduling') await h.tick();
@@ -730,6 +755,51 @@ describe('queue state machine', () => {
     expect(state.diagnosticResults).toHaveLength(5);
     expect(state.promotion.memberIds).toEqual(['A', 'C']);
     expect(state.entries.find((entry: any) => entry.changeId === 'B').state).toBe('blocked');
+  });
+
+  it('lands three generic candidates with arbitrary intents and pinned queue order', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const [id, intent] of [['A', 'repair/alpha'], ['B', 'feature:beta'], ['C', 'misc.gamma']]) {
+      const response = await addChange(h, id, [], 'local-demo', intent);
+      expect(response.response.status).toBe(201);
+    }
+    await h.tick();
+    const job = h.jobs[0];
+    if (job.kind !== 'validate-stack' || job.bootstrap) throw new Error('expected generic stack');
+    expect(job.caseId).toBeUndefined();
+    expect(job.candidates.map(candidate => candidate.changeId)).toEqual(['A', 'B', 'C']);
+    expect(job.canonicalBaseOid).toBe(main);
+    expect(job.expectedRefs[`canonical-${h.repoId}`]).toBe(main);
+    expect(job.candidates.map(candidate => job.expectedRefs[candidate.storageName])).toEqual(job.candidates.map(candidate => candidate.headOid));
+    expect(job.policyDigest).toBe(job.unitPolicy.digest);
+    expect(job.inputDigest).toBe(await digest(jobInput(job)));
+    await deliverChecked(h, job, 'PASS'); await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ memberIds: ['A', 'B', 'C'], expectedOldOid: main });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('2'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['landed', 'landed', 'landed']);
+  });
+
+  it('bisects a failing generic middle candidate and lands the survivors', async () => {
+    const h = harness;
+    await h.seed(`canonical-${h.repoId}`);
+    await h.seed(`scratch-${h.repoId}`, null);
+    for (const [id, intent] of [['A', 'first/unknown'], ['B', 'second/unknown'], ['C', 'third/unknown']]) {
+      expect((await addChange(h, id, [], 'local-demo', intent)).response.status).toBe(201);
+    }
+    await h.tick();
+    await deliverChecked(h, h.jobs[0], 'FAIL'); await h.tick();
+    for (const [index, outcome] of [[1, 'PASS'], [2, 'PASS'], [3, 'FAIL'], [4, 'FAIL'], [5, 'PASS']] as const) {
+      expect(h.jobs[index].caseId).toBeUndefined();
+      await deliverChecked(h, h.jobs[index], outcome); await h.tick();
+    }
+    expect((await h.state()).diagnosis).toMatchObject({ reason: 'SINGLETON', blame: ['B'], survivors: ['A', 'C'] });
+    expect((await h.state()).promotion.memberIds).toEqual(['A', 'C']);
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('7'), main)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries.map((entry: any) => entry.state)).toEqual(['landed', 'blocked', 'landed']);
   });
 
   it.each([
@@ -1296,6 +1366,39 @@ describe('queue state machine', () => {
     expect((await h.state()).promotion).toBeNull();
   });
 
+  it('refuses a generic repository contest before looking up unavailable children', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }], ['A']);
+    const refused = await h.fetch('/contests', { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
+      baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'missing'], verdictIds: ['v-A', 'v-missing'],
+      leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
+    expect(refused.response.status).toBe(409);
+    expect(refused.body.error.code).toBe('CONTEST_UNSUPPORTED_FOR_PROFILE');
+    expect((await leaseState(h, 'A')).state).toBe('active');
+    expect((await h.state()).contests).toEqual([]);
+    expect(h.jobs).toHaveLength(0);
+  });
+
+  it.each(['hard-gates', 'score'] as const)('refuses a generic %s contest through the public API before reservation or scheduling', async kind => {
+    const h = harness;
+    const config = localFixtureConfig('local');
+    if (kind === 'score') config.policies['local-demo'].acceptance = { kind: 'score', gates: [{ id: 'default', requiredOutcome: 'PASS' }], fixedDenominator: 4 };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    for (const id of ['A', 'B']) {
+      h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
+        unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
+        branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
+    }
+    const refused = await h.fetch('/contests', { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
+      baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
+      leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
+    expect(refused.response.status).toBe(409);
+    expect(refused.body.error.code).toBe('CONTEST_UNSUPPORTED_FOR_PROFILE');
+    expect((await h.state()).contests).toEqual([]);
+    expect(h.jobs).toHaveLength(0);
+    expect(h.releases).toEqual([]);
+  });
+
   it('chooses the first valid green contest result and supersedes the loser', async () => {
     const h = harness;
     await h.seed(`canonical-${h.repoId}`);
@@ -1305,14 +1408,16 @@ describe('queue state machine', () => {
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
         unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
         branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
     }
-    const created = await h.fetch('/contests', { intentKey: 'shared-intent', intentText: 'compete', unitKey: 'row:J',
+    const created = await contest(h, { intentKey: 'J', intentText: 'compete', unitKey: 'row:J',
       baseOid: main, profileId: 'local-demo', childChangeIds: ['A', 'B'], verdictIds: ['v-A', 'v-B'],
       leaseFences: [{ 'row:J': 1 }, { 'row:J': 1 }] });
     expect(created.response.status).toBe(201);
     await h.tick();
     if (h.jobs.length !== 2) throw new Error(JSON.stringify(h.jobs.map(job => ({ jobId: job.jobId, candidates: job.kind === 'validate-stack' ? job.candidates.map(item => item.changeId) : [] }))));
+    expect(h.jobs.map(job => ({ caseId: job.caseId, contest: job.contest })))
+      .toEqual([{ caseId: 'j-common', contest: true }, { caseId: 'j-common', contest: true }]);
     await h.deliver(h.jobs[1], 'PASS'); await h.tick();
     await h.deliver(h.jobs[0], 'PASS'); await h.tick();
     const state = await h.state();
@@ -1333,7 +1438,7 @@ describe('queue state machine', () => {
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
         unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
         branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
     }
     await contestReal(h);
     await h.tick();
@@ -1356,7 +1461,7 @@ describe('queue state machine', () => {
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
         unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
         branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
     }
     await contestReal(h);
     await h.tick();
@@ -1384,7 +1489,7 @@ describe('queue state machine', () => {
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
         unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
         branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
     }
     await contestReal(h);
     await h.tick();
@@ -1409,7 +1514,7 @@ describe('queue state machine', () => {
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
         unitKeys: ['row:J'], frozen: false, baseOid: main, candidateStorageName: `candidate-${h.repoId}-${id}`,
         branch: 'refs/heads/work', dependencyChangeIds: [], canonicalStorageName: `canonical-${h.repoId}`,
-        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'shared-intent' });
+        scratchStorageName: `scratch-${h.repoId}`, policyId: 'local-demo', profileId: 'local-demo', intentKey: 'J' });
     }
     await contestReal(h);
     await h.tick();

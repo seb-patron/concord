@@ -354,7 +354,8 @@ export function attemptBudget(family) {
         expectedRefs: { canonical: base, scratch: null } };
       const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
-        executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+        executable: process.execPath, argv: ['-e', "if (require('node:fs').readFileSync('example.txt', 'utf8') !== 'candidate\\n') process.exit(1)"] };
+      expect(job.caseId).toBeUndefined();
       const result = await executeJob(job, profile, credentials(remotes));
       expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
       if (result.kind !== 'validate-stack') throw new Error('wrong result');
@@ -401,7 +402,7 @@ export function attemptBudget(family) {
     });
   });
 
-  it('composes disjoint TSV candidates and blocks a divergent same-row candidate', async () => {
+  it('reports MERGE_CONFLICT for adjacent generic families.tsv edits', async () => {
     await temporaryWork(async dir => {
       const canonical = join(dir, 'canonical.git');
       const first = join(dir, 'first.git');
@@ -450,10 +451,9 @@ export function attemptBudget(family) {
         return executeJob(job, profile, credentials(remotes));
       };
       const composed = await run('second', second, secondHead, scratch);
-      expect(composed).toMatchObject({ outcome: 'PASS' });
-      if (composed.kind !== 'validate-stack' || !composed.composedOid) throw new Error('no composed commit');
-      const table = await git(seed, ['--git-dir=' + scratch, 'show', composed.composedOid + ':families.tsv']);
-      expect(table).toContain('alpha\t2\t1000\nbeta\t3\t1000');
+      expect(composed).toMatchObject({ outcome: 'MERGE_CONFLICT', composedOid: null });
+      expect(composed.log).toContain('MERGE_CONFLICT');
+      expect(await refOid(seed, pathToFileURL(scratch).href, 'refs/heads/check')).toBeNull();
       const rejected = await run('collision', collision, collisionHead, scratchCollision);
       expect(rejected).toMatchObject({ outcome: 'MERGE_CONFLICT' });
       expect(await refOid(seed, pathToFileURL(scratchCollision).href, 'refs/heads/check')).toBeNull();
