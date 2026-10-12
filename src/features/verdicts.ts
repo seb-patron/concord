@@ -1,5 +1,5 @@
 import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule, Gate, Id, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict, InspectedRevision } from '../contracts';
-import { requireRole } from '../auth';
+import { requireRepo, requireRole } from '../auth';
 import { HttpError, json } from '../http';
 import { dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest } from '../verdicts/manifest';
 
@@ -181,16 +181,19 @@ export const verdicts: FeatureModule = {
   name: 'verdicts', migrations: [],
   routes: [
     { method: 'GET', pattern: verdictPath, handle: (context, request, match) => {
-      requireRole(context.principal, 'reviewer');
+      requireRepo(context.principal, match[1]);
       const change = view(context, match[2]);
       if (change.status === 'blocked') throw new HttpError(change.code === 'MODULE_UNAVAILABLE' ? 501 : 409, change.code, change.reason);
-      if (change.value.authorId === context.principal.principalId) throw new HttpError(403, 'SELF_REVIEW', 'Change author cannot review');
       const cursor = new URL(request.url).searchParams.get('cursor');
       let offset = 0;
       try { if (cursor !== null) offset = Number(atob(cursor)); } catch { throw new HttpError(400, 'INVALID_CURSOR', 'Invalid verdict cursor'); }
       if (!Number.isSafeInteger(offset) || offset < 0) throw new HttpError(400, 'INVALID_CURSOR', 'Invalid verdict cursor');
       const all = ids(context, match[2]);
-      const items = all.slice(offset, offset + 100).map(id => storedVerdict(context, id)).filter((item): item is Verdict => item !== null);
+      const full = context.principal.roles.some(role => role === 'owner' || role === 'reviewer');
+      const items = all.slice(offset, offset + 100).map(id => storedVerdict(context, id)).filter((item): item is Verdict => item !== null)
+        .map(item => full ? item : ({ verdictId: item.verdictId, changeId: item.changeId,
+          reviewerId: item.reviewerId, revision: item.revision, decision: item.decision,
+          parentVerdictId: item.parentVerdictId }));
       return json({ items, nextCursor: offset + 100 < all.length ? btoa(String(offset + 100)) : null }, context.version());
     } },
     { method: 'POST', pattern: verdictPath, handle: (context, _request, match, raw) => {

@@ -1,6 +1,6 @@
 # Review verdicts and carry
 
-Verdicts bind an independent reviewer to the exact bytes and trusted dependency scope inspected for one change revision. The commit OID is audit identity; it is not the approval key. All mutation bodies use `Idempotency-Key` and `expectedVersion`. The authenticated principal supplies reviewer identity. The author cannot list, create, or request carry even if that principal also has a reviewer role.
+Verdicts bind an independent reviewer to the exact bytes and trusted dependency scope inspected for one change revision. The commit OID is audit identity; it is not the approval key. All mutation bodies use `Idempotency-Key` and `expectedVersion`. The authenticated principal supplies reviewer identity. The author cannot create or request carry even if that principal also has a reviewer role.
 
 ## Evidence and pins
 
@@ -11,6 +11,8 @@ The verdict service reads the current change through `readChange`, the finding s
 ## Endpoints
 
 `GET /v1/repos/:repoId/changes/:changeId/verdicts?cursor=...` returns chronological verdict history in pages of at most 100. Old verdicts remain visible after a revision, finding, or pin change. `POST` on the same path creates `approve` or `reject` for the current trusted inspection and exact finding-set version:
+
+Any authenticated principal whose scope includes the repository may read verdict history, including the change author. Owners and reviewers receive the full stored verdict. Other readers receive only `verdictId`, `changeId`, `reviewerId`, `revision`, `decision`, and `parentVerdictId`, which are available from verdict events; the response excludes review manifest paths, byte digests, evidence digests, and other private review evidence. Posting verdicts and requesting carry remain reviewer-only.
 
 ```json
 {

@@ -15,6 +15,24 @@ const local: Record<string, Omit<Principal, 'expiresAt'>> = {
   'local-viewer': { tenantId: 'local', principalId: 'viewer', roles: ['viewer'], repoIds: '*' },
 };
 
+const modelLabel = /^[A-Za-z0-9._:/-]{1,64}$/;
+let cachedTokens: { source: string; mappings: Record<string, Principal> } | undefined;
+
+/** Validate the entire secret mapping when loaded, before selecting a credential. */
+export function loadAuthTokens(source: string): Record<string, Principal> {
+  if (cachedTokens?.source === source) return cachedTokens.mappings;
+  let value: unknown;
+  try { value = JSON.parse(source); } catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.values(value).some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      ('model' in entry && (typeof entry.model !== 'string' || !modelLabel.test(entry.model))))) {
+    throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable');
+  }
+  const mappings = value as Record<string, Principal>;
+  cachedTokens = { source, mappings };
+  return mappings;
+}
+
 export function clock(env: Pick<Env, 'CONCORD_MODE' | 'CONCORD_TEST_NOW'>): () => number {
   if (env.CONCORD_MODE === 'local' && env.CONCORD_TEST_NOW !== undefined) {
     const fixed = Number(env.CONCORD_TEST_NOW);
@@ -36,9 +54,7 @@ export async function authenticate(request: Request, env: Env, now: () => number
     throw new HttpError(401, 'UNAUTHORIZED', 'Fixture credential is not valid in production');
   }
   if (!principal && env.AUTH_TOKENS) {
-    let mappings: Record<string, Principal>;
-    try { mappings = JSON.parse(env.AUTH_TOKENS) as Record<string, Principal>; }
-    catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
+    const mappings = loadAuthTokens(env.AUTH_TOKENS);
     const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
     const key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
     principal = mappings[key];
@@ -50,7 +66,7 @@ export async function authenticate(request: Request, env: Env, now: () => number
     (principal.repoIds !== '*' && (!Array.isArray(principal.repoIds) || principal.repoIds.some(repoId => !validId(repoId))))) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Invalid credential');
   }
-  if (!Number.isFinite(principal.expiresAt) || principal.expiresAt <= now()) {
+  if (principal.expiresAt !== null && (!Number.isFinite(principal.expiresAt) || principal.expiresAt <= now())) {
     throw new HttpError(401, 'CREDENTIAL_EXPIRED', 'Credential expired');
   }
   return principal;

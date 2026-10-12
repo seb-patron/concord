@@ -43,6 +43,33 @@ function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensur
 }
 
 describe('repository and change lifecycle', () => {
+  it('records the creating principal model and returns null for an absent label', async () => {
+    const name = 'author_model_case';
+    await create(name);
+    const token = 'model-owner-token';
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), b => b.toString(16).padStart(2, '0')).join('');
+    const original = (env as Env).AUTH_TOKENS;
+    (env as Env).AUTH_TOKENS = JSON.stringify({ [hash]: {
+      tenantId: 'local', principalId: 'model-owner', roles: ['owner'], repoIds: [name],
+      expiresAt: Number.MAX_SAFE_INTEGER, model: 'GPT-6.1/fast',
+    } });
+    try {
+      const body = { intentKey: 'model-task', intentText: 'model task', baseOid: null,
+        branch: 'refs/heads/model', unitKeys: [], dependencyChangeIds: [] };
+      const modeled = await fetchApi(mutation(`/v1/repos/${name}/changes`, body, 'model-change', token));
+      expect(modeled.status).toBe(201);
+      const modeledId = (await responseBody(modeled)).data.changeId;
+      const plain = await fetchApi(mutation(`/v1/repos/${name}/changes`, { ...body, intentKey: 'plain-task' }, 'plain-change'));
+      expect(plain.status).toBe(201);
+      const plainId = (await responseBody(plain)).data.changeId;
+      const list = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes`)))).data.items;
+      expect(list.find((change: { changeId: string }) => change.changeId === modeledId).authorModel).toBe('GPT-6.1/fast');
+      expect(list.find((change: { changeId: string }) => change.changeId === plainId).authorModel).toBeNull();
+      const snapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections.repos.changes;
+      expect(snapshot.find((change: { changeId: string }) => change.changeId === modeledId).authorModel).toBe('GPT-6.1/fast');
+      expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/changes/${plainId}`)))).data.authorModel).toBeNull();
+    } finally { (env as Env).AUTH_TOKENS = original; }
+  });
   it('keeps ordinary intent keys owned, including contest-shaped tasks and fixture authors', async () => {
     const repo = await create('intent_ownership_case');
     await fetchApi(apiRequest('/v1/repos/intent_ownership_case'));

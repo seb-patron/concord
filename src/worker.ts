@@ -65,6 +65,10 @@ export default {
       }
       requireTenant(principal, request.headers.get('x-tenant-id') ?? undefined);
       requireRouteRole(principal, request.method, url.pathname);
+      if (request.method === 'GET' && url.pathname === '/v1/me') {
+        const { principalId, tenantId, roles, repoIds, expiresAt } = principal;
+        return json({ principalId, tenantId, roles, repoIds, expiresAt: expiresAt ?? null, model: principal.model ?? null });
+      }
       const repoMatch = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(url.pathname);
       if (repoMatch) requireRepo(principal, repoMatch[1]);
       request = await enforceBodyLimit(request);

@@ -26,6 +26,7 @@ const getChange = (context: ModuleContext, changeId: string): Change => {
   const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
   return change ?? fail(404, 'CHANGE_NOT_FOUND', 'Change not found');
 };
+const changeResponse = (change: Change): Change => ({ ...change, authorModel: change.authorModel ?? null });
 function storeChange(context: ModuleContext, change: Change): void {
   const all = list<Change>(context, 'changes');
   context.state.put('changes', all.some(item => item.changeId === change.changeId)
@@ -298,7 +299,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
       await reconcile(context, pending, true);
       const provisioning = intents(context)[intentKey('fork', prior.candidateStorageName)];
       if (provisioning?.state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Candidate fork provisioning failed; retry the same intent');
-      return respond(context, { ...prior, provisioning }, provisioning?.state === 'observed' ? 200 : 202);
+      return respond(context, { ...changeResponse(prior), provisioning }, provisioning?.state === 'observed' ? 200 : 202);
     }
     if (body.attempt === undefined || input.attempt !== priorIntent.attempt + 1) fail(409, 'ATTEMPT_REQUIRED', 'Terminal intent needs the next explicit attempt');
   } else if (input.attempt !== 1) fail(409, 'ATTEMPT_CONFLICT', 'First attempt must be 1');
@@ -316,7 +317,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const candidateStorageName = `concord-f-${changeId}`;
   const requestDigest = await digest({ kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName });
   const change: Change = {
-    changeId, repoId: repo.repoId, authorId: context.principal.principalId, intentKey: input.intentKey,
+    changeId, repoId: repo.repoId, authorId: context.principal.principalId, authorModel: context.principal.model ?? null, intentKey: input.intentKey,
     intentText: input.intentText, candidateStorageName, branch: input.branch, baseOid: input.baseOid,
     headOid: null, revision: 0, unitKeys: input.unitKeys, dependencyChangeIds: input.dependencyChangeIds,
     status: 'draft', version: 0,
@@ -330,7 +331,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   });
   await reconcile(context, intents(context)[intentKey('fork', candidateStorageName)], true);
   if (intents(context)[intentKey('fork', candidateStorageName)].state === 'failed') fail(503, 'PROVISIONING_FAILED', 'Candidate fork provisioning failed; retry the same intent');
-  return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', candidateStorageName)] }, intents(context)[intentKey('fork', candidateStorageName)].state === 'observed' ? 201 : 202);
+  return respond(context, { ...changeResponse(change), provisioning: intents(context)[intentKey('fork', candidateStorageName)] }, intents(context)[intentKey('fork', candidateStorageName)].state === 'observed' ? 201 : 202);
 }
 
 async function registerBranch(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
@@ -659,14 +660,14 @@ export const repos: FeatureModule = {
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Branch>(context, 'branches'), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: (context, _request, _match, body) => registerBranch(context, body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/git-token$/, handle: (context, _request, _match, body) => gitToken(context, body as Record<string, unknown>) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes'), request)); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes').map(changeResponse), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...change, provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match) => close(context, match[2]) },
   ],
-  snapshot: context => ({ repo: context.state.get<Repo>('repo'), branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes'), provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
+  snapshot: context => ({ repo: context.state.get<Repo>('repo'), branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(changeResponse), provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
   nextDeadline: context => Object.values(intents(context)).filter(activeProvisioning).reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
   onAlarm: async context => {
     const all = Object.values(intents(context)).filter(intent => activeProvisioning(intent) && intent.retryAt <= context.now());

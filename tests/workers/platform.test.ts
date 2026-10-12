@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
-import { authenticate, clock } from '../../src/auth';
+import { authenticate, clock, loadAuthTokens } from '../../src/auth';
 import { modules } from '../../src/coordinator';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
@@ -14,6 +14,40 @@ import { apiRequest, mutation, responseBody } from '../helpers';
 const fetchApi = (request: Request) => worker.fetch(request, env);
 
 describe('local Worker and SQLite Durable Objects', () => {
+  it('returns an exact authenticated principal profile for every role', async () => {
+    for (const [token, principalId, role] of [
+      ['local-owner', 'owner', 'owner'], ['local-agent-a', 'agent-a', 'agent'],
+      ['local-reviewer', 'reviewer', 'reviewer'], ['local-viewer', 'viewer', 'viewer'],
+      ['local-checker', 'checker', 'checker'], ['local-promoter', 'promoter', 'promoter'],
+    ]) {
+      const response = await fetchApi(apiRequest('/v1/me', token));
+      expect(response.status).toBe(200);
+      expect((await responseBody(response)).data).toEqual({
+        principalId, tenantId: 'local', roles: [role], repoIds: '*',
+        expiresAt: Number.MAX_SAFE_INTEGER, model: null,
+      });
+    }
+    expect((await fetchApi(new Request('https://concord.test/v1/me'))).status).toBe(401);
+  });
+
+  it('validates model labels when loading the token mapping', async () => {
+    const principal = { tenantId: 'local', principalId: 'agent', roles: ['agent'], repoIds: ['alpha'], expiresAt: Number.MAX_SAFE_INTEGER };
+    for (const model of ['', 'a'.repeat(65), 'bad space', 'bad@model', null, 3]) {
+      expect(() => loadAuthTokens(JSON.stringify({ unused: { ...principal, model } }))).toThrowError(/Authentication configuration unavailable/);
+    }
+    for (const model of ['a', 'GPT-6.1/fast:preview', 'x'.repeat(64)]) {
+      expect(loadAuthTokens(JSON.stringify({ unused: { ...principal, model } })).unused.model).toBe(model);
+    }
+    const token = 'model-token';
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), b => b.toString(16).padStart(2, '0')).join('');
+    const production = { ...env, CONCORD_MODE: 'production', AUTH_TOKENS: JSON.stringify({ [hash]: { ...principal, model: 'GPT-6.1' } }) } as Env;
+    const response = await worker.fetch(apiRequest('/v1/me', token), production);
+    expect((await responseBody(response)).data).toEqual({ principalId: 'agent', tenantId: 'local', roles: ['agent'], repoIds: ['alpha'], expiresAt: Number.MAX_SAFE_INTEGER, model: 'GPT-6.1' });
+    const nonExpiring = await worker.fetch(apiRequest('/v1/me', token), { ...production,
+      AUTH_TOKENS: JSON.stringify({ [hash]: { ...principal, expiresAt: null } }),
+    });
+    expect((await responseBody(nonExpiring)).data.expiresAt).toBeNull();
+  });
   it('authenticates every named local actor as a distinct principal through the Worker', async () => {
     const fixtures = [
       ['local-owner', 'owner', 'owner'],
