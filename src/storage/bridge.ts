@@ -1,4 +1,4 @@
-import type { RepoStorage, StorageCommit, StorageRepo, StorageToken } from '../contracts';
+import type { RepoStorage, StorageCommit, StorageRepo, StorageToken, StorageTreeEntry } from '../contracts';
 
 /** Worker-safe HTTP client for the authenticated loopback development bridge. */
 export function bridgeStorage(rawUrl: string): RepoStorage {
@@ -26,6 +26,7 @@ export function bridgeStorage(rawUrl: string): RepoStorage {
     info: name => call<StorageRepo | null>('info', { name }),
     resolveRef: (name, ref) => call<string | null>('resolveRef', { name, ref }),
     readCommit: (name, oid) => call<StorageCommit | null>('readCommit', { name, oid }),
+    listTree: (name, oid, path) => call<StorageTreeEntry[] | null>('listTree', { name, oid, path }),
     async readFile(name, oid, path) {
       const value = await call<{ bytes: number[] } | null>('readFile', { name, oid, path });
       return value ? new Uint8Array(value.bytes) : null;

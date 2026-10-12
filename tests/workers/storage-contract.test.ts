@@ -45,6 +45,8 @@ describe('fake RepoStorage and module state', () => {
       expect(await second.resolveRef('source', 'refs/heads/main')).toBe('a');
       expect(await second.readCommit('candidate', 'a')).toMatchObject({ treeOid: 'tree-a' });
       expect(new TextDecoder().decode(await second.readFile('candidate', 'a', 'a.txt') ?? new Uint8Array())).toBe('hello');
+      expect(await second.listTree('candidate', 'a', '')).toEqual([{ name: 'a.txt', type: 'blob', oid: '' }]);
+      expect(await second.listTree('candidate', 'a', 'missing')).toBeNull();
       await expect(second.mintToken('candidate', 'read', 60)).resolves.toMatchObject({ expiresAt: 61000 });
       const token = await second.mintToken('candidate', 'write', 1);
       expect(await second.revokeToken('candidate', token.secret)).toBe(true);

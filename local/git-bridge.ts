@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 const namePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const oidPattern = /^[a-f0-9]{40}$/;
 const MAX_REPO_BYTES = 10 * 1024 * 1024;
-const MAX_FILE_BYTES = 256 * 1024;
+const MAX_FILE_BYTES = MAX_REPO_BYTES;
 
 export interface GitBridge { server: Server; url: string; close(): Promise<void> }
 
@@ -105,6 +105,25 @@ export async function startGitBridge(dataDirectory: string, token: string, port 
           return { bytes: Array.from(gitRepo(body.name, ['show', `${oid}:${path}`], MAX_FILE_BYTES)) };
         }
         catch (error) { if (missing(error)) return null; throw error; }
+      }
+      case 'listTree': {
+        remote(body.name);
+        const oid = validOid(body.oid);
+        const path = body.path;
+        if (typeof path !== 'string' || (path && (path.startsWith('/') || path.split('/').some(part => !part || part === '.' || part === '..' || part.includes(':') || part.includes('\\'))))) throw new Error('INVALID_PATH');
+        try {
+          if (gitRepo(body.name, ['cat-file', '-t', oid]).toString().trim() !== 'commit') return null;
+          const object = path ? `${oid}:${path}` : `${oid}^{tree}`;
+          if (gitRepo(body.name, ['cat-file', '-t', object]).toString().trim() !== 'tree') return null;
+          const raw = gitRepo(body.name, ['ls-tree', '-z', object]);
+          return raw.toString('utf8').split('\0').filter(Boolean).map(row => {
+            const match = /^([0-7]+) (blob|tree|commit) ([a-f0-9]{40})\t(.+)$/.exec(row);
+            if (!match) throw new Error('INVALID_TREE_ENTRY');
+            const [, mode, kind, hash, entryName] = match;
+            const type = kind === 'tree' ? 'tree' : kind === 'commit' ? 'gitlink' : mode === '120000' ? 'symlink' : mode === '100755' ? 'exec' : 'blob';
+            return { name: entryName, type, oid: hash };
+          });
+        } catch (error) { if (missing(error)) return null; throw error; }
       }
       case 'mintToken': {
         remote(body.name);

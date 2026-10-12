@@ -8,6 +8,7 @@ const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
+const { createRepoPage } = require('../../web/repo.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -31,6 +32,61 @@ const fixture = {
   } },
   version: 7, eventSeq: 0,
 };
+
+describe('Repository code page', () => {
+  it('renders human files and claims, switches to exact agent context and opens docs', async () => {
+    const dom = new JSDOM('<main id="page"></main>', { url: 'http://localhost/' });
+    const previous = globalThis.document;
+    globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('page')!;
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.repos.repo.observedCanonicalOid = 'a'.repeat(40);
+      snapshot.data.projections.leases.heldItems = [
+        { unitKey: 'file:docs/guide.md', state: 'active', holderId: 'worker', expiresAt: Date.now() + 60000 },
+        { unitKey: 'row:guides:one', state: 'reserved', holderId: 'worker-2', expiresAt: Date.now() + 60000 },
+      ];
+      const api = {
+        getRepoTree: async (_repo: string, path: string) => ({ data: { entries: path === '' ? [{ name: 'docs', type: 'tree' }, { name: 'README.md', type: 'blob' }] : path === 'docs' ? [{ name: 'guide.md', type: 'blob' }] : [{ name: 'rules.md', type: 'blob' }], rowTables: { guides: 'docs/guide.md' } } }),
+        getRepoReadme: async () => ({ data: { path: 'README.md', content: '# Welcome\n<script>alert(1)</script>' } }),
+        getRepoFile: async (_repo: string, path: string) => ({ data: { path, content: path === 'AGENTS.md' ? 'Follow rules' : 'Agent or guide content' } }),
+      };
+      const page = createRepoPage(root, api);
+      page.show('sample', snapshot);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(root.textContent).toContain('README.md');
+      expect(root.textContent).toContain('Welcome');
+      expect(root.querySelector('script')).toBeNull();
+      const docs = [...root.querySelectorAll('button')].find(button => button.textContent?.includes('docs/'))! as HTMLButtonElement;
+      docs.click(); await new Promise(resolve => setTimeout(resolve, 0));
+      expect(root.textContent).toContain('2 claimed');
+      const agents = [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')! as HTMLButtonElement;
+      agents.click();
+      expect(agents.isConnected).toBe(false);
+      expect(root.textContent).toContain('AGENTS.md');
+      expect(root.textContent).toContain('agents/rules.md');
+      expect(root.querySelector('pre')?.textContent).toBe(JSON.stringify(snapshot, null, 2));
+      const docButton = [...root.querySelectorAll('button')].find(button => button.textContent === 'AGENTS.md')! as HTMLButtonElement;
+      docButton.click();
+      expect(root.textContent).toContain('Follow rules');
+    } finally { globalThis.document = previous; }
+  });
+  it('shows empty main and read errors without inventing files', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('page')!;
+      const page = createRepoPage(root, { getRepoTree: async () => { throw { status: 403 }; }, getRepoReadme: async () => { throw { status: 404 }; }, getRepoFile: async () => { throw { status: 404 }; } });
+      page.show(null, null);
+      expect(root.textContent).toContain('Choose a repository');
+      page.show('empty', { data: { projections: { repos: { repo: { observedCanonicalOid: null } } } } });
+      expect(root.textContent).toContain('Canonical main has no files yet');
+      page.show('full', { data: { projections: { repos: { repo: { observedCanonicalOid: 'a'.repeat(40) } } } } });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(root.textContent).toContain('Your token cannot read this repository');
+    } finally { globalThis.document = previous; }
+  });
+});
 
 describe('Fleet desk derivation', () => {
   it('derives blamed changes, lease waits, and ready changes without reading verdicts', () => {

@@ -1,4 +1,4 @@
-import type { Oid, RepoStorage, StorageCommit, StorageRepo, StorageToken } from '../contracts';
+import type { Oid, RepoStorage, StorageCommit, StorageRepo, StorageToken, StorageTreeEntry } from '../contracts';
 import type { StateStore } from '../state';
 
 interface FakeRepo {
@@ -59,6 +59,20 @@ export class FakeStorage implements RepoStorage {
     this.fault('readFile');
     const bytes = this.repo(name)?.files[oid]?.[path];
     return bytes ? new Uint8Array(bytes) : null;
+  }
+
+  async listTree(name: string, oid: Oid, path: string): Promise<StorageTreeEntry[] | null> {
+    this.fault('listTree');
+    const files = this.repo(name)?.files[oid];
+    if (!files || (path && !Object.keys(files).some(file => file.startsWith(`${path}/`)))) return null;
+    const entries = new Map<string, StorageTreeEntry>();
+    for (const file of Object.keys(files)) {
+      if (path && !file.startsWith(`${path}/`)) continue;
+      const remainder = path ? file.slice(path.length + 1) : file;
+      const [segment, ...rest] = remainder.split('/');
+      if (segment) entries.set(segment, { name: segment, type: rest.length ? 'tree' : 'blob', oid: '' });
+    }
+    return [...entries.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async mintToken(name: string, scope: 'read' | 'write', ttlSeconds: number): Promise<StorageToken> {

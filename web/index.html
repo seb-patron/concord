@@ -18,6 +18,8 @@
 <div class="signin-card"><h2>Open the dashboard</h2><button id="demo-open" type="button" class="primary" hidden>Watch the live demo repo (read-only)</button><form id="token-form"><label for="token-input">Bearer token (kept in this tab’s memory only)</label><input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="cct_…" required><button type="submit">Sign in</button></form><p id="session-error" role="alert" hidden></p><p class="muted">Agents connect through the MCP server or <code>concord land</code>. <a href="https://github.com/seb-patron/concord#readme">Set up an agent</a>.</p></div>
 </section>
 <div id="desk" hidden>
+<nav class="repo-nav" aria-label="Repository sections"><button type="button" id="open-code">Code</button><button type="button" id="open-desk">Fleet desk</button></nav>
+<section id="repo-page" class="repo-page" aria-label="Repository code" hidden></section>
 <p id="desk-message" class="desk-message" role="status" hidden></p>
 <section id="stat-strip" class="stat-strip" aria-label="Fleet summary"></section><button id="inbox-alert" class="inbox-alert" type="button"><span class="alert-dot" aria-hidden="true"></span><strong id="alert-count">0 decisions need you</strong><span id="alert-preview"></span><span aria-hidden="true">→</span></button>
 <div id="desk-view"><nav class="mobile-tabs" aria-label="Views"><button type="button" data-tab="work">Work</button><button type="button" data-tab="fleet">Fleet</button><button type="button" data-tab="leases">Leases</button><button type="button" data-tab="queue">Queue</button></nav>

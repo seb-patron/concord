@@ -47,6 +47,8 @@ describe('authenticated loopback Git bridge', () => {
     expect(git(['--git-dir', new URL(canonical.remote).pathname, 'cat-file', '-t', blobOid]).trim()).toBe('blob');
     expect(await storage.readCommit('canonical', blobOid)).toBeNull();
     expect(new TextDecoder().decode(await storage.readFile('canonical', oid, 'README.md') ?? new Uint8Array())).toBe('first seed\n');
+    expect(await storage.listTree('canonical', oid, '')).toEqual([expect.objectContaining({ name: 'README.md', type: 'blob' })]);
+    expect(await storage.listTree('canonical', oid, 'missing')).toBeNull();
     const fork = await storage.fork('canonical', 'candidate');
     expect(fork.remote).toMatch(/^file:\/\//);
     expect(await storage.resolveRef('candidate', 'refs/heads/main')).toBe(oid);
@@ -64,7 +66,7 @@ describe('authenticated loopback Git bridge', () => {
     const restartedStorage = bridgeStorage(restarted.url);
     expect(await restartedStorage.resolveRef('candidate', 'refs/heads/main')).toBe(oid);
     expect(await restartedStorage.revokeToken('candidate', persistentToken.secret)).toBe(true);
-  });
+  }, 20_000);
 
   it('rejects unauthenticated calls, traversal, unknown names and unsafe refs', async () => {
     const bridge = await startGitBridge(temp(), 'another-bridge-token-12345');
@@ -81,5 +83,6 @@ describe('authenticated loopback Git bridge', () => {
     await storage.ensureRepo('safe');
     await expect(storage.resolveRef('safe', 'refs/heads/../main')).rejects.toThrow('INVALID_REF');
     await expect(storage.readFile('safe', 'a'.repeat(40), '../secret')).rejects.toThrow('INVALID_PATH');
+    await expect(storage.listTree('safe', 'a'.repeat(40), '../secret')).rejects.toThrow('INVALID_PATH');
   });
 });

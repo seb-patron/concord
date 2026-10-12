@@ -233,6 +233,45 @@ async function repoDetail(context: ModuleContext): Promise<Response> {
   return respond(context, repo, repo.status === 'provisioning' ? 202 : 200);
 }
 
+const MAX_CONTENT_BYTES = 64 * 1024;
+function canonicalPath(value: string | null, allowEmpty = false): string {
+  if (value === null && allowEmpty) return '';
+  if (!value || value.length > 1024 || value.startsWith('/') || value.split('/').some(segment => !segment || segment === '.' || segment === '..' || /[\\:\x00-\x1f]/.test(segment))) {
+    return fail(400, 'INVALID_PATH', 'Invalid repository path');
+  }
+  return value;
+}
+async function canonicalRead(context: ModuleContext, request: Request, kind: 'tree' | 'file' | 'readme'): Promise<Response> {
+  const repo = await catalogRepo(context);
+  requireReady(repo);
+  const params = new URL(request.url).searchParams;
+  const main = await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
+  if (!main) return fail(404, 'MAIN_NOT_FOUND', 'Canonical main is empty');
+  const requestedOid = params.get('oid');
+  if (requestedOid && !/^[a-f0-9]{40}$/.test(requestedOid)) fail(400, 'INVALID_OID', 'Invalid commit OID');
+  const commitOid = requestedOid ?? main;
+  if (!await context.storage.readCommit(repo.canonicalStorageName, commitOid)) return fail(404, 'COMMIT_NOT_FOUND', 'Commit not found');
+  if (kind === 'tree') {
+    const path = canonicalPath(params.get('path'), true);
+    const entries = await context.storage.listTree(repo.canonicalStorageName, commitOid, path);
+    if (!entries) return fail(404, 'TREE_NOT_FOUND', 'Directory not found');
+    const policy = context.trusted.policies[repo.policyId];
+    if (!policy || policy.digest !== repo.policyDigest) return fail(503, 'UNIT_POLICY_UNAVAILABLE', 'Trusted unit policy unavailable');
+    const unitFiles = Object.fromEntries(Object.values(policy.units).map(unit => [unit.canonicalKey, unit.file]));
+    const rowTables = Object.fromEntries((policy.tables ?? []).map(table => [table.name, table.file]));
+    return respond(context, { oid: commitOid, path, entries, unitFiles, rowTables });
+  }
+  const path = kind === 'readme' ? 'README.md' : canonicalPath(params.get('path'));
+  const bytes = await context.storage.readFile(repo.canonicalStorageName, commitOid, path);
+  if (!bytes) return fail(404, 'FILE_NOT_FOUND', 'File not found');
+  if (bytes.byteLength > MAX_CONTENT_BYTES) return fail(413, 'FILE_TOO_LARGE', 'File exceeds the 64 KiB display limit');
+  let content: string;
+  try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { return fail(415, 'BINARY_FILE', 'Binary files cannot be displayed'); }
+  if (content.includes('\0')) fail(415, 'BINARY_FILE', 'Binary files cannot be displayed');
+  return respond(context, { oid: commitOid, path, content, size: bytes.byteLength });
+}
+
 function changeInput(body: CreateChangeBody) {
   const intentKey = text(body.intentKey, 'intentKey', 128);
   const intentText = text(body.intentText, 'intentText');
@@ -665,6 +704,9 @@ export const repos: FeatureModule = {
   routes: [
     { method: 'POST', pattern: /^\/v1\/repos$/, handle: (context, _request, _match, body) => catalogCreate(context, body as unknown as CreateRepoBody) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)$/, handle: context => repoDetail(context) },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/tree$/, handle: (context, request) => canonicalRead(context, request, 'tree') },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/file$/, handle: (context, request) => canonicalRead(context, request, 'file') },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/readme$/, handle: (context, request) => canonicalRead(context, request, 'readme') },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/bootstrap$/, handle: (context, _request, _match, body) => bootstrap(context, body as unknown as BootstrapBody) },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Branch>(context, 'branches'), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: (context, _request, _match, body) => registerBranch(context, body as Record<string, unknown>) },

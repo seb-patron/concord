@@ -55,6 +55,32 @@ function provisioningAtProvider(storage: FakeStorage, name: string, kind: 'ensur
 }
 
 describe('repository and change lifecycle', () => {
+  it('reads canonical directories, files and README at a pinned commit with bounded text', async () => {
+    const name = 'canonical_browse_case';
+    const repo = await create(name);
+    await fetchApi(apiRequest(`/v1/repos/${name}`));
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] }, {
+        'README.md': new TextEncoder().encode('# Human <script>\n'),
+        'agents/rules.md': new TextEncoder().encode('agent rules'),
+        'binary.bin': new Uint8Array([0, 1]),
+        'large.txt': new Uint8Array(65 * 1024),
+      });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const base = `/v1/repos/${name}`;
+    const root = await responseBody(await fetchApi(apiRequest(`${base}/tree`)));
+    expect(root.data.oid).toBe(a);
+    expect(root.data.entries).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'agents', type: 'tree' })]));
+    expect(root.data).toMatchObject({ unitFiles: {}, rowTables: {} });
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/tree?path=agents`)))).data.entries).toEqual([expect.objectContaining({ name: 'rules.md' })]);
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/readme?oid=${a}`)))).data.content).toBe('# Human <script>\n');
+    expect((await responseBody(await fetchApi(apiRequest(`${base}/file?path=agents%2Frules.md`)))).data.content).toBe('agent rules');
+    for (const [path, status] of [['file?path=../secret', 400], ['tree?path=missing', 404], ['file?path=binary.bin', 415], ['file?path=large.txt', 413], ['readme?oid=bad', 400]]) {
+      expect((await fetchApi(apiRequest(`${base}/${path}`))).status).toBe(status);
+    }
+    expect((await fetchApi(apiRequest(`${base}/tree`, 'invalid-token'))).status).toBe(401);
+  });
   it('records the creating principal model and returns null for an absent label', async () => {
     const name = 'author_model_case';
     await create(name);

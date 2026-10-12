@@ -175,6 +175,23 @@ export function getSnapshot(repoId, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/snapshot`, {}, fetchImpl);
 }
 
+export function getRepoTree(repoId, path = '', oid = null, fetchImpl) {
+  const query = new URLSearchParams({ path });
+  if (oid) query.set('oid', oid);
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/tree?${query}`, {}, fetchImpl);
+}
+
+export function getRepoFile(repoId, path, oid = null, fetchImpl) {
+  const query = new URLSearchParams({ path });
+  if (oid) query.set('oid', oid);
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/file?${query}`, {}, fetchImpl);
+}
+
+export function getRepoReadme(repoId, oid = null, fetchImpl) {
+  const query = oid ? `?oid=${encodeURIComponent(oid)}` : '';
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/readme${query}`, {}, fetchImpl);
+}
+
 export function getEvents(repoId, after, fetchImpl) {
   const params = new URLSearchParams({ after: String(after), limit: '100' });
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);

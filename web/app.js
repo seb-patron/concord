@@ -7,8 +7,10 @@ import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
+import { createRepoPage } from './repo.js';
 
 const $ = id => document.getElementById(id);
+const repoPage = createRepoPage($('repo-page'));
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
@@ -70,6 +72,7 @@ function showSession() {
 }
 function signOut(message) {
   ++state.generation; clearSessionToken();
+  repoPage.hide();
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
   state.observedVersions.clear();
@@ -557,7 +560,7 @@ function renderDetail() {
 }
 function renderInbox() {
   const items=deriveInbox(state.snapshot);
-  $('inbox-alert').hidden=items.length===0;
+  $('inbox-alert').hidden=items.length===0 || state.view==='repo';
   $('alert-count').textContent=`${items.length} decision${items.length===1?'':'s'} need you`;
   $('alert-preview').textContent=items.slice(0,3).map(i=>i.kind).join(' · ');
   $('inbox-count').textContent=`${items.length} decisions · ${state.repos.find(r=>r.repoId===state.repoId)?.displayName ?? state.repoId ?? ''}`;
@@ -599,9 +602,16 @@ function render() {
   preserve(()=>{
     showSession();
     if (!hasToken() || !state.identity) return;
+    $('repo-page').hidden = state.view !== 'repo';
+    $('open-code').setAttribute('aria-current', String(state.view === 'repo'));
+    $('open-desk').setAttribute('aria-current', String(state.view !== 'repo'));
+    if (state.view === 'repo') repoPage.show(state.repoId, state.snapshot);
+    else repoPage.hide();
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
+    $('stat-strip').hidden = state.view === 'repo';
+    $('inbox-alert').hidden = state.view === 'repo';
     if (!state.snapshot) {
       if (!state.repoId) {
         renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderInbox();renderTabs();
@@ -665,6 +675,8 @@ function doVerdict(change,decision,manifest,evidenceDigest) {
   void mutate('Verdict',()=>submitVerdict(state.repoId,change.changeId,{expectedVersion:state.snapshot.version,revision:evidence.revision,reviewManifestDigest:manifest.trim(),findingSetVersion:evidence.findingSetVersion,decision,evidenceDigest:evidenceDigest.trim()},newIdempotencyKey()));
 }
 function boot() {
+  $('open-code').addEventListener('click',()=>{state.view='repo';render();});
+  $('open-desk').addEventListener('click',()=>{state.view='desk';render();});
   $('demo-open').hidden=!demo;
   $('demo-open').addEventListener('click',()=>{if(demo) void signIn(demo,window.CONCORD_DEMO_REPO_ID);});
   $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value.trim();if(token)void signIn(token);});

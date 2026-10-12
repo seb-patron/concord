@@ -312,6 +312,7 @@ export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');
 export const pendingResultFailure: unique symbol = Symbol('pendingResultFailure');
 export interface StorageRepo { name: string; remote: string; status: 'ready' | 'provisioning'; [pendingInitialToken]?: string; [pendingResultFailure]?: string }
 export interface StorageCommit { oid: Oid; treeOid: Oid; parents: Oid[] }
+export interface StorageTreeEntry { name: string; type: 'tree' | 'blob' | 'exec' | 'symlink' | 'gitlink'; oid: Oid }
 export interface StorageToken { secret: string; expiresAt: number; [pendingResultFailure]?: string }
 export interface RepoStorage {
   ensureRepo(name: string): Promise<StorageRepo>;
@@ -319,6 +320,7 @@ export interface RepoStorage {
   info(name: string): Promise<StorageRepo | null>;
   resolveRef(name: string, ref: string): Promise<Oid | null>;
   readCommit(name: string, oid: Oid): Promise<StorageCommit | null>;
+  listTree(name: string, oid: Oid, path: string): Promise<StorageTreeEntry[] | null>;
   readFile(name: string, oid: Oid, path: string): Promise<Uint8Array | null>;
   mintToken(name: string, scope: 'read' | 'write', ttlSeconds: number): Promise<StorageToken>;
   revokeToken(name: string, tokenIdOrSecret: string): Promise<boolean>;

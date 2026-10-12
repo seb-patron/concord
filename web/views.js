@@ -348,3 +348,5 @@ export function restoreScroll(el, saved) {
   el.scrollLeft = saved.left;
   return true;
 }
+/** Conservative token estimate for document previews; never a model tokenizer. */
+export const approximateTokens = value => Math.ceil(String(value ?? '').length / 4);

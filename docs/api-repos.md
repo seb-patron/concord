@@ -9,6 +9,9 @@ An `AUTH_TOKENS` principal may have an optional `model` label of 1–64 characte
 | `GET /v1/repos` | Any authorized principal | Page of tenant repos; `?cursor=` advances. |
 | `POST /v1/repos` | Owner | `{name,policyId,profileId}` reserves a logical name and canonical storage intent before contacting the provider. Returns `201 ready`, `202 provisioning`, or `503` with visible `blocked` state. Repost the same name/config to reconcile a failed call. |
 | `GET /v1/repos/:r` | Repo reader | Repo status and observed canonical `main` OID; `202` while provisioning. |
+| `GET /v1/repos/:r/tree?path=&oid=` | Repo reader | Immediate directory entries from canonical storage. Empty `path` selects the root; omitted `oid` reads current `main`. Entries carry `name`, `type`, and `oid`; `unitFiles` and `rowTables` map trusted policy units to paths for live claim badges. Missing main, commit or directory returns 404. |
+| `GET /v1/repos/:r/file?path=…&oid=` | Repo reader | UTF-8 text and byte size from canonical storage. Omitted `oid` reads current `main`. Files over 64 KiB return 413; binary or invalid UTF-8 returns 415. Missing files return 404. |
+| `GET /v1/repos/:r/readme?oid=` | Repo reader | Same bounded text response as `file` for root `README.md`. Missing README returns 404. |
 | `GET /v1/repos/:r/branches` | Repo reader | Registered candidate refs only. |
 | `POST /v1/repos/:r/branches` | Candidate author | `{expectedVersion,storageName,ref,observedHead,ownerId}`. `ref` is a full `refs/heads/...` name. The server resolves the exact fork ref and commit before registration. |
 | `POST /v1/repos/:r/git-token` | Owner/agent | `{expectedVersion,storageName,scope,ttlSeconds}`. TTL is 60–600 seconds. Canonical accepts read scope only; a candidate write token is confined to its author. Returns the provider's exact remote and a short-lived token. |
