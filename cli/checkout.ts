@@ -16,7 +16,7 @@ export async function checkoutPublishedRevision(worktree: string, remote: string
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(changeId) || !Number.isSafeInteger(revision) || revision < 1 || !/^[a-f0-9]{40}$/i.test(headOid)) {
     throw new ConcordError('Published revision identity is invalid', 'server');
   }
-  const ref = `refs/remotes/concord/revisions/${changeId}/${revision}`;
+  const ref = `refs/concord/revisions/${changeId}/${revision}`;
   const object = await git(['rev-parse', '--verify', `${headOid}^{commit}`], {}, worktree).catch(() => null);
   if (object !== headOid.toLowerCase()) {
     await git(['fetch', '--no-tags', '--', remote, `${headOid}:${ref}`], { token }, worktree)

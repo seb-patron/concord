@@ -270,7 +270,7 @@ describe('Concord agent CLI client', () => {
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
-  it('fetches a full change ref and detaches at the requested published revision', async () => {
+  it('checks out a published revision when the candidate branch is revisions', async () => {
     const { root, worktree } = await publicationFixture('checkout-published-revision');
     const bare = join(root, 'candidate.git');
     await git(['init', '--bare', bare]);
@@ -278,12 +278,12 @@ describe('Concord agent CLI client', () => {
     await git(['add', '--', 'source.txt'], {}, worktree);
     await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'revision one'], {}, worktree);
     const firstHead = await resolveHead(worktree);
-    await git(['push', bare, 'HEAD:refs/heads/candidate'], {}, worktree);
+    await git(['push', bare, 'HEAD:refs/heads/revisions'], {}, worktree);
     await writeFile(join(worktree, 'source.txt'), 'revision two\n');
     await git(['add', '--', 'source.txt'], {}, worktree);
     await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'revision two'], {}, worktree);
     const secondHead = await resolveHead(worktree);
-    await git(['push', bare, 'HEAD:refs/heads/candidate'], {}, worktree);
+    await git(['push', bare, 'HEAD:refs/heads/revisions'], {}, worktree);
     await git(['update-server-info'], {}, bare);
     const requests: string[] = [];
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
@@ -291,7 +291,7 @@ describe('Concord agent CLI client', () => {
       if (path.startsWith('/v1/')) {
         requests.push(path);
         response.setHeader('content-type', 'application/json');
-        if (path === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { changeId: 'change-1', candidateStorageName: 'fork', branch: 'refs/heads/candidate', revision: 2, headOid: secondHead } }));
+        if (path === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { changeId: 'change-1', candidateStorageName: 'fork', branch: 'refs/heads/revisions', revision: 2, headOid: secondHead } }));
         else if (path === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical' }, version: 7 }));
         else if (path === '/v1/repos/repo-1/git-token') response.end(JSON.stringify({ data: { remote: `http://127.0.0.1:${(server.address() as { port: number }).port}/candidate.git`, plaintext: 'git-test-token' } }));
         else if (path === '/v1/repos/repo-1/events') response.end(JSON.stringify({ data: { items: [{ sequence: 1, kind: 'change.published', relatedIds: ['change-1'], payload: { revision: 1, headOid: firstHead } }], nextCursor: null } }));
@@ -310,12 +310,13 @@ describe('Concord agent CLI client', () => {
     });
     try {
       await cli();
-      expect(await git(['rev-parse', 'refs/remotes/concord/candidate'], {}, worktree)).toBe(secondHead);
+      expect(await git(['rev-parse', 'refs/remotes/concord/revisions'], {}, worktree)).toBe(secondHead);
       expect(await resolveHead(worktree)).toBe(secondHead);
       await cli('--revision', '1');
       expect(await resolveHead(worktree)).toBe(firstHead);
       expect(await git(['symbolic-ref', '-q', 'HEAD'], {}, worktree).catch(() => null)).toBeNull();
-      expect(await git(['rev-parse', 'refs/remotes/concord/revisions/change-1/1'], {}, worktree)).toBe(firstHead);
+      expect(await git(['rev-parse', 'refs/concord/revisions/change-1/1'], {}, worktree)).toBe(firstHead);
+      expect(await git(['rev-parse', 'refs/remotes/concord/revisions'], {}, worktree)).toBe(secondHead);
       expect(await readFile(join(worktree, 'source.txt'), 'utf8')).toBe('revision one\n');
       expect(requests).toContain('/v1/repos/repo-1/events');
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
