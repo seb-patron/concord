@@ -534,8 +534,35 @@ function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate
   }
   return context.transaction(() => {
     const state = read(context);
-    if (state.observedMain !== null || state.finalCanonicalOid !== null || state.bootstrap || state.ticket
+    if (state.observedMain !== null || state.finalCanonicalOid !== null || state.ticket
       || state.entries.some(active)) return blocked(context, 'BOOTSTRAP_CONFLICT', 'Canonical repository is already initialized or initialization is pending');
+    if (state.bootstrap) {
+      const old = state.bootstrap;
+      const policy = context.trusted.policies[input.policyId];
+      const profile = context.trusted.profiles[input.profileId];
+      if (!input.repin || !input.jobId || input.jobId === old.jobId
+        || old.input.seedStorageName !== input.seedStorageName || old.input.seedRef !== input.seedRef
+        || old.input.headOid !== input.headOid || old.input.canonicalStorageName !== input.canonicalStorageName
+        || old.input.scratchStorageName !== input.scratchStorageName || old.input.policyId !== input.policyId
+        || old.input.profileId !== input.profileId || old.state === 'merged'
+        || old.policyDigest === policy.digest && old.profileDigest === profile.digest && old.blockedReason !== 'INVALID_JOB')
+        return blocked(context, 'BOOTSTRAP_CONFLICT', 'Bootstrap cannot be replaced');
+      const cancelled = context.call('runners.cancelBootstrap', old.jobId);
+      if (cancelled.status === 'blocked') return cancelled;
+      for (const record of state.jobs) if (record.job.jobId === old.jobId) record.consumed = true;
+      const previous = { policyDigest: old.policyDigest, profileDigest: old.profileDigest };
+      const stackId = crypto.randomUUID();
+      state.bootstrap = { input: { ...input, repin: undefined }, stackId, jobId: input.jobId!, createdAt: context.now(),
+        state: 'waiting', blockedReason: null, policyDigest: policy.digest, profileDigest: profile.digest };
+      bump(context, state, 'BOOTSTRAP_REPINNED', [stackId]);
+      state.blockedReason = null;
+      state.coalesceUntil = null;
+      emit(context, 'repo.bootstrap.repinned', [stackId], { oldJobId: old.jobId, jobId: input.jobId,
+        oldPolicyDigest: previous.policyDigest, newPolicyDigest: policy.digest,
+        oldProfileDigest: previous.profileDigest, newProfileDigest: profile.digest });
+      save(context, state);
+      return eligible(context, { stackId }, [stackId]);
+    }
     const stackId = crypto.randomUUID();
     state.bootstrap = { input: { ...input }, stackId, jobId: input.jobId ?? crypto.randomUUID(), createdAt: context.now(), state: 'waiting', blockedReason: null,
       policyDigest: context.trusted.policies[input.policyId].digest,
@@ -1014,6 +1041,9 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
     context.transaction(() => {
       schedule(context, state, job, 'stack', []);
       state.bootstrap!.state = 'checking';
+      state.bootstrap!.blockedReason = null;
+      state.blockedReason = null;
+      state.coalesceUntil = null;
       save(context, state);
     });
     return;
@@ -1079,13 +1109,30 @@ export const queue: FeatureModule = {
     catch (error) {
       const state = read(context);
       const reason = error instanceof HttpError ? error.code : 'QUEUE_ALARM_ERROR';
+      if (state.coalesceUntil !== null && state.coalesceUntil > context.now() && state.bootstrap
+        && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)
+        && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(state.blockedReason ?? '')) {
+        state.blockedReason = reason;
+        state.bootstrap.blockedReason = reason;
+        save(context, state);
+        return;
+      }
       state.blockedReason = reason;
-      state.coalesceUntil = context.now() + 10_000;
+      if (state.bootstrap && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)) state.bootstrap.blockedReason = reason;
+      state.coalesceUntil = context.now() + (['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason) && state.bootstrap ? 60_000 : 10_000);
       emit(context, 'queue.alarm_deferred', [], { reason, retryAt: state.coalesceUntil });
       save(context, state);
     }
   },
-  hooks: { 'queue.onResult': onResult },
+  hooks: { 'queue.onResult': onResult, 'queue.bootstrapStatus': context => {
+    if (!context?.state?.get || !context?.version)
+      return { status: 'blocked', version: 0, code: 'MODULE_UNAVAILABLE', reason: 'Queue context unavailable', evidenceIds: [] };
+    const state = read(context);
+    const bootstrap = state.bootstrap;
+    return eligible(context, bootstrap ? { jobId: bootstrap.jobId, state: bootstrap.state,
+      blockedReason: bootstrap.blockedReason ?? state.blockedReason,
+      policyDigest: bootstrap.policyDigest, profileDigest: bootstrap.profileDigest } : null);
+  } },
   bootstrapHandoff,
   promotionFreeze: (context, request) => {
     const ticket = read(context).ticket;

@@ -111,14 +111,15 @@ function field(record: Record<string, unknown>, name: string): string {
   if (typeof found !== 'string' || !found) throw new ConcordError(`Concord response lacks ${name}`, 'server');
   return found;
 }
-async function poll<T>(label: string, action: () => Promise<T>, done: (value: T) => boolean, timeout = 120_000): Promise<T> {
+async function poll<T>(label: string, action: () => Promise<T>, done: (value: T) => boolean,
+  timeout = 120_000, detail: () => string = () => ''): Promise<T> {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
     const result = await action();
     if (done(result)) return result;
     await pause(400);
   }
-  throw new ConcordError(`Timed out waiting for ${label}; re-run import to reconcile`, 'transport');
+  throw new ConcordError(`Timed out waiting for ${label}${detail()}; re-run import to reconcile`, 'transport');
 }
 
 export async function importRepo(options: ImportOptions, client?: ConcordClient): Promise<Record<string, unknown>> {
@@ -200,6 +201,9 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
       if (repository.observedCanonicalOid !== headOid) throw new ConcordError('Canonical main already differs from this import', 'conflict');
       return { ...summary, canonicalOid: headOid, repoId: options.repo, reconciled: true };
     }
+    const initialBootstrap = repository.bootstrap as { blockedReason?: unknown } | null;
+    let blockedReason = typeof initialBootstrap?.blockedReason === 'string' ? initialBootstrap.blockedReason : null;
+    if (blockedReason) console.error(`Bootstrap blocked: ${blockedReason}; re-requesting bootstrap`);
     const intentHash = createHash('sha256').update(message).update('\0').update(patterns.join('\0'));
     if (options.withHistory) intentHash.update('\0history');
     const intentKey = 'import:' + intentHash.digest('hex');
@@ -241,10 +245,13 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
       expectedVersion: version(detail), idempotencyKey: idempotencyKey() });
     }, result => data(result).state === 'requested');
     await poll('canonical main', () => client.request('GET', root), result => {
-      const oid = data(result).observedCanonicalOid;
+      const detail = data(result);
+      const oid = detail.observedCanonicalOid;
+      const bootstrap = detail.bootstrap as { blockedReason?: unknown } | null;
+      if (typeof bootstrap?.blockedReason === 'string') blockedReason = bootstrap.blockedReason;
       if (oid && oid !== headOid) throw new ConcordError('Canonical main differs from imported commit', 'conflict');
       return oid === headOid;
-    }, 300_000);
+    }, 300_000, () => blockedReason ? ` (${blockedReason})` : '');
     return { ...summary, canonicalOid: headOid, repoId: options.repo, reconciled: false };
   } finally {
     await rm(scratch, { recursive: true, force: true });

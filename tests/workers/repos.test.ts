@@ -35,6 +35,31 @@ async function fake(name: string, action: (provider: FakeStorage) => void) {
   await runInDurableObject(stub, (_instance, state) => action(new FakeStorage(sqlState(state.storage.sql))));
 }
 
+async function bootstrapSeed(name: string) {
+  const repo = await create(name);
+  await fetchApi(apiRequest(`/v1/repos/${name}`));
+  const created = await fetchApi(mutation(`/v1/repos/${name}/changes`, {
+    intentKey: 'seed', intentText: 'seed', baseOid: null, branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+  }, `${name}-seed-change`));
+  const change = (await responseBody(created)).data;
+  await fake(name, provider => {
+    provider.putCommit(change.candidateStorageName, { oid: a, treeOid: b, parents: [] });
+    provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, a);
+  });
+  const branch = await fetchApi(mutation(`/v1/repos/${name}/branches`, {
+    expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: a, ownerId: 'owner',
+  }, `${name}-seed-branch`));
+  expect(branch.status).toBe(201);
+  const body = { seedStorageName: change.candidateStorageName, seedRef: 'refs/heads/seed', headOid: a,
+    policyId: 'local-demo', profileId: 'local-demo' };
+  const requested = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, {
+    ...body, expectedVersion: (await responseBody(branch)).version,
+  }, `${name}-bootstrap`));
+  expect(requested.status).toBe(202);
+  return { repo, change, body, requested: (await responseBody(requested)).data,
+    coordinator: env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`)) };
+}
+
 async function makeLegacyChange(name: string, changeId: string) {
   const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${name}`));
   await runInDurableObject(stub, (_instance, durable) => {
@@ -340,6 +365,139 @@ describe('repository and change lifecycle', () => {
     await fake('seed_case', async provider => {
       expect(await provider.resolveRef(repo.canonicalStorageName, 'refs/heads/main')).toBe(a);
     });
+  });
+
+  it('re-pins a profile-blocked bootstrap and promotes the original seed', async () => {
+    const name = 'bootstrap_repin_case';
+    const { repo, body, requested, coordinator } = await bootstrapSeed(name);
+    const config = localFixtureConfig('local');
+    config.profiles['local-demo'].digest = `sha256:${'b'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const detail = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+    expect(detail.data.bootstrap).toMatchObject({ jobId: requested.jobId, state: 'waiting', blockedReason: 'PROFILE_CHANGED' });
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/events`)))).data.items;
+    expect(events.filter((event: { kind: string; payload?: { reason?: string } }) =>
+      event.kind === 'queue.alarm_deferred' && event.payload?.reason === 'PROFILE_CHANGED')).toHaveLength(1);
+    const repinned = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: detail.version }, `${name}-repin`));
+    expect(repinned.status).toBe(202);
+    const newJobId = (await responseBody(repinned)).data.jobId;
+    expect(newJobId).not.toBe(requested.jobId);
+    const repeated = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: detail.version }, `${name}-repin`));
+    expect((await responseBody(repeated)).data.jobId).toBe(newJobId);
+    const updated = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data;
+    expect(updated.bootstrap).toMatchObject({ jobId: newJobId, state: 'waiting', blockedReason: null });
+    const repinEvents = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/events`)))).data.items
+      .filter((event: { kind: string }) => event.kind === 'repo.bootstrap.repinned');
+    expect(repinEvents).toHaveLength(1);
+    expect(repinEvents[0].payload).toMatchObject({ newProfileDigest: config.profiles['local-demo'].digest });
+    const originalInfo = FakeStorage.prototype.info;
+    const remote = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, storageName) {
+      const info = await originalInfo.call(this, storageName);
+      return info ? { ...info, remote: `file:///${storageName}` } : null;
+    });
+    try { await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm()); }
+    finally { remote.mockRestore(); }
+    const poll = await fetchApi(mutation(`/v1/repos/${name}/runner/poll`, {
+      runnerId: 'repin-checker', role: 'checker', supportedProfileDigests: [config.profiles['local-demo'].digest],
+    }, `${name}-poll`, 'local-checker'));
+    expect(poll.status).toBe(200);
+    const job = (await responseBody(poll)).data.job;
+    expect(job.jobId).toBe(newJobId);
+    const newer = localFixtureConfig('local');
+    newer.profiles['local-demo'].digest = `sha256:${'c'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(newer);
+    const busyDetail = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+    const busy = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: busyDetail.version }, `${name}-busy`));
+    expect(busy.status).toBe(409);
+    expect((await responseBody(busy)).error.code).toBe('BOOTSTRAP_BUSY');
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    await fake(name, provider => {
+      provider.putCommit(job.scratchStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(job.scratchStorageName, job.scratchRef, null, a);
+    });
+    const checked = { kind: 'validate-stack', jobId: job.jobId, attempt: job.attempt, fence: job.fence,
+      inputDigest: job.inputDigest, sourceTreeOid: b, checkerDigest: job.checkerDigest,
+      toolchainDigest: job.toolchainDigest, oracleDigest: job.oracleDigest, environmentDigest: job.environmentDigest,
+      durationMs: 1, log: '', outcome: 'PASS', composedOid: a, composedTreeOid: b,
+      gateResults: job.unitPolicy.acceptance.gates.map((gate: { id: string; requiredOutcome: string }) => ({
+        gateId: gate.id, outcome: gate.requiredOutcome,
+      })), score: null, bootstrap: true, canonicalBaseOid: null };
+    const checkedDigest = await canonicalDigest(checked);
+    const result = await fetchApi(mutation(`/v1/repos/${name}/jobs/${job.jobId}/result`, {
+      attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest, resultDigest: checkedDigest,
+      result: { ...checked, resultDigest: checkedDigest },
+    }, `${name}-check-result`, 'local-checker'));
+    expect(result.status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const ticket = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(ticket.queue.promotion).toMatchObject({ state: 'pending', bootstrap: true, checkedNewOid: a });
+    const promotion = ticket.runners.jobs.find((item: { kind: string }) => item.kind === 'promote');
+    const promoter = await fetchApi(mutation(`/v1/repos/${name}/runner/poll`, {
+      runnerId: 'repin-promoter', role: 'promoter', supportedProfileDigests: [promotion.profileDigest],
+    }, `${name}-promoter-poll`, 'local-promoter'));
+    expect(promoter.status).toBe(200);
+    const promotionJob = (await responseBody(promoter)).data.job;
+    await fake(name, provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const applied = { kind: 'promote', jobId: promotionJob.jobId, attempt: promotionJob.attempt, fence: promotionJob.fence,
+      inputDigest: promotionJob.inputDigest, sourceTreeOid: null, checkerDigest: promotionJob.checkerDigest,
+      toolchainDigest: promotionJob.toolchainDigest, oracleDigest: promotionJob.oracleDigest,
+      environmentDigest: promotionJob.environmentDigest, durationMs: 1, log: '', outcome: 'APPLIED', observedCanonicalOid: a };
+    const appliedDigest = await canonicalDigest(applied);
+    expect((await fetchApi(mutation(`/v1/repos/${name}/jobs/${promotionJob.jobId}/result`, {
+      attempt: promotionJob.attempt, fence: promotionJob.fence, inputDigest: promotionJob.inputDigest,
+      resultDigest: appliedDigest, result: { ...applied, resultDigest: appliedDigest },
+    }, `${name}-promoted`, 'local-promoter'))).status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data.observedCanonicalOid).toBe(a);
+    const afterMain = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+    const refused = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: afterMain.version }, `${name}-after-main`));
+    expect((await responseBody(refused)).error.code).toBe('ALREADY_INITIALIZED');
+  });
+
+  it('recovers INVALID_JOB and fences a scheduled stale bootstrap job', async () => {
+    const name = 'bootstrap_invalid_repin_case';
+    const invalid = localFixtureConfig('local');
+    invalid.profiles['local-demo'].timeoutMs = 40 * 60_000;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(invalid);
+    const { body, requested, coordinator } = await bootstrapSeed(name);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const blocked = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+    expect(blocked.data.bootstrap.blockedReason).toBe('INVALID_JOB');
+    const fixed = localFixtureConfig('local');
+    fixed.profiles['local-demo'].digest = `sha256:${'b'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(fixed);
+    const first = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: blocked.version }, `${name}-fixed`));
+    expect(first.status).toBe(202);
+    const firstId = (await responseBody(first)).data.jobId;
+    expect(firstId).not.toBe(requested.jobId);
+    const originalInfo = FakeStorage.prototype.info;
+    const remote = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, storageName) {
+      const info = await originalInfo.call(this, storageName);
+      return info ? { ...info, remote: `file:///${storageName}` } : null;
+    });
+    try { await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm()); }
+    finally { remote.mockRestore(); }
+    const before = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(before.runners.jobs.find((job: { jobId: string }) => job.jobId === firstId)).toMatchObject({ state: 'pending' });
+    const newer = localFixtureConfig('local');
+    newer.profiles['local-demo'].digest = `sha256:${'c'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(newer);
+    const detail = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+    const second = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: detail.version }, `${name}-newer`));
+    expect(second.status).toBe(202);
+    expect((await responseBody(second)).data.jobId).not.toBe(firstId);
+    const after = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(after.runners.jobs.find((job: { jobId: string }) => job.jobId === firstId)).toMatchObject({ state: 'blocked' });
+    expect(after.repos.bootstrap.scratchStorageName).toBe(before.repos.bootstrap.scratchStorageName);
+    const stalePoll = await fetchApi(mutation(`/v1/repos/${name}/runner/poll`, {
+      runnerId: 'stale-checker', role: 'checker', supportedProfileDigests: [fixed.profiles['local-demo'].digest],
+    }, `${name}-stale-poll`, 'local-checker'));
+    expect(stalePoll.status).toBe(204);
   });
 
   it('requires an explicit history declaration for a registered non-root seed', async () => {
