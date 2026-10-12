@@ -496,7 +496,7 @@ export function attemptBudget(family) {
       await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/main']);
       const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
       const units = Object.fromEntries(['example.txt', 'later.txt'].map(file => ['file:' + file,
-        { canonicalKey: 'file:' + file, file, resources: [file], dependencyKeys: [] }]));
+        { canonicalKey: 'file:' + file, file, resources: [], dependencyKeys: [] }]));
       const oldReviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
       const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, units }, kind: 'delta-check', changeId: 'change',
@@ -521,15 +521,19 @@ export function attemptBudget(family) {
 
   it('fails closed when affected-unit exit markers cannot all fit', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
-      await writeFile(join(repo, 'example.txt'), 'changed\n');
-      await writeFile(join(repo, 'later.txt'), 'added\n');
-      await git(repo, ['add', 'example.txt', 'later.txt']);
-      await git(repo, ['commit', '--quiet', '-m', 'two affected units'], 30_000, commitEnv);
+      // Whole-file keys are bounded by main's unit policy. Ten valid long paths
+      // still require more than 4096 bytes for their exit markers alone.
+      const directory = 'd'.repeat(220);
+      await mkdir(join(repo, directory));
+      const files = Array.from({ length: 10 }, (_, index) => `${directory}/${'f'.repeat(210)}${index}`);
+      for (const file of files) await writeFile(join(repo, file), 'added\n');
+      await git(repo, ['add', directory]);
+      await git(repo, ['commit', '--quiet', '-m', 'ten affected units'], 30_000, commitEnv);
       const head = await git(repo, ['rev-parse', 'HEAD']);
       await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/main']);
       const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
-      const units = Object.fromEntries(['example.txt', 'later.txt'].map((file, index) => ['file:' + file,
-        { canonicalKey: `unit-${index}-` + 'x'.repeat(2500), file, resources: [file], dependencyKeys: [] }]));
+      const units = Object.fromEntries(files.map(file => ['file:' + file,
+        { canonicalKey: 'file:' + file, file, resources: [], dependencyKeys: [] }]));
       const oldReviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
       const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, units }, kind: 'delta-check', changeId: 'change',
