@@ -342,7 +342,7 @@ export interface ServiceHooks {
   'runners.schedule': (context: ModuleContext, job: Job) => Gate<{ jobId: Id }>;
 }
 export type HookName = keyof ServiceHooks;
-export type ModuleName = 'repos' | 'leases' | 'queue' | 'runners' | 'findings' | 'verdicts' | 'issues';
+export type ModuleName = 'repos' | 'leases' | 'queue' | 'runners' | 'findings' | 'verdicts' | 'issues' | 'settings';
 /** A queue-owned decision made immediately before a module mutation is dispatched. */
 export interface PromotionFreezeDecision { frozen: boolean; exempt?: boolean }
 export type PromotionFreezeProvider = (context: ModuleContext, request: Request) => PromotionFreezeDecision;

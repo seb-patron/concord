@@ -10,7 +10,16 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { afterEach, expect, it } from 'vitest';
 import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenarios.ts';
 import type { ConcordClient } from '../../cli/client.ts';
-import { callTool } from '../../mcp/tools.ts';
+import { callTool, tools } from '../../mcp/tools.ts';
+
+it('exposes repository protection settings as a read-only MCP tool', async () => {
+  const calls: string[] = [];
+  const client = { request: async (_method: string, path: string) => { calls.push(path); return { data: { protectedPaths: [{ pattern: 'AGENTS.md', level: 'human-only' }] } }; } } as unknown as ConcordClient;
+  expect(tools.find(tool => tool.name === 'repo_settings')).toBeDefined();
+  const result = await callTool(client, 'repo_settings', { repoId: 'repo' });
+  expect(calls).toEqual(['/repos/repo/settings']);
+  expect(result).toMatchObject({ data: { protectedPaths: [{ pattern: 'AGENTS.md' }] } });
+});
 
 it('dispatches issue and milestone MCP tools with issue links', async () => {
   const calls: Array<{ method: string; path: string; options: unknown }> = [];

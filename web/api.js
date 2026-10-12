@@ -175,6 +175,19 @@ export function getSnapshot(repoId, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/snapshot`, {}, fetchImpl);
 }
 
+export function getSettings(repoId, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/settings`, {}, fetchImpl);
+}
+
+export function putSettings(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/settings`, { method: 'PUT', body, idempotencyKey }, fetchImpl);
+}
+
+export function submitHumanApproval(repoId, changeId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/human-approval`,
+    { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
 export function getEvents(repoId, after, fetchImpl) {
   const params = new URLSearchParams({ after: String(after), limit: '100' });
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);

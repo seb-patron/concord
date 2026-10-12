@@ -1,11 +1,12 @@
 import type {
-  BootstrapHandoff, CandidateInput, ChangeView, Digest, FeatureModule, FrozenAdmission, Gate, Id,
+  BootstrapHandoff, CandidateInput, Change, ChangeView, Digest, FeatureModule, FrozenAdmission, Gate, Id,
   Job, ModuleContext, Promotion, PromotionResult, Repo, SeedInput, StackResult, ValidateStackJob,
 } from '../contracts';
 import { digest, failure, HttpError, json } from '../http';
 import { eventSequence, sqlState } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
+import { humanApprovalStatus } from './verdicts';
 import { jobInput, visibleCommit, visibleRef } from './runners';
 import {
   advanceDiagnosis, COALESCE_MS, MAX_CANDIDATES, selectStack, startDiagnosis, STACK_WIDTH,
@@ -14,6 +15,7 @@ import {
 
 type EntryState = 'admitted' | 'reserved' | 'checking' | 'landed' | 'blocked' | 'withdrawn' | 'failed';
 interface Entry extends PlannedEntry {
+  ownerAuthored?: boolean;
   issueNumber?: number | null;
   entryId: Id; revision: number; baseOid: string; headOid: string; storageName: string; ref: string;
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
@@ -141,6 +143,10 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
   const finding = requireGate(context.call('findings.gate', changeId, view.revision));
   if (finding.unresolvedIds.length || finding.pendingRound !== null) throw new HttpError(409, 'FINDINGS_OPEN', 'Findings are unresolved');
   const verdict = requireGate(context.call('verdicts.gate', changeId, view.revision));
+  const human = humanApprovalStatus(context, changeId, view.revision);
+  if (human.humanOnlyPatterns?.length && (!context.principal.roles.includes('owner') || view.authorId !== context.principal.principalId))
+    throw new HttpError(409, 'PATH_PROTECTED', `Owner-only path: ${human.humanOnlyPatterns.join(', ')}`);
+  if (human.awaitingHumanApproval.length) throw new HttpError(409, 'HUMAN_APPROVAL_REQUIRED', `Owner approval required for ${human.awaitingHumanApproval.join(', ')}`);
   if (verdict.verdictId !== verdictId || verdict.findingSetVersion !== finding.findingSetVersion) {
     throw new HttpError(409, 'VERDICT_STALE', 'Approval does not cover this finding set');
   }
@@ -162,7 +168,8 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
     storageName: view.candidateStorageName, ref: view.branch, canonicalStorageName: view.canonicalStorageName,
     scratchStorageName: view.scratchStorageName, policyId: view.policyId, profileId: view.profileId,
     policyDigest: policy.digest, profileDigest: profile.digest,
-    dependencyChangeIds: [...view.dependencyChangeIds], authorId: view.authorId, unitKeys: [...view.unitKeys], intentKey: view.intentKey ?? '',
+    dependencyChangeIds: [...view.dependencyChangeIds], authorId: view.authorId, ownerAuthored: context.principal.roles.includes('owner') && view.authorId === context.principal.principalId,
+    unitKeys: [...view.unitKeys], intentKey: view.intentKey ?? '',
     verdictId, findingSetVersion: finding.findingSetVersion, reservationFences: { ...fences },
     state: 'admitted', blockedReason: null, contestId,
   };
@@ -182,6 +189,8 @@ function admissionStillValid(context: ModuleContext, entry: Entry): boolean {
       || view.dependencyChangeIds.some((id, index) => id !== entry.dependencyChangeIds[index])) return false;
     const findings = requireGate(context.call('findings.gate', entry.changeId, entry.revision));
     const verdict = requireGate(context.call('verdicts.gate', entry.changeId, entry.revision));
+    const protection = humanApprovalStatus(context, entry.changeId, entry.revision);
+    if (protection.awaitingHumanApproval.length || protection.humanOnlyPatterns?.length && !entry.ownerAuthored) return false;
     return findings.unresolvedIds.length === 0 && findings.pendingRound === null
       && findings.findingSetVersion === entry.findingSetVersion
       && verdict.verdictId === entry.verdictId && verdict.findingSetVersion === entry.findingSetVersion;
@@ -417,6 +426,16 @@ function queueProjection(state: QueueState) {
     diagnosticResults: state.diagnosticResults, finalCanonicalOid: state.finalCanonicalOid,
     blockedReason: state.blockedReason,
   };
+}
+function protectedQueueProjection(context: ModuleContext) {
+  const projection = queueProjection(read(context));
+  const changes = sqlState(context.sql).get<Change[]>('module:repos:changes') ?? [];
+  const awaitingHumanApproval = Object.fromEntries(changes.filter(change => change.status === 'ready')
+    .map(change => [change.changeId, humanApprovalStatus(context, change.changeId, change.revision).awaitingHumanApproval])
+    .filter(([, patterns]) => patterns.length));
+  return { ...projection, entries: projection.entries.map(entry => ({ ...entry,
+    awaitingHumanApproval: humanApprovalStatus(context, entry.changeId, entry.revision).awaitingHumanApproval })),
+    awaitingHumanApproval };
 }
 
 function withdraw(context: ModuleContext, body: Record<string, unknown>): Response {
@@ -1043,7 +1062,7 @@ export const queue: FeatureModule = {
   name: 'queue', migrations: [],
   routes: [
     { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/queue$/, handle: context => {
-      return json(queueProjection(read(context)), context.version(), eventSequence(context.sql));
+      return json(protectedQueueProjection(context), context.version(), eventSequence(context.sql));
     } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/queue\/enqueue$/, handle: (context, _request, _match, body) => enqueue(context, body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/queue\/withdraw$/, handle: (context, _request, _match, body) => withdraw(context, body as Record<string, unknown>) },
@@ -1053,7 +1072,7 @@ export const queue: FeatureModule = {
     const view = context.readChange?.('queue_status_probe');
     const status = !view || view.status === 'blocked' && view.code === 'MODULE_UNAVAILABLE'
       ? 'unavailable' : 'ready';
-    return { status, ...queueProjection(read(context)) };
+    return { status, ...protectedQueueProjection(context) };
   },
   nextDeadline: context => {
     const state = read(context);

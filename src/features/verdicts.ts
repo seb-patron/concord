@@ -2,6 +2,8 @@ import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule,
 import { requireRepo, requireRole } from '../auth';
 import { HttpError, json } from '../http';
 import { dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest } from '../verdicts/manifest';
+import { matchingProtections, protectionFor } from './settings';
+import { sqlState } from '../state';
 
 export type { InspectedRevision } from '../contracts';
 interface ActiveEvidence { revision: number; headOid: string; manifestDigest: Digest; profileDigest: Digest; sourceId: Id }
@@ -22,6 +24,25 @@ const isId = (value: unknown): value is Id => typeof value === 'string' && /^[A-
 const view = (context: ModuleContext, changeId: Id) => context.readChange?.(changeId) ?? reject(context, 'MODULE_UNAVAILABLE', 'Trusted change view unavailable');
 const storedVerdict = (context: ModuleContext, id: Id) => context.state.get<Verdict>(`verdict:${id}`);
 const ids = (context: ModuleContext, changeId: Id) => context.state.get<Id[]>(`list:${changeId}`) ?? [];
+interface HumanApproval { revision: number; headOid: string; manifestDigest: Digest; ownerId: Id; decision: 'approve' | 'reject'; version: number; patterns: string[] }
+export function humanApprovalStatus(context: ModuleContext, changeId: Id, revision: number) {
+  const record = sqlState(context.sql).get<InspectedRevision>(`module:verdicts:inspection:${changeId}`);
+  if (!record || record.revision !== revision) return { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null };
+  const rules = matchingProtections(context, record.reviewManifest, 'human-approval');
+  const humanOnlyPatterns = matchingProtections(context, record.reviewManifest, 'human-only').map(rule => rule.pattern);
+  const paths = record.reviewManifest.changedUnits.flatMap(unit => [unit.beforePath, unit.afterPath])
+    .filter((path): path is string => !!path && protectionFor(context, path)?.level === 'human-approval');
+  const approval = sqlState(context.sql).get<HumanApproval>(`module:verdicts:human:${changeId}`);
+  const valid = approval?.decision === 'approve' && approval.revision === revision &&
+    approval.headOid === record.candidate.headOid && approval.manifestDigest === record.reviewManifestDigest &&
+    JSON.stringify(approval.patterns) === JSON.stringify(rules.map(rule => rule.pattern));
+  const protectedDiffSummary = record.reviewManifest.changedUnits.filter(unit =>
+    [unit.beforePath, unit.afterPath].some(path => !!path && protectionFor(context, path)?.level === 'human-approval'))
+    .map(unit => ({ beforePath: unit.beforePath, afterPath: unit.afterPath,
+      beforeDigest: unit.beforeDigest, afterDigest: unit.afterDigest }));
+  return { awaitingHumanApproval: valid ? [] : rules.map(rule => rule.pattern), protectedFiles: [...new Set(paths)].sort(),
+    protectedDiffSummary, reviewManifestDigest: record.reviewManifestDigest, humanOnlyPatterns };
+}
 
 function inspection(context: ModuleContext, changeId: Id): Gate<{ record: InspectedRevision; policy: TrustedPolicy; profile: TrustedProfile }> {
   const change = view(context, changeId);
@@ -169,6 +190,12 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
     reviewManifest: normalized, reviewManifestDigest: freshDigest, findingSetVersion: job.findingSetVersion,
     parentVerdictId: parent.verdictId, deltaResultId: result.jobId, evidenceDigest: resultDigest };
   save(context, derived, job.candidate.headOid, job.profileDigest, result.jobId);
+  const parentApproval = context.state.get<HumanApproval>(`human:${job.changeId}`);
+  if (parentApproval?.decision === 'approve' && parentApproval.revision === parent.revision &&
+    parentApproval.manifestDigest === parent.reviewManifestDigest) {
+    context.state.put(`human:${job.changeId}`, { ...parentApproval, revision: derived.revision,
+      headOid: job.candidate.headOid, manifestDigest: freshDigest, version });
+  }
   pending.status = 'carried'; pending.resultDigest = resultDigest; pending.derivedVerdictId = verdictId;
   context.state.put(`carry:${job.jobId}`, pending);
   context.appendEvent('verdict.carried', [verdictId, parent.verdictId, job.jobId], { revision: derived.revision }, version);
@@ -177,10 +204,31 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
 
 const verdictPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/verdicts$/;
 const carryPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/carry$/;
+const humanPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/human-approval$/;
 
 export const verdicts: FeatureModule = {
   name: 'verdicts', migrations: [],
   routes: [
+    { method: 'POST', pattern: humanPath, handle: (context, _request, match, raw) => {
+      requireRole(context.principal, 'owner');
+      const body = raw as Record<string, unknown>;
+      const changeId = match[2];
+      const current = inspection(context, changeId);
+      if (current.status === 'blocked') throw new HttpError(409, current.code, current.reason);
+      if (body?.revision !== current.value.record.revision || !['approve', 'reject'].includes(body?.decision as string) ||
+        body?.reviewManifestDigest !== current.value.record.reviewManifestDigest || !isDigest(body?.evidenceDigest))
+        throw new HttpError(422, 'INVALID_HUMAN_APPROVAL', 'Current revision, manifest, decision and evidence digest required');
+      const matching = matchingProtections(context, current.value.record.reviewManifest, 'human-approval');
+      if (!matching.length) throw new HttpError(409, 'NO_HUMAN_APPROVAL_REQUIRED', 'No protected path needs owner approval');
+      const version = context.nextVersion();
+      const approval: HumanApproval = { revision: current.value.record.revision, headOid: current.value.record.candidate.headOid,
+        manifestDigest: current.value.record.reviewManifestDigest, ownerId: context.principal.principalId,
+        decision: body.decision as 'approve' | 'reject', version, patterns: matching.map(rule => rule.pattern) };
+      context.state.put(`human:${changeId}`, approval);
+      const event = context.appendEvent('verdict.human_approval', [changeId], { decision: approval.decision,
+        revision: approval.revision, patterns: matching.map(rule => rule.pattern) }, version);
+      return json(approval, version, event.sequence, 201);
+    } },
     { method: 'GET', pattern: verdictPath, handle: (context, request, match) => {
       requireRepo(context.principal, match[1]);
       const change = view(context, match[2]);

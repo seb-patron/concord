@@ -13,6 +13,7 @@ Every tool input is a JSON object with `additionalProperties: false`. IDs and te
 | `repo_list` | none | `cursor` | Repository page |
 | `repo_get` | `repoId` | none | Repository detail and canonical head |
 | `repo_context` | `repoId` | none | Repository snapshot with projections |
+| `repo_settings` | `repoId` | none | Protected path rules, levels and notes |
 | `change_create` | `repoId`, `intentKey`, `intentText`, `baseOid`, `branch`, `unitKeys` | `dependencyChangeIds`, `attempt`, `idempotencyKey` | New or existing candidate change |
 | `change_status` | `repoId`, `changeId` | none | Change detail, provisioning and revision |
 | `lease_claim` | `repoId`, `changeId`, `unitKeys`, `intentText` | `ttlSeconds` (1–300, default 120), `idempotencyKey` | Grant with lease IDs and fences, or normal `conflict: true` result with holder, intent, expiry, keys and next action |
@@ -25,6 +26,8 @@ Every tool input is a JSON object with `additionalProperties: false`. IDs and te
 | `queue_enqueue` | `repoId`, `changeId`, `verdictId`, `leaseFences` | `idempotencyKey` | Admitted queue entry |
 | `queue_status` | `repoId` | none | Queue entries and results |
 | `events_since` | `repoId` | `after`, `cursor` | Events after a sequence; `after` takes priority |
+
+The `repo_context` snapshot includes a `settings` projection so agents can avoid `human-only` paths before claiming. `repo_settings` reads the rules directly. A change touching a `human-approval` path needs an owner decision in Concord in addition to the independent review. `change_status` exposes the pending patterns and protected file digest summary.
 
 Read the returned `version` and `eventSeq` envelopes to understand current state. The server reads the latest repository version before mutations that require `expectedVersion`. If state changes in the meantime, retry after rereading. A lease conflict is a normal tool result; other failures use MCP `isError` with a redacted diagnostic. The configured token and minted Git tokens are registered with the CLI redactor and never returned by a tool. Git tokens are supplied to Git only via child process environment configuration (`http.extraHeader`), never placed in remotes, tool results, or persistent Git config. The local test bridge may issue a `file://` remote only when `CONCORD_URL` is loopback; deployed service remotes must be credential-free HTTP(S).
 

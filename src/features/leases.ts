@@ -2,6 +2,7 @@ import type { Change, FeatureModule, Gate, Lease, ModuleContext, Repo, TrustedPo
 import { failure, HttpError, json, unavailableGate } from '../http';
 import { eventSequence, sqlState } from '../state';
 import { covers, normalizeUnits, overlaps, resolveUnit, unitRegistry, type UnitIdentity } from '../leases/units';
+import { protectionFor } from './settings';
 
 const DEFAULT_TTL_SECONDS = 120;
 const MAX_TTL_SECONDS = 300;
@@ -117,6 +118,14 @@ function claim(context: ModuleContext, body: unknown): Response {
   }
   const registry = unitRegistry(policy(context));
   const units = normalizeUnits(registry, input.unitKeys);
+  if (!context.principal.roles.includes('owner')) {
+    const protectedUnit = units.map(unit => ({ unit, rule: protectionFor(context, unit.file) }))
+      .find(item => item.rule?.level === 'human-only');
+    if (protectedUnit) return failure(new HttpError(409, 'PATH_PROTECTED', 'Owner-only path cannot be claimed by an agent', {
+      holderId: 'owner', pattern: protectedUnit.rule!.pattern, note: protectedUnit.rule!.note ?? null,
+      keys: [protectedUnit.unit.key], nextAction: 'Ask a repository owner to claim this path.',
+    }));
+  }
   const ttlSeconds = ttl(input.ttlSeconds);
   return context.transaction(() => {
     const now = context.now();
