@@ -137,6 +137,8 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
     return json(publicRecord(row), context.version(), eventSequence(sql));
   }
   if (match && request.method === 'DELETE') {
+    const visibility = catalogVisibility(sql, principal);
+    if (!visibility.all && !visibility.principalIds.has(match[1])) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
     const target = sql.exec<Row>('SELECT * FROM principals_records WHERE id = ?', match[1]).toArray()[0];
     if (!target) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
     if (!principal.roles.includes('owner') && target.parent_id !== principal.principalId && target.id !== principal.principalId) {

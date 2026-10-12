@@ -193,6 +193,33 @@ describe('delegated principals', () => {
     expect((await responseBody(await fetchApi(apiRequest(`/v1/principals/${beta.id}`)))).data.name).toBe('beta-private-name');
   });
 
+  it('does not let a repository-scoped owner revoke a principal outside its scope', async () => {
+    const beta = (await responseBody(await mint({ roles: ['agent'], repoIds: ['beta'] }))).data;
+    const secret = `alpha-owner-${crypto.randomUUID()}`;
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret))),
+      byte => byte.toString(16).padStart(2, '0')).join('');
+    runtime.AUTH_TOKENS = JSON.stringify({ [digest]: { tenantId: 'local', principalId: 'alpha-owner',
+      roles: ['owner', 'agent'], repoIds: ['alpha'], expiresAt: Date.now() + 60_000 } });
+    const alphaResponse = await mint({ roles: ['agent'], repoIds: ['alpha'], ttlSeconds: 30 }, crypto.randomUUID(), secret);
+    expect(alphaResponse.status).toBe(201);
+    const alpha = (await responseBody(alphaResponse)).data;
+
+    const before = (await responseBody(await fetchApi(apiRequest('/v1/events')))).eventSeq;
+    const denied = await fetchApi(apiRequest(`/v1/principals/${beta.id}`, secret, { method: 'DELETE' }));
+    expect(denied.status).toBe(404);
+    expect((await responseBody(denied)).error.code).toBe('NOT_FOUND');
+    expect((await responseBody(await fetchApi(apiRequest('/v1/events')))).eventSeq).toBe(before);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/principals/${beta.id}`)))).data.revokedAt).toBeNull();
+    expect((await fetchApi(apiRequest('/v1/repos', beta.token))).status).toBe(200);
+
+    const allowed = await fetchApi(apiRequest(`/v1/principals/${alpha.id}`, secret, { method: 'DELETE' }));
+    expect(allowed.status).toBe(200);
+    expect((await responseBody(allowed)).data.revokedIds).toContain(alpha.id);
+    const tenantOwner = await fetchApi(apiRequest(`/v1/principals/${beta.id}`, 'local-owner', { method: 'DELETE' }));
+    expect(tenantOwner.status).toBe(200);
+    expect((await responseBody(tenantOwner)).data.revokedIds).toContain(beta.id);
+  });
+
   it('refuses role, repository, TTL, and parent-expiry escalation', async () => {
     for (const roles of [['checker'], ['promoter'], ['owner'], ['reviewer'], ['viewer'], ['agent', 'viewer']]) {
       expect((await mint({ roles })).status).toBe(403);
