@@ -307,11 +307,36 @@ describe('content-bound verdicts', () => {
     h.setAuthor('reviewer');
     const body = { revision: 1, findingSetVersion: 0, reviewManifestDigest: manifestDigest(manifest('row:alpha'), policy, ['row:alpha']), decision: 'approve', evidenceDigest: d('review') };
     await expect(h.route('POST', 'verdicts', body)).rejects.toMatchObject({ code: 'SELF_REVIEW' });
-    await expect(h.route('GET', 'verdicts')).rejects.toMatchObject({ code: 'SELF_REVIEW' });
+    expect((await h.route('GET', 'verdicts')).status).toBe(200);
     const unknown = harness('row:alpha', manifest('row:alpha', { coverage: 'unknown' }));
     const parent = await unknown.approve();
     unknown.advance(manifest('row:alpha', { coverage: 'unknown' }));
     await expect(unknown.carry(parent)).rejects.toMatchObject({ code: 'REVIEW_REQUIRED', message: expect.stringContaining('Unknown dependency') });
+  });
+
+  it('shares reduced verdict history with in-scope readers and keeps writes reviewer-only', async () => {
+    const h = harness();
+    const approved = await h.approve();
+    const principal = h.context.principal;
+    for (const role of ['viewer', 'agent'] as const) {
+      principal.roles = [role];
+      const read = await h.route('GET', 'verdicts');
+      expect(read.status).toBe(200);
+      expect(read.payload.data.items).toEqual([{
+        verdictId: approved.verdictId, changeId: approved.changeId, reviewerId: approved.reviewerId,
+        revision: approved.revision, decision: approved.decision, parentVerdictId: null,
+      }]);
+      const serialized = JSON.stringify(read.payload.data);
+      expect(serialized).not.toMatch(/reviewManifest|evidenceDigest|beforePath|afterPath|beforeDigest|afterDigest|sha256:/);
+      await expect(h.route('POST', 'verdicts', {})).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(h.route('POST', 'carry', {})).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    }
+    principal.roles = ['owner'];
+    expect((await h.route('GET', 'verdicts')).payload.data.items).toEqual([approved]);
+    principal.roles = ['reviewer'];
+    expect((await h.route('GET', 'verdicts')).payload.data.items).toEqual([approved]);
+    principal.repoIds = ['other'];
+    await expect(h.route('GET', 'verdicts')).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('rejects whitespace and mode changes after review', async () => {

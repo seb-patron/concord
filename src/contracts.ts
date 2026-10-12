@@ -11,6 +11,7 @@ export interface Principal {
   roles: Role[];
   repoIds: Id[] | '*';
   expiresAt: number;
+  model?: string | null;
 }
 
 export interface Repo extends Versioned {
@@ -25,6 +26,7 @@ export interface Branch extends Versioned {
 }
 export interface Change extends Versioned {
   changeId: Id; repoId: Id; authorId: Id; intentKey: string; intentText: string;
+  authorModel?: string | null;
   candidateStorageName: string; branch: string; baseOid: Oid | null;
   headOid: Oid | null; revision: number; unitKeys: string[];
   dependencyChangeIds: Id[];
