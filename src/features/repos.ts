@@ -2,6 +2,7 @@ import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody,
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { costLimits, eventSequence } from '../state';
+import { resolveUnit, unitRegistry } from '../leases/units';
 import { branch, ids, oid, pendingInitialToken, pendingResultFailure, repoName, requireReady, revokeOrphanTokens, sameTask, terminal, text, type BootstrapPending, type InspectionPending, type ProvisioningIntent } from '../repos/model';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
@@ -439,7 +440,8 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');
   if (baseOid === null || change.baseOid === null) fail(409, 'SEED_REQUIRES_BOOTSTRAP', 'Seed drafts use owner bootstrap');
   if (ref !== change.branch) fail(409, 'BRANCH_MISMATCH', 'Change branch differs');
-  if (unitKeys.some(key => !context.trusted.policies[repo.policyId]?.units[key])) fail(422, 'UNKNOWN_UNIT', 'Unit key is not in the trusted policy');
+  const registry = unitRegistry(context.trusted.policies[repo.policyId]);
+  for (const key of unitKeys) resolveUnit(registry, key);
   const registered = list<Branch>(context, 'branches').find(item => item.storageName === change.candidateStorageName && item.ref === ref && item.ownerId === change.authorId);
   if (!registered || registered.observedHead !== headOid) fail(409, 'BRANCH_NOT_REGISTERED', 'Register the current fork branch before publishing');
   if (await context.storage.resolveRef(change.candidateStorageName, ref) !== headOid) fail(409, 'HEAD_MOVED', 'Registered candidate ref changed');
@@ -622,7 +624,7 @@ function inspectRevision(context: ModuleContext, result: InspectionResult) {
     result.toolchainDigest === profile.toolchainDigest && result.environmentDigest === profile.environmentDigest &&
     result.reviewManifest.policyDigest === policy.digest && result.reviewManifest.checkerDigest === policy.checkerDigest &&
     result.reviewManifest.oracleDigest === profile.oracleDigest && result.reviewManifest.toolchainDigest === profile.toolchainDigest &&
-    result.unitKeys.every(key => key in policy.units) &&
+    result.unitKeys.every(key => { try { resolveUnit(unitRegistry(policy), key); return true; } catch { return false; } }) &&
     JSON.stringify([...new Set(result.reviewManifest.changedUnits.map(unit => unit.unitKey))].sort()) === JSON.stringify([...result.unitKeys].sort()) &&
     JSON.stringify([...result.unitKeys].sort()) === JSON.stringify([...pending.unitKeys].sort()) &&
     change.revision === pending.revision && change.headOid === pending.headOid;

@@ -4,9 +4,19 @@ Leases are scoped to one `RepoCoordinator` and its trusted policy. Times are ser
 
 ## Unit identity
 
-The installed policy's `units` map is the only registry. Each alias has a `canonicalKey`, `file`, and `resources` footprint. Aliases with the same canonical key resolve to one unit; conflicting metadata is rejected. A `file:<path>` key is available only when that exact path occurs in trusted metadata. It covers every registered symbol, declaration, and TSV row in the file. Separate row resources in one TSV can be leased simultaneously. An unknown key, including an unregistered file key, returns `422 UNKNOWN_UNIT`. There is no free-form unit or claim override.
+The installed owner policy controls all unit identities. Its `units` map registers explicit aliases with a `canonicalKey`, `file`, and `resources` footprint. Aliases with the same canonical key resolve to one unit; conflicting metadata is rejected. A `file:<path>` key is available when its path occurs in trusted metadata or a declared table. It covers every symbol, declaration, and TSV row in that file. Separate row resources in one TSV can be leased simultaneously. Unknown keys, including undeclared table names, return `422 UNKNOWN_UNIT`. Agents cannot add tables or claim overrides.
 
-The helper `changedUnitsForFile` compares complete TSV rows by the first tab-separated field. It returns registered row identities for changed rows. New, duplicate, malformed, ambiguous, or otherwise unmapped row changes use the trusted file footprint. A file absent from the policy cannot be mapped and is rejected. Non-TSV changes use the file footprint. General language parsing is outside this policy.
+An owner can also declare TSV tables in trusted policy metadata:
+
+```json
+"tables": [{
+  "name": "families", "file": "families.tsv",
+  "header": ["family", "retry_limit", "timeout_ms"],
+  "keyColumn": "family", "keySpec": { "charset": "lower", "minLength": 1, "maxLength": 256 }
+}]
+```
+
+The header is an exact ordered column list. `keyColumn` names one header column. `keySpec` matches the entire key, character by character, with `minLength` at least 1 and `maxLength` at most 256. `charset` is `lower`, `alnum`, `alnum-dash-dot`, or an explicit list of unique printable nonspace ASCII characters. Regular expressions and other fields are rejected. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Non-TSV changes use the file footprint.
 
 ### Owner file-unit policy generation
 
@@ -48,7 +58,7 @@ Refresh writes a JSON envelope with `status: "unchanged"` and exits zero when th
 
 `ttlSeconds` defaults to 120 and must be an integer from 1 through 300. Aliases are canonicalized, duplicates removed, and the final set sorted. At most 16 normalized, pairwise nonoverlapping keys are accepted. The response is `201` with `data.leases` and `data.renewAfterSeconds: 40`. Every lease carries `leaseId`, canonical `unitKey`, `holderId`, `changeId`, `intentText`, `fence`, `expiresAt`, `state`, and `version`. Keep the returned fence; it changes on renewal and reacquisition.
 
-A claim requires a ready repository record and a draft or ready change owned by the caller, as reported by the repos change view. A missing repository returns `404 REPO_NOT_FOUND`; a missing change or one the caller cannot claim returns `403 CHANGE_NOT_OWNED`. Until the repos module registers its change view, claims return `501 MODULE_UNAVAILABLE`.
+A claim requires a ready repository record and a draft or ready change owned by the caller, as reported by the repos change view. A missing repository returns `404 REPO_NOT_FOUND`; a missing change or one the caller cannot claim returns `403 CHANGE_NOT_OWNED`.
 
 If any requested footprint is occupied, **none** of the request's keys are granted. `409 LEASE_CONFLICT` includes the holder ID, holder intent, expiry, conflicting keys, all conflict records, and a next action. The refusal and its intent remain in event history and in the snapshot's recent refusals. `GET /v1/repos/:repoId/leases` returns at most 100 rows per page, with live leases first, followed by historical rows. Follow the opaque `data.nextCursor` with `?cursor=<value>` until it is `null` to reach every lease that remains live until its page is read, then older history. Pages use the immutable creation time and lease ID as a keyset, so releasing a lease already returned does not skip a later live lease or repeat that released row. Historical rows changed after the first page are omitted from that traversal; start a new traversal for the latest history. Each row includes `remainingSeconds`; the page also includes `serverTime` and renewal guidance. `GET /v1/repos/:repoId/snapshot` includes the first lease page and its cursor. `GET /v1/repos/:repoId/events` retains claim, refusal, renewal, expiry, release, and reservation events.
 
@@ -66,4 +76,4 @@ The hook `leases.releaseReservation(context, changeId)` accepts only a queue rec
 
 An owner-created contest can share a parent reservation with exactly its recorded children. Queue code records matching `module:queue:contest:<contestId>` and `module:queue:contest-child:<childChangeId>` objects containing `contestId`, `parentChangeId`, `childChangeIds`, `selectedChangeId`, and `ownerCreated: true`. The child still needs its own verified write footprint, and the supplied fences must match the live parent reservation. Once selection is recorded, only the selected child can inherit it. The selected child's terminal queue transition releases the parent reservation. A request body cannot create this exception.
 
-The repos and queue modules are placeholders in this slice. The admission records above are an internal integration seam, exercised by fake records in the lease tests. Missing, stale, or ambiguous evidence returns a blocked gate; it never grants admission by default.
+Missing, stale, or ambiguous admission evidence returns a blocked gate; it never grants admission by default.
