@@ -363,7 +363,7 @@ export function attemptBudget(family) {
       const retry = await executeJob({ ...job, attempt: 2, fence: 2 }, profile, credentials(remotes));
       expect(retry).toMatchObject({ kind: 'validate-stack', outcome: 'PASS', composedOid: result.composedOid });
     });
-  });
+  }, 15_000);
 
   it('checks the canonical commit and tree for a base-check job', async () => {
     await gitFixture(async ({ repo, canonical, scratch, base }) => {
@@ -483,6 +483,66 @@ export function attemptBudget(family) {
       expect(result).toMatchObject({ kind: 'delta-check', outcome: 'PASS' });
       if (result.kind !== 'delta-check') throw new Error('wrong result');
       expect(result.reviewManifest?.changedUnits[0].unitKey).toBe('file:example.txt');
+    });
+  });
+
+  it('keeps a later failing affected unit and its exit marker after an earlier full log', async () => {
+    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+      await writeFile(join(repo, 'example.txt'), 'changed\n');
+      await writeFile(join(repo, 'later.txt'), 'added\n');
+      await git(repo, ['add', 'example.txt', 'later.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'two affected units'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const units = Object.fromEntries(['example.txt', 'later.txt'].map(file => ['file:' + file,
+        { canonicalKey: 'file:' + file, file, resources: [file], dependencyKeys: [] }]));
+      const oldReviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
+      const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, units }, kind: 'delta-check', changeId: 'change',
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: head, storageName: 'candidate', ref: 'refs/heads/main' },
+        oldManifestDigest: pin, newBaseOid: base, parentVerdictId: 'verdict', findingSetVersion: 0,
+        oldReviewManifest, expectedRefs: { canonical: base } };
+      const profile: LocalProfile = { id: 'local-demo', kind: 'command', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16_384,
+        executable: '/bin/sh', toolchainFile: '/bin/sh', argv: ['-c',
+          `if [ -f .first-unit-ran ]; then printf '%s' '${'y'.repeat(16_384)}'; exit 7; fi\n` +
+          `touch .first-unit-ran\nprintf '%s' '${'x'.repeat(16_384)}'`],
+        cwd: 'repo', timeoutSeconds: 5, env: [], outputCap: 16_384 };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'delta-check', outcome: 'FAIL' });
+      if (result.kind !== 'delta-check') throw new Error('wrong result');
+      expect(result.reviewManifest?.changedUnits.map(unit => unit.unitKey)).toEqual(['file:example.txt', 'file:later.txt']);
+      expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(16_384);
+      expect(result.log).toContain('file:later.txt: exit=7');
+      expect(result.log).toContain('yyyyyyyy');
+    });
+  }, 15_000);
+
+  it('fails closed when affected-unit exit markers cannot all fit', async () => {
+    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+      await writeFile(join(repo, 'example.txt'), 'changed\n');
+      await writeFile(join(repo, 'later.txt'), 'added\n');
+      await git(repo, ['add', 'example.txt', 'later.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'two affected units'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const units = Object.fromEntries(['example.txt', 'later.txt'].map((file, index) => ['file:' + file,
+        { canonicalKey: `unit-${index}-` + 'x'.repeat(2500), file, resources: [file], dependencyKeys: [] }]));
+      const oldReviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
+      const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, units }, kind: 'delta-check', changeId: 'change',
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: head, storageName: 'candidate', ref: 'refs/heads/main' },
+        oldManifestDigest: pin, newBaseOid: base, parentVerdictId: 'verdict', findingSetVersion: 0,
+        oldReviewManifest, expectedRefs: { canonical: base }, maxOutputBytes: 4096 };
+      const profile: LocalProfile = { id: 'local-demo', kind: 'command', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 4096,
+        executable: '/bin/sh', toolchainFile: '/bin/sh', argv: ['-c', 'exit 0'],
+        cwd: 'repo', timeoutSeconds: 5, env: [], outputCap: 4096 };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'delta-check', outcome: 'ENV_ERROR' });
+      expect(result.log).toContain('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
     });
   });
 

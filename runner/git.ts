@@ -9,7 +9,7 @@ const jobDeadline = new AsyncLocalStorage<number>();
 export function withJobDeadline<T>(deadline: number, run: () => Promise<T>): Promise<T> {
   return jobDeadline.run(deadline, run);
 }
-export type CommandResult = { code: number; stdout: string; stderr: string; stdoutBytes: Buffer; timedOut: boolean; truncated: boolean };
+export type CommandResult = { code: number; stdout: string; stderr: string; stdoutBytes: Buffer; timedOut: boolean; truncated: boolean; outputTail?: string };
 
 export function childEnvironment(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const keep = ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP', 'LANG'];
@@ -22,7 +22,8 @@ export function childEnvironment(extra: Record<string, string> = {}): NodeJS.Pro
 }
 
 /** No shell interpolation, and output is capped while it is collected. */
-export async function command(file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv = childEnvironment()): Promise<CommandResult> {
+export async function command(file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv = childEnvironment(),
+  capture?: { outputCap: number; tail: true }): Promise<CommandResult> {
   const remaining = jobDeadline.getStore() === undefined ? timeoutMs : Math.min(timeoutMs, jobDeadline.getStore()! - Date.now());
   if (remaining <= 0) throw new Error('JOB_TIMEOUT');
   return new Promise((resolveResult, reject) => {
@@ -32,14 +33,21 @@ export async function command(file: string, args: string[], cwd: string, timeout
     let timedOut = false;
     let killer: Promise<void> | null = null;
     let truncated = false;
+    let outputTail = Buffer.alloc(0);
+    const collectTail = (chunk: Buffer) => {
+      if (!capture) return;
+      const next = Buffer.concat([outputTail, chunk]);
+      if (next.length > capture.outputCap) truncated = true;
+      outputTail = next.subarray(Math.max(0, next.length - capture.outputCap));
+    };
     const collect = (previous: Buffer, chunk: Buffer) => {
       if (previous.length >= OUTPUT_CAP) { truncated = true; return previous; }
       const next = Buffer.concat([previous, chunk]);
       if (next.length > OUTPUT_CAP) truncated = true;
       return next.subarray(0, OUTPUT_CAP);
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); });
+    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); collectTail(chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); collectTail(chunk); });
     const timer = setTimeout(() => {
       timedOut = true;
       if (process.platform !== 'win32' && child.pid) {
@@ -56,7 +64,8 @@ export async function command(file: string, args: string[], cwd: string, timeout
     child.once('close', async code => {
       clearTimeout(timer);
       if (killer) await killer;
-      resolveResult({ code: code ?? -1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), stdoutBytes: stdout, timedOut, truncated });
+      resolveResult({ code: code ?? -1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), stdoutBytes: stdout,
+        timedOut, truncated, outputTail: capture ? outputTail.toString('utf8') : undefined });
     });
   });
 }

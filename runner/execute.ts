@@ -6,6 +6,33 @@ import { inspectUnits, mergeTsv } from './units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
+const tailLog = (value: string, cap: number): string => {
+  let tail = Buffer.from(value).subarray(Math.max(0, Buffer.byteLength(value) - cap)).toString('utf8');
+  while (Buffer.byteLength(tail) > cap) tail = tail.slice(1);
+  return tail;
+};
+
+function cappedChecks(cap: number, commandProfile: boolean) {
+  let body = '';
+  const markers: string[] = [];
+  let markerBytes = 0;
+  return {
+    append(log: string, label = '') {
+      const exit = commandProfile ? /^exit=-?\d+(?: timeout)?\n/.exec(log)?.[0] : undefined;
+      if (commandProfile && !exit) throw new Error('COMMAND_EXIT_MARKER_MISSING');
+      if (exit) {
+        const marker = tailLog(label, cap - Buffer.byteLength(exit)) + exit;
+        markerBytes += Buffer.byteLength(marker);
+        if (markerBytes > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
+        markers.push(marker);
+      }
+      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes);
+    },
+    value() {
+      return body + markers.join('');
+    },
+  };
+}
 
 export type Credential = { storageName: string; remote: string; secret: string; expiresAt: number };
 export type CredentialProvider = (operation: 'fetch' | 'scratch-push' | 'canonical-push') => Promise<Credential[]>;
@@ -52,29 +79,32 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
 }
 
 async function runGates(profile: LocalProfile, job: Job, directory: string): Promise<{ outcome: CheckOutcome; gates: StackResult['gateResults']; log: string; score: StackResult['score'] }> {
+  // 128 markers fit the 4096-byte command minimum even with 32 bytes reserved per exit line.
+  if (profile.kind === 'command' && job.unitPolicy.acceptance.gates.length > 128)
+    throw new Error('TOO_MANY_COMMAND_GATES');
   const gates: StackResult['gateResults'] = [];
-  let log = '';
+  const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   let score: StackResult['score'] = null;
   for (const gate of job.unitPolicy.acceptance.gates) {
     const checked = await pinnedCheck(profile, job, directory, gate.id);
     gates.push({ gateId: gate.id, outcome: checked.outcome });
-    log += checked.log + '\n';
+    log.append(checked.log);
     score = job.contest === true ? checked.score : null;
-    if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log, score: null };
+    if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log: log.value(), score: null };
   }
-  return { outcome: 'PASS', gates, log, score };
+  return { outcome: 'PASS', gates, log: log.value(), score };
 }
 
 async function runAffected(profile: LocalProfile, job: Job, directory: string, unitKeys: string[]): Promise<{ outcome: CheckOutcome; log: string }> {
   const targets = profile.checkerId === 'dispatch-lab' ? ['all'] : [...new Set(unitKeys)].sort();
   if (!targets.length) return { outcome: 'UNVERIFIED_TARGET', log: 'No affected units identified' };
-  let log = '';
+  const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   for (const unit of targets) {
     const checked = await pinnedCheck(profile, job, directory, unit);
-    log += unit + ': ' + checked.log + '\n';
-    if (!['PASS', 'MATCH'].includes(checked.outcome)) return { outcome: checked.outcome, log };
+    log.append(checked.log, unit + ': ');
+    if (!['PASS', 'MATCH'].includes(checked.outcome)) return { outcome: checked.outcome, log: log.value() };
   }
-  return { outcome: 'PASS', log };
+  return { outcome: 'PASS', log: log.value() };
 }
 
 async function reconcileScratch(directory: string, job: Extract<Job, { kind: 'validate-stack' }>, composed: string,
@@ -110,7 +140,17 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     const actual = await git(directory, ['rev-parse', candidate.headOid + '^{commit}']);
     if (candidate.baseOid && !await isAncestor(directory, candidate.baseOid, actual)) throw new Error('CANDIDATE_ANCESTRY');
     const inspected = await inspectUnits(directory, candidate.baseOid, actual, job);
-    return { ...common, kind: 'inspect-candidate', outcome: 'PASS', observedHeadOid: actual,
+    // A command profile validates the inspected tree as well as composed stacks.
+    // Dispatch-lab inspection retains its existing manifest-only behavior.
+    let outcome: CheckOutcome = 'PASS';
+    let log = '';
+    if (profile?.kind === 'command') {
+      await git(directory, ['switch', '--detach', actual]);
+      const checked = await pinnedCheck(profile, job, directory);
+      outcome = checked.outcome;
+      log = checked.log;
+    }
+    return { ...common, kind: 'inspect-candidate', outcome, log, observedHeadOid: actual,
       sourceTreeOid: await treeOid(directory, actual), unitKeys: inspected.unitKeys,
       reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest };
   }
@@ -151,7 +191,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     }
     return { ...common, kind: 'validate-stack', bootstrap: job.bootstrap, canonicalBaseOid: job.canonicalBaseOid,
       sourceTreeOid: tree, composedOid: composed, composedTreeOid: tree,
-      outcome: checked.outcome, gateResults: checked.gates, score: checked.score, log: checked.log.slice(0, OUTPUT_CAP) } as UnsignedResult;
+      outcome: checked.outcome, gateResults: checked.gates, score: checked.score, log: checked.log } as UnsignedResult;
   }
   if (job.kind === 'delta-check') {
     if (!profile) throw new Error('PROFILE_REQUIRED');
@@ -167,7 +207,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     return { ...common, kind: 'delta-check', outcome: checked.outcome, sourceTreeOid: await treeOid(directory, composed),
       reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest,
       dependencyScope: inspected.manifest.dependencyScope, dependencyScopeDigest: await digest(inspected.manifest.dependencyScope),
-      log: checked.log.slice(0, OUTPUT_CAP) };
+      log: checked.log };
   }
   // Promoter mode has no profile load, checkout, source execution, or checker invocation.
   if (job.bootstrap && (!job.ownerAuthorized || job.expectedOldOid !== null)) throw new Error('BOOTSTRAP_UNAUTHORIZED');
@@ -226,7 +266,8 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
   value.durationMs = Math.max(0, Date.now() - began);
   for (const secret of secrets) value.log = value.log.replaceAll(secret, '[REDACTED]');
   const cap = Math.min(job.maxOutputBytes, OUTPUT_CAP);
-  while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
+  if (value.kind === 'validate-stack' || value.kind === 'delta-check') value.log = tailLog(value.log, cap);
+  else while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
   const resultDigest = await digest(value);
   return { ...value, resultDigest } as JobResult;
 }
