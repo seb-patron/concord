@@ -56,6 +56,17 @@ describe('land input and evidence gates', () => {
     expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head}\nREQUEST CHANGES\nAPPROVED for merge`, head)).toBe(false);
     expect(approvedHead(`\`\`\`markdown\n# ✅ APPROVED FOR MERGE — head ${head}\nAPPROVED for merge\n\`\`\``, head)).toBe(false);
   });
+  it('accepts the AW launcher review trailer only when its verdict and outcome are final', () => {
+    const head = 'a'.repeat(40);
+    const body = `# ✅ APPROVED FOR MERGE — head ${head}\n\nReview details.\n\n`;
+    expect(approvedHead(`${body}VERDICT: APPROVED\nDELEGATE_OUTCOME=completed\n`, head)).toBe(true);
+    expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head.toUpperCase()}\nVERDICT: APPROVED`, head)).toBe(true);
+    expect(approvedHead(`${body}VERDICT: APPROVED\n`, head)).toBe(true);
+    expect(approvedHead(`${body}VERDICT: APPROVED\nDELEGATE_OUTCOME=failed\n`, head)).toBe(false);
+    expect(approvedHead(`${body}VERDICT: REQUEST CHANGES\nDELEGATE_OUTCOME=completed\n`, head)).toBe(false);
+    expect(approvedHead(`${body}VERDICT: APPROVED\nDELEGATE_OUTCOME=completed\nTrailing text\n`, head)).toBe(false);
+    expect(approvedHead(`${body}APPROVED for merge\nDELEGATE_OUTCOME=completed\n`, head)).toBe(false);
+  });
   it('rejects conflicting AW commit and allowed-file overrides before any API request', async () => {
     const { dir, commit } = await source();
     const run = await temp();

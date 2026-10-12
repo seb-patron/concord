@@ -149,10 +149,13 @@ async function prepareHead(source: string, commit: string, parent: string, base:
 export function approvedHead(evidence: string, head: string): boolean {
   const lines = evidence.split(/\r?\n/);
   const report = lines.filter(line => line.trim() !== '');
-  const approval = /^# ✅ APPROVED FOR MERGE — head ([a-f0-9]{40})$/;
+  const approval = /^# ✅ APPROVED FOR MERGE — head ([a-fA-F0-9]{40})$/;
   const match = approval.exec(report[0] ?? '');
+  const last = report.at(-1);
+  const approvedFooter = last === 'APPROVED for merge' || last === 'VERDICT: APPROVED' ||
+    (last === 'DELEGATE_OUTCOME=completed' && report.at(-2) === 'VERDICT: APPROVED');
   return !!match && match[1].toLowerCase() === head.toLowerCase() &&
-    report[report.length - 1] === 'APPROVED for merge' &&
+    approvedFooter &&
     !/CHANGES REQUIRED|REQUEST CHANGES|NOT APPROVED/i.test(evidence);
 }
 export async function land(input: LandOptions): Promise<Obj> {
