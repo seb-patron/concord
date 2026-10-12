@@ -572,6 +572,57 @@ export function attemptBudget(family) {
     });
   }, 15_000);
 
+  it('rejects clean Git merges that put sorted keys out of order across frame lines', async () => {
+    await temporaryWork(async dir => {
+      const canonical = join(dir, 'canonical.git');
+      const first = join(dir, 'first.git');
+      const second = join(dir, 'second.git');
+      const scratch = join(dir, 'scratch.git');
+      for (const bare of [canonical, first, second, scratch]) await git(dir, ['init', '--bare', '--quiet', bare]);
+      const seed = join(dir, 'seed');
+      await mkdir(seed);
+      await git(seed, ['init', '--quiet']);
+      const frame = Array.from({ length: 12 }, (_, i) => `# group ${i}`).join('\n');
+      const baseText = `a\n${frame}\nd\n`;
+      await writeFile(join(seed, 'lines.txt'), baseText);
+      await git(seed, ['add', 'lines.txt']);
+      await git(seed, ['commit', '--quiet', '-m', 'base'], 30_000, commitEnv);
+      const base = await git(seed, ['rev-parse', 'HEAD']);
+      for (const remote of [canonical, first, second]) await git(seed, ['push', '--quiet', remote, 'HEAD:refs/heads/main']);
+      const candidate = async (name: string, remote: string, text: string) => {
+        const work = join(dir, name);
+        await mkdir(work);
+        await git(work, ['init', '--quiet']);
+        await git(work, ['fetch', '--quiet', remote, base]);
+        await git(work, ['switch', '--detach', base]);
+        await writeFile(join(work, 'lines.txt'), text);
+        await git(work, ['add', 'lines.txt']);
+        await git(work, ['commit', '--quiet', '-m', name], 30_000, commitEnv);
+        const head = await git(work, ['rev-parse', 'HEAD']);
+        await git(work, ['push', '--quiet', remote, 'HEAD:refs/heads/main']);
+        return head;
+      };
+      const firstHead = await candidate('before', first, baseText.replace('a\n', 'a\nc\n'));
+      const secondHead = await candidate('after', second, baseText.replace('\nd\n', '\nb\nd\n'));
+      const remotes = Object.fromEntries(Object.entries({ canonical, first, second, scratch })
+        .map(([name, path]) => [name, pathToFileURL(path).href]));
+      const linePolicy: TrustedPolicy = { ...policy,
+        keyedLines: [{ file: 'lines.txt', keyRule: 'whole-line', order: 'sorted' }] };
+      const job: Job = { ...jobBase(remotes), unitPolicy: linePolicy, kind: 'validate-stack', canonicalBaseOid: base,
+        candidates: [
+          { changeId: 'first', revision: 1, baseOid: base, headOid: firstHead, storageName: 'first', ref: 'refs/heads/main' },
+          { changeId: 'second', revision: 1, baseOid: base, headOid: secondHead, storageName: 'second', ref: 'refs/heads/main' },
+        ], bootstrap: false, stackId: 'stack', scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+        expectedRefs: { canonical: base, scratch: null } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
+        executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ outcome: 'MERGE_CONFLICT', composedOid: null });
+      expect(await refOid(seed, remotes.scratch, 'refs/heads/check')).toBeNull();
+    });
+  }, 20_000);
+
   it('checks the canonical commit and tree for a base-check job', async () => {
     await gitFixture(async ({ repo, canonical, scratch, base }) => {
       const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };

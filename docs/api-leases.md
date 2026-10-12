@@ -24,7 +24,7 @@ An owner may declare exact keyed-line files in the policy template. The generato
 "keyedLines": [{ "file": "include/callees.h", "keyRule": "c-declaration", "order": "append" }]
 ```
 
-The single-line declaration `void sub_2029668(int a);` has unit `line:include/callees.h:sub_2029668`. `c-declaration` accepts simple prototypes, extern variables, and typedef names, including multi-word types and pointers. Function-pointer declarations and other ambiguous syntax require a whole-file lease. Blank lines, comments, and preprocessor directives form the frame; edits to them also require `file:include/callees.h`. Duplicate keys in either version require the file unit. Agents can claim distinct line keys in the same file concurrently, while the file unit conflicts with all of them.
+The single-line declaration `void sub_2029668(int a);` has unit `line:include/callees.h:sub_2029668`. `c-declaration` accepts simple prototypes, extern variables, and typedef names, including multi-word types and pointers. Function-pointer declarations and other ambiguous syntax require a whole-file lease. Blank lines, comments (including every line inside a block comment), and preprocessor directives form the frame; edits to them also require `file:include/callees.h`. Duplicate keys in either version require the file unit. Agents can claim distinct line keys in the same file concurrently, while the file unit conflicts with all of them.
 
 For a sorted baseline list, use:
 
@@ -32,7 +32,7 @@ For a sorted baseline list, use:
 "keyedLines": [{ "file": "baselines/matching.txt", "keyRule": "whole-line", "order": "sorted" }]
 ```
 
-`first-token` is also available for ledgers whose first whitespace-separated token identifies each entry. `sorted` places merged entries in key order; `append` keeps base entries and appends candidate additions in candidate order. The checker maps changed keys to line units, and composition merges disjoint keyed changes while retaining exact line bytes and the final newline. CRLF and mixed line endings require a whole-file lease. Same-key changes conflict.
+`first-token` is also available for ledgers whose first whitespace-separated token identifies each entry. `sorted` places merged entries in key order; `append` keeps base entries and appends candidate additions in candidate order. A sorted composition that would put keys out of order across frame lines conflicts. The checker maps changed keys to line units, and composition merges disjoint keyed changes while retaining exact line bytes and the final newline. CRLF and mixed line endings require a whole-file lease. Same-key changes conflict.
 
 ### Owner file-unit policy generation
 

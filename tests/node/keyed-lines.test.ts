@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import type { Job, TrustedPolicy } from '../../src/contracts';
 import { changedUnitsForFile, normalizeUnits, overlaps, resolveUnit, unitRegistry } from '../../src/leases/units';
-import { lineKey, mergeKeyedLines } from '../../runner/lines';
+import { keyedLineChanges, lineKey, mergeKeyedLines } from '../../runner/lines';
 import { inspectUnits } from '../../runner/units';
 import { normalizeManifest } from '../../src/verdicts/manifest';
 
@@ -59,6 +59,24 @@ describe('keyed-line units', () => {
     expect(() => mergeKeyedLines('alpha 1\n', 'alpha 2\n', 'alpha 3\n', append)).toThrow('KEYED_LINE_CONFLICT');
   });
 
+  it('rejects a sorted composition whose additions cross a frame boundary', () => {
+    const sorted = policy('whole-line', 'sorted').keyedLines![0];
+    expect(() => mergeKeyedLines('a\n# group\nd\n', 'a\nc\n# group\nd\n',
+      'a\n# group\nb\nd\n', sorted)).toThrow('KEYED_LINE_CONFLICT');
+  });
+
+  it('requires the file unit for changes inside a multiline comment', () => {
+    const linePolicy = policy('c-declaration').keyedLines![0];
+    const base = '/*\nvoid old(void);\n*/\nvoid live(void);\n';
+    const commentEdit = '/*\nvoid old(int x);\n*/\nvoid live(void);\n';
+    expect(keyedLineChanges(base, commentEdit, linePolicy)).toBeNull();
+    expect(changedUnitsForFile(unitRegistry(policy('c-declaration')), 'include/callees.h', base, commentEdit)
+      .map(unit => unit.key)).toEqual(['file:include/callees.h']);
+    expect(changedUnitsForFile(unitRegistry(policy('c-declaration')), 'include/callees.h', base,
+      '/*\nvoid old(void);\n*/\nvoid live(int x);\n').map(unit => unit.key))
+      .toEqual(['line:include/callees.h:live']);
+  });
+
   it('falls back for frame edits, unkeyed declarations, and duplicate keys', () => {
     const registry = unitRegistry(policy('c-declaration'));
     const base = '#ifndef H\nvoid alpha(void);\n#endif\n';
@@ -93,6 +111,15 @@ describe('keyed-line units', () => {
       expect(inspected.unitKeys).toEqual(['line:callees.h:beta']);
       expect(inspected.manifest.coverage).toBe('complete');
       expect(normalizeManifest(inspected.manifest, unitPolicy, inspected.unitKeys).changedUnits[0].unitKey).toBe('line:callees.h:beta');
+      writeFileSync(join(dir, 'callees.h'), '/*\nvoid old(void);\n*/\nvoid alpha(void);\n');
+      git('add', 'callees.h');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'comment base');
+      const commentBase = git('rev-parse', 'HEAD');
+      writeFileSync(join(dir, 'callees.h'), '/*\nvoid old(int x);\n*/\nvoid alpha(void);\n');
+      git('add', 'callees.h');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'comment edit');
+      const commentHead = git('rev-parse', 'HEAD');
+      expect((await inspectUnits(dir, commentBase, commentHead, job)).unitKeys).toEqual(['file:callees.h']);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

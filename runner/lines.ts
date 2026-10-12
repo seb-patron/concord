@@ -35,8 +35,20 @@ export function parseKeyedLines(text: string, policy: KeyedLinePolicy): ParsedLi
   const rows = new Map<string, { line: string; segment: number }>();
   const frame: string[] = [];
   const segments: string[][] = [[]];
+  let inBlockComment = false;
   for (const line of lines) {
-    if (!line.trim() || /^\s*(?:\/\/|\/\*|\*|\*\/|#)/.test(line)) {
+    const wasInBlockComment = inBlockComment;
+    const markers = line.match(/\/\*|\*\//g) ?? [];
+    for (const marker of markers) {
+      if (marker === '/*') {
+        if (inBlockComment) continue;
+        inBlockComment = true;
+      } else {
+        if (!inBlockComment) return null;
+        inBlockComment = false;
+      }
+    }
+    if (!line.trim() || wasInBlockComment || markers.length || /\/\//.test(line) || /^\s*(?:\*|#)/.test(line)) {
       frame.push(line);
       segments.push([]);
       continue;
@@ -46,6 +58,7 @@ export function parseKeyedLines(text: string, policy: KeyedLinePolicy): ParsedLi
     rows.set(key, { line, segment: frame.length });
     segments[frame.length].push(key);
   }
+  if (inBlockComment) return null;
   return { rows, frame, ending, segments };
 }
 
@@ -82,6 +95,7 @@ export function mergeKeyedLines(base: string, ours: string, theirs: string, poli
   if (left.keys.some(key => right.keys.includes(key))) throw new Error('KEYED_LINE_CONFLICT');
   const { before } = left;
   const output: string[] = [];
+  let previousKey: string | undefined;
   for (let segment = 0; segment < before.segments.length; segment++) {
     const entries = new Map<string, string>();
     for (const key of before.segments[segment]) {
@@ -95,6 +109,12 @@ export function mergeKeyedLines(base: string, ours: string, theirs: string, poli
       if (row) entries.set(key, row.line);
     }
     const keys = policy.order === 'sorted' ? [...entries.keys()].sort() : [...entries.keys()];
+    if (policy.order === 'sorted') {
+      for (const key of keys) {
+        if (previousKey !== undefined && previousKey > key) throw new Error('KEYED_LINE_CONFLICT');
+        previousKey = key;
+      }
+    }
     output.push(...keys.map(key => entries.get(key)!));
     if (segment < before.frame.length) output.push(before.frame[segment]);
   }

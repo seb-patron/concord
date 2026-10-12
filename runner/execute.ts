@@ -1,11 +1,11 @@
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '../src/contracts';
 import { digest } from '../src/http';
 import { compareKeys } from '../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, MAX_INSPECTED_BLOB_BYTES, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
 import { keyedLinesForFile, tableForFile } from '../src/leases/units';
-import { keyedLineChanges, mergeKeyedLines } from './lines';
+import { keyedLineChanges, mergeKeyedLines, parseKeyedLines } from './lines';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
@@ -58,6 +58,15 @@ async function fetchInput(directory: string, job: Job, name: string, oid: string
 async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
   await git(directory, ['switch', '--detach', base]);
   const touched = new Map<string, Set<string>>();
+  const composedLinePaths = new Set<string>();
+  const validateComposedLines = async () => {
+    for (const path of composedLinePaths) {
+      const policy = keyedLinesForFile(job.unitPolicy, path)!;
+      const parsed = parseKeyedLines(await readFile(directory + '/' + path, 'utf8'), policy);
+      if (!parsed || policy.order === 'sorted' && [...parsed.rows.keys()].some((key, i, keys) => i > 0 && keys[i - 1] > key))
+        throw new Error('KEYED_LINE_CONFLICT');
+    }
+  };
   const readBlob = async (oid: string, path: string): Promise<string | null> => {
     const value = await command('git', ['show', `${oid}:${path}`], directory, 30_000, undefined, undefined, MAX_INSPECTED_BLOB_BYTES);
     if (value.code !== 0) return null;
@@ -84,12 +93,16 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
       const keys = change ? change.keys : ['*'];
       const prior = touched.get(item.file) ?? new Set<string>();
       if (keys.some(key => prior.has('*') || key === '*' && prior.size > 0 || prior.has(key))) throw new Error('KEYED_LINE_CONFLICT');
+      if (prior.size > 0) composedLinePaths.add(item.file);
       keys.forEach(key => prior.add(key));
       touched.set(item.file, prior);
     }
     const result = await command('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'),
       'merge', '--no-edit', '--no-ff', candidate.headOid], directory, 60_000, env);
-    if (result.code === 0) continue;
+    if (result.code === 0) {
+      await validateComposedLines();
+      continue;
+    }
     const conflicts = (await git(directory, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
     if (!conflicts.length) throw new Error('MERGE_CONFLICT');
     for (const path of conflicts) {
@@ -113,6 +126,7 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
       await writeFile(directory + '/' + path, merged);
       await git(directory, ['add', '--', path]);
     }
+    await validateComposedLines();
     await git(directory, ['commit', '--no-edit'], 60_000, env);
   }
   return git(directory, ['rev-parse', 'HEAD']);
