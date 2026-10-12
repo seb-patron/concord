@@ -616,6 +616,7 @@ async function mutate(label,call) {
   } catch(error) {
     if(gen!==state.generation)return;
     if(error.status===409 && error.code==='STALE_VERSION') {
+      observeVersion(repoId, error.details?.currentVersion);
       state.awaitingFreshSnapshot = true;
       render();
     }

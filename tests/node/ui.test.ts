@@ -104,7 +104,9 @@ describe('Fleet desk DOM', () => {
     let snapshotVersion = 7;
     let eventVersion = 7;
     let releaseSnapshot8: (() => void) | undefined;
+    let releaseSnapshot10: (() => void) | undefined;
     let delayNextSnapshot8 = true;
+    let delayNextSnapshot10 = true;
     let mutationVersion = 7;
     let staleNextEnqueue = false;
     let failNextSnapshot = false;
@@ -130,6 +132,10 @@ describe('Fleet desk DOM', () => {
       } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
       else if (url.endsWith('/snapshot')) {
         if (token === 'Bearer restricted') { status = 403; body = { error: { code: 'FORBIDDEN', message: 'no scope' } }; }
+        else if (snapshotVersion === 10 && delayNextSnapshot10) return await new Promise<Response>(resolve => {
+          delayNextSnapshot10 = false;
+          releaseSnapshot10 = () => resolve(new Response(JSON.stringify({ ...fixture, version: 10 })));
+        });
         else if (failNextSnapshot) {
           failNextSnapshot = false;
           status = 503; body = { error: { code: 'NETWORK_UNREACHABLE', message: 'refresh failed' } };
@@ -169,7 +175,7 @@ describe('Fleet desk DOM', () => {
       }
       else if (url.endsWith('/queue/enqueue') && init.method === 'POST' && staleNextEnqueue) {
         staleNextEnqueue = false;
-        status = 409; body = { error: { code: 'STALE_VERSION', message: 'Snapshot is stale' } };
+        status = 409; body = { error: { code: 'STALE_VERSION', message: 'Snapshot is stale', details: { currentVersion: 11 } } };
       }
       else body = { data: {}, version: mutationVersion };
       return new Response(JSON.stringify(body), { status });
@@ -353,10 +359,13 @@ describe('Fleet desk DOM', () => {
       expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(requestsBeforeRetry + 1);
       expect(byId('work-board').textContent).toContain('Current version 9');
       expect(byId('work-board').textContent).not.toContain('Stale version 8');
-      // A stale refusal must disable every action even when its refresh fails.
+      // An in-flight v10 snapshot cannot clear the v11 requirement from a stale refusal.
+      snapshotVersion = 10; eventVersion = 10;
+      tick!();
       staleNextEnqueue = true; failNextSnapshot = true;
       raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
+      expect(releaseSnapshot10).toBeTypeOf('function');
       expect(byId('desk-message').textContent).toContain('Snapshot unavailable (NETWORK_UNREACHABLE)');
       const actionButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
       expect(actionButtons.length).toBeGreaterThan(1);
@@ -365,7 +374,12 @@ describe('Fleet desk DOM', () => {
       raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush();
       expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(postsAfterStale);
-      interaction = true; snapshotVersion = 10; eventVersion = 10;
+      releaseSnapshot10!(); await flush();
+      expect((raceEnqueue.querySelector('button') as HTMLButtonElement).disabled).toBe(true);
+      raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(postsAfterStale);
+      interaction = true; snapshotVersion = 11; eventVersion = 11;
       tick!(); await flush(); await flush();
       const recoveredButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
       expect(recoveredButtons.every(button => !button.disabled)).toBe(true);
@@ -381,7 +395,7 @@ describe('Fleet desk DOM', () => {
       tick!(); await flush();
       expect(byId('action-panel').querySelector('input[name="intentText"]')).toBe(retainedClaim);
       expect(retainedClaim.value).toBe('Unsubmitted lease intent');
-      changeStatus = 'merged'; snapshotVersion = 11; eventVersion = 11;
+      changeStatus = 'merged'; snapshotVersion = 12; eventVersion = 12;
       tick!(); await flush(); await flush();
       expect(byId('detail-body').textContent).toContain('Status: merged');
       expect(byId('action-panel').textContent).not.toContain('Claim');
@@ -391,6 +405,7 @@ describe('Fleet desk DOM', () => {
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
     } finally {
+      releaseSnapshot10?.();
       clearSessionToken();
       Object.assign(globalThis, previous);
       dom.window.close();
