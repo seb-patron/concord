@@ -114,14 +114,15 @@ export async function apiFetch(path, options = {}, fetchImpl = fetch) {
     const code = failure && typeof failure.code === 'string' ? failure.code : `HTTP_${response.status}`;
     const message = failure && typeof failure.message === 'string' ? failure.message : `Request failed (${response.status})`;
     const requestId = parsed && typeof parsed === 'object' && typeof parsed.requestId === 'string' ? parsed.requestId : null;
-    // Keep only the documented lease-conflict evidence, never arbitrary server details.
-    const raw = code === 'LEASE_CONFLICT' && response.status === 409 && failure?.details;
-    const details = raw && typeof raw === 'object' ? {
+    // Keep only documented conflict evidence, never arbitrary server details.
+    const raw = response.status === 409 && failure?.details;
+    const details = raw && typeof raw === 'object' && code === 'LEASE_CONFLICT' ? {
       holderId: typeof raw.holderId === 'string' ? redactText(raw.holderId) : null,
       intentText: typeof raw.intentText === 'string' ? redactText(raw.intentText) : null,
       expiresAt: Number.isFinite(raw.expiresAt) ? raw.expiresAt : null,
       conflictingKeys: Array.isArray(raw.conflictingKeys) ? raw.conflictingKeys.filter(key => typeof key === 'string').slice(0, 16).map(redactText) : [],
-    } : null;
+    } : raw && typeof raw === 'object' && code === 'STALE_VERSION' && Number.isSafeInteger(raw.currentVersion) && raw.currentVersion >= 0
+      ? { currentVersion: raw.currentVersion } : null;
     throw new ApiError(response.status, code, message, requestId, response.status === 429 || response.status >= 500, details);
   }
   return parsed;
@@ -156,6 +157,18 @@ export function getHealth(fetchImpl) {
 
 export function listRepos(fetchImpl) {
   return apiFetch('/v1/repos', {}, fetchImpl);
+}
+
+/** Identity is optional during rollout; callers handle a 404 with server-checked actions. */
+export function getMe(fetchImpl) {
+  return apiFetch('/v1/me', {}, fetchImpl);
+}
+
+/** Per-change approval records, including carried verdict provenance. */
+export function getVerdicts(repoId, changeId, cursor = null, fetchImpl) {
+  const query = typeof cursor === 'string' && cursor ? `?${new URLSearchParams({ cursor })}` : '';
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/verdicts${query}`,
+    {}, typeof cursor === 'function' ? cursor : fetchImpl);
 }
 
 export function getSnapshot(repoId, fetchImpl) {

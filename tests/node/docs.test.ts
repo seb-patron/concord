@@ -224,21 +224,21 @@ afterEach(async () => {
 });
 
 describe('UI documentation', () => {
-  it('states that verdict records are unavailable until the UI calls the serving route', async () => {
+  it('documents verdict provenance from the per-change route and unreadable history', async () => {
     const document = await readFile(join(cwd, 'docs/ui.md'), 'utf8');
-    const provenance = /- \*\*Approval provenance\*\*:([\s\S]*?)(?=\n- \*\*|\n## )/.exec(document)?.[1] ?? '';
-    const snapshotRow = document.split('\n').find(line => line.startsWith('| Approval provenance |')) ?? '';
-    const demoRow = document.split('\n').find(line => line.startsWith('| D carried approval, H invalidation |')) ?? '';
+    const desk = document.split('\n').find(line => line.startsWith('After sign-in,')) ?? '';
+    const history = document.split('\n').find(line => line.startsWith('The page polls')) ?? '';
 
-    expect(provenance).toMatch(/no verdict records are available/i);
-    expect(provenance).toContain('`items: []`');
-    expect(provenance).toMatch(/renders verdicts from that snapshot only/i);
-    expect(provenance).toMatch(/per-change verdict GET route\s+exists, but the UI\s+does not call it yet/i);
-    expect(provenance).toMatch(/separate slice/i);
-    expect(snapshotRow).toContain('returns `items: []`');
-    expect(snapshotRow).toMatch(/GET \/v1\/repos\/:repoId\/changes\/:changeId\/verdicts.*UI does not call it/i);
-    expect(demoRow).toMatch(/shows no verdict records today/i);
-    expect(demoRow).not.toMatch(/panel reads verdict records/i);
+    expect(desk).toContain('Select a change for its head, units, actions, and approval history.');
+    expect(history).toContain('Verdict history comes from `GET /v1/repos/:repo/changes/:change/verdicts`');
+    expect(history).toContain('following `nextCursor` through all pages');
+    expect(history).toContain('including direct and carried approvals with parent review and delta evidence.');
+    expect(history).toContain('A `/v1/me` 404 leaves the role unverified and offers server-checked actions');
+    expect(history).toContain('A verdict 403 reads “Approval history is visible to reviewers.”');
+    expect(history).toContain('A 401 returns to sign-in; a 403 on a repository says the token cannot see it.');
+    expect(document).not.toMatch(/no verdict records are available|UI does not call it yet|shows no verdict records today/i);
+    expect(document).toContain('Claim accepts distinct unit keys and a nonempty intent');
+    expect(document).toContain('a zero-decision alert is hidden');
   });
 });
 

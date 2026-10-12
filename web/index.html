@@ -1,145 +1,28 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Concord fleet coordination</title>
-  <link rel="stylesheet" href="/styles.css">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#0d0f12">
+<title>Concord · Fleet desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=Geist+Mono:wght@400;500&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <a class="skip" href="#boards">Skip to fleet boards</a>
-  <header class="topbar">
-    <div>
-      <h1>Concord</h1>
-      <p class="subtitle">Fleet coordination: repo to landing</p>
-    </div>
-    <p id="env-badge" class="badge" role="status" aria-live="polite">Backend: checking…</p>
-  </header>
-
-  <section class="session" aria-labelledby="session-heading">
-    <h2 id="session-heading">Session</h2>
-    <form id="token-form">
-      <label for="token-input">Session token (kept in memory only)</label>
-      <input id="token-input" name="token" type="password" autocomplete="off" spellcheck="false"
-             placeholder="local-viewer, local-agent-a, …" aria-describedby="token-note">
-      <button type="submit" id="token-save">Use token</button>
-      <button type="button" id="token-clear">Forget</button>
-      <span id="token-state" role="status" aria-live="polite">No token stored.</span>
-      <small id="token-note">Viewer can browse without mutation controls. The token never enters the URL or browser storage.</small>
-    </form>
-    <div class="session-row">
-      <label for="role-select">Requested role (unverified; server authorizes each action)</label>
-      <select id="role-select">
-        <option value="viewer" selected>viewer — browse only</option>
-        <option value="agent">agent — claim, enqueue, withdraw</option>
-        <option value="owner">owner — claim, enqueue, withdraw</option>
-        <option value="reviewer">reviewer — submit verdicts</option>
-      </select>
-      <label for="repo-select">Repository</label>
-      <select id="repo-select" aria-describedby="repo-note"></select>
-      <label for="repo-custom">Or repo ID</label>
-      <input id="repo-custom" type="text" placeholder="demo" size="12">
-      <button type="button" id="repo-use">Switch</button>
-      <span id="repo-note" class="hint">Repo switcher. Polls incrementally every second.</span>
-    </div>
-    <p id="session-error" class="error" role="alert" hidden></p>
-  </section>
-
-  <main id="boards" class="layout">
-    <div class="column">
-      <section class="panel" aria-labelledby="leases-heading">
-        <h2 id="leases-heading">Lease board</h2>
-        <p class="hint">Semantic units, holder, intent, countdown. Conflicts name the holder.</p>
-        <ul id="lease-list" class="cards" aria-live="polite"></ul>
-      </section>
-
-      <section class="panel" aria-labelledby="changes-heading">
-        <h2 id="changes-heading">Changes</h2>
-        <p class="hint">Arrow keys move, Enter opens details. Each card shows intent, agent, unit, state, next action.</p>
-        <ul id="change-list" class="cards" role="listbox" aria-label="Changes" tabindex="0"></ul>
-      </section>
-
-      <section class="panel" aria-labelledby="queue-heading">
-        <h2 id="queue-heading">Queue and bisection</h2>
-        <p class="hint">Membership, progress, result. Failures highlight only the supported culprit or set.</p>
-        <div id="queue-tree"></div>
-        <ul id="queue-list" class="cards" aria-live="polite"></ul>
-      </section>
-
-      <section class="panel" aria-labelledby="runners-heading">
-        <h2 id="runners-heading">Runner health</h2>
-        <ul id="runner-list" class="cards" aria-live="polite"></ul>
-      </section>
-    </div>
-
-    <div class="column">
-      <section class="panel detail" aria-labelledby="detail-heading">
-        <h2 id="detail-heading">Change details</h2>
-        <div id="detail-body" aria-live="polite"><p>No change selected.</p></div>
-        <div id="mutation-zone">
-          <h3>Actions</h3>
-          <form id="claim-form" hidden>
-            <h4>Claim a registered unit</h4>
-            <label for="claim-units">Unit keys (comma separated, max 16)</label>
-            <input id="claim-units" type="text" placeholder="row:families:gamma">
-            <label for="claim-intent">Intent text</label>
-            <input id="claim-intent" type="text" placeholder="Increase gamma retry budget safely">
-            <button type="submit">Claim</button>
-          </form>
-          <form id="enqueue-form" hidden>
-            <h4>Enqueue / withdraw</h4>
-            <label for="enqueue-verdict">Verdict ID (for enqueue)</label>
-            <input id="enqueue-verdict" type="text">
-            <button type="submit" id="enqueue-submit">Enqueue selected change</button>
-            <button type="button" id="withdraw-submit">Withdraw selected change</button>
-          </form>
-          <form id="verdict-form" hidden>
-            <h4>Submit review verdict with evidence</h4>
-            <label for="verdict-decision">Decision</label>
-            <select id="verdict-decision"><option value="approve">approve</option><option value="reject">reject</option></select>
-            <label for="verdict-manifest">Review manifest digest</label>
-            <input id="verdict-manifest" type="text" placeholder="sha256:…">
-            <label for="verdict-evidence">Evidence digest</label>
-            <input id="verdict-evidence" type="text" placeholder="sha256:…">
-            <button type="submit">Submit verdict</button>
-          </form>
-          <p id="mutation-note" class="hint">Mutations send Idempotency-Key and expectedVersion. A stale 409 refreshes context instead of pretending success.</p>
-          <p id="mutation-status" role="status" aria-live="polite"></p>
-        </div>
-      </section>
-
-      <section class="panel" aria-labelledby="findings-heading">
-        <h2 id="findings-heading">Findings round</h2>
-        <ul id="finding-list" class="cards" aria-live="polite"></ul>
-      </section>
-
-      <section class="panel" aria-labelledby="verdicts-heading">
-        <h2 id="verdicts-heading">Approval provenance</h2>
-        <p class="hint">Carried verdicts link the original review and delta evidence.</p>
-        <ul id="verdict-list" class="cards" aria-live="polite"></ul>
-      </section>
-
-      <section class="panel" aria-labelledby="tip-heading">
-        <h2 id="tip-heading">Canonical tip</h2>
-        <div id="canonical-tip" aria-live="polite"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="replay-heading">
-        <h2 id="replay-heading">History</h2>
-        <div id="replay-body" aria-live="polite"></div>
-      </section>
-
-      <section class="panel" aria-labelledby="events-heading">
-        <h2 id="events-heading">Events</h2>
-        <ol id="event-log" class="events" aria-live="polite"></ol>
-        <ol id="event-evidence" class="events" aria-label="Referenced older events"></ol>
-      </section>
-    </div>
-  </main>
-
-  <footer>
-    <p>Static, framework-free UI over the frozen snapshot/events contract. See <a href="https://github.com/seb-patron/concord">docs/ui.md</a> for the owner walkthrough.</p>
-  </footer>
-  <script type="module" src="/app.js"></script>
-</body>
-</html>
+<a class="skip" href="#main">Skip to content</a>
+<header class="topbar">
+<div class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M8.5 7.5l7 3.2M8.5 16.5l7-3.2"/></svg><span>Concord</span></div>
+<label class="repo-picker" id="repo-picker" hidden>Repo <select id="repo-select" aria-label="Repository"></select></label><span id="env-badge" class="live-badge" role="status">Backend: checking…</span><span class="header-spacer"></span><span id="principal" class="principal" hidden>Signed in</span><button type="button" id="token-clear" class="quiet" hidden>Sign out</button>
+</header>
+<main id="main">
+<section id="signed-out" class="first-run">
+<div class="intro"><h1>Many agents. One main branch. Nothing lands broken.</h1><p>Concord is a Git platform for fleets of AI agents. Agents lease the code they change, every change is checked on its exact head, and the merge queue finds the bad change instead of blocking everyone.</p><ul><li><strong>Leases, not lock files.</strong> An agent claims a function, row, or file; others wait instead of overwriting.</li><li><strong>Checked on the exact head.</strong> Your test command runs on the composed tree before anything lands.</li><li><strong>One culprit, not a blocked queue.</strong> Bisection names an isolated bad change and lets the rest land.</li></ul></div>
+<div class="signin-card"><h2>Open the dashboard</h2><button id="demo-open" type="button" class="primary" hidden>Watch the live demo repo (read-only)</button><form id="token-form"><label for="token-input">Bearer token (kept in this tab’s memory only)</label><input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="cct_…" required><button type="submit">Sign in</button></form><p id="session-error" role="alert" hidden></p><p class="muted">Agents connect through the MCP server or <code>concord land</code>. <a href="https://github.com/seb-patron/concord#readme">Set up an agent</a>.</p></div>
+</section>
+<div id="desk" hidden>
+<p id="desk-message" class="desk-message" role="status" hidden></p>
+<section id="stat-strip" class="stat-strip" aria-label="Fleet summary"></section><button id="inbox-alert" class="inbox-alert" type="button"><span class="alert-dot" aria-hidden="true"></span><strong id="alert-count">0 decisions need you</strong><span id="alert-preview"></span><span aria-hidden="true">→</span></button>
+<div id="desk-view"><nav class="mobile-tabs" aria-label="Views"><button type="button" data-tab="work">Work</button><button type="button" data-tab="fleet">Fleet</button><button type="button" data-tab="leases">Leases</button><button type="button" data-tab="queue">Queue</button></nav>
+<div class="desk-grid"><section class="board-area" data-pane="work" aria-labelledby="work-heading"><div class="section-heading"><h2 id="work-heading">Work in progress</h2><p>Lease → Check → Queue → Land. A change moves right only with evidence.</p></div><div class="board-scroll"><div id="work-board" class="work-board"></div></div></section><aside class="side-column"><section class="side-panel" data-pane="fleet"><h2>Fleet</h2><ul id="fleet-list" class="plain-list"></ul><p id="runner-summary" class="runner-summary"></p></section><section class="side-panel" data-pane="leases"><h2>Leases</h2><div id="lease-list"></div></section><section class="side-panel" data-pane="queue"><h2>Merge queue</h2><div id="queue-list"></div><p id="diagnosis" class="muted"></p><div id="queue-tree" aria-label="Queue bisection evidence"></div></section></aside></div>
+<section id="change-detail" class="detail-panel" aria-labelledby="detail-heading" hidden><div class="drawer-heading"><h2 id="detail-heading" tabindex="-1">Change details</h2><button type="button" id="detail-close" class="quiet" aria-label="Close change details">Close</button></div><div id="detail-body"></div><section aria-labelledby="findings-heading"><h3 id="findings-heading">Findings round</h3><div id="finding-list"></div></section><section aria-labelledby="runners-heading"><h3 id="runners-heading">Runner health</h3><div id="runner-list"></div></section><div id="verdict-panel"><h3>Approval history</h3><div id="verdict-list"></div></div><section aria-labelledby="history-heading"><h3 id="history-heading">History</h3><div id="replay-body"></div></section><section aria-labelledby="events-heading"><h3 id="events-heading">Events</h3><ol id="event-log" class="events"></ol><ol id="event-evidence" class="events" aria-label="Referenced older events"></ol></section><div id="action-panel"></div><p id="mutation-status" role="status" aria-live="polite"></p></section><footer id="main-footer" aria-label="Main branch"></footer></div>
+<section id="inbox-view" class="inbox-view" hidden><div class="inbox-heading"><button type="button" id="back-desk" class="quiet">← Fleet desk</button><h1>Inbox</h1><span id="inbox-count"></span></div><div class="inbox-grid"><nav id="inbox-list" aria-label="Decisions"></nav><article id="inbox-detail" class="inbox-detail"></article></div></section>
+</div></main><script type="module" src="/app.js"></script>
+</body></html>

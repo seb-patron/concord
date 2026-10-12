@@ -47,6 +47,70 @@ export function snapshotCollections(envelope) {
   };
 }
 
+/** Queue diagnoses use reason/blame in production; older exports used classification. */
+export function normalizeDiagnosis(raw) {
+  const reason = raw?.reason ?? raw?.classification ?? null;
+  const ids = reason === 'SINGLETON' ? raw?.blame ?? raw?.culpritChangeIds :
+    raw?.blame ?? raw?.failingSet ?? raw?.suspects;
+  return { reason, ids: Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [] };
+}
+
+export function boardStage(change) {
+  switch (change?.status) {
+    case 'merged': return 'Landed';
+    case 'queued': return 'Queued';
+    case 'checking': return 'Checking';
+    default: return 'Working';
+  }
+}
+
+/** Every decision comes from live snapshot evidence, never illustrative mockup data. */
+export function deriveInbox(snapshot) {
+  const p = snapshot?.data?.projections ?? {};
+  const changes = snapshotCollections(snapshot).changes.items;
+  const queue = p.queue ?? {};
+  const diagnosis = normalizeDiagnosis(queue.diagnosis);
+  const items = [];
+  if (diagnosis.reason === 'SINGLETON') {
+    for (const changeId of diagnosis.ids) {
+      const change = changes.find(c => c?.changeId === changeId);
+      const observations = (Array.isArray(queue.diagnosticResults) ? queue.diagnosticResults : [])
+        .filter(r => Array.isArray(r.memberIds) && r.memberIds.includes(changeId))
+        .map(r => `${r.memberIds.join(' + ')}: ${r.outcome ?? 'unknown outcome'} (job ${r.jobId ?? '?'})`);
+      items.push({ id: `blamed:${changeId}`, kind: 'Blamed by bisection', tone: 'red', changeId,
+        title: change?.intentText ?? changeId, why: 'This change failed alone during bisection. Review the checker evidence before deciding whether to withdraw it.',
+        evidence: `Change ${changeId} · isolated singleton culprit${observations.length ? `\n${observations.join('\n')}` : ''}` });
+    }
+  } else if (['INTERACTION', 'DEPENDENCY_GROUP', 'BASE_RED', 'INCONCLUSIVE'].includes(diagnosis.reason)) {
+    items.push({ id: `diagnosis:${diagnosis.reason}`, kind: diagnosis.reason.replaceAll('_', ' '), tone: 'red',
+      title: diagnosis.reason === 'BASE_RED' ? 'Main branch baseline is red' : 'Queue needs review',
+      why: diagnosis.reason === 'INCONCLUSIVE' ? 'Diagnosis could not isolate a culprit.' : 'The queue cannot blame one change from this evidence.',
+      evidence: `Classification: ${diagnosis.reason}\nSet: ${diagnosis.ids.join(', ') || 'none identified'}` });
+  }
+  for (const refusal of Array.isArray(p.leases?.refusals) ? p.leases.refusals : []) {
+    const conflict = Array.isArray(refusal.conflicts) ? refusal.conflicts[0] : null;
+    if (!conflict || !Number.isFinite(conflict.expiresAt) || conflict.expiresAt <= Date.now()) continue;
+    const held = Array.isArray(p.leases?.items) && p.leases.items.some(lease =>
+      lease?.holderId === conflict.holderId && ['active', 'reserved'].includes(lease.state) &&
+      lease.expiresAt > Date.now() && (refusal.keys ?? []).includes(lease.unitKey));
+    if (!held) continue;
+    const key = (refusal.keys ?? [])[0] ?? conflict?.unitKey ?? 'a unit';
+    const holder = conflict?.holderId ?? 'another holder';
+    items.push({ id: `wait:${refusal.changeId}:${refusal.createdAt}`, kind: 'Waiting on a lease', tone: 'amber',
+      changeId: refusal.changeId, title: `${refusal.requesterId ?? 'An agent'} is waiting for ${key}`,
+      why: `${holder} holds the unit. Wait for release or expiry before retrying the claim.`,
+      evidence: `Holder: ${holder}\nUnit: ${key}\nExpires: ${conflict?.expiresAt ? new Date(conflict.expiresAt).toLocaleString() : 'unknown'}` });
+  }
+  for (const change of changes) {
+    if (change?.status !== 'ready' || !change.headOid) continue;
+    items.push({ id: `review:${change.changeId}`, kind: 'Review requested', tone: 'blue',
+      changeId: change.changeId, title: change.intentText ?? change.intentKey ?? change.changeId,
+      why: 'The published revision is ready for independent review or enqueue with an approved verdict ID.',
+      evidence: `Head: ${change.headOid}\nRevision: ${change.revision}\nUnits: ${(change.unitKeys ?? []).join(', ') || 'none'}` });
+  }
+  return items;
+}
+
 export function mutationEvidence(change, leases, findingSetVersion, requireFences = true) {
   if (typeof change?.changeId !== 'string' || !change.changeId.trim()) return { error: 'Select a change first.' };
   if (!Number.isSafeInteger(change.revision) || change.revision < 1) return { error: 'Current change revision is unavailable.' };
