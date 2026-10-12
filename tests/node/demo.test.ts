@@ -203,7 +203,7 @@ describe('dispatch-lab local acceptance', () => {
     const prefixedRun = await demo(['seed', '--run', 'dispatch_a', '--state-dir', dir, '--pump-local'], env);
     expect(prefixedRun.repoId).toBe('dispatch_dispatch_a');
     expect(prefixedRun.canonicalOid).toMatch(/^[a-f0-9]{40}$/);
-    for (const name of ['context', 'leases', 'stack', 'isolate', 'negative', 'repair', 'carry', 'invalidate', 'contest', 'dedupe', 'aw']) {
+    for (const name of ['context', 'leases', 'stack', 'isolate', 'negative', 'repair', 'carry', 'invalidate', 'contest', 'dedupe', 'aw', 'rows']) {
       let result: any;
       try { result = await demo(['scene', name, ...(name === 'aw' ? flags.filter(flag => flag !== '--pump-local') : flags)], env); }
       catch (error) { throw new Error(`${name}: ${String(error)}\nWORKER: ${worker.output()}`); }
@@ -229,7 +229,14 @@ describe('dispatch-lab local acceptance', () => {
     expect(inspected.changes.AW.headOid).toBe(inspected.evidence.aw.headOid);
     expect(inspected.evidence.aw.leaseFences['row:families:gamma']).toBeGreaterThan(0);
     expect(inspected.evidence.aw.verdictId).toBeTruthy();
-    expect(inspected.evidence.aw.canonicalOid).toBe(inspected.canonicalOid);
+    expect(inspected.evidence.aw.canonicalOid).toBe(inspected.evidence.rows.baseOid);
+    expect(inspected.evidence.rows.plainGitConflict).toContain('<<<<<<<');
+    expect(inspected.evidence.rows.checkerOutcome).toBe('PASS');
+    expect(inspected.evidence.rows.checkerCaseId).toBe('rows-all');
+    expect(inspected.evidence.rows.refusal.code).toBe('LEASE_CONFLICT');
+    expect(inspected.evidence.rows.finalTable).toContain('zeta\t2\t750');
+    expect(inspected.evidence.rows.finalTable).toContain('eta\t3\t750');
+    expect(inspected.evidence.rows.finalTable).not.toContain('epsilon\t');
     expect(inspected.queue.entries.find((entry: any) => entry.changeId === inspected.evidence.aw.changeId)?.state).toBe('landed');
     expect(inspected.audit.some((event: any) => event.resultDigest && event.jobId)).toBe(true);
     expect(inspected.queue.finalCanonicalOid).toBe(inspected.canonicalOid);
