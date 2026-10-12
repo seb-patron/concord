@@ -180,6 +180,11 @@ export function getEvents(repoId, after, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);
 }
 
+export function getMetrics(repoId, since, until, fetchImpl) {
+  const params = new URLSearchParams({ since, until });
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/metrics?${params}`, {}, fetchImpl);
+}
+
 /** POST /v1/repos/:r/leases — creation calls carry no expectedVersion. */
 export function claimUnits(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/leases`, { method: 'POST', body, idempotencyKey }, fetchImpl);

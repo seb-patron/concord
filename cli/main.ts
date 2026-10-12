@@ -48,6 +48,7 @@ Commands and required fields:
   verdict carry --repo ID --change-id ID --parent-verdict-id ID --revision N --new-base-oid OID --expected-version N
   events list --repo ID [--after SEQUENCE]
   events --tenant [--cursor CURSOR]
+  metrics --repo ID --since ISO_UTC --until ISO_UTC
   api METHOD PATH [--body-file PATH]                 (advanced API; mutations need --idempotency-key)
 
 Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UNAVAILABLE responses remain explicit server errors.
@@ -60,7 +61,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   let parsed;
   try {
     const options: Record<string, { type: 'string'; multiple?: boolean } | { type: 'boolean' }> = {};
-    for (const name of [...OPTION_NAMES, 'role', 'ttl']) options[name] = { type: 'string' };
+    for (const name of [...OPTION_NAMES, 'role', 'ttl', 'since', 'until']) options[name] = { type: 'string' };
     options.exclude = { type: 'string', multiple: true };
     options['depends-on'] = { type: 'string', multiple: true };
     options.json = { type: 'boolean' };
@@ -173,6 +174,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   }
   const rid = requireRepo();
   const root = `/repos/${rid}`;
+  if (noun === 'metrics' && !verb) return print(await send('GET', `${root}/metrics${query({ since: required(flags, 'since'), until: required(flags, 'until') })}`));
   if (noun === 'issue') {
     const path = `${root}/issues`;
     if (verb === 'list') return print(await send('GET', `${path}${query({ state: flags.state, label: flags.label, milestoneId: flags['milestone-id'], cursor: flags.cursor, limit: flags.limit })}`));

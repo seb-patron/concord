@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import type { BootstrapHandoff, FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
+import type { BootstrapHandoff, Event, FeatureModule, HookName, ModuleContext, ModuleName, Principal, RepoStorage, ServiceHooks } from './contracts';
 import { clock, requireRepo, requireTenant } from './auth';
 import { digest, encodeCursor, expectVersion, failure, HttpError, json, parseCursor, readJson, requiresExpectedVersion } from './http';
 import { appendEvent, applyMigrations, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState, unfrozenPromotion } from './state';
@@ -13,6 +13,7 @@ import { runners } from './features/runners';
 import { findings } from './features/findings';
 import { verdicts } from './features/verdicts';
 import { issuesFeature } from './features/issues';
+import { measureEvents, metricsWindow, type RepoMetrics } from './features/metrics';
 
 /** The six modules are registered once. Each supplies migrations, routes, alarms and projections. */
 export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature];
@@ -26,6 +27,7 @@ export function selectStorage(env: Env, sql: SqlStorage, now: () => number): Rep
 
 export class RepoCoordinator extends DurableObject<Env> {
   private readonly now: () => number;
+  private readonly metricsCache = new Map<string, { expiresAt: number; data: RepoMetrics }>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.now = clock(env);
@@ -117,6 +119,22 @@ export class RepoCoordinator extends DurableObject<Env> {
       if (!identity) identityStore.put('repo:identity', { tenantId: principal.tenantId, repoId });
       const core = this.context('repos', principal, repoId);
       const version = core.version();
+      if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/metrics`) {
+        const { since, until, sinceIso, untilIso } = metricsWindow(url.searchParams);
+        const key = `${sinceIso}/${untilIso}`;
+        let cached = this.metricsCache.get(key);
+        if (!cached || cached.expiresAt <= this.now()) {
+          const rows = core.sql.exec<{ sequence: number; kind: string; actor_id: string; timestamp: number; version: number; related_ids: string; payload: string }>(
+            'SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload FROM concord_events WHERE timestamp < ? ORDER BY timestamp, sequence', until).toArray();
+          const events: Event[] = rows.map(row => ({ sequence: row.sequence, kind: row.kind, actorId: row.actor_id,
+            timestamp: row.timestamp, version: row.version, relatedIds: JSON.parse(row.related_ids) as string[],
+            payload: JSON.parse(row.payload) as Record<string, unknown> }));
+          cached = { expiresAt: this.now() + 60_000, data: measureEvents(events, since, until) };
+          this.metricsCache.set(key, cached);
+          for (const [oldKey, entry] of this.metricsCache) if (entry.expiresAt <= this.now()) this.metricsCache.delete(oldKey);
+        }
+        return json(cached.data, version, eventSequence(core.sql));
+      }
       if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/snapshot`) {
         const projections = Object.fromEntries(modules.map(module => [module.name, module.snapshot(this.context(module.name, principal, repoId))]));
         return json({ repoId, projections }, version, eventSequence(core.sql));
