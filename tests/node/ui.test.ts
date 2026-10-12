@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
@@ -105,6 +106,8 @@ describe('Fleet desk DOM', () => {
     let releaseSnapshot8: (() => void) | undefined;
     let delayNextSnapshot8 = true;
     let mutationVersion = 7;
+    let staleNextEnqueue = false;
+    let failNextSnapshot = false;
     let claimConflict = false;
     let interaction = false;
     let changeStatus = 'ready';
@@ -127,6 +130,10 @@ describe('Fleet desk DOM', () => {
       } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
       else if (url.endsWith('/snapshot')) {
         if (token === 'Bearer restricted') { status = 403; body = { error: { code: 'FORBIDDEN', message: 'no scope' } }; }
+        else if (failNextSnapshot) {
+          failNextSnapshot = false;
+          status = 503; body = { error: { code: 'NETWORK_UNREACHABLE', message: 'refresh failed' } };
+        }
         else if (snapshotVersion === 8 && delayNextSnapshot8) return await new Promise<Response>(resolve => {
           delayNextSnapshot8 = false;
           releaseSnapshot8 = () => resolve(new Response(JSON.stringify({ ...fixture, version: 8,
@@ -159,6 +166,10 @@ describe('Fleet desk DOM', () => {
         status = 409; body = { error: { code: 'LEASE_CONFLICT', message: 'Already claimed', details: {
           holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: Date.now() + 120000,
         } } };
+      }
+      else if (url.endsWith('/queue/enqueue') && init.method === 'POST' && staleNextEnqueue) {
+        staleNextEnqueue = false;
+        status = 409; body = { error: { code: 'STALE_VERSION', message: 'Snapshot is stale' } };
       }
       else body = { data: {}, version: mutationVersion };
       return new Response(JSON.stringify(body), { status });
@@ -342,8 +353,26 @@ describe('Fleet desk DOM', () => {
       expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(requestsBeforeRetry + 1);
       expect(byId('work-board').textContent).toContain('Current version 9');
       expect(byId('work-board').textContent).not.toContain('Stale version 8');
+      // A stale refusal must disable every action even when its refresh fails.
+      staleNextEnqueue = true; failNextSnapshot = true;
+      raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(byId('desk-message').textContent).toContain('Snapshot unavailable (NETWORK_UNREACHABLE)');
+      const actionButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
+      expect(actionButtons.length).toBeGreaterThan(1);
+      expect(actionButtons.every(button => button.disabled)).toBe(true);
+      const postsAfterStale = requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST').length;
+      raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(postsAfterStale);
       interaction = true; snapshotVersion = 10; eventVersion = 10;
       tick!(); await flush(); await flush();
+      const recoveredButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
+      expect(recoveredButtons.every(button => !button.disabled)).toBe(true);
+      const recoveredEnqueue = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
+      recoveredEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(postsAfterStale + 1);
       expect(byId('diagnosis').textContent).toContain('Interaction set failed together: x, y');
       expect(byId('queue-tree').textContent).toContain('Diagnostic job job-3 · Members: x, y · Outcome: FAIL');
       expect(byId('queue-tree').querySelectorAll('li.highlight')).toHaveLength(3);
@@ -376,6 +405,10 @@ describe('layout and token contract', () => {
     expect(guide).toContain('admitted revision, backend sequence, and blocked reason');
     expect(guide).toContain('including landed and withdrawn rows in a collapsed history');
     expect(guide).toContain('Actions remain disabled after a newer mutation or event version');
+    const preRewrite = '025117692ae91d1dfd4b67cfc0cdb1e1833d97a3';
+    expect(guide).toContain(`Field parity with the pre-rewrite panels (\`${preRewrite}\`)`);
+    expect(guide).not.toContain('HEAD~3');
+    expect(execFileSync('git', ['show', `${preRewrite}:web/index.html`], { encoding: 'utf8' })).toContain('id="enqueue-form"');
   });
   it('has a phone breakpoint, tabs, horizontal stat strip and 44px touch targets', () => {
     const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');

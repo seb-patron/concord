@@ -11,7 +11,8 @@ import {
 const $ = id => document.getElementById(id);
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
-  inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null };
+  inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
+  awaitingFreshSnapshot: false };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
 const node = (tag, value, className) => {
@@ -25,7 +26,7 @@ const projections = () => state.snapshot?.data?.projections ?? {};
 const changes = () => snapshotCollections(state.snapshot).changes.items;
 const leases = () => projectionItems(projections().leases).items;
 const entries = () => projectionItems(projections().queue).items;
-const snapshotCurrent = () => !!state.snapshot && state.connected &&
+const snapshotCurrent = () => !!state.snapshot && state.connected && !state.awaitingFreshSnapshot &&
   state.snapshot.version >= (state.observedVersions.get(state.repoId) ?? 0);
 const roles = () => list(state.identity?.roles);
 const actions = () => state.identity?.unverified
@@ -72,6 +73,7 @@ function signOut(message) {
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
   state.observedVersions.clear();
+  state.awaitingFreshSnapshot = false;
   state.selected = null; state.inboxSelected = null;
   $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = '';
   $('inbox-detail').replaceChildren(); $('inbox-detail').dataset.itemId = '';
@@ -149,6 +151,7 @@ function acceptSnapshot(body, repoId) {
   if (!Number.isSafeInteger(body?.version) || body.version < (state.observedVersions.get(repoId) ?? 0)) return false;
   observeVersion(repoId, body.version);
   state.snapshot = body; state.version = body.version;
+  state.awaitingFreshSnapshot = false;
   return true;
 }
 async function refreshVerdicts(gen = state.generation) {
@@ -612,6 +615,10 @@ async function mutate(label,call) {
     mutationStatus(refreshed ? `${label}: accepted.` : `${label}: accepted; waiting for a current snapshot.`);
   } catch(error) {
     if(gen!==state.generation)return;
+    if(error.status===409 && error.code==='STALE_VERSION') {
+      state.awaitingFreshSnapshot = true;
+      render();
+    }
     const refusal=redactError(error);
     const conflict=error.code==='LEASE_CONFLICT' && error.details
       ? ` Holder: ${error.details.holderId ?? 'unknown'}; intent: ${error.details.intentText ?? 'not recorded'}; expires: ${fmtTime(error.details.expiresAt)}.` : '';
