@@ -74,9 +74,12 @@ export async function start(input: StartOptions): Promise<Obj> {
     : JSON.stringify([...(existing?.unitKeys ?? [])].sort()) === JSON.stringify(units);
   if (existing && (existing.baseOid !== baseOid || existing.intentText !== input.intent || existing.branch !== branch || !sameUnits))
     throw new ConcordError('INTENT_CONFLICT: existing change differs from start inputs', 'conflict');
-  const change = existing && published ? existing : (await post(client, `${root}/changes`, {
-    intentKey: input.intentKey, intentText: input.intent, baseOid, branch, unitKeys: units, dependencyChangeIds: [],
+  const change = (await post(client, `${root}/changes`, {
+    intentKey: input.intentKey, intentText: input.intent, baseOid, branch,
+    unitKeys: published ? existing.unitKeys : units, dependencyChangeIds: [],
   })).data;
+  if (existing && change.changeId !== existing.changeId)
+    throw new ConcordError('INTENT_CONFLICT: change changed during restart', 'conflict');
   const needed = published ? change.unitKeys as string[] : units;
   const held = (await liveLeases(client, root, change.changeId)).filter(item =>
     needed.some(unit => leaseCovers(item.unitKey, unit, policy)));
@@ -90,7 +93,7 @@ export async function start(input: StartOptions): Promise<Obj> {
   if (needed.some(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy))))
     throw new ConcordError('claim response did not cover every required unit', 'server');
   for (const item of held) {
-    if (item.expiresAt > Date.now() + (ttlSeconds - 60) * 1000) continue;
+    if (item.expiresAt > Date.now() + Math.max(ttlSeconds / 2, ttlSeconds - 60) * 1000) continue;
     const version = (await get(client, `${root}/snapshot`)).version;
     const renewed = (await post(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/renew`,
       { fence: item.fence, ttlSeconds }, version)).data.lease;

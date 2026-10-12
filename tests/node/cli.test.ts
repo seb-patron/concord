@@ -102,6 +102,10 @@ describe('Concord agent CLI client', () => {
       if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: base } };
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
       if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [lease], nextCursor: null } };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        expect(options?.body?.unitKeys).toEqual(['row:families:alpha']);
+        return { data: change };
+      }
       if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: {
         tables: [{ name: 'families', file: 'families.tsv' }], units: {} } } } }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/leases/lease/renew') {
@@ -116,9 +120,71 @@ describe('Concord agent CLI client', () => {
     });
     const result = await start({ repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles, client: { request } as never });
     expect(result).toMatchObject({ changeId: 'change', leases: [{ unitKey: 'file:families.tsv', fence: 2 }] });
-    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/changes')).toBe(false);
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path === '/repos/demo/changes')).toHaveLength(1);
     expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toBe(false);
     expect(await releaseByIntent('demo', 'task', { request } as never)).toEqual({ changeId: 'change', released: ['file:families.tsv'] });
+  });
+  it('requires an ownership-checked reuse before a published change can restart', async () => {
+    const dir = await tempDir('start-owner'); const allowedFiles = join(dir, 'allowed.txt');
+    await writeFile(allowedFiles, 'families.tsv\n');
+    const base = 'a'.repeat(40);
+    const branch = `refs/heads/land/${(await import('node:crypto')).createHash('sha256').update('task').digest('hex').slice(0, 16)}`;
+    const change = { changeId: 'agent-a-change', intentKey: 'task', intentText: 'work', baseOid: base, branch,
+      unitKeys: ['row:families:alpha'], headOid: 'b'.repeat(40), status: 'ready' };
+    const calls: string[] = [];
+    const requestFor = (agent: 'A' | 'B') => vi.fn(async (method: string, path: string,
+      options?: { body?: Record<string, unknown> }) => {
+      calls.push(`${agent} ${method} ${path}`);
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: base } };
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: {
+        tables: [{ name: 'families', file: 'families.tsv' }], units: {} } } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        expect(options?.body?.unitKeys).toEqual(['row:families:alpha']);
+        if (agent === 'B') throw new ConcordError('INTENT_OWNED', 'conflict', 409,
+          { error: { code: 'INTENT_OWNED' } });
+        return { data: change };
+      }
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{
+        changeId: change.changeId, leaseId: 'lease', unitKey: 'file:families.tsv', fence: 1,
+        expiresAt: Date.now() + 7200_000, state: 'active',
+      }], nextCursor: null } };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const input = { repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles };
+    await expect(start({ ...input, client: { request: requestFor('B') } as never }))
+      .rejects.toMatchObject({ kind: 'conflict', status: 409 });
+    expect(calls.some(call => call === 'B GET /repos/demo/leases')).toBe(false);
+    expect(await start({ ...input, client: { request: requestFor('A') } as never }))
+      .toMatchObject({ changeId: 'agent-a-change', leases: [{ fence: 1 }] });
+    expect(calls.filter(call => call.endsWith('POST /repos/demo/changes'))).toHaveLength(2);
+  });
+  it('renews a short hold when less than half its duration remains', async () => {
+    const dir = await tempDir('start-short-hold'); const allowedFiles = join(dir, 'allowed.txt');
+    await writeFile(allowedFiles, 'file.txt\n');
+    const base = 'a'.repeat(40);
+    const branch = `refs/heads/land/${(await import('node:crypto')).createHash('sha256').update('task').digest('hex').slice(0, 16)}`;
+    const change = { changeId: 'change', intentKey: 'task', intentText: 'work', baseOid: base, branch,
+      unitKeys: ['file:file.txt'], status: 'draft' };
+    let lease = { changeId: 'change', leaseId: 'lease', unitKey: 'file:file.txt', fence: 1,
+      expiresAt: Date.now() + 10_000, state: 'active' };
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, unknown> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: base } };
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [lease], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {}, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases/lease/renew') {
+        expect(options?.body).toMatchObject({ fence: 1, ttlSeconds: 30 });
+        lease = { ...lease, fence: 2, expiresAt: Date.now() + 30_000 };
+        return { data: { lease } };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    const result = await start({ repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles,
+      hold: '30s', client: { request } as never });
+    expect(result).toMatchObject({ changeId: 'change', leases: [{ fence: 2 }] });
+    expect(request.mock.calls.filter(([method, path]) => method === 'POST' && path.endsWith('/renew'))).toHaveLength(1);
   });
   it('reports a start conflict without retrying a partial claim', async () => {
     const dir = await tempDir('start-conflict'); const allowedFiles = join(dir, 'allowed.txt');
