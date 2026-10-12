@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { approvedHead, filesChanged, land, parseAllowed, unitKeys, waitChange } from '../../cli/land.ts';
+import { ConcordError } from '../../cli/client.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 
@@ -45,6 +46,39 @@ describe('land input and evidence gates', () => {
       .rejects.toMatchObject({ message: `INSPECTION_FAILED: ${outcome}${['ENV_ERROR', 'TIMEOUT'].includes(outcome) ? '; fix the environment, then re-run land with a new --intent-key' : ''}`,
         payload: { log: 'checker diagnostic tail' } });
     expect(request).toHaveBeenCalledTimes(3);
+  });
+  it.each([401, 403, 404])('returns awaiting-review for an author-only PASS inspection when result read returns %s', async status => {
+    const { dir, commit, parent } = await source();
+    const allowed = join(await temp(), 'allowed.txt');
+    await writeFile(allowed, 'first.txt\nfamilies.tsv\nrenamed.tsv\n');
+    const change = { changeId: 'change', provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
+      branch: 'refs/heads/work', authorId: 'agent', baseOid: parent, headOid: commit, revision: 1, status: 'ready' };
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}` }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'change', revision: 1, jobId: 'pass-job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [
+        'families.tsv', 'first.txt', 'renamed.tsv'].map((file, index) => ({ changeId: 'change', state: 'active',
+          unitKey: `file:${file}`, leaseId: `lease-${index}`, fence: 1, remainingSeconds: 300 })) }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result')
+        throw new ConcordError('result read denied', 'auth', status);
+      if (method === 'POST' && path.startsWith('/repos/demo/leases/') && path.endsWith('/release'))
+        return { data: {}, version: 1 };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    vi.stubEnv('CONCORD_REVIEWER_TOKEN', '');
+    const result = await land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+      waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+    expect(result).toEqual({ status: 'awaiting-review', changeId: 'change', headOid: commit });
+    expect(request.mock.calls.filter(([method, path]) => method === 'GET' && path === '/repos/demo/jobs/pass-job/result'))
+      .toHaveLength(1);
   });
   it.each([false, true])('republishes a repaired commit with the same intent after a failed inspection (advanced base: %s)', async advanceCanonical => {
     const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
@@ -522,8 +556,10 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const baseArgs = ['--repo', 'landdemo', '--source', sourceDir, '--commit', commit, '--intent-key', 'generic-task',
     '--intent', 'Update a value', '--allowed-files', allowed, '--wait-seconds', '150', '--json'];
   const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
+  const authorEnv: NodeJS.ProcessEnv = { ...landEnv };
+  delete authorEnv.CONCORD_REVIEWER_TOKEN;
   const first = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs],
-    { cwd: root, env: landEnv, timeout: 155_000 }));
+    { cwd: root, env: authorEnv, timeout: 155_000 }));
   expect(first.stdout).toContain('"state":"awaiting-review"');
   expect(first.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.state === 'leased').unitKeys).toHaveLength(16);
   const beforeResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');

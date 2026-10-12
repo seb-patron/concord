@@ -145,8 +145,7 @@ async function inspection(client: ConcordClient, root: string, change: Obj): Pro
   if (!job || job.state !== 'completed') return null;
   try { return (await api(client, `${root}/jobs/${encodeURIComponent(job.jobId)}/result`)).data.result; }
   catch (error) {
-    if (error instanceof ConcordError && error.status === 403)
-      throw new ConcordError('INSPECTION_RESULT_FORBIDDEN: result reads require owner or reviewer credentials; set CONCORD_REVIEWER_TOKEN', 'auth');
+    if (error instanceof ConcordError && [401, 403, 404].includes(error.status ?? 0)) return null;
     throw error;
   }
 }
