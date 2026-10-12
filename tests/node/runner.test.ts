@@ -49,11 +49,86 @@ function jobBase(storageRemotes: Record<string, string>) {
 function credentials(remotes: Record<string, string>): CredentialProvider {
   return async operation => Object.entries(remotes).filter(([name]) =>
     operation === 'fetch' || operation === 'scratch-push' && name === 'scratch' ||
-    operation === 'canonical-push' && name === 'canonical').map(([storageName, remote]) =>
+    operation === 'canonical-push' && name === 'canonical' ||
+    operation === 'candidate-push' && name === 'candidate').map(([storageName, remote]) =>
     ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
 }
 
 describe('local runner Git and checker execution', () => {
+  it('rebases a clean patch onto moving main with the stable patch identity', async () => {
+    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+      await writeFile(join(repo, 'example.txt'), 'candidate\n');
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'candidate'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/work']);
+      await git(repo, ['switch', '--detach', base]);
+      await writeFile(join(repo, 'other.txt'), 'main moved\n');
+      await git(repo, ['add', 'other.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'main moved'], 30_000, commitEnv);
+      const nextMain = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const unitPolicy: TrustedPolicy = { ...policy, units: { 'file:example.txt': {
+        canonicalKey: 'file:example.txt', file: 'example.txt', resources: [], dependencyKeys: [],
+      } } };
+      const job: Job = { ...jobBase(remotes), kind: 'rebase-candidate', unitPolicy,
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: head,
+          storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: nextMain,
+        canonicalStorageName: 'canonical', targetRef: 'refs/heads/concord-rebase-job', verdictId: 'verdict',
+        expectedRefs: { canonical: nextMain, candidate: head } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'rebase-candidate', outcome: 'PASS', baseOid: nextMain,
+        patchIdBefore: expect.any(String), patchIdAfter: expect.any(String), unitKeys: ['file:example.txt'] });
+      if (result.kind !== 'rebase-candidate') throw new Error('wrong result kind');
+      expect(result.patchIdAfter).toBe(result.patchIdBefore);
+      expect(await refOid(repo, remotes.candidate, job.targetRef)).toBe(result.headOid);
+    });
+  }, 20_000);
+
+  it('uses declared TSV row composition for a rebase and reports a row collision', async () => {
+    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+      const original = 'family\tretry_limit\ttimeout_ms\nalpha\t1\t1000\nbeta\t2\t1000\n';
+      await writeFile(join(repo, 'families.tsv'), original);
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'table'], 30_000, commitEnv);
+      const tableBase = await git(repo, ['rev-parse', 'HEAD']);
+      for (const remote of [canonical, candidate]) await git(repo, ['push', '--quiet', remote, 'HEAD:refs/heads/main']);
+      await writeFile(join(repo, 'families.tsv'), original.replace('alpha\t1', 'alpha\t2'));
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'alpha'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/work']);
+      await git(repo, ['switch', '--detach', tableBase]);
+      await writeFile(join(repo, 'families.tsv'), original.replace('beta\t2', 'beta\t3'));
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'beta'], 30_000, commitEnv);
+      const nextMain = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const table = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'],
+        keyColumn: 'family', keySpec: { charset: 'lower' as const, minLength: 1, maxLength: 256 } };
+      const unitPolicy: TrustedPolicy = { ...policy, tables: [table], units: {} };
+      const job: Job = { ...jobBase(remotes), kind: 'rebase-candidate', unitPolicy,
+        candidate: { changeId: 'change', revision: 1, baseOid: tableBase, headOid: head,
+          storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: nextMain,
+        canonicalStorageName: 'canonical', targetRef: 'refs/heads/concord-rebase-row', verdictId: 'verdict',
+        expectedRefs: { canonical: nextMain, candidate: head } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'rebase-candidate', outcome: 'PASS', unitKeys: ['row:families:alpha'] });
+      if (result.kind !== 'rebase-candidate' || !result.headOid) throw new Error('rebase failed');
+      await git(repo, ['fetch', '--quiet', candidate, result.headOid]);
+      expect(await git(repo, ['show', result.headOid + ':families.tsv']))
+        .toContain('alpha\t2\t1000\nbeta\t3\t1000');
+      expect(await refOid(repo, remotes.candidate, job.targetRef)).toBe(result.headOid);
+    });
+  }, 20_000);
   it('requires every reviewed dispatch scene case and checks its expected tree', async () => {
     await temporaryWork(async dir => {
       const a1 = { retry_limit: 1, timeout_ms: 1000, output: 1000 };

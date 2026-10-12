@@ -2,7 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '../src/contracts';
 import { digest } from '../src/http';
 import { compareKeys } from '../src/verdicts/manifest';
-import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
+import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, patchId, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
 import { tableForFile } from '../src/leases/units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
@@ -37,7 +37,7 @@ function cappedChecks(cap: number, commandProfile: boolean) {
 }
 
 export type Credential = { storageName: string; remote: string; secret: string; expiresAt: number };
-export type CredentialProvider = (operation: 'fetch' | 'scratch-push' | 'canonical-push') => Promise<Credential[]>;
+export type CredentialProvider = (operation: 'fetch' | 'scratch-push' | 'canonical-push' | 'candidate-push') => Promise<Credential[]>;
 const oidPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const checkOid = (oid: string) => { if (!oidPattern.test(oid)) throw new Error('INVALID_OID'); };
 const remote = (job: Job, name: string) => {
@@ -69,16 +69,18 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
     if (!conflicts.length) throw new Error('MERGE_CONFLICT');
     for (const path of conflicts) {
       const table = tableForFile(job.unitPolicy, path);
-      if (!table) throw new Error('MERGE_CONFLICT');
+      if (!table) throw new Error('MERGE_CONFLICT:' + path);
       const stages = await git(directory, ['ls-files', '--stage', '--', path]);
       const modes = stages.split('\n').filter(Boolean).map(line => line.split(' ')[0]);
-      if (modes.length !== 3 || new Set(modes).size !== 1) throw new Error('MERGE_CONFLICT');
+      if (modes.length !== 3 || new Set(modes).size !== 1) throw new Error('MERGE_CONFLICT:' + path);
       const readStage = async (stage: number) => {
         const value = await command('git', ['show', ':' + stage + ':' + path], directory, 30_000);
-        if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
+        if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT:' + path);
         return value.stdout;
       };
-      const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3), table);
+      let merged: string;
+      try { merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3), table); }
+      catch (error) { throw new Error('MERGE_CONFLICT:' + path + ':' + (error instanceof Error ? error.message : 'TSV')); }
       await writeFile(directory + '/' + path, merged);
       await git(directory, ['add', '--', path]);
     }
@@ -218,6 +220,48 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
       dependencyScope: inspected.manifest.dependencyScope, dependencyScopeDigest: await digest(inspected.manifest.dependencyScope),
       log: checked.log };
   }
+  if (job.kind === 'rebase-candidate') {
+    if (!profile) throw new Error('PROFILE_REQUIRED');
+    await fetchInput(directory, job, job.canonicalStorageName, job.newBaseOid, fetchTokens);
+    await fetchInput(directory, job, job.candidate.storageName, job.candidate.baseOid, fetchTokens);
+    await fetchInput(directory, job, job.candidate.storageName, job.candidate.headOid, fetchTokens);
+    const before = await patchId(directory, job.candidate.baseOid, job.candidate.headOid);
+    let composed: string;
+    try { composed = await compose(directory, job.newBaseOid, [job.candidate], job); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : 'MERGE_CONFLICT';
+      if (!message.startsWith('MERGE_CONFLICT:')) throw error;
+      const path = message.slice('MERGE_CONFLICT:'.length).split(':')[0];
+      const row = /TSV_COLLISION:([^:]+)/.exec(message)?.[1];
+      return { ...common, kind: 'rebase-candidate', outcome: 'MERGE_CONFLICT', baseOid: job.newBaseOid,
+        headOid: null, patchIdBefore: before, patchIdAfter: null, reviewManifest: null,
+        reviewManifestDigest: null, unitKeys: [], conflictPaths: [path],
+        conflictUnits: [row ? `row:${tableForFile(job.unitPolicy, path)?.name}:${row}` : `file:${path}`],
+        log: message.slice(0, job.maxOutputBytes) };
+    }
+    const inspected = await inspectUnits(directory, job.newBaseOid, composed, job);
+    let outcome: CheckOutcome = inspected.manifest.coverage === 'complete' ? 'PASS' : 'UNVERIFIED_TARGET';
+    let log = '';
+    if (outcome === 'PASS' && profile.checkerId !== 'dispatch-lab') {
+      const checked = await pinnedCheck(profile, job, directory);
+      outcome = checked.outcome;
+      log = checked.log;
+    }
+    const after = outcome === 'PASS' ? await patchId(directory, job.newBaseOid, composed) : null;
+    if (outcome === 'PASS') {
+      const tokens = await provide('candidate-push');
+      const item = tokens.find(value => value.storageName === job.candidate.storageName);
+      if (!item || item.remote !== remote(job, item.storageName)) throw new Error('CANDIDATE_CREDENTIAL_MISMATCH');
+      const pushed = await conditionalPush(directory, item.remote, composed, null,
+        await gitCredentialEnvironment(directory, item.secret), job.targetRef);
+      if (pushed !== 'APPLIED') throw new Error('CANDIDATE_REF_MOVED');
+    }
+    return { ...common, kind: 'rebase-candidate', outcome, baseOid: job.newBaseOid,
+      headOid: outcome === 'PASS' ? composed : null, patchIdBefore: before,
+      patchIdAfter: after,
+      reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest, unitKeys: inspected.unitKeys,
+      conflictPaths: [], conflictUnits: [], sourceTreeOid: await treeOid(directory, composed), log };
+  }
   // Promoter mode has no profile load, checkout, source execution, or checker invocation.
   if (job.bootstrap && (!job.ownerAuthorized || job.expectedOldOid !== null)) throw new Error('BOOTSTRAP_UNAUTHORIZED');
   await fetchInput(directory, job, job.scratchStorageName, job.checkedNewOid, fetchTokens);
@@ -270,12 +314,15 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
         canonicalBaseOid: job.canonicalBaseOid, composedOid: null, composedTreeOid: null, gateResults: [], score: null } as UnsignedResult :
         job.kind === 'delta-check' ? { ...common, kind: job.kind, outcome, reviewManifestDigest: null, reviewManifest: null,
           dependencyScopeDigest: null, dependencyScope: null } :
+        job.kind === 'rebase-candidate' ? { ...common, kind: job.kind, outcome, baseOid: job.newBaseOid,
+          headOid: null, patchIdBefore: null, patchIdAfter: null, reviewManifest: null,
+          reviewManifestDigest: null, unitKeys: [], conflictPaths: [], conflictUnits: [] } :
           { ...common, kind: 'promote', outcome: 'ENV_ERROR', observedCanonicalOid: null };
   }
   value.durationMs = Math.max(0, Date.now() - began);
   for (const secret of secrets) value.log = value.log.replaceAll(secret, '[REDACTED]');
   const cap = Math.min(job.maxOutputBytes, OUTPUT_CAP);
-  if (value.kind === 'validate-stack' || value.kind === 'delta-check') value.log = tailLog(value.log, cap);
+  if (value.kind === 'validate-stack' || value.kind === 'delta-check' || value.kind === 'rebase-candidate') value.log = tailLog(value.log, cap);
   else while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
   const resultDigest = await digest(value);
   return { ...value, resultDigest } as JobResult;

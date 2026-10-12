@@ -1,4 +1,4 @@
-import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule, Gate, Id, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict, InspectedRevision } from '../contracts';
+import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, FeatureModule, Gate, Id, ModuleContext, RebaseCandidateJob, RebaseResult, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict, InspectedRevision } from '../contracts';
 import { requireRepo, requireRole } from '../auth';
 import { HttpError, json } from '../http';
 import { dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest } from '../verdicts/manifest';
@@ -100,6 +100,20 @@ function contentDifference(oldManifest: ReviewManifest, nextManifest: ReviewMani
   return 'Review manifest changed';
 }
 
+export function mechanicallyMergeableRows(policy: TrustedPolicy, oldManifest: ReviewManifest,
+  nextManifest: ReviewManifest): boolean {
+  const old = oldManifest.changedUnits;
+  const next = nextManifest.changedUnits;
+  return old.length > 0 && old.length === next.length && old.every((unit, index) => {
+    const rebased = next[index];
+    return rebased && unit.unitKey === rebased.unitKey && unit.unitKey.startsWith('row:') &&
+      policy.tables?.some(table => unit.unitKey.startsWith(`row:${table.name}:`)) &&
+      unit.beforePath === rebased.beforePath && unit.afterPath === rebased.afterPath &&
+      unit.beforeMode === rebased.beforeMode && unit.afterMode === rebased.afterMode &&
+      unit.beforeDigest === rebased.beforeDigest && unit.afterDigest === rebased.afterDigest;
+  });
+}
+
 function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verdictId: Id }> {
   if (!context.state || !result) return reject(context, 'MODULE_UNAVAILABLE', 'Trusted delta result unavailable');
   const pending = context.state.get<CarryRequest>(`carry:${result.jobId}`);
@@ -173,6 +187,66 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
   context.state.put(`carry:${job.jobId}`, pending);
   context.appendEvent('verdict.carried', [verdictId, parent.verdictId, job.jobId], { revision: derived.revision }, version);
   return { status: 'eligible', version, evidenceIds: [verdictId, result.jobId], value: { verdictId } };
+}
+
+function carryRebase(context: ModuleContext, job: RebaseCandidateJob, result: RebaseResult,
+  revision: number, findingSetVersion: number): Gate<{ verdictId: Id }> {
+  if (!context.state || !job || !result) return reject(context, 'MODULE_UNAVAILABLE', 'Trusted rebase evidence unavailable');
+  const parent = storedVerdict(context, job.verdictId);
+  if (!parent || parent.changeId !== job.candidate.changeId || parent.decision !== 'approve' ||
+    parent.revision !== job.candidate.revision || parent.findingSetVersion !== findingSetVersion ||
+    context.state.get<Id>(`active:${parent.changeId}`) !== parent.verdictId ||
+    parent.policyDigest !== job.policyDigest || parent.checkerDigest !== job.checkerDigest ||
+    parent.oracleDigest !== job.oracleDigest || parent.toolchainDigest !== job.toolchainDigest ||
+    !result.reviewManifest || !result.reviewManifestDigest || !result.headOid ||
+    !result.patchIdBefore || !result.patchIdAfter || revision !== job.candidate.revision + 1) {
+    return reject(context, 'REVIEW_REQUIRED', 'Approved source or rebase evidence changed');
+  }
+  const inspected = inspection(context, parent.changeId);
+  if (inspected.status === 'blocked') return inspected;
+  if (inspected.value.record.revision !== revision || inspected.value.record.candidate.headOid !== result.headOid ||
+    inspected.value.record.candidate.baseOid !== job.newBaseOid ||
+    inspected.value.record.reviewManifestDigest !== result.reviewManifestDigest) {
+    return reject(context, 'REVIEW_REQUIRED', 'Rebased revision differs from trusted inspection');
+  }
+  const evidence = context.state.get<ActiveEvidence>(`active-evidence:${parent.verdictId}`);
+  if (!evidence || evidence.headOid !== job.candidate.headOid || evidence.profileDigest !== job.profileDigest)
+    return reject(context, 'REVIEW_REQUIRED', 'Original approval evidence is unavailable');
+  const priorUnits = parent.reviewManifest.changedUnits.map(unit => unit.unitKey).sort();
+  if (hashCanonical(priorUnits) !== hashCanonical([...result.unitKeys].sort())) {
+    const changed = [...new Set([...priorUnits, ...result.unitKeys])].sort();
+    return reject(context, 'REVIEW_REQUIRED', 'Rebased unit scope changed: ' + changed.join(', '), changed);
+  }
+  let normalized: ReviewManifest;
+  try { normalized = normalizeManifest(result.reviewManifest, inspected.value.policy, result.unitKeys); }
+  catch { return reject(context, 'REVIEW_REQUIRED', 'Rebased manifest lacks trusted unit coverage'); }
+  if (normalized.coverage !== 'complete' || manifestDigest(normalized, inspected.value.policy, result.unitKeys) !== result.reviewManifestDigest)
+    return reject(context, 'REVIEW_REQUIRED', 'Rebased manifest differs from inspected evidence');
+  if (result.patchIdBefore !== result.patchIdAfter) {
+    const old = parent.reviewManifest.changedUnits;
+    const next = normalized.changedUnits;
+    if (!mechanicallyMergeableRows(inspected.value.policy, parent.reviewManifest, normalized)) {
+      const oldByKey = new Map(old.map(unit => [unit.unitKey, unit]));
+      const nextByKey = new Map(next.map(unit => [unit.unitKey, unit]));
+      const all = [...new Set([...oldByKey.keys(), ...nextByKey.keys()])].sort();
+      const changed = all.filter(key => hashCanonical(oldByKey.get(key) ?? null) !== hashCanonical(nextByKey.get(key) ?? null));
+      const units = changed.length ? changed : all;
+      return reject(context, 'REVIEW_REQUIRED', 'Rebased units require review: ' + units.join(', '), units);
+    }
+  }
+  const findings = clearFindings(context, parent.changeId, revision);
+  if (findings.status === 'blocked' || findings.value.findingSetVersion !== findingSetVersion)
+    return reject(context, 'REVIEW_REQUIRED', 'Finding set changed during rebase');
+  const version = context.nextVersion();
+  const verdictId = crypto.randomUUID();
+  const derived: Verdict = { ...parent, verdictId, version, revision, reviewManifest: normalized,
+    reviewManifestDigest: result.reviewManifestDigest, parentVerdictId: parent.verdictId,
+    deltaResultId: null, evidenceDigest: result.resultDigest,
+    carriedFrom: { sourceOid: job.candidate.headOid, method: 'patch-id' } };
+  save(context, derived, result.headOid, job.profileDigest, job.jobId);
+  context.appendEvent('verdict.carried', [verdictId, parent.verdictId, parent.changeId],
+    { revision, carriedFrom: derived.carriedFrom, mergedUnits: result.patchIdBefore === result.patchIdAfter ? [] : result.unitKeys }, version);
+  return { status: 'eligible', version, evidenceIds: [verdictId, job.jobId], value: { verdictId } };
 }
 
 const verdictPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/verdicts$/;
@@ -308,7 +382,7 @@ export const verdicts: FeatureModule = {
     return { status: availability.status === 'blocked' && availability.code === 'MODULE_UNAVAILABLE' ? 'unavailable' : 'ready', items: [] };
   },
   nextDeadline: () => null, onAlarm: () => undefined,
-  hooks: { 'verdicts.gate': gate, 'verdicts.evaluateCarry': evaluateCarry,
+  hooks: { 'verdicts.gate': gate, 'verdicts.evaluateCarry': evaluateCarry, 'verdicts.carryRebase': carryRebase,
     'verdicts.recordInspection': (context, record) => {
       // The repository module has already checked this inspection against its
       // indexed candidate and declared units. Keep the handoff digest strict,
@@ -317,7 +391,7 @@ export const verdicts: FeatureModule = {
       if (!context.principal || !context.trusted || !context.state) {
         return reject(context, 'MODULE_UNAVAILABLE', 'Trusted inspection context unavailable');
       }
-      if (!context.principal.roles.includes('checker') || !record || !record.reviewManifest ||
+      if (!(context.principal.roles.includes('checker') || context.principal.principalId === 'system' && context.principal.roles.length === 0) || !record || !record.reviewManifest ||
         !context.trusted.policies[record.policyId] ||
         record.reviewManifestDigest !== hashCanonical(record.reviewManifest)) {
         return reject(context, 'INSPECTION_MISMATCH', 'Trusted inspection record is incomplete');

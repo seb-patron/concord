@@ -1,4 +1,4 @@
-import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
+import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, RebaseCandidateJob, RebaseResult, Repo, StorageRepo, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { costLimits, eventSequence } from '../state';
@@ -659,6 +659,46 @@ function inspectRevision(context: ModuleContext, result: InspectionResult) {
   return { status: 'eligible' as const, version: context.version(), evidenceIds: [result.jobId], value: { changeId: change.changeId, revision: change.revision, reviewManifestDigest: result.reviewManifestDigest! } };
 }
 
+function applyRebase(context: ModuleContext, job: RebaseCandidateJob, result: RebaseResult) {
+  if (!context.state || !job || !result) return { status: 'blocked' as const, version: context.version?.() ?? 0,
+    code: 'MODULE_UNAVAILABLE', reason: 'Trusted rebase evidence unavailable', evidenceIds: [] };
+  const change = getChange(context, job.candidate.changeId);
+  const repo = context.state.get<Repo>('repo');
+  if (!repo || result.outcome !== 'PASS' || !result.headOid || !result.reviewManifest || !result.reviewManifestDigest ||
+    change.revision !== job.candidate.revision || change.baseOid !== job.candidate.baseOid ||
+    change.headOid !== job.candidate.headOid || change.branch !== job.candidate.ref ||
+    change.candidateStorageName !== job.candidate.storageName || change.status !== 'ready' ||
+    repo.canonicalStorageName !== job.canonicalStorageName || repo.policyId !== job.policyId ||
+    repo.profileId !== Object.keys(context.trusted.profiles).find(id => context.trusted.profiles[id].digest === job.profileDigest) ||
+    result.baseOid !== job.newBaseOid || result.reviewManifestDigest !== evidenceHash(stableJson(result.reviewManifest)) ||
+    result.unitKeys.some(key => { try { resolveUnit(unitRegistry(context.trusted.policies[repo.policyId]), key); return false; } catch { return true; } })) {
+    return { status: 'blocked' as const, version: context.version(), code: 'REBASE_STALE',
+      reason: 'Rebase no longer matches the current change and trusted pins', evidenceIds: [job.jobId] };
+  }
+  const revision = change.revision + 1;
+  const handoff = context.call('verdicts.recordInspection', { changeId: change.changeId, revision,
+    candidate: { ...job.candidate, revision, baseOid: job.newBaseOid, headOid: result.headOid, ref: job.targetRef },
+    canonicalStorageName: repo.canonicalStorageName, policyId: job.policyId, profileId: repo.profileId,
+    reviewManifest: result.reviewManifest, reviewManifestDigest: result.reviewManifestDigest, outcome: 'PASS' });
+  if (handoff.status === 'blocked') return handoff;
+  change.baseOid = job.newBaseOid;
+  change.headOid = result.headOid;
+  change.branch = job.targetRef;
+  change.unitKeys = [...result.unitKeys];
+  change.revision = revision;
+  change.version = versioned(context, 'change.rebased', [change.changeId],
+    { revision, baseOid: job.newBaseOid, headOid: result.headOid, sourceOid: job.candidate.headOid });
+  storeChange(context, change);
+  context.state.put('branches', [...list<Branch>(context, 'branches'), { logicalRepoId: context.repoId,
+    storageName: change.candidateStorageName, ref: job.targetRef, ownerId: change.authorId,
+    observedHead: result.headOid, version: change.version }]);
+  context.state.put(`review:${change.changeId}`, result.reviewManifestDigest);
+  context.state.put(`verified:${change.changeId}`, { changeId: change.changeId, revision,
+    headOid: result.headOid, policyDigest: job.policyDigest, unitKeys: [...result.unitKeys], verifiedBy: 'checker' });
+  context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
+  return { status: 'eligible' as const, version: context.version(), evidenceIds: [job.jobId], value: { revision } };
+}
+
 export const repos: FeatureModule = {
   name: 'repos', migrations: [],
   routes: [
@@ -693,7 +733,7 @@ export const repos: FeatureModule = {
       }
     }
   },
-  hooks: { 'repos.inspectRevision': inspectRevision, },
+  hooks: { 'repos.inspectRevision': inspectRevision, 'repos.applyRebase': applyRebase },
   changeView: (context, changeId) => {
     const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
     const repo = context.state.get<Repo>('repo');

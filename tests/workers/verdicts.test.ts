@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
-import { verdicts, type InspectedRevision } from '../../src/features/verdicts';
+import { mechanicallyMergeableRows, verdicts, type InspectedRevision } from '../../src/features/verdicts';
 import { canonicalJson, dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest, trustedDependencyKeys } from '../../src/verdicts/manifest';
 
 const d = (text: string): Digest => hashCanonical(text);
@@ -100,6 +100,18 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
 }
 
 describe('content-bound verdicts', () => {
+  it('carries a changed patch identity only for equal rows in a trusted table', () => {
+    const table = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'],
+      keyColumn: 'family', keySpec: { charset: 'lower' as const, minLength: 1, maxLength: 256 } };
+    const trusted: TrustedPolicy = { ...policy, tables: [table] };
+    const old = { ...manifest('row:alpha'), changedUnits: [{ ...manifest('row:alpha').changedUnits[0],
+      unitKey: 'row:families:alpha' }] } as ReviewManifest;
+    const rebased = structuredClone(old);
+    expect(mechanicallyMergeableRows(trusted, old, rebased)).toBe(true);
+    expect(mechanicallyMergeableRows(policy, old, rebased)).toBe(false);
+    (rebased.changedUnits[0] as { afterDigest: Digest }).afterDigest = d('new row bytes');
+    expect(mechanicallyMergeableRows(trusted, old, rebased)).toBe(false);
+  });
   it('uses canonical byte-sensitive sorted manifests and exact trusted dependency closure', async () => {
     const original = manifest('row:gamma');
     const reversed = { ...original, changedUnits: [...original.changedUnits].reverse(), dependencyScope: [...original.dependencyScope].reverse() } as ReviewManifest;

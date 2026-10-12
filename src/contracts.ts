@@ -139,6 +139,7 @@ export interface TrustedConfiguration {
   policies: Record<string, TrustedPolicy>;
   profiles: Record<string, TrustedProfile>;
   delegatedPrincipals?: { maxTtlMs?: number; activeLimit?: number; totalLimit?: number };
+  queue?: { maxAutomaticRebases?: number };
 }
 
 export interface ApiSuccess<T> { data: T; version: number; eventSeq: number }
@@ -196,9 +197,9 @@ export interface RunnerPollBody {
 }
 export interface JobHeartbeatBody { attempt: number; fence: number; inputDigest: Digest }
 export interface JobResultBody { attempt: number; fence: number; inputDigest: Digest; resultDigest: Digest; result: JobResult }
-export interface JobCredentialsBody { attempt: number; fence: number; operation: 'fetch' | 'scratch-push' | 'canonical-push' }
+export interface JobCredentialsBody { attempt: number; fence: number; operation: 'fetch' | 'scratch-push' | 'canonical-push' | 'candidate-push' }
 
-export type JobKind = 'inspect-candidate' | 'validate-stack' | 'delta-check' | 'promote';
+export type JobKind = 'inspect-candidate' | 'validate-stack' | 'delta-check' | 'rebase-candidate' | 'promote';
 export type JobState = 'pending' | 'claimed' | 'completed' | 'expired' | 'blocked';
 export interface JobBase extends Versioned {
   jobId: Id; repoId: Id; inputDigest: Digest; generation: number;
@@ -236,6 +237,10 @@ export interface DeltaCheckJob extends JobBase {
   kind: 'delta-check'; changeId: Id; candidate: CandidateInput; oldManifestDigest: Digest; newBaseOid: Oid;
   parentVerdictId: Id; findingSetVersion: number; oldReviewManifest: ReviewManifest;
 }
+export interface RebaseCandidateJob extends JobBase {
+  kind: 'rebase-candidate'; candidate: CandidateInput; newBaseOid: Oid;
+  canonicalStorageName: string; targetRef: string; verdictId: Id;
+}
 export interface OrdinaryPromoteJob extends JobBase {
   kind: 'promote'; promotionId: Id; expectedOldOid: Oid; checkedNewOid: Oid; bootstrap: false;
   scratchStorageName: string; scratchRef: string;
@@ -245,7 +250,7 @@ export interface BootstrapPromoteJob extends JobBase {
   scratchStorageName: string; scratchRef: string;
 }
 export type PromoteJob = OrdinaryPromoteJob | BootstrapPromoteJob;
-export type Job = InspectCandidateJob | ValidateStackJob | DeltaCheckJob | PromoteJob;
+export type Job = InspectCandidateJob | ValidateStackJob | DeltaCheckJob | RebaseCandidateJob | PromoteJob;
 export type CheckOutcome = 'PASS' | 'FAIL' | 'MATCH' | 'MISMATCH' | 'COMPILE_ERROR' | 'UNVERIFIED_TARGET' | 'ENV_ERROR' | 'MERGE_CONFLICT' | 'TIMEOUT';
 export interface ChangedUnitEvidence {
   unitKey: string; beforePath: string | null; afterPath: string | null;
@@ -300,11 +305,17 @@ export interface DeltaResult extends ResultBase {
   reviewManifest: ReviewManifest | null;
   dependencyScopeDigest: Digest | null; dependencyScope: DependencyScopeEntry[] | null;
 }
+export interface RebaseResult extends ResultBase {
+  kind: 'rebase-candidate'; outcome: CheckOutcome; baseOid: Oid; headOid: Oid | null;
+  patchIdBefore: string | null; patchIdAfter: string | null;
+  reviewManifest: ReviewManifest | null; reviewManifestDigest: Digest | null;
+  unitKeys: string[]; conflictPaths: string[]; conflictUnits: string[];
+}
 export interface PromotionResult extends ResultBase {
   kind: 'promote'; outcome: 'APPLIED' | 'OLD_REF' | 'THIRD_REF' | 'ENV_ERROR';
   observedCanonicalOid: Oid | null;
 }
-export type JobResult = InspectionResult | StackResult | DeltaResult | PromotionResult;
+export type JobResult = InspectionResult | StackResult | DeltaResult | RebaseResult | PromotionResult;
 
 /** Internal handoff for a creation token; never included in JSON responses. */
 export const pendingInitialToken: unique symbol = Symbol('pendingInitialToken');
@@ -338,7 +349,9 @@ export interface ServiceHooks {
   'findings.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ findingSetVersion: number; unresolvedIds: Id[]; pendingRound: number | null }>;
   'verdicts.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ verdictId: Id; reviewManifestDigest: Digest; findingSetVersion: number }>;
   'verdicts.evaluateCarry': (context: ModuleContext, result: DeltaResult) => Gate<{ verdictId: Id }>;
-  'queue.onResult': (context: ModuleContext, result: StackResult | PromotionResult) => Gate<{ promotionId: Id | null }>;
+  'repos.applyRebase': (context: ModuleContext, job: RebaseCandidateJob, result: RebaseResult) => Gate<{ revision: number }>;
+  'verdicts.carryRebase': (context: ModuleContext, job: RebaseCandidateJob, result: RebaseResult, revision: number, findingSetVersion: number) => Gate<{ verdictId: Id }>;
+  'queue.onResult': (context: ModuleContext, result: StackResult | RebaseResult | PromotionResult) => Gate<{ promotionId: Id | null }>;
   'runners.schedule': (context: ModuleContext, job: Job) => Gate<{ jobId: Id }>;
 }
 export type HookName = keyof ServiceHooks;
