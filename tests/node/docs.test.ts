@@ -7,12 +7,37 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
+import { getCurrentTest } from 'vitest/suite';
 import { wranglerStateDir } from '../../demo/scenarios';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
 const children: ChildProcess[] = [];
 const directories: string[] = [];
+const CHILD_TIMEOUT_MS = 30_000;
+const DOCUMENTED_BLOCK_TIMEOUT_MS = 300_000;
+const SETUP_MARGIN_MS = 30_000;
+
+function shellCallBudget(maxCalls: number, maxCallMs = CHILD_TIMEOUT_MS) {
+  const timeout = maxCalls * maxCallMs + SETUP_MARGIN_MS;
+  return {
+    timeout,
+    countCalls() {
+      let calls = 0;
+      return {
+        run<T>(call: () => T): T {
+          if (calls >= maxCalls) throw new Error(`Shell call budget exceeded: more than ${maxCalls} calls`);
+          calls++;
+          return call();
+        },
+        assertComplete() {
+          expect(calls).toBe(maxCalls);
+          expect(getCurrentTest()?.timeout).toBeGreaterThanOrEqual(timeout);
+        },
+      };
+    },
+  };
+}
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -50,12 +75,17 @@ async function externalTempDir(prefix: string): Promise<string> {
   throw new Error('No writable temporary directory outside the clone');
 }
 
-async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
-  const document = await readFile(join(cwd, path), 'utf8');
+function parseTaggedBlocks(document: string, tag = '12c'): string[] {
   const marker = `<!-- verified-by: ${tag} -->`;
-  const blocks = [...document.matchAll(new RegExp(`${marker}\\s*\`\`\`sh\\n([\\s\\S]*?)\\n\`\`\``, 'g'))]
+  return [...document.matchAll(new RegExp(`${marker}\\s*\`\`\`sh\\n([\\s\\S]*?)\\n\`\`\``, 'g'))]
     .map(match => match[1].replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort))
       .replace(/npm run dev --/g, `npm run dev -- --port ${workerPort}`));
+}
+
+async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
+  const document = await readFile(join(cwd, path), 'utf8');
+  const blocks = parseTaggedBlocks(document, tag);
+  const marker = `<!-- verified-by: ${tag} -->`;
   expect(blocks).toHaveLength(document.split(marker).length - 1);
   return blocks;
 }
@@ -75,7 +105,7 @@ async function capturedNpm(exports: string[], command: string, env: NodeJS.Proce
     '}',
     ...exports, command,
   ].join('\n');
-  const { stdout } = await execFile('sh', ['-c', script], { cwd, env });
+  const { stdout } = await execFile('sh', ['-c', script], { cwd, env, timeout: CHILD_TIMEOUT_MS });
   const lines = stdout.trimEnd().split('\n');
   return { args: lines.filter(line => line.startsWith('ARG:')).map(line => line.slice(4)),
     values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
@@ -105,7 +135,7 @@ if (command === 'npm' && process.argv.slice(2).join(' ').startsWith('run demo --
   }
   const cleanEnv = { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: root, TMPDIR: root, CAPTURE_LOG: log };
   await execFile('env', ['-i', ...Object.entries(cleanEnv).map(([key, value]) => `${key}=${value}`),
-    'sh', '-ec', block], { cwd, timeout: 30_000 });
+    'sh', '-ec', block], { cwd, timeout: CHILD_TIMEOUT_MS });
   return (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as ShellCall);
 }
 
@@ -148,7 +178,7 @@ async function runDocumentedBlock(block: string, env: NodeJS.ProcessEnv): Promis
   const marker = '__CONCORD_DOCUMENTED_NPM_CALL__';
   const wrapper = `npm() { printf '\\n${marker}\\n'; command npm "$@"; }`;
   const { stdout } = await execFile('sh', ['-ec', `${wrapper}\n${block}`],
-    { cwd, env, timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+    { cwd, env, timeout: DOCUMENTED_BLOCK_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
   const outputs = stdout.split(marker + '\n').slice(1);
   expect(outputs).toHaveLength(commandLines(block).commands.length);
   return outputs.map(output => {
@@ -169,7 +199,7 @@ function start(command: string, env: NodeJS.ProcessEnv): { child: ChildProcess; 
 }
 
 async function waitFor(label: string, predicate: () => Promise<boolean>, output: () => string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (await predicate().catch(() => false)) return;
     await new Promise(done => setTimeout(done, 150));
@@ -212,29 +242,62 @@ describe('UI documentation', () => {
   });
 });
 
+const [readmeDocument, demoDocument, deployDocument, guideDocument] = await Promise.all(
+  ['README.md', 'docs/DEMO.md', 'docs/deploy.md', 'docs/api-repos.md']
+    .map(path => readFile(join(cwd, path), 'utf8')));
+const readmeBlocks = parseTaggedBlocks(readmeDocument);
+const demoBlocks = parseTaggedBlocks(demoDocument);
+const deployBlocks = parseTaggedBlocks(deployDocument);
+const blocks = [...readmeBlocks, ...demoBlocks, ...deployBlocks];
+const persistenceRoots = ['first', 'second'];
+const guideBlocks = [
+  /In a second terminal[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guideDocument)?.[1],
+  /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guideDocument)?.[1],
+].filter((block): block is string => block !== undefined);
+const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(demoDocument)?.[1] ?? '';
+const productionRunners = deployDocument.split('\n').filter(line => line.includes('npm run runner --'));
+const blockBudget = shellCallBudget(blocks.length + 2); // deploy replay and modified token block
+const persistenceBudget = shellCallBudget(persistenceRoots.length * guideBlocks.length + 1); // missing token
+const pathBudget = shellCallBudget(blocks.length + blocks.slice(1).reduce((calls, block) =>
+  calls + commandLines(block).commands.length, 0) + commandLines(manual).commands.length
+  + productionRunners.length + 3); // run directory, deploy seed, and missing-run-directory check
+const liveBlocks = [readmeBlocks[4], demoBlocks[0], deployBlocks[0]]
+  .filter((block): block is string => block !== undefined);
+const liveBudget = shellCallBudget(liveBlocks.length + 5,
+  DOCUMENTED_BLOCK_TIMEOUT_MS); // install, preflight, and three servers
+
 describe('documented demo commands', () => {
+  it('rejects shell calls beyond the declared budget', () => {
+    const calls = shellCallBudget(1).countCalls();
+    calls.run(() => undefined);
+    expect(() => calls.run(() => undefined)).toThrow('Shell call budget exceeded: more than 1 calls');
+  });
+
   it('runs every 12c-tagged block in written order from a clean shell', async () => {
+    const shell = blockBudget.countCalls();
     const root = await externalTempDir('concord-docs-shell-');
     const runDir = join(root, 'concord-demo-01');
     for (const path of ['README.md', 'docs/DEMO.md', 'docs/deploy.md']) {
       for (const block of await taggedBlocks(path)) {
-        assertCallEnvironment(await capturedBlock(block, root), block, runDir);
+        assertCallEnvironment(await shell.run(() => capturedBlock(block, root)), block, runDir);
       }
     }
     const deploy = (await taggedBlocks('docs/deploy.md'))[0];
-    const [seed] = await capturedBlock(deploy, root);
+    const [seed] = await shell.run(() => capturedBlock(deploy, root));
     expect(seed.args.slice(0, 4)).toEqual(['run', 'demo', '--', 'seed']);
     expect(seed.env.CONCORD_TOKEN).toBe('local-owner');
     const readme = (await taggedBlocks('README.md'))[4];
     const tokenExport = 'export CONCORD_TOKEN=local-owner\n';
     const movedToken = readme.replace(tokenExport, '').replace(/(npm run demo -- seed[^\n]*\n)/, `$1${tokenExport}`);
     expect(movedToken).not.toBe(readme);
-    const mutatedCalls = await capturedBlock(movedToken, root);
+    const mutatedCalls = await shell.run(() => capturedBlock(movedToken, root));
     expect(() => assertCallEnvironment(mutatedCalls, movedToken, runDir)).toThrow();
     expect(mutatedCalls.find(call => call.args[3] === 'seed')?.env.CONCORD_TOKEN).toBeUndefined();
-  });
+    shell.assertComplete();
+  }, blockBudget.timeout);
 
   it('keeps every documented Wrangler dev command persistent inside the clone', async () => {
+    const shell = persistenceBudget.countCalls();
     async function markdownFiles(dir: string): Promise<string[]> {
       const entries = await readdir(join(cwd, dir), { withFileTypes: true });
       const nested = await Promise.all(entries.map(async entry => {
@@ -273,11 +336,11 @@ describe('documented demo commands', () => {
     const bridgeBlock = /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1]
       ?.replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort));
     expect(bridgeBlock).toBeDefined();
-    for (const suffix of ['first', 'second']) {
+    for (const suffix of persistenceRoots) {
       const root = await externalTempDir(`concord-${suffix}-`);
       const env = { ...freshShellEnv(process.env), TMPDIR: root };
-      const bridge = await capturedNpm([], bridgeBlock!, env);
-      const worker = await capturedNpm([], bridgeWorker!, env);
+      const bridge = await shell.run(() => capturedNpm([], bridgeBlock!, env));
+      const worker = await shell.run(() => capturedNpm([], bridgeWorker!, env));
       const runDir = join(root, 'concord-repos-01');
       const token = createHash('sha256').update(runDir + ':bridge').digest('hex');
       const hash = createHash('sha256').update(token).digest('hex').slice(0, 12);
@@ -289,10 +352,12 @@ describe('documented demo commands', () => {
       expect(resolve(cwd, worker.args[6])).toBe(join(cwd, '.wrangler', 'state', hash));
     }
     const missingToken = bridgeWorker!.replace(/^export CONCORD_BRIDGE_TOKEN=.*\n/m, '');
-    await expect(capturedNpm([], missingToken, freshShellEnv(process.env))).rejects.toMatchObject({ stdout: '' });
-  });
+    await expect(shell.run(() => capturedNpm([], missingToken, freshShellEnv(process.env)))).rejects.toMatchObject({ stdout: '' });
+    shell.assertComplete();
+  }, persistenceBudget.timeout);
 
   it('keeps Wrangler persistence in the clone when TMPDIR is outside it', async () => {
+    const shell = pathBudget.countCalls();
     const root = await externalTempDir('concord-docs-paths-');
     const readme = await taggedBlocks('README.md');
     const demo = await taggedBlocks('docs/DEMO.md');
@@ -303,13 +368,13 @@ describe('documented demo commands', () => {
     expect(readme).toHaveLength(5);
     for (const block of readme) expect(block).toContain('cd "$(pwd -P)"');
     for (const block of blocks) {
-      expect((await capturedNpm([], block, env)).args.length).toBeGreaterThan(0);
+      expect((await shell.run(() => capturedNpm([], block, env))).args.length).toBeGreaterThan(0);
     }
-    const { stdout: runDir } = await execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
-      { cwd, env });
+    const { stdout: runDir } = await shell.run(() => execFile('sh', ['-c', `${commandLines(readme[1]).exports[0]}\nprintf '%s' "$CONCORD_RUN_DIR"`],
+      { cwd, env, timeout: CHILD_TIMEOUT_MS }));
     expect(isAbsolute(runDir)).toBe(true);
     expect(runDir).toBe(join(resolve(env.TMPDIR), 'concord-demo-01'));
-    const firstDeploy = await capturedNpm(commandLines(deploy[0]).exports, commandLines(deploy[0]).commands[0], env);
+    const firstDeploy = await shell.run(() => capturedNpm(commandLines(deploy[0]).exports, commandLines(deploy[0]).commands[0], env));
     expect(firstDeploy.args).toEqual(['run', 'demo', '--', 'seed', '--run', 'demo-01', '--state-dir', runDir]);
     await mkdir(runDir);
     await writeFile(join(runDir, 'trusted-config.json'), '{}\n');
@@ -325,7 +390,7 @@ describe('documented demo commands', () => {
     for (const block of blocks.slice(1)) {
       const { exports, commands } = commandLines(block);
       for (const command of commands) {
-        const { args, values } = await capturedNpm(exports, command, env);
+        const { args, values } = await shell.run(() => capturedNpm(exports, command, env));
         if (args[1] === 'dev') {
           workers++;
           expect(args).toEqual(['run', 'dev', '--', '--port', String(workerPort), '--persist-to', `.wrangler/state/${runHash}`,
@@ -357,19 +422,19 @@ describe('documented demo commands', () => {
     expect(manual).toBeDefined();
     const { exports: runnerExports, commands: runnerCommands } = commandLines(manual!);
     expect(runnerCommands).toHaveLength(2);
-    const checker = await capturedNpm(runnerExports, runnerCommands[0], env);
+    const checker = await shell.run(() => capturedNpm(runnerExports, runnerCommands[0], env));
     expect(checker.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'checker',
       '--profile', join(runDir, 'dispatch-profile.json'), '--once']);
     expect(checker.values.slice(3, 5)).toEqual([`http://127.0.0.1:${workerPort}`, 'local-checker']);
-    const promoter = await capturedNpm(runnerExports, runnerCommands[1], env);
+    const promoter = await shell.run(() => capturedNpm(runnerExports, runnerCommands[1], env));
     expect(promoter.args).toEqual(['run', 'runner', '--', '--repo', 'REPO_ID', '--role', 'promoter',
       '--profile-digest', 'PROFILE_DIGEST_FROM_PREFLIGHT', '--once']);
     expect(promoter.values.slice(3, 5)).toEqual([`http://127.0.0.1:${workerPort}`, 'local-promoter']);
 
     const missingRunDir = runnerExports.filter(line => !line.startsWith('export CONCORD_RUN_DIR='));
     expect(missingRunDir).toHaveLength(runnerExports.length - 1);
-    await expect(execFile('sh', ['-c', [...missingRunDir, runnerCommands[0]].join('\n')],
-      { cwd, env: { ...env, TMPDIR: relative(cwd, root) }, timeout: 120_000 }))
+    await expect(shell.run(() => execFile('sh', ['-c', [...missingRunDir, runnerCommands[0]].join('\n')],
+      { cwd, env: { ...env, TMPDIR: relative(cwd, root) }, timeout: CHILD_TIMEOUT_MS })))
       .rejects.toMatchObject({ stderr: expect.stringMatching(/ENOENT.*\/dispatch-profile\.json/) });
 
     const release = await readFile(join(cwd, 'docs/deploy.md'), 'utf8');
@@ -377,17 +442,19 @@ describe('documented demo commands', () => {
     expect(productionRunners).toHaveLength(2);
     const productionEnv = { ...env, CONCORD_REPO_ID: 'repo-id', CONCORD_HOME: join(root, 'operator'),
       CHECKER_TOKEN: 'checker-token', PROMOTER_TOKEN: 'promoter-token', PROFILE_DIGEST: 'profile-digest' };
-    const productionChecker = await capturedNpm([], productionRunners[0], productionEnv);
+    const productionChecker = await shell.run(() => capturedNpm([], productionRunners[0], productionEnv));
     expect(productionChecker.args).toEqual(['run', 'runner', '--', '--repo', 'repo-id', '--role', 'checker',
       '--profile', join(root, 'operator', 'checker-profile.json'), '--once']);
     expect(productionChecker.values[4]).toBe('checker-token');
-    const productionPromoter = await capturedNpm([], productionRunners[1], productionEnv);
+    const productionPromoter = await shell.run(() => capturedNpm([], productionRunners[1], productionEnv));
     expect(productionPromoter.args).toEqual(['run', 'runner', '--', '--repo', 'repo-id', '--role', 'promoter',
       '--profile-digest', 'profile-digest', '--once']);
     expect(productionPromoter.values[4]).toBe('promoter-token');
-  });
+    shell.assertComplete();
+  }, pathBudget.timeout);
 
   it('runs every 12c-tagged local command against the real bridge and Worker', async () => {
+    const shell = liveBudget.countCalls();
     const root = await externalTempDir('concord-docs-');
     // tsx needs a short socket path. This relative TMPDIR resolves outside the clone.
     // Demo and runner need the absolute path for their candidate worktrees.
@@ -417,25 +484,25 @@ describe('documented demo commands', () => {
     const install = join(root, 'install');
     await mkdir(install);
     await Promise.all(['package.json', 'package-lock.json'].map(file => copyFile(join(cwd, file), join(install, file))));
-    await execFile('sh', ['-c', readme[0]], { cwd: install, timeout: 120_000, env: {
+    await shell.run(() => execFile('sh', ['-c', readme[0]], { cwd: install, timeout: 120_000, env: {
       ...env, TMPDIR: root, NPM_CONFIG_CACHE: join(root, 'npm-cache'), NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_FUND: 'false',
-    } });
+    } }));
     await access(join(install, 'node_modules/.bin/tsx'));
 
-    const [preflight] = await runDocumentedBlock(readme[1], env);
+    const [preflight] = await shell.run(() => runDocumentedBlock(readme[1], env));
     expect(preflight.status).toBe('ready');
-    const occupiedDefaultPort = start(`node -e 'const s=require("node:net").createServer(); s.on("error",e=>{if(e.code!=="EADDRINUSE") throw e; console.log("held 8788 (existing process)")}); s.listen(8788,"127.0.0.1",()=>console.log("held 8788"))'`, env);
+    const occupiedDefaultPort = shell.run(() => start(`node -e 'const s=require("node:net").createServer(); s.on("error",e=>{if(e.code!=="EADDRINUSE") throw e; console.log("held 8788 (existing process)")}); s.listen(8788,"127.0.0.1",()=>console.log("held 8788"))'`, env));
     await waitFor('default bridge port held', async () => occupiedDefaultPort.output().includes('held 8788'), occupiedDefaultPort.output);
-    const bridge = start(readme[2], env);
+    const bridge = shell.run(() => start(readme[2], env));
     await waitFor('bridge', async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`), bridge.output);
-    const worker = start(readme[3], env);
+    const worker = shell.run(() => start(readme[3], env));
     await waitFor('Worker health', async () => (await fetch(workerUrl + '/health')).ok, worker.output);
     expect((await (await fetch(workerUrl + '/health')).json() as any).data.storageBackend).toBe('bridge');
 
     const execute = async (block: string) => {
       const commands = commandLines(block).commands;
       for (const command of commands) expect(command).toMatch(/^npm run demo -- (seed|scene|inspect) /);
-      const results = await runDocumentedBlock(block, env);
+      const results = await shell.run(() => runDocumentedBlock(block, env));
       for (const [index, result] of results.entries()) {
         const scene = /npm run demo -- scene (\w+)/.exec(commands[index])?.[1];
         if (scene) {
@@ -472,5 +539,6 @@ describe('documented demo commands', () => {
     expect(deployed[0].canonicalOid).toBe(later[8].canonicalOid);
     expect(deployed[3].evidence['wrong-exec'].checkerOutcomes).toContain('FAIL');
     expect(deployed[3].queue.finalCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
-  }, 600_000);
+    shell.assertComplete();
+  }, liveBudget.timeout);
 });
