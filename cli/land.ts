@@ -149,7 +149,7 @@ async function prepareHead(source: string, commit: string, parent: string, base:
 export function approvedHead(evidence: string, head: string): boolean {
   const lines = evidence.split(/\r?\n/);
   const report = lines.filter(line => line.trim() !== '');
-  const approval = /^# ✅ APPROVED FOR MERGE — head ([a-f0-9]{40})$/i;
+  const approval = /^# ✅ APPROVED FOR MERGE — head ([a-f0-9]{40})$/;
   const match = approval.exec(report[0] ?? '');
   return !!match && match[1].toLowerCase() === head.toLowerCase() &&
     report[report.length - 1] === 'APPROVED for merge' &&

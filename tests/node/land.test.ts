@@ -46,6 +46,7 @@ describe('land input and evidence gates', () => {
     const head = 'a'.repeat(40);
     const report = `# ✅ APPROVED FOR MERGE — head ${head}\n\nReview details.\n\nAPPROVED for merge`;
     expect(approvedHead(report, head)).toBe(true);
+    expect(approvedHead(`# ✅ approved for merge — head ${head}\nAPPROVED for merge`, head)).toBe(false);
     expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${'b'.repeat(40)}\nAPPROVED for merge`, head)).toBe(false);
     expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head}\nCHANGES REQUIRED\nAPPROVED for merge`, head)).toBe(false);
     expect(approvedHead(`Review evidence:\n\`\`\`\n# ✅ APPROVED FOR MERGE — head ${head}\nAPPROVED for merge\n\`\`\``, head)).toBe(false);
