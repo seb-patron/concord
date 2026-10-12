@@ -50,7 +50,17 @@ A/B/C originate from the same seed commit. Later scenes start from the current o
 
 ## Rehearsal setup
 
-Follow the four-terminal [README quickstart](../README.md#five-minute-local-start) for exact preflight, bridge, Worker, seed, and first-scene commands. The bridge must use `CONCORD_BRIDGE_DATA_DIR="$CONCORD_RUN_DIR/bridge"`; preflight alone does not start it. Keep Wrangler persistence under the clone's ignored `.wrangler/state/`, even when `TMPDIR` and `CONCORD_RUN_DIR` point outside the clone. The README derives a separate persistence directory from each absolute run path. Prerequisites are Node 22+, installed lockfile dependencies, and native Git. No Cloudflare account is needed for the local path. A new rehearsal uses a fresh run ID and state directory. The final competition capture additionally needs the provisioned deployment described below.
+In the bridge terminal, run this quickstart command before seed. `local/git-bridge.ts` requires the data directory; without it, seed cannot provision the Git remote and reports `PROVISIONING_FAILED`.
+
+```sh
+export CONCORD_RUN_DIR="$(node -p 'require("node:path").resolve(process.env.TMPDIR || "/tmp")')/concord-demo-01"
+export CONCORD_BRIDGE_DATA_DIR="$CONCORD_RUN_DIR/bridge"
+export CONCORD_BRIDGE_TOKEN=local-bridge-fixture-2026
+export CONCORD_BRIDGE_PORT=8788
+npm run git-bridge
+```
+
+Follow the four-terminal [README quickstart](../README.md#five-minute-local-start) for exact preflight, bridge, Worker, seed, and first-scene commands. Keep Wrangler persistence under the clone's ignored `.wrangler/state/`, even when `TMPDIR` and `CONCORD_RUN_DIR` point outside the clone. The README derives a separate persistence directory from each absolute run path. Prerequisites are Node 22+, installed lockfile dependencies, and native Git. No Cloudflare account is needed for the local path. A new rehearsal uses a fresh run ID and state directory. The final competition capture additionally needs the provisioned deployment described below.
 
 `seed` creates a new logical repo and seed draft fork, pushes the public seed there, requests owner-only bootstrap validation and conditional initial promotion, and captures the checked seed OID. It pumps the local checker/promoter for bootstrap in local mode, then allocates draft changes A/B/C/X, prepares A/B/C worktrees, and prints the repo URL. Bootstrap is allowed only for empty main; all main writes, including initialization, use stored promoter tickets. `seed` repeated with the same run ID returns the same manifest; it never deletes existing history.
 
