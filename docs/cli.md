@@ -30,6 +30,12 @@ Safe GET requests and keyed mutations retry transient transport failures, HTTP 4
 
 ## Repository commands
 
+To adopt a committed source tree as one provenance-stamped root commit, see
+[Import an existing repository](import.md). Use `npm run concord -- import
+--source PATH --ref REF --repo NAME --policy-id ID --profile-id ID` with
+optional repeated `--exclude GLOB`, `--exclude-file FILE`, `--require-match`, `--print-tree`,
+and `--verbose`.
+
 ```sh
 npm run concord -- repo create --name public-aw --policy-id policy-v1 --profile-id profile-v1
 npm run concord -- repo list --json

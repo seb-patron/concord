@@ -232,6 +232,11 @@ test "$(git -C "$CONCORD_RUN_DIR/canonical" rev-parse HEAD)" = "$CHECKED_SHA"
 
 ## Optional GitHub human mirror
 
+For a repository adopted with [import](import.md), the owner-authorized
+destination must be a **new empty GitHub repository**. Import creates a new
+root commit, so its history differs from the source repository. The mirror
+remains one-way and retains its absent-or-ancestor check and no-force-push rule.
+
 Only after a confirmed canonical landing, the owner may supply a **new demo-only** `https://github.com/OWNER/REPO.git` destination. `CONCORD_MIRROR_TOKEN` is an optional GitHub token passed through the environment; the URL must contain no credential. The mirror requests a read-only canonical Git token, verifies the API's observed SHA against remote `main`, checks that destination `main` is absent or its ancestor, and prints the planned SHA update. It has no reverse sync, PR API, tags, force push, or Concord rollback path.
 
 ```sh

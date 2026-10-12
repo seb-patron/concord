@@ -3,18 +3,33 @@ import { promisify } from 'node:util';
 import { ConcordError } from './client.ts';
 
 const execFile = promisify(execFileCallback);
-export interface GitOptions { token?: string; timeoutMs?: number }
+export interface GitOptions { token?: string; timeoutMs?: number; alternateObjectDirectory?: string; identity?: boolean; indexFile?: string; noLazyFetch?: boolean }
 
-export async function git(args: string[], options: GitOptions = {}, cwd?: string): Promise<string> {
-  if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1' };
+// Never let a caller's Git context redirect an importer command into its source repository.
+export function gitEnvironment(options: GitOptions = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !/^GIT_/i.test(name)));
+  env.GIT_TERMINAL_PROMPT = '0';
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_NO_REPLACE_OBJECTS = '1';
+  if (options.noLazyFetch) env.GIT_NO_LAZY_FETCH = '1';
+  if (options.alternateObjectDirectory) env.GIT_ALTERNATE_OBJECT_DIRECTORIES = options.alternateObjectDirectory;
+  if (options.indexFile) env.GIT_INDEX_FILE = options.indexFile;
+  if (options.identity) Object.assign(env, { GIT_AUTHOR_NAME: 'Concord Import', GIT_AUTHOR_EMAIL: 'import@concord.invalid',
+    GIT_COMMITTER_NAME: 'Concord Import', GIT_COMMITTER_EMAIL: 'import@concord.invalid',
+    GIT_AUTHOR_DATE: '@0 +0000', GIT_COMMITTER_DATE: '@0 +0000' });
   if (options.token) {
     env.GIT_CONFIG_COUNT = '1';
     env.GIT_CONFIG_KEY_0 = 'http.extraHeader';
     env.GIT_CONFIG_VALUE_0 = `Authorization: Bearer ${options.token}`;
   }
+  return env;
+}
+
+export async function git(args: string[], options: GitOptions = {}, cwd?: string): Promise<string> {
+  if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
   try {
-    const result = await execFile('git', args, { cwd, env, timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+    const result = await execFile('git', args, { cwd, env: gitEnvironment(options), timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
     return result.stdout.trim();
   } catch (error) {
     const e = error as NodeJS.ErrnoException & { killed?: boolean };
@@ -51,11 +66,11 @@ export async function fetchFork(worktree: string, remote: string, branch: string
   await git(['fetch', '--no-tags', '--', remote, `refs/heads/${branch}:refs/remotes/concord/${branch}`], { token }, worktree);
 }
 
-export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string, headOid = 'HEAD'): Promise<void> {
+export async function pushCandidate(worktree: string, remote: string, branch: string, token?: string, headOid = 'HEAD', alternateObjectDirectory?: string, noLazyFetch = false): Promise<void> {
   validateRemote(remote);
   validateBranch(branch);
   if (!/^(?:HEAD|[0-9a-f]{40,64})$/i.test(headOid)) throw new ConcordError('Candidate head OID is malformed', 'usage');
-  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch}`], { token }, worktree);
+  await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', remote, `${headOid}:refs/heads/${branch}`], { token, alternateObjectDirectory, noLazyFetch }, worktree);
 }
 
 export function rejectCanonicalTarget(candidateStorageName: string, canonicalStorageName: unknown, candidateRemote: string, canonicalRemote?: unknown): void {
