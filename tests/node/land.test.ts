@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { approvedHead, failSameKeyInspection, filesChanged, land, parseAllowed, unitKeys, waitChange } from '../../cli/land.ts';
+import { ConcordError } from '../../cli/client.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 
@@ -55,6 +56,37 @@ describe('land input and evidence gates', () => {
         payload: { log: 'checker diagnostic tail' },
       });
     }
+  });
+  it.each(['ENV_ERROR', 'FAIL', 'TIMEOUT'])('reports a reused %s inspection before waiting for a contested lease', async outcome => {
+    const { dir, commit, parent } = await source();
+    const allowed = join(dir, 'allowed.txt');
+    await writeFile(allowed, 'first.txt\nfamilies.tsv\nrenamed.tsv\n');
+    const change = { changeId: 'change', provisioning: { state: 'observed' }, baseOid: parent,
+      headOid: commit, revision: 3, status: 'failed' };
+    let snapshots = 0;
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: ++snapshots === 1 ? [] : [
+        { kind: 'inspect-candidate', changeId: 'change', revision: 3, jobId: 'job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/job/result') return { data: { result: { outcome, log: 'checker diagnostic tail' } }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [] }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases') throw new ConcordError('LEASE_CONFLICT', 'conflict', 409,
+        { error: { code: 'LEASE_CONFLICT', details: { holderId: 'other' } } });
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    await expect(land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+      waitSeconds: 0, client: { request } as never, emit: () => {} })).rejects.toMatchObject({
+      message: outcome === 'FAIL' ? 'INSPECTION_FAILED: FAIL' :
+        `INSPECTION_FAILED: ${outcome}; fix the environment, then re-run land with a new --intent-key`,
+      payload: { log: 'checker diagnostic tail' },
+    });
+    expect(request.mock.calls.filter(([method, path]) => method === 'GET' && path === '/repos/demo/jobs/job/result')).toHaveLength(1);
+    expect(request.mock.calls.some(([, path]) => path === '/repos/demo/queue')).toBe(false);
+    expect(request.mock.calls.some(([, path]) => path === '/repos/demo/leases')).toBe(false);
   });
   it('treats a rename as a deleted and an added path', async () => {
     const { dir, commit, parent } = await source();

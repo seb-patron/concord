@@ -158,7 +158,7 @@ function failInspection(result: Obj, sameKeyRetry = false): never {
     typeof result.log === 'string' ? { log: redactOutput(result.log) } : undefined);
 }
 export function failSameKeyInspection(result: Obj): void {
-  if (['ENV_ERROR', 'TIMEOUT'].includes(result.outcome)) failInspection(result, true);
+  if (result.outcome !== 'PASS') failInspection(result, true);
 }
 export async function waitChange(client: ConcordClient, path: string, deadline: number, emit: (event: Obj) => void, onTick: () => Promise<void>, inspector = client): Promise<Obj> {
   let last = '';
@@ -266,6 +266,10 @@ export async function land(input: LandOptions): Promise<Obj> {
   if (created.provisioning?.state !== 'observed') throw new ConcordError('FORK_TIMEOUT: candidate fork was not provisioned', 'server');
   const changeId = required(created.changeId, 'changeId'); const path = `${root}/changes/${encodeURIComponent(changeId)}`;
   emit({ state: 'created', changeId, baseOid: created.baseOid });
+  if (created.headOid) {
+    const priorInspection = await inspection(inspector, root, created);
+    if (priorInspection) failSameKeyInspection(priorInspection);
+  }
   const existingQueue = (await api(client, `${root}/queue`)).data;
   const alreadyQueued = (existingQueue.entries ?? []).some((item: Obj) => item.changeId === changeId &&
     ['admitted', 'reserved', 'checking', 'landed'].includes(item.state));
@@ -307,10 +311,6 @@ export async function land(input: LandOptions): Promise<Obj> {
     try {
       let change = (await api(client, path)).data;
       if (change.headOid && change.baseOid === targetBase && change.headOid !== prepared.head) throw new ConcordError('PUBLISHED_HEAD_MISMATCH: existing intent has a different head', 'conflict');
-      if (change.headOid && change.baseOid === targetBase) {
-        const priorInspection = await inspection(inspector, root, change);
-        if (priorInspection) failSameKeyInspection(priorInspection);
-      }
       if (change.headOid !== prepared.head || !change.headOid || change.baseOid !== targetBase) {
         if (change.headOid && change.baseOid === targetBase && alreadyQueued)
           throw new ConcordError('INSPECTION_FAILED: environment inspection cannot be retried for an admitted change; use a new intent key', 'server');
