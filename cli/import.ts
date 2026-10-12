@@ -75,6 +75,12 @@ async function treeEntries(source: string, tree: string, alternateObjectDirector
 }
 
 async function requireLocalHistory(source: string, commit: string): Promise<void> {
+  const shallow = await importerGit(['-C', source, 'rev-parse', '--is-shallow-repository']).catch(() => {
+    throw new ConcordError('Cannot inspect source history; shallow status is unavailable', 'usage');
+  });
+  if (shallow !== 'false') {
+    throw new ConcordError('Source history is shallow; fetch complete history before importing', 'usage');
+  }
   let objects: string;
   try {
     const result = await execFile('git', ['-c', 'protocol.allow=never', '-C', source, 'rev-list',

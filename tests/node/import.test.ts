@@ -315,6 +315,25 @@ describe('adopted root import', () => {
     expect(await sourceState(source)).toEqual(before);
   });
 
+  it('rejects shallow history before provisioning even when rev-list reports no missing objects', async () => {
+    const root = await temporary();
+    const { source: original } = await fixture(root);
+    const source = join(root, 'shallow');
+    await execFile('git', ['clone', '--quiet', '--depth=1', '--branch', 'main',
+      pathToFileURL(original).href, source], { cwd: root, env: gitEnv, timeout: 30_000 });
+    expect(await git(source, 'rev-parse', '--is-shallow-repository')).toBe('true');
+    const preflight = await execFile('git', ['rev-list', '--objects', '--no-object-names',
+      '--missing=print', 'HEAD'], { cwd: source, env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+    expect(preflight.stdout).not.toMatch(/^\?[a-f0-9]{40}$/m);
+    const before = await sourceState(source);
+    const fetcher = vi.fn(() => { throw new Error('API contacted for shallow history'); });
+    const client = new ConcordClient({ url: 'http://127.0.0.1:1', fetch: fetcher });
+    await expect(importRepo({ source, ref: 'main', repo: 'adopted', policyId: 'policy',
+      profileId: 'profile', withHistory: true }, client)).rejects.toThrow(/shallow/);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await sourceState(source)).toEqual(before);
+  });
+
   it('rejects malformed exclusion bytes before contacting Concord', async () => {
     const root = await temporary();
     const { source } = await fixture(root);
