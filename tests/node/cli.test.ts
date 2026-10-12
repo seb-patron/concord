@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -261,7 +261,7 @@ describe('Concord agent CLI client', () => {
     const root = await tempDir('clone-version-race');
     try {
       // The token retry succeeds, then the Git clone to the unreachable remote fails.
-      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', join(root, 'clone')], {
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', join(root, 'clone'), '--expected-version', '7'], {
         cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
       })).rejects.toMatchObject({ code: 5, stdout: '' });
       const tokenCalls = calls.filter(call => call.path === '/v1/repos/repo-1/git-token');
@@ -269,6 +269,57 @@ describe('Concord agent CLI client', () => {
       expect(tokenCalls.map(call => call.body.scope)).toEqual(['read', 'read']);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
+
+  it('fetches a full change ref and detaches at the requested published revision', async () => {
+    const { root, worktree } = await publicationFixture('checkout-published-revision');
+    const bare = join(root, 'candidate.git');
+    await git(['init', '--bare', bare]);
+    await writeFile(join(worktree, 'source.txt'), 'revision one\n');
+    await git(['add', '--', 'source.txt'], {}, worktree);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'revision one'], {}, worktree);
+    const firstHead = await resolveHead(worktree);
+    await git(['push', bare, 'HEAD:refs/heads/candidate'], {}, worktree);
+    await writeFile(join(worktree, 'source.txt'), 'revision two\n');
+    await git(['add', '--', 'source.txt'], {}, worktree);
+    await git(['-c', 'user.name=CLI Test', '-c', 'user.email=cli@example.invalid', 'commit', '-m', 'revision two'], {}, worktree);
+    const secondHead = await resolveHead(worktree);
+    await git(['push', bare, 'HEAD:refs/heads/candidate'], {}, worktree);
+    await git(['update-server-info'], {}, bare);
+    const requests: string[] = [];
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+      if (path.startsWith('/v1/')) {
+        requests.push(path);
+        response.setHeader('content-type', 'application/json');
+        if (path === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { changeId: 'change-1', candidateStorageName: 'fork', branch: 'refs/heads/candidate', revision: 2, headOid: secondHead } }));
+        else if (path === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical' }, version: 7 }));
+        else if (path === '/v1/repos/repo-1/git-token') response.end(JSON.stringify({ data: { remote: `http://127.0.0.1:${(server.address() as { port: number }).port}/candidate.git`, plaintext: 'git-test-token' } }));
+        else if (path === '/v1/repos/repo-1/events') response.end(JSON.stringify({ data: { items: [{ sequence: 1, kind: 'change.published', relatedIds: ['change-1'], payload: { revision: 1, headOid: firstHead } }], nextCursor: null } }));
+        else { response.statusCode = 404; response.end('{}'); }
+        return;
+      }
+      if (!path.startsWith('/candidate.git/') || path.includes('..')) { response.statusCode = 404; response.end(); return; }
+      try { response.end(await readFile(join(bare, path.slice('/candidate.git/'.length)))); }
+      catch { response.statusCode = 404; response.end(); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const cli = (...args: string[]) => execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'change', 'checkout', '--repo', 'repo-1', '--id', 'change-1', '--worktree', worktree, ...args], {
+      cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+    });
+    try {
+      await cli();
+      expect(await git(['rev-parse', 'refs/remotes/concord/candidate'], {}, worktree)).toBe(secondHead);
+      expect(await resolveHead(worktree)).toBe(secondHead);
+      await cli('--revision', '1');
+      expect(await resolveHead(worktree)).toBe(firstHead);
+      expect(await git(['symbolic-ref', '-q', 'HEAD'], {}, worktree).catch(() => null)).toBeNull();
+      expect(await git(['rev-parse', 'refs/remotes/concord/revisions/change-1/1'], {}, worktree)).toBe(firstHead);
+      expect(await readFile(join(worktree, 'source.txt'), 'utf8')).toBe('revision one\n');
+      expect(requests).toContain('/v1/repos/repo-1/events');
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  }, 30_000);
 
   it('shows the server error code and message when a git-token request is refused', async () => {
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {

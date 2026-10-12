@@ -705,7 +705,7 @@ describe('repository and change lifecycle', () => {
         body: JSON.stringify({ expectedVersion, storageName: change.candidateStorageName, scope, ttlSeconds: 60 }),
       }))));
 
-    const unpublished = await directToken('read', 'read-unpublished', 'reviewer', ['reviewer']);
+    const unpublished = await gitToken('read', 'read-unpublished', 'local-reviewer');
     expect(unpublished.status).toBe(403);
     expect((await responseBody(unpublished)).error.code).toBe('FORK_NOT_OWNED');
 
@@ -724,10 +724,10 @@ describe('repository and change lifecycle', () => {
     const current = (await responseBody(await fetchApi(apiRequest(`/v1/repos/read_token_case/changes/${change.changeId}`)))).data;
     expect(current).toMatchObject({ revision: 1, headOid: b, status: 'draft' });
 
-    const reviewerRead = await directToken('read', 'read-reviewer', 'reviewer', ['reviewer']);
+    const reviewerRead = await gitToken('read', 'read-reviewer', 'local-reviewer');
     expect(reviewerRead.status).toBe(200);
     expect((await responseBody(reviewerRead)).data.secret).toMatch(/^fake-token:/);
-    const reviewerWrite = await directToken('write', 'write-reviewer', 'reviewer', ['reviewer']);
+    const reviewerWrite = await gitToken('write', 'write-reviewer', 'local-reviewer');
     expect(reviewerWrite.status).toBe(403);
     expect((await responseBody(reviewerWrite)).error.code).toBe('FORK_NOT_OWNED');
     const agentRead = await gitToken('read', 'read-agent-b', 'local-agent-b');
@@ -754,7 +754,7 @@ describe('repository and change lifecycle', () => {
       state.put(`module:repos:change:${change.changeId}`, merged);
     });
     expect((await gitToken('read', 'read-author-landed', 'local-agent-a')).status).toBe(200);
-    expect((await directToken('read', 'read-reviewer-landed', 'reviewer', ['reviewer'])).status).toBe(200);
+    expect((await gitToken('read', 'read-reviewer-landed', 'local-reviewer')).status).toBe(200);
     const landedWrite = await directToken('write', 'write-author-landed', 'agent-a', ['agent']);
     expect(landedWrite.status).toBe(403);
     expect((await responseBody(landedWrite)).error.code).toBe('FORK_NOT_OWNED');

@@ -7,6 +7,7 @@ import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCred
 import { assertCommit, assertHeadBasedOn, cloneRepo, fetchFork, git, pushCandidate, rejectCanonicalTarget, resolveHead } from './git.ts';
 import { importRepo } from './import.ts';
 import { land } from './land.ts';
+import { checkoutPublishedRevision, candidateBranchName } from './checkout.ts';
 
 const HELP = `Concord agent CLI
 
@@ -126,7 +127,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     let version = expectedVersion ?? await freshVersion();
     for (let retries = 0; ; retries++) {
       try {
-        return unwrap(await client.request('POST', `${path}/git-token`, requestOptions(flags, payload, version))) as Record<string, unknown>;
+        return unwrap(await client.request('POST', `${path}/git-token`, { ...requestOptions(flags, payload), expectedVersion: version })) as Record<string, unknown>;
       } catch (error) {
         const conflict = error instanceof ConcordError ? (error.payload as { error?: { code?: unknown; details?: { currentVersion?: unknown } } } | undefined)?.error : undefined;
         const moved = conflict?.details?.currentVersion;
@@ -247,10 +248,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     const headOid = revision === undefined ? undefined : await publishedHead(revision);
     const access = await requestGitToken(root, { storageName, scope: 'read', ttlSeconds: 300 }, numberField(repoDetail as Record<string, unknown>, 'version'));
     const remote = stringField(access, 'remote', true);
-    await fetchFork(worktree, remote, branch, tokenField(access));
+    await fetchFork(worktree, remote, candidateBranchName(branch), tokenField(access));
     if (headOid !== undefined) {
-      const resolved = await git(['rev-parse', '--verify', `${headOid}^{commit}`], {}, worktree).catch(() => null);
-      if (resolved !== headOid.toLowerCase()) throw new ConcordError(`Published head ${headOid} is not available from the candidate fork`, 'server');
+      await checkoutPublishedRevision(worktree, remote, tokenField(access), String(flags.id), revision!, headOid);
     }
     return print({ fetched: true, changeId: change.changeId ?? flags.id, worktree, branch, ...(revision === undefined ? {} : { revision, headOid }), remote: redactRemote(remote) });
   }
