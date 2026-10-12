@@ -18,6 +18,22 @@ An owner can also declare TSV tables in trusted policy metadata:
 
 The header is an exact ordered column list. `keyColumn` names one header column. `keySpec` matches the entire key, character by character, with `minLength` at least 1 and `maxLength` at most 256. `charset` is `lower`, `alnum`, `alnum-dash-dot`, or an explicit list of unique printable nonspace ASCII characters. Regular expressions and other fields are rejected. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Non-TSV changes use the file footprint.
 
+An owner may declare exact keyed-line files in the policy template. The generator copies this declaration into the digest-covered policy and checks that every path is tracked or explicitly approved. For a shared decomp header:
+
+```json
+"keyedLines": [{ "file": "include/callees.h", "keyRule": "c-declaration", "order": "append" }]
+```
+
+The single-line declaration `void sub_2029668(int a);` has unit `line:include/callees.h:sub_2029668`. `c-declaration` accepts simple prototypes, extern variables, and typedef names, including multi-word types and pointers. Function-pointer declarations and other ambiguous syntax require a whole-file lease. Blank lines, comments, and preprocessor directives form the frame; edits to them also require `file:include/callees.h`. Duplicate keys in either version require the file unit. Agents can claim distinct line keys in the same file concurrently, while the file unit conflicts with all of them.
+
+For a sorted baseline list, use:
+
+```json
+"keyedLines": [{ "file": "baselines/matching.txt", "keyRule": "whole-line", "order": "sorted" }]
+```
+
+`first-token` is also available for ledgers whose first whitespace-separated token identifies each entry. `sorted` places merged entries in key order; `append` keeps base entries and appends candidate additions in candidate order. The checker maps changed keys to line units, and composition merges disjoint keyed changes while retaining exact line bytes and the final newline. CRLF and mixed line endings require a whole-file lease. Same-key changes conflict.
+
 ### Owner file-unit policy generation
 
 An owner may add `"newFilePrefixes": ["src/mother_base/", "tests/"]` to the template or pass a repeatable `--allow-new-under DIR/` flag. Prefixes are normalized relative directories ending in `/`, sorted in the generated policy, and covered by its digest. The generator does not list future files as units. At claim and inspection time, an unregistered `file:<path>` under an approved prefix resolves to a whole-file unit for that exact path. Registered units keep their identity. Claims for the same new path conflict; distinct paths can be leased separately. Paths outside approved prefixes return `UNKNOWN_UNIT`. Use the same flags for generation and read-back comparison. A policy without prefixes retains its existing shape and digest.

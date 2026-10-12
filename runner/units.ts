@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
 import { compareKeys, trustedDependencyKeys } from '../src/verdicts/manifest';
-import { matchesTableKey, patternRow, prefixFileUnit, tableForFile, type TsvTable } from '../src/leases/units';
+import { keyedLinesForFile, matchesTableKey, patternLine, patternRow, prefixFileUnit, tableForFile, type TsvTable } from '../src/leases/units';
+import { keyedLineChanges, parseKeyedLines } from './lines';
 import { command, git, MAX_INSPECTED_BLOB_BYTES, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
@@ -99,6 +100,21 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     const rowUnits = table ? units.filter(([key]) => rowId(key, table)) : [];
     const beforeText = before && decode(before);
     const afterText = after && decode(after);
+    const linePolicy = keyedLinesForFile(policy, path);
+    if (linePolicy && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode) {
+      const parsed = keyedLineChanges(beforeText, afterText, linePolicy);
+      if (parsed) {
+        for (const key of parsed.keys) {
+          const old = parsed.before.rows.get(key)?.line;
+          const next = parsed.after.rows.get(key)?.line;
+          evidence.push({ unitKey: `line:${path}:${key}`, beforePath: old === undefined ? null : path,
+            afterPath: next === undefined ? null : path, beforeMode: old === undefined ? null : beforeMode,
+            afterMode: next === undefined ? null : afterMode, beforeDigest: old === undefined ? null : hash(old),
+            afterDigest: next === undefined ? null : hash(next) });
+        }
+        continue;
+      }
+    }
     if (table && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode &&
       beforeText.endsWith('\n') === afterText.endsWith('\n')) {
       let oldRows: Map<string, string> | null = null;
@@ -120,7 +136,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
       }
     }
     const fileUnit = units.find(([key]) => key === 'file:' + path);
-    if (!fileUnit && !table && !prefixFileUnit(policy, `file:${path}`)) coverage = 'unknown';
+    if (!fileUnit && !table && !linePolicy && !prefixFileUnit(policy, `file:${path}`)) coverage = 'unknown';
     evidence.push({ unitKey: fileUnit?.[1].canonicalKey ?? 'file:' + path,
       beforePath: before === null ? null : path, afterPath: after === null ? null : path,
       beforeMode, afterMode, beforeDigest: before === null ? null : hash(before), afterDigest: after === null ? null : hash(after) });
@@ -132,7 +148,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     try { dependencies = trustedDependencyKeys(policy, evidence.map(item => item.unitKey)); }
     catch { coverage = 'unknown'; }
     for (const key of dependencies) {
-      const unit = policy.units[key] ?? patternRow(policy, key);
+      const unit = policy.units[key] ?? patternRow(policy, key) ?? patternLine(policy, key);
       if (!unit) { coverage = 'unknown'; break; }
       const bytes = await content(repo, head, unit.file, maxInspectedBlobBytes);
       const fileMode = await mode(repo, head, unit.file);
@@ -140,11 +156,14 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
       if (bytes === null || fileMode === null) { coverage = 'unknown'; break; }
       const dependencyTable = tableForFile(policy, unit.file) ?? (unit.file === 'families.tsv' ? legacyTable : undefined);
       const row = dependencyTable && rowId(key, dependencyTable);
-      const decoded = row ? decode(bytes) : null;
-      let evidenceBytes: string | Buffer | undefined = row ? undefined : bytes;
+      const linePolicy = keyedLinesForFile(policy, unit.file);
+      const lineKey = linePolicy && key.startsWith(`line:${unit.file}:`) ? key.slice(`line:${unit.file}:`.length) : null;
+      const decoded = row || lineKey !== null ? decode(bytes) : null;
+      let evidenceBytes: string | Buffer | undefined = row || lineKey !== null ? undefined : bytes;
       if (row && decoded !== null) {
         try { evidenceBytes = parseTsv(decoded, dependencyTable!).get(row); } catch { /* Unknown scope below. */ }
       }
+      if (lineKey !== null && decoded !== null) evidenceBytes = parseKeyedLines(decoded, linePolicy!)?.rows.get(lineKey)?.line;
       if (evidenceBytes === undefined) { coverage = 'unknown'; break; }
       dependencyScope.push({ kind: 'unit', unitKey: unit.canonicalKey, path: unit.file, mode: fileMode, contentDigest: hash(evidenceBytes) });
     }

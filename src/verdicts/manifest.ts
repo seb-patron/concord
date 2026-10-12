@@ -1,15 +1,17 @@
 import type { DependencyScopeEntry, Digest, ReviewManifest, TrustedPolicy } from '../contracts';
-import { patternRow, prefixFileUnit, tableForFile } from '../leases/units';
+import { keyedLinesForFile, patternLine, patternRow, prefixFileUnit, tableForFile } from '../leases/units';
 
 const sha256 = /^sha256:[a-f0-9]{64}$/;
 const oid = /^[a-f0-9]{40,64}$/;
 export const compareKeys = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const unitSpec = (policy: TrustedPolicy, key: string) => policy.units[key] ?? (() => {
-  if (key.startsWith('file:') && (tableForFile(policy, key.slice(5)) || prefixFileUnit(policy, key))) return {
+  if (key.startsWith('file:') && (tableForFile(policy, key.slice(5)) || keyedLinesForFile(policy, key.slice(5)) || prefixFileUnit(policy, key))) return {
     canonicalKey: key, file: key.slice(5), resources: [], dependencyKeys: [],
   };
   const row = patternRow(policy, key);
-  return row && { canonicalKey: row.key, file: row.file, resources: [...row.resources], dependencyKeys: [] };
+  const line = patternLine(policy, key);
+  const unit = row ?? line;
+  return unit && { canonicalKey: unit.key, file: unit.file, resources: [...unit.resources], dependencyKeys: [] };
 })();
 
 /** JSON with object keys and review evidence arrays in a fixed order. No Worker imports. */
@@ -83,7 +85,7 @@ export function trustedDependencyKeys(policy: TrustedPolicy, changedKeys: readon
     const unit = unitSpec(policy, key);
     if (!unit || !Array.isArray(unit.dependencyKeys)) throw new Error(`UNKNOWN_DEPENDENCY:${key}`);
     const row = /^row:families:([a-z]+)$/.exec(key)?.[1];
-    const generated = patternRow(policy, key);
+    const generated = patternRow(policy, key) ?? patternLine(policy, key);
     const reviewedRowFootprint = generated ? unit.file === generated.file &&
       JSON.stringify(unit.resources) === JSON.stringify(generated.resources) : row && unit.file === 'families.tsv' &&
       JSON.stringify(unit.resources) === JSON.stringify([`families.tsv#${row}`]);
