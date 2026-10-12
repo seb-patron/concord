@@ -1,5 +1,6 @@
 import type { TrustedPolicy } from '../contracts';
 import { HttpError } from '../http';
+import { keyedLineChanges, validLineKey } from '../../runner/lines';
 
 /** A policy is the only source of unit identity. Paths never become claims by parsing input. */
 export interface UnitIdentity {
@@ -12,6 +13,36 @@ export interface UnitIdentity {
 export type TsvTable = NonNullable<TrustedPolicy['tables']>[number];
 const tableMetadata = new WeakMap<Map<string, UnitIdentity>, TsvTable[]>();
 const prefixMetadata = new WeakMap<Map<string, UnitIdentity>, string[]>();
+const lineMetadata = new WeakMap<Map<string, UnitIdentity>, NonNullable<TrustedPolicy['keyedLines']>>();
+
+export function declaredKeyedLines(policy: TrustedPolicy): NonNullable<TrustedPolicy['keyedLines']> {
+  if (policy.keyedLines === undefined) return [];
+  if (!Array.isArray(policy.keyedLines) || policy.keyedLines.length > 256) throw new Error('KEYED_LINE_POLICY_INVALID');
+  const files = new Set<string>();
+  for (const item of policy.keyedLines) {
+    if (!item || Object.keys(item).sort().join(',') !== 'file,keyRule,order' ||
+      typeof item.file !== 'string' || !validPath(item.file) || files.has(item.file) ||
+      !['c-declaration', 'first-token', 'whole-line'].includes(item.keyRule) ||
+      !['sorted', 'append'].includes(item.order)) throw new Error('KEYED_LINE_POLICY_INVALID');
+    files.add(item.file);
+  }
+  return policy.keyedLines;
+}
+
+export function keyedLinesForFile(policy: TrustedPolicy, file: string) {
+  return declaredKeyedLines(policy).find(item => item.file === file);
+}
+
+export function patternLine(policy: TrustedPolicy, raw: string): UnitIdentity | null {
+  for (const item of declaredKeyedLines(policy)) {
+    const prefix = `line:${item.file}:`;
+    if (!raw.startsWith(prefix)) continue;
+    const key = raw.slice(prefix.length);
+    if (raw.length > 512 || !validLineKey(key, item.keyRule)) return null;
+    return { key: raw, file: item.file, resources: [`${item.file}#${key}`], wholeFile: false };
+  }
+  return null;
+}
 
 export function matchesTableKey(table: TsvTable, key: string): boolean {
   const spec = table.keySpec;
@@ -105,6 +136,8 @@ function validKey(key: string): boolean {
 export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
   const registry = new Map<string, UnitIdentity>();
   const tables = declaredTables(policy);
+  const keyedLines = declaredKeyedLines(policy);
+  if (keyedLines.some(item => tables.some(table => table.file === item.file))) throw new Error('KEYED_LINE_POLICY_INVALID');
   const prefixes = declaredNewFilePrefixes(policy);
   const canonical = new Map<string, UnitIdentity>();
   const signatures = new Map<string, string>();
@@ -173,13 +206,28 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
     const fileKey = `file:${table.file}`;
     if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file: table.file, resources: [], wholeFile: true });
   }
+  for (const item of keyedLines) {
+    for (const [alias, spec] of entries) {
+      if (alias.startsWith(`line:${item.file}:`) && alias !== spec.canonicalKey)
+        throw new Error('KEYED_LINE_POLICY_INVALID');
+    }
+    for (const identity of canonical.values()) {
+      if (!identity.key.startsWith(`line:${item.file}:`)) continue;
+      const generated = patternLine(policy, identity.key);
+      if (!generated || identity.file !== item.file || identity.wholeFile || JSON.stringify(identity.resources) !== JSON.stringify(generated.resources))
+        throw new Error('KEYED_LINE_POLICY_INVALID');
+    }
+    const fileKey = `file:${item.file}`;
+    if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file: item.file, resources: [], wholeFile: true });
+  }
   tableMetadata.set(registry, tables);
+  lineMetadata.set(registry, keyedLines);
   prefixMetadata.set(registry, prefixes);
   return registry;
 }
 
 export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): UnitIdentity {
-  if (typeof raw !== 'string' || !validKey(raw)) throw new HttpError(422, 'UNKNOWN_UNIT', 'Unit key is not registered');
+  if (typeof raw !== 'string' || (!validKey(raw) && !(raw.startsWith('line:') && raw.length <= 512 && !/[\r\n\0]/.test(raw)))) throw new HttpError(422, 'UNKNOWN_UNIT', 'Unit key is not registered');
   let identity = registry.get(raw);
   if (!identity) {
     if (raw.startsWith('file:')) {
@@ -195,6 +243,11 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
       if (validKey(key) && matchesTableKey(table, key))
         identity = { key: raw, file: table.file, resources: [`${table.file}#${key}`], wholeFile: false };
       break;
+    }
+    for (const item of lineMetadata.get(registry) ?? []) {
+      if (raw.startsWith(`line:${item.file}:`) && raw.length <= 512 &&
+        validLineKey(raw.slice(`line:${item.file}:`.length), item.keyRule))
+        identity = { key: raw, file: item.file, resources: [`${item.file}#${raw.slice(`line:${item.file}:`.length)}`], wholeFile: false };
     }
   }
   if (!identity) throw new HttpError(422, 'UNKNOWN_UNIT', 'Unit key is not registered', { key: raw });
@@ -239,6 +292,12 @@ export function changedUnitsForFile(
   registry: Map<string, UnitIdentity>, file: string, before: string | null, after: string | null,
 ): UnitIdentity[] {
   const wholeFile = resolveUnit(registry, `file:${file}`);
+  const linePolicy = (lineMetadata.get(registry) ?? []).find(item => item.file === file);
+  if (linePolicy && before !== null && after !== null) {
+    // Keep this path in sync with runner inspection's conservative parser.
+    const changes = keyedLineChanges(before, after, linePolicy);
+    return changes ? changes.keys.map(key => resolveUnit(registry, `line:${file}:${key}`)) : [wholeFile];
+  }
   const table = tableMetadata.get(registry)?.find(item => item.file === file);
   if (!file.endsWith('.tsv') || before === null || after === null ||
       (before.endsWith('\n') !== after.endsWith('\n'))) return [wholeFile];

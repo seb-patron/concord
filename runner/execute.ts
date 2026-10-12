@@ -2,9 +2,10 @@ import { writeFile } from 'node:fs/promises';
 import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '../src/contracts';
 import { digest } from '../src/http';
 import { compareKeys } from '../src/verdicts/manifest';
-import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
+import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, MAX_INSPECTED_BLOB_BYTES, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
-import { tableForFile } from '../src/leases/units';
+import { keyedLinesForFile, tableForFile } from '../src/leases/units';
+import { keyedLineChanges, mergeKeyedLines } from './lines';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
@@ -56,12 +57,36 @@ async function fetchInput(directory: string, job: Job, name: string, oid: string
 
 async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
   await git(directory, ['switch', '--detach', base]);
+  const touched = new Map<string, Set<string>>();
+  const readBlob = async (oid: string, path: string): Promise<string | null> => {
+    const value = await command('git', ['show', `${oid}:${path}`], directory, 30_000, undefined, undefined, MAX_INSPECTED_BLOB_BYTES);
+    if (value.code !== 0) return null;
+    if (value.truncated) throw new Error('MERGE_CONFLICT');
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(value.stdoutBytes); }
+    catch { throw new Error('MERGE_CONFLICT'); }
+  };
   const env = childEnvironment({ GIT_AUTHOR_NAME: 'Concord Runner', GIT_AUTHOR_EMAIL: 'runner@concord.invalid',
     GIT_COMMITTER_NAME: 'Concord Runner', GIT_COMMITTER_EMAIL: 'runner@concord.invalid',
     GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' });
   for (const candidate of inputs) {
     if (!await isAncestor(directory, candidate.baseOid, candidate.headOid) ||
       !await isAncestor(directory, candidate.baseOid, await git(directory, ['rev-parse', 'HEAD']))) throw new Error('CANDIDATE_ANCESTRY');
+    const diff = await command('git', ['diff', '--no-renames', '--name-only', '-z', candidate.baseOid, candidate.headOid, '--'],
+      directory, 30_000, undefined, undefined, MAX_INSPECTED_BLOB_BYTES);
+    if (diff.code !== 0 || diff.truncated) throw new Error('MERGE_CONFLICT');
+    const changed = new Set(new TextDecoder('utf-8', { fatal: true }).decode(diff.stdoutBytes).split('\0'));
+    for (const item of job.unitPolicy.keyedLines ?? []) {
+      if (!changed.has(item.file)) continue;
+      const before = await readBlob(candidate.baseOid, item.file);
+      const after = await readBlob(candidate.headOid, item.file);
+      if (before === after) continue;
+      const change = before !== null && after !== null ? keyedLineChanges(before, after, item) : null;
+      const keys = change ? change.keys : ['*'];
+      const prior = touched.get(item.file) ?? new Set<string>();
+      if (keys.some(key => prior.has('*') || key === '*' && prior.size > 0 || prior.has(key))) throw new Error('KEYED_LINE_CONFLICT');
+      keys.forEach(key => prior.add(key));
+      touched.set(item.file, prior);
+    }
     const result = await command('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'),
       'merge', '--no-edit', '--no-ff', candidate.headOid], directory, 60_000, env);
     if (result.code === 0) continue;
@@ -69,16 +94,22 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
     if (!conflicts.length) throw new Error('MERGE_CONFLICT');
     for (const path of conflicts) {
       const table = tableForFile(job.unitPolicy, path);
-      if (!table) throw new Error('MERGE_CONFLICT');
+      const linePolicy = keyedLinesForFile(job.unitPolicy, path);
+      if (!table && !linePolicy) throw new Error('MERGE_CONFLICT');
       const stages = await git(directory, ['ls-files', '--stage', '--', path]);
       const modes = stages.split('\n').filter(Boolean).map(line => line.split(' ')[0]);
       if (modes.length !== 3 || new Set(modes).size !== 1) throw new Error('MERGE_CONFLICT');
       const readStage = async (stage: number) => {
-        const value = await command('git', ['show', ':' + stage + ':' + path], directory, 30_000);
+        const value = await command('git', ['show', ':' + stage + ':' + path], directory, 30_000, undefined, undefined, MAX_INSPECTED_BLOB_BYTES);
         if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
-        return value.stdout;
+        try { return new TextDecoder('utf-8', { fatal: true }).decode(value.stdoutBytes); }
+        catch { throw new Error('MERGE_CONFLICT'); }
       };
-      const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3), table);
+      const baseText = await readStage(1);
+      const oursText = await readStage(2);
+      const theirsText = await readStage(3);
+      const merged = table ? mergeTsv(baseText, oursText, theirsText, table) :
+        mergeKeyedLines(baseText, oursText, theirsText, linePolicy!);
       await writeFile(directory + '/' + path, merged);
       await git(directory, ['add', '--', path]);
     }
@@ -259,7 +290,7 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
     value = await withJobDeadline(began + job.timeoutMs, () => temporaryWork(directory => executeIn(directory, job, profile, tracked)));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown runner failure';
-    const outcome = message.includes('MERGE_CONFLICT') || message.includes('TSV_COLLISION') || message.includes('INVALID_TSV') ? 'MERGE_CONFLICT' :
+    const outcome = message.includes('MERGE_CONFLICT') || message.includes('KEYED_LINE_CONFLICT') || message.includes('TSV_COLLISION') || message.includes('INVALID_TSV') ? 'MERGE_CONFLICT' :
       message.includes('TIMEOUT') ? 'TIMEOUT' : 'ENV_ERROR';
     const common = { jobId: job.jobId, attempt: job.attempt, inputDigest: job.inputDigest, fence: job.fence,
       checkerDigest: job.checkerDigest, toolchainDigest: job.toolchainDigest, oracleDigest: job.oracleDigest,

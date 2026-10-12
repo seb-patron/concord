@@ -63,6 +63,23 @@ beforeEach(() => {
 
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
+it('records owner keyed-line declarations under the policy digest', () => {
+  writeFileSync(join(repo, 'callees.h'), 'void alpha(void);\n');
+  git('add', 'callees.h');
+  git('-c', 'user.name=Owner', '-c', 'user.email=owner@example.test', 'commit', '-qm', 'header');
+  oid = git('rev-parse', 'HEAD');
+  writeFileSync(template, JSON.stringify({ ...baseTemplate,
+    keyedLines: [{ file: 'callees.h', keyRule: 'c-declaration', order: 'append' }] }));
+  const first = generated(['--oid', oid]);
+  expect(first.policy.keyedLines).toEqual([{ file: 'callees.h', keyRule: 'c-declaration', order: 'append' }]);
+  writeFileSync(template, JSON.stringify({ ...baseTemplate,
+    keyedLines: [{ file: 'callees.h', keyRule: 'c-declaration', order: 'sorted' }] }));
+  expect(generated(['--oid', oid]).policyDigest).not.toBe(first.policyDigest);
+  writeFileSync(template, JSON.stringify({ ...baseTemplate,
+    keyedLines: [{ file: 'callees.h', keyRule: 'regex', order: 'sorted' }] }));
+  expect(run(['--oid', oid]).status).toBe(2);
+});
+
 describe('owner file-unit generator', () => {
   it('is deterministic, hashes policy alone and preserves declared rows and tables', () => {
     const a = run(['--oid', oid, '--allow-path', 'new/one.txt', '--allow-path', 'new/two.rs']);

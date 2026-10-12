@@ -21,7 +21,7 @@ const trusted: TrustedConfiguration = { policies: { 'local-demo': policy }, prof
 const previousTrustedConfig = (env as Env).TRUSTED_CONFIG;
 const previousChangeView = repos.changeView;
 
-afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; delete policy.newFilePrefixes; });
+afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; delete policy.newFilePrefixes; delete policy.keyedLines; });
 
 function setupPolicy(): void {
   (env as Env).TRUSTED_CONFIG = JSON.stringify(trusted);
@@ -110,6 +110,21 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('allows distinct keyed declarations while a file claim conflicts with both', async () => {
+    policy.keyedLines = [{ file: 'include/callees.h', keyRule: 'c-declaration', order: 'append' }];
+    setupPolicy();
+    const repo = 'lease_keyed_lines';
+    const alpha = await claim(repo, 'local-agent-a', 'alpha', ['line:include/callees.h:alpha'], 'alpha');
+    expect(alpha.status).toBe(201);
+    const beta = await claim(repo, 'local-agent-b', 'beta', ['line:include/callees.h:beta'], 'beta');
+    expect(beta.status).toBe(201);
+    const file = await claim(repo, 'local-agent-c', 'file', ['file:include/callees.h'], 'file');
+    expect(file.status).toBe(409);
+    expect((await responseBody(file)).error.code).toBe('LEASE_CONFLICT');
+    const duplicate = await claim(repo, 'local-agent-c', 'duplicate', ['line:include/callees.h:alpha'], 'duplicate');
+    expect(duplicate.status).toBe(409);
+    expect((await responseBody(duplicate)).error.code).toBe('LEASE_CONFLICT');
+  });
   it('claims exact new paths under a prefix and conflicts only on the same path', async () => {
     policy.newFilePrefixes = ['tests/'];
     setupPolicy();

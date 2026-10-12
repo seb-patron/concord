@@ -128,6 +128,8 @@ export interface TrustedPolicy {
   /** Owner-declared TSV row namespaces. These are never supplied by a change author. */
   tables?: Array<{ name: string; file: string; header: string[]; keyColumn: string;
     keySpec: { charset: 'lower' | 'alnum' | 'alnum-dash-dot' | string[]; minLength: number; maxLength: number } }>;
+  /** Exact files whose individual declaration/list lines have policy-derived identities. */
+  keyedLines?: Array<{ file: string; keyRule: 'c-declaration' | 'first-token' | 'whole-line'; order: 'sorted' | 'append' }>;
   checkerId: string; checkerDigest: Digest;
   acceptance: AcceptancePolicy;
 }
