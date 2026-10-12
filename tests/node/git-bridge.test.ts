@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startGitBridge, type GitBridge } from '../../local/git-bridge';
 import { bridgeStorage } from '../../src/storage/bridge';
+import { testTimeout } from '../helpers';
 
 const temporary: string[] = [];
 const openBridges: GitBridge[] = [];
@@ -14,7 +15,7 @@ afterEach(async () => {
 });
 const temp = () => { const path = mkdtempSync(join(tmpdir(), 'concord-bridge-')); temporary.push(path); return path; };
 const git = (args: string[]) => execFileSync('git', args, {
-  encoding: 'utf8', timeout: 10_000,
+  encoding: 'utf8', timeout: testTimeout(10_000),
   env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test' },
 });
 
@@ -64,7 +65,7 @@ describe('authenticated loopback Git bridge', () => {
     const restartedStorage = bridgeStorage(restarted.url);
     expect(await restartedStorage.resolveRef('candidate', 'refs/heads/main')).toBe(oid);
     expect(await restartedStorage.revokeToken('candidate', persistentToken.secret)).toBe(true);
-  });
+  }, testTimeout(60_000));
 
   it('rejects unauthenticated calls, traversal, unknown names and unsafe refs', async () => {
     const bridge = await startGitBridge(temp(), 'another-bridge-token-12345');

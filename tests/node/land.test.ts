@@ -8,7 +8,7 @@ import { approvedHead, filesChanged, land, parseAllowed, unitKeys, waitChange } 
 import { ConcordError } from '../../cli/client.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
-import { withoutNodeDeprecationWarnings } from '../helpers.ts';
+import { testTimeout, withoutNodeDeprecationWarnings } from '../helpers.ts';
 
 const execFile = promisify(callback);
 const dirs: string[] = [];
@@ -57,7 +57,7 @@ describe('land input and evidence gates', () => {
       if (path === '/repos/demo/jobs/job/result') return { data: { result: { outcome, log: 'checker diagnostic tail' } } };
       throw new Error(`unexpected ${path}`);
     });
-    await expect(waitChange({ request } as never, '/repos/demo/changes/change', Date.now() + 10_000, () => {}, async () => {}))
+    await expect(waitChange({ request } as never, '/repos/demo/changes/change', Date.now() + testTimeout(10_000), () => {}, async () => {}))
       .rejects.toMatchObject({ message: `INSPECTION_FAILED: ${outcome}${['ENV_ERROR', 'TIMEOUT'].includes(outcome) ? '; fix the environment, then re-run land with a new --intent-key' : ''}`,
         payload: { log: 'checker diagnostic tail' } });
     expect(request).toHaveBeenCalledTimes(3);
@@ -463,7 +463,7 @@ function service(file: string, args: string[], env: NodeJS.ProcessEnv): () => st
   return () => output;
 }
 async function waitFor(check: () => Promise<boolean>): Promise<void> {
-  const until = Date.now() + 30_000;
+  const until = Date.now() + testTimeout(30_000);
   while (Date.now() < until) {
     if (await check().catch(() => false)) return;
     await new Promise(done => setTimeout(done, 150));
@@ -527,7 +527,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   async function drive<T>(work: Promise<T>): Promise<T> {
     let finished = false;
     work.finally(() => { finished = true; }).catch(() => {});
-    const handled = new Set<string>(); const until = Date.now() + 150_000;
+    const handled = new Set<string>(); const until = Date.now() + testTimeout(150_000);
     while (!finished && Date.now() < until) {
       const snapshot = await api('/snapshot').catch(() => null);
       const pending = snapshot?.data?.projections?.runners?.jobs?.find((job: any) =>
@@ -539,7 +539,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
         if (role === 'checker') args.push('--profile', profilePath);
         const run = await execFile(process.execPath, args, { cwd: root, env: {
           ...environment, CONCORD_TOKEN: `local-${role}`, CONCORD_PROFILE_DIGEST: profile.digest,
-        }, timeout: 40_000 });
+        }, timeout: testTimeout(40_000) });
         expect(run.stdout).toContain('Completed 1 job(s)');
       } else await new Promise(done => setTimeout(done, 150));
     }
@@ -556,7 +556,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await git(seed, 'add', '.'); await git(seed, 'commit', '-qm', 'seed');
   const imported = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import',
     '--source', seed, '--ref', 'main', '--repo', 'landdemo', '--policy-id', 'generic-land',
-    '--profile-id', 'generic-land'], { cwd: root, env: { ...environment, CONCORD_TOKEN: 'local-owner' }, timeout: 150_000 }));
+    '--profile-id', 'generic-land'], { cwd: root, env: { ...environment, CONCORD_TOKEN: 'local-owner' }, timeout: testTimeout(150_000) }));
   const importedOid = JSON.parse(imported.stdout).canonicalOid;
   expect((await api('')).data.observedCanonicalOid).toBe(importedOid);
   const canonical = join(dir, 'bridge', (await api('')).data.canonicalStorageName + '.git');
@@ -569,25 +569,25 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const allowed = join(dir, 'allowed.txt'); await writeFile(allowed, ['a.txt', ...bulkFiles].join('\n') + '\n');
   const evidence = join(dir, 'review.txt'); await writeFile(evidence, `# ✅ APPROVED FOR MERGE — head ${commit}\n\nReview of ${commit}\n\nAPPROVED for merge\n`);
   const baseArgs = ['--repo', 'landdemo', '--source', sourceDir, '--commit', commit, '--intent-key', 'generic-task',
-    '--intent', 'Update a value', '--allowed-files', allowed, '--wait-seconds', '150', '--json'];
+    '--intent', 'Update a value', '--allowed-files', allowed, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'];
   const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
   const authorEnv: NodeJS.ProcessEnv = { ...landEnv };
   delete authorEnv.CONCORD_REVIEWER_TOKEN;
   const first = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs],
-    { cwd: root, env: authorEnv, timeout: 155_000 }));
+    { cwd: root, env: authorEnv, timeout: testTimeout(155_000) }));
   expect(first.stdout).toContain('"state":"awaiting-review"');
   expect(first.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.state === 'leased').unitKeys).toHaveLength(16);
   const beforeResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
   const wrongEvidence = join(dir, 'wrong-review.txt');
   await writeFile(wrongEvidence, `APPROVED for merge: ${'f'.repeat(40)}\n`);
   await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs,
-    '--review-evidence', wrongEvidence], { cwd: root, env: landEnv, timeout: 30_000 }))
+    '--review-evidence', wrongEvidence], { cwd: root, env: landEnv, timeout: testTimeout(30_000) }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') });
   await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs,
-    '--review-evidence', evidence], { cwd: root, env: { ...landEnv, CONCORD_REVIEWER_TOKEN: 'local-agent-a' }, timeout: 30_000 }))
+    '--review-evidence', evidence], { cwd: root, env: { ...landEnv, CONCORD_REVIEWER_TOKEN: 'local-agent-a' }, timeout: testTimeout(30_000) }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('reviewer token must differ') });
   const landed = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
-    ...baseArgs, '--review-evidence', evidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    ...baseArgs, '--review-evidence', evidence], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }))
     .catch(error => { throw new Error(`land failed after: ${(error as { stdout?: string }).stdout ?? ''}\n${(error as Error).message}`); });
   const afterResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
   expect(afterResume.changeId).toBe(beforeResume.changeId);
@@ -608,14 +608,14 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(carryEvidence, `# ✅ APPROVED FOR MERGE — head ${sourceOid}\nAPPROVED for merge\n`);
   const carryArgs = ['--repo', 'landdemo', '--source', oldSource, '--commit', sourceOid,
     '--intent-key', 'carry-task', '--intent', 'Carry old-parent update', '--allowed-files', carryAllowed,
-    '--wait-seconds', '150', '--json'];
+    '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'];
   const otherEvidence = join(dir, 'other-review.txt');
   await writeFile(otherEvidence, `# ✅ APPROVED FOR MERGE — head ${'f'.repeat(40)}\nAPPROVED for merge\n`);
   await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
-    '--review-evidence', otherEvidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    '--review-evidence', otherEvidence], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') }));
   const carried = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
-    '--review-evidence', carryEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
+    '--review-evidence', carryEvidence], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }));
   const carriedEvents = carried.stdout.trim().split('\n').map(line => JSON.parse(line));
   const carryEvent = carriedEvents.find(item => item.state === 'review-carried');
   expect(carryEvent).toMatchObject({ sourceOid, publishedOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
@@ -640,18 +640,18 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(join(rangeRun, 'work-spec.md'), 'Goal:\n  Outcome: Land repaired range\n');
   await writeFile(join(rangeRun, 'allowed-files.txt'), 'range-a.txt\nrange-b.txt\n');
   const rangeEvidence = join(dir, 'range-review.txt');
-  const rangeArgs = ['--repo', 'landdemo', '--aw-run', rangeRun, '--base', rangeBase, '--wait-seconds', '150', '--json'];
+  const rangeArgs = ['--repo', 'landdemo', '--aw-run', rangeRun, '--base', rangeBase, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'];
   await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', '--repo', 'landdemo',
-    '--aw-run', rangeRun, '--wait-seconds', '150', '--json'], { cwd: root, env: landEnv, timeout: 155_000 }))
+    '--aw-run', rangeRun, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('supply --base') });
   await writeFile(rangeEvidence, `# ✅ APPROVED FOR MERGE — head ${firstRangeCommit}\nAPPROVED for merge\n`);
   await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...rangeArgs,
-    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') }));
   await writeFile(rangeEvidence, `# ✅ APPROVED FOR MERGE — head ${rangeHead}\nAPPROVED for merge\n`);
   const beforeRange = (await api('')).data.observedCanonicalOid;
   const rangeResult = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...rangeArgs,
-    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
+    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }));
   const rangeEvents = rangeResult.stdout.trim().split('\n').map(line => JSON.parse(line));
   const squashEvent = rangeEvents.find(item => item.state === 'squashed');
   expect(squashEvent).toMatchObject({ base: rangeBase, headOid: rangeHead,
@@ -682,7 +682,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const contextLand = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
     '--repo', 'landdemo', '--source', contextSource, '--commit', contextOid, '--intent-key', 'context-task',
     '--intent', 'Update shared context', '--allowed-files', sharedAllowed, '--review-evidence', contextEvidence,
-    '--wait-seconds', '150', '--json'], { cwd: root, env: landEnv, timeout: 155_000 }));
+    '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'], { cwd: root, env: landEnv, timeout: testTimeout(155_000) }));
   expect(contextLand.stdout).toContain('"state":"landed"');
   const staleContext = await temp(); await git(staleContext, 'clone', '-q', '-b', 'main', seed, '.');
   const stale = await readFile(join(staleContext, 'shared.txt'), 'utf8');
@@ -693,9 +693,9 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(staleEvidence, `# ✅ APPROVED FOR MERGE — head ${staleOid}\nAPPROVED for merge\n`);
   const staleArgs = ['--repo', 'landdemo', '--source', staleContext, '--commit', staleOid,
     '--intent-key', 'stale-context-task', '--intent', 'Update nearby line', '--allowed-files', sharedAllowed,
-    '--review-evidence', staleEvidence, '--wait-seconds', '150', '--json'];
+    '--review-evidence', staleEvidence, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'];
   await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...staleArgs],
-    { cwd: root, env: landEnv, timeout: 155_000 })).rejects.toMatchObject({ code: 2,
+    { cwd: root, env: landEnv, timeout: testTimeout(155_000) })).rejects.toMatchObject({ code: 2,
     stderr: expect.stringContaining('exact published head SHA') }));
   const staleChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'stale-context-task');
   const staleCandidate = join(dir, 'bridge', `${staleChange.candidateStorageName}.git`);
@@ -709,18 +709,18 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     const paths = join(dir, `allowed-parallel-${index}.txt`); await writeFile(paths, `${file}\n`);
     const review = join(dir, `review-parallel-${index}.txt`); await writeFile(review, `# ✅ APPROVED FOR MERGE — head ${oid}\nAPPROVED for merge\n`);
     return { args: ['--repo', 'landdemo', '--source', checkout, '--commit', oid, '--intent-key', `parallel-${index}`,
-      '--intent', `Update ${file}`, '--allowed-files', paths, '--wait-seconds', '150', '--json'], review,
+      '--intent', `Update ${file}`, '--allowed-files', paths, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'], review,
       env: { ...environment, CONCORD_TOKEN: index ? 'local-agent-c' : 'local-agent-b', CONCORD_REVIEWER_TOKEN: 'local-reviewer' } };
   }));
   const inspected = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
-    ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args], { cwd: root, env: item.env, timeout: 155_000 }))));
+    ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args], { cwd: root, env: item.env, timeout: testTimeout(155_000) }))));
   for (const item of inspected) expect(item.stdout).toContain('"state":"awaiting-review"');
   const attemptOutcomes: Array<{ result: Awaited<ReturnType<typeof execFile>> } | { error: Error & { stdout?: string; stderr?: string } } | undefined> = [];
   const stderrTails = parallel.map(() => '');
   const startAttempt = (index: number) => new Promise<NonNullable<typeof attemptOutcomes[number]>>(resolveAttempt => {
     const item = parallel[index];
     callback(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args, '--review-evidence', item.review],
-      { cwd: root, env: item.env, timeout: 155_000 }, (error, stdout, stderr) => {
+      { cwd: root, env: item.env, timeout: testTimeout(155_000) }, (error, stdout, stderr) => {
         const outcome = error
           ? { error: Object.assign(error, { stdout, stderr }) as Error & { stdout?: string; stderr?: string } }
           : { result: { stdout, stderr } as Awaited<ReturnType<typeof execFile>> };
@@ -729,7 +729,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
       }).stderr?.on('data', part => { stderrTails[index] = (stderrTails[index] + part.toString()).slice(-6000); });
   });
   const firstAttempt = startAttempt(0);
-  const firstQueueDeadline = Date.now() + 45_000;
+  const firstQueueDeadline = Date.now() + testTimeout(45_000);
   let firstSelected = false;
   while (Date.now() < firstQueueDeadline) {
     const snapshot = await api('/snapshot').catch(() => null);
@@ -746,9 +746,9 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     }
     await new Promise(done => setTimeout(done, 150));
   }
-  expect(firstSelected, `first queue entry was not selected within 45s\nstderr tail:\n${stderrTails[0]}`).toBe(true);
+  expect(firstSelected, `first queue entry was not selected within ${testTimeout(45_000) / 1000}s\nstderr tail:\n${stderrTails[0]}`).toBe(true);
   const secondAttempt = startAttempt(1);
-  const secondQueueDeadline = Date.now() + 45_000;
+  const secondQueueDeadline = Date.now() + testTimeout(45_000);
   let secondAdmitted = false;
   while (Date.now() < secondQueueDeadline) {
     const snapshot = await api('/snapshot').catch(() => null);
@@ -764,11 +764,11 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     }
     await new Promise(done => setTimeout(done, 150));
   }
-  expect(secondAdmitted, `second queue entry was not admitted within 45s\nstderr tail:\n${stderrTails[1]}`).toBe(true);
+  expect(secondAdmitted, `second queue entry was not admitted within ${testTimeout(45_000) / 1000}s\nstderr tail:\n${stderrTails[1]}`).toBe(true);
   const attemptsWork = drive(Promise.all([firstAttempt, secondAttempt]));
   void attemptsWork.catch(() => {});
   let staleMainBlocked = false;
-  const blockedDeadline = Date.now() + 150_000;
+  const blockedDeadline = Date.now() + testTimeout(150_000);
   while (Date.now() < blockedDeadline) {
     const queue = await api('/queue').catch(() => null);
     if (queue?.data?.entries?.some((entry: any) => entry.state === 'blocked' && entry.blockedReason === 'STALE_MAIN') ||
@@ -784,19 +784,19 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     }
     await new Promise(done => setTimeout(done, 150));
   }
-  expect(staleMainBlocked, `queue did not become observably blocked with STALE_MAIN within 150s\nstderr tails:\n${stderrTails.join('\n--- child ---\n')}`).toBe(true);
+  expect(staleMainBlocked, `queue did not become observably blocked with STALE_MAIN within ${testTimeout(150_000) / 1000}s\nstderr tails:\n${stderrTails.join('\n--- child ---\n')}`).toBe(true);
   const attempts = await attemptsWork;
   const merged = [];
   for (const [index, attempt] of attempts.entries()) {
     if ('result' in attempt) { merged.push(attempt.result); continue; }
-    // execFile settles only after the child exits (or its 155s timeout); inspect both streams
+    // execFile settles only after the child exits (or its scaled timeout); inspect both streams
     // because the CLI diagnostic and Node warnings may be written to different streams.
     const output = withoutNodeDeprecationWarnings([attempt.error.stdout, attempt.error.stderr].filter(Boolean).join('\n'));
     expect(output, attempt.error.message).toContain('QUEUE_BLOCKED: STALE_MAIN');
     const item = parallel[index];
     const retryArgs = [...item.args]; retryArgs[retryArgs.indexOf('--intent-key') + 1] += '-retry';
     merged.push(await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
-      ...retryArgs, '--review-evidence', item.review], { cwd: root, env: item.env, timeout: 155_000 })));
+      ...retryArgs, '--review-evidence', item.review], { cwd: root, env: item.env, timeout: testTimeout(155_000) })));
   }
   for (const item of merged) expect(item.stdout).toContain('"state":"landed"');
   expect((await api('')).data.observedCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
@@ -809,15 +809,15 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     const paths = join(dir, `allowed-shared-${index}.txt`); await writeFile(paths, 'shared.txt\n');
     const review = join(dir, `review-shared-${index}.txt`); await writeFile(review, `# ✅ APPROVED FOR MERGE — head ${oid}\nAPPROVED for merge\n`);
     return { args: ['--repo', 'landdemo', '--source', checkout, '--commit', oid, '--intent-key', `shared-${index}`,
-      '--intent', `Edit shared line ${line}`, '--allowed-files', paths, '--wait-seconds', '150', '--json'], review,
+      '--intent', `Edit shared line ${line}`, '--allowed-files', paths, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'], review,
       env: { ...environment, CONCORD_TOKEN: index ? 'local-agent-c' : 'local-agent-b', CONCORD_REVIEWER_TOKEN: 'local-reviewer' } };
   }));
   const firstShared = execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...sameFile[0].args,
-    '--review-evidence', sameFile[0].review], { cwd: root, env: sameFile[0].env, timeout: 155_000 });
+    '--review-evidence', sameFile[0].review], { cwd: root, env: sameFile[0].env, timeout: testTimeout(155_000) });
   await waitFor(async () => (await api('/leases')).data.items.some((item: any) =>
     item.unitKey === 'file:shared.txt' && item.state === 'active'));
   const secondShared = execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...sameFile[1].args],
-    { cwd: root, env: sameFile[1].env, timeout: 155_000 });
+    { cwd: root, env: sameFile[1].env, timeout: testTimeout(155_000) });
   const [firstResult, secondResult] = await drive(Promise.all([firstShared, secondShared]));
   expect(firstResult.stdout).toContain('"state":"landed"');
   expect(secondResult.stdout).toContain('"state":"LEASE_CONFLICT"');
@@ -828,9 +828,9 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(sameFile[1].review, `# ✅ APPROVED FOR MERGE — head ${approved.headOid}\nAPPROVED for merge\n`);
   const secondLanded = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
     ...sameFile[1].args, '--review-evidence', sameFile[1].review],
-  { cwd: root, env: sameFile[1].env, timeout: 155_000 }));
+  { cwd: root, env: sameFile[1].env, timeout: testTimeout(155_000) }));
   expect(secondLanded.stdout).toContain('"state":"landed"');
-}, 360_000);
+}, testTimeout(360_000));
 
 import type { DeltaCheckJob, DeltaResult, Digest, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
 import { dependencyScopeDigest, hashCanonical, manifestDigest } from '../../src/verdicts/manifest';

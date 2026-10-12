@@ -11,6 +11,7 @@ import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
 import { ConcordClient } from '../../cli/client.ts';
 import { gitEnvironment } from '../../cli/git.ts';
 import { importRepo } from '../../cli/import.ts';
+import { testTimeout } from '../helpers';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
@@ -22,7 +23,7 @@ const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'Import Fixture', GIT_AUTHOR_E
   GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
 
 async function git(directory: string, ...args: string[]): Promise<string> {
-  return (await execFile('git', args, { cwd: directory, env: gitEnv, timeout: 30_000 })).stdout.trim();
+  return (await execFile('git', args, { cwd: directory, env: gitEnv, timeout: testTimeout(30_000) })).stdout.trim();
 }
 async function temporary(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'concord-import-test-'));
@@ -66,18 +67,18 @@ async function partialClone(root: string, source: string, checkout = false): Pro
   const partial = join(root, 'partial');
   await execFile('git', ['clone', '--quiet', '--filter=blob:none', '--no-checkout',
     '--upload-pack=git -c uploadpack.allowFilter=true upload-pack',
-    pathToFileURL(source).href, partial], { cwd: root, env: gitEnv, timeout: 30_000 });
+    pathToFileURL(source).href, partial], { cwd: root, env: gitEnv, timeout: testTimeout(30_000) });
   if (!checkout) {
     const missing = await execFile('git', ['rev-list', '--objects', '--missing=print', 'HEAD'], {
-      cwd: partial, env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+      cwd: partial, env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: testTimeout(30_000) });
     expect(missing.stdout).toMatch(/\?[a-f0-9]{40}/);
     const listing = await execFile('git', ['ls-tree', '-r', '-l', 'HEAD'], { cwd: partial,
-      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: testTimeout(30_000) });
     expect(listing.stdout).toMatch(/ (?:-|BAD)\t/);
   }
   if (checkout) await git(partial, 'checkout', '--force', 'main');
   else await execFile('git', ['read-tree', 'HEAD'], { cwd: partial,
-    env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+    env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: testTimeout(30_000) });
   const packs = await readdir(join(partial, '.git', 'objects', 'pack'));
   expect(packs.some(name => name.endsWith('.promisor'))).toBe(true);
   expect(await git(partial, 'config', '--get', 'remote.origin.promisor')).toBe('true');
@@ -123,7 +124,7 @@ function start(file: string, args: string[], env: NodeJS.ProcessEnv): { child: C
   return { child, output: () => output };
 }
 async function waitFor<T>(action: () => Promise<T>, accept: (value: T) => boolean, output: () => string): Promise<T> {
-  const until = Date.now() + 45_000;
+  const until = Date.now() + testTimeout(45_000);
   while (Date.now() < until) {
     try { const value = await action(); if (accept(value)) return value; } catch { /* service starting */ }
     await new Promise(done => setTimeout(done, 150));
@@ -166,7 +167,7 @@ async function importWithLocalStack(root: string, source: string, extraArgs: str
   async function drive<T>(work: Promise<T>): Promise<T> {
     let finished = false;
     work.finally(() => { finished = true; }).catch(() => {});
-    const until = Date.now() + 150_000;
+    const until = Date.now() + testTimeout(150_000);
     const handled = new Set<string>();
     while (!finished && Date.now() < until) {
       const snapshot = await api('snapshot').catch(() => null);
@@ -179,7 +180,7 @@ async function importWithLocalStack(root: string, source: string, extraArgs: str
         if (role === 'checker') runnerArgs.push('--profile', profile.sourcePath!);
         const run = await execFile(process.execPath, ['--import', 'tsx', ...runnerArgs],
           { cwd, env: { ...env, CONCORD_TOKEN: `local-${role}`, CONCORD_PROFILE_DIGEST: profile.digest },
-            timeout: 40_000, maxBuffer: 1024 * 1024 });
+            timeout: testTimeout(40_000), maxBuffer: 1024 * 1024 });
         expect(run.stdout).toContain('Completed 1 job(s)');
       } else await new Promise(done => setTimeout(done, 150));
     }
@@ -187,7 +188,7 @@ async function importWithLocalStack(root: string, source: string, extraArgs: str
     return work;
   }
   const first = await drive(execFile(process.execPath, ['--import', 'tsx', ...args],
-    { cwd, env, timeout: 180_000, maxBuffer: 1024 * 1024 }));
+    { cwd, env, timeout: testTimeout(180_000), maxBuffer: 1024 * 1024 }));
   const imported = JSON.parse(first.stdout) as { canonicalOid: string; treeOid: string };
   const detail = (await api(''))?.data;
   const canonical = join(root, 'bridge', detail.canonicalStorageName + '.git');
@@ -208,7 +209,7 @@ describe('adopted root import', () => {
     const before = await sourceState(source);
     const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import',
       '--source', source, '--ref', 'main', '--repo', 'adopted', '--exclude', 'private/**', '--print-tree'], {
-      cwd, env: { ...gitEnv, GIT_DIR: join(source, '.git'), GIT_INDEX_FILE: index }, timeout: 30_000,
+      cwd, env: { ...gitEnv, GIT_DIR: join(source, '.git'), GIT_INDEX_FILE: index }, timeout: testTimeout(30_000),
     });
     const tree = JSON.parse(result.stdout);
     expect(tree).toMatchObject({ fileCount: 3, excludedPathCount: 1 });
@@ -267,7 +268,7 @@ describe('adopted root import', () => {
     const args = ['--import', 'tsx', 'cli/main.ts', 'import', '--source', source, '--ref', 'main',
       '--repo', 'adopted', '--with-history', '--print-tree'];
     for (const extra of [['--exclude', 'private/**'], ['--exclude-file', join(root, 'missing')]]) {
-      await expect(execFile(process.execPath, [...args, ...extra], { cwd, env: gitEnv, timeout: 30_000 }))
+      await expect(execFile(process.execPath, [...args, ...extra], { cwd, env: gitEnv, timeout: testTimeout(30_000) }))
         .rejects.toMatchObject({ code: 2, stderr: expect.stringMatching(/--with-history cannot be combined/) });
     }
   });
@@ -279,7 +280,7 @@ describe('adopted root import', () => {
     const before = await sourceState(source);
     const args = ['--import', 'tsx', 'cli/main.ts', 'import', '--source', source, '--ref', 'main',
       '--repo', 'adopted', '--print-tree'];
-    await expect(execFile(process.execPath, args, { cwd, env: gitEnv, timeout: 30_000 }))
+    await expect(execFile(process.execPath, args, { cwd, env: gitEnv, timeout: testTimeout(30_000) }))
       .rejects.toMatchObject({ code: 2, stderr: expect.stringMatching(/unavailable locally/) });
     expect(await sourceState(source)).toEqual(before);
     const fetcher = vi.fn(() => { throw new Error('API contacted for unavailable blob'); });
@@ -302,10 +303,10 @@ describe('adopted root import', () => {
     const source = await partialClone(root, original, true);
     const before = await sourceState(source);
     const head = await execFile('git', ['ls-tree', '-r', '-l', 'HEAD'], { cwd: source,
-      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: testTimeout(30_000) });
     expect(head.stdout).not.toMatch(/ (?:-|BAD)\t/);
     const reachable = await execFile('git', ['rev-list', '--objects', '--missing=print', 'HEAD'], { cwd: source,
-      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: testTimeout(30_000) });
     expect(reachable.stdout).toContain(`?${historicalBlob}`);
     const fetcher = vi.fn(() => { throw new Error('API contacted for missing history'); });
     const client = new ConcordClient({ url: 'http://127.0.0.1:1', fetch: fetcher });
@@ -320,10 +321,10 @@ describe('adopted root import', () => {
     const { source: original } = await fixture(root);
     const source = join(root, 'shallow');
     await execFile('git', ['clone', '--quiet', '--depth=1', '--branch', 'main',
-      pathToFileURL(original).href, source], { cwd: root, env: gitEnv, timeout: 30_000 });
+      pathToFileURL(original).href, source], { cwd: root, env: gitEnv, timeout: testTimeout(30_000) });
     expect(await git(source, 'rev-parse', '--is-shallow-repository')).toBe('true');
     const preflight = await execFile('git', ['rev-list', '--objects', '--no-object-names',
-      '--missing=print', 'HEAD'], { cwd: source, env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+      '--missing=print', 'HEAD'], { cwd: source, env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: testTimeout(30_000) });
     expect(preflight.stdout).not.toMatch(/^\?[a-f0-9]{40}$/m);
     const before = await sourceState(source);
     const fetcher = vi.fn(() => { throw new Error('API contacted for shallow history'); });
@@ -363,7 +364,7 @@ describe('adopted root import', () => {
     await expect(importRepo({ ...options, requireMatch: true })).rejects.toThrow(/matches no paths/);
     await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import', '--source', source,
       '--ref', 'main', '--repo', 'adopted', '--exclude', 'absent/**', '--require-match', '--print-tree'],
-    { cwd, env: gitEnv, timeout: 30_000 })).rejects.toMatchObject({ code: 2 });
+    { cwd, env: gitEnv, timeout: testTimeout(30_000) })).rejects.toMatchObject({ code: 2 });
     await expect(importRepo({ ...options, excludes: [''] })).rejects.toThrow(/Invalid exclusion glob/);
     await expect(importRepo({ ...options, excludes: ['private//secret.txt'] })).rejects.toThrow(/Invalid exclusion glob/);
   });
@@ -391,7 +392,7 @@ describe('adopted root import', () => {
     const args = ['cli/main.ts', 'import', '--source', source, '--ref', 'main', '--repo', 'adopted',
       '--policy-id', 'dispatch-lab', '--profile-id', 'dispatch-lab', '--exclude', 'private/**'];
     const invocation = execFile(process.execPath, ['--import', 'tsx', ...args],
-      { cwd, env, timeout: 180_000, maxBuffer: 1024 * 1024 });
+      { cwd, env, timeout: testTimeout(180_000), maxBuffer: 1024 * 1024 });
     const api = async (path: string) => {
       const response = await fetch(url + '/v1/repos/adopted' + (path ? '/' + path : ''),
         { headers: { authorization: 'Bearer local-owner' } });
@@ -399,7 +400,7 @@ describe('adopted root import', () => {
     };
     let finished = false;
     invocation.finally(() => { finished = true; }).catch(() => {});
-    const until = Date.now() + 150_000;
+    const until = Date.now() + testTimeout(150_000);
     const handled = new Set<string>();
     while (!finished && Date.now() < until) {
       const snapshot = await api('snapshot').catch(() => null);
@@ -412,7 +413,7 @@ describe('adopted root import', () => {
         if (role === 'checker') runnerArgs.push('--profile', profile.sourcePath!);
         const run = await execFile(process.execPath, ['--import', 'tsx', ...runnerArgs],
           { cwd, env: { ...env, CONCORD_TOKEN: `local-${role}`, CONCORD_PROFILE_DIGEST: profile.digest },
-            timeout: 40_000, maxBuffer: 1024 * 1024 });
+            timeout: testTimeout(40_000), maxBuffer: 1024 * 1024 });
         expect(run.stdout).toContain('Completed 1 job(s)');
       } else await new Promise(done => setTimeout(done, 150));
     }
@@ -431,11 +432,11 @@ describe('adopted root import', () => {
     expect(await git(root, '--git-dir', canonical, 'show', '-s', '--format=%B', 'refs/heads/main')).toContain(sourceOid);
     await expect(git(root, '--git-dir', canonical, 'show', 'main:private/secret.txt')).rejects.toThrow();
     const second = await execFile(process.execPath, ['--import', 'tsx', ...args],
-      { cwd, env, timeout: 40_000, maxBuffer: 1024 * 1024 });
+      { cwd, env, timeout: testTimeout(40_000), maxBuffer: 1024 * 1024 });
     expect(await sourceState(source)).toEqual(beforeSource);
     expect(JSON.parse(second.stdout)).toMatchObject({ canonicalOid: imported.canonicalOid, reconciled: true });
     expect(await git(root, '--git-dir', canonical, 'rev-list', '--count', 'refs/heads/main')).toBe('1');
-  }, 210_000);
+  }, testTimeout(210_000));
 
   it('imports a three-commit merge unchanged, then lands and mirrors a descendant to an ancestor', async () => {
     const root = await temporary();
@@ -451,7 +452,7 @@ describe('adopted root import', () => {
     expect(await git(root, '--git-dir', canonical, 'rev-parse', 'refs/heads/main')).toBe(sourceOid);
     expect(await sourceState(source)).toEqual(beforeSource);
     const second = await execFile(process.execPath, ['--import', 'tsx', ...args],
-      { cwd, env, timeout: 40_000, maxBuffer: 1024 * 1024 });
+      { cwd, env, timeout: testTimeout(40_000), maxBuffer: 1024 * 1024 });
     expect(JSON.parse(second.stdout)).toMatchObject({ canonicalOid: sourceOid, reconciled: true });
 
     const destination = join(root, 'destination.git');
@@ -483,10 +484,10 @@ describe('adopted root import', () => {
       CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
     const landArgs = ['cli/main.ts', 'land', '--repo', 'adopted', '--source', candidate, '--commit', candidateOid,
       '--intent-key', 'A', '--intent', 'Advance alpha after history import',
-      '--allowed-files', allowed, '--mirror-to', mirrorTo, '--wait-seconds', '150', '--json'];
+      '--allowed-files', allowed, '--mirror-to', mirrorTo, '--wait-seconds', String(testTimeout(150_000) / 1000), '--json'];
     expect(await git(root, '--git-dir', destination, 'rev-parse', 'refs/heads/main')).toBe(ancestor);
     const landed = await drive(execFile(process.execPath, ['--import', 'tsx', ...landArgs,
-      '--review-evidence', evidence], { cwd, env: landEnv, timeout: 155_000 }));
+      '--review-evidence', evidence], { cwd, env: landEnv, timeout: testTimeout(155_000) }));
     const events = landed.stdout.trim().split('\n').map(line => JSON.parse(line));
     const landedOid = events.find(event => event.state === 'landed')?.canonicalOid;
     expect(landedOid).toMatch(/^[a-f0-9]{40}$/);
@@ -498,5 +499,5 @@ describe('adopted root import', () => {
     expect(await git(root, '--git-dir', canonical, 'rev-parse', 'refs/heads/main')).toBe(landedOid);
     expect(await git(root, '--git-dir', destination, 'rev-parse', 'refs/heads/main')).toBe(landedOid);
     await git(root, '--git-dir', destination, 'merge-base', '--is-ancestor', ancestor, landedOid);
-  }, 210_000);
+  }, testTimeout(210_000));
 });

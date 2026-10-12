@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { wranglerStateDir } from '../../demo/scenarios';
+import { testTimeout } from '../helpers';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
@@ -45,7 +46,7 @@ function start(file: string, args: string[], env: NodeJS.ProcessEnv): { child: C
   return { child, output: () => output };
 }
 async function waitFor(label: string, predicate: () => Promise<boolean>, output: () => string): Promise<void> {
-  const until = Date.now() + 30_000;
+  const until = Date.now() + testTimeout(30_000);
   while (Date.now() < until) {
     if (await predicate().catch(() => false)) return;
     await new Promise(done => setTimeout(done, 150));
@@ -53,7 +54,7 @@ async function waitFor(label: string, predicate: () => Promise<boolean>, output:
   throw new Error(`TIMEOUT ${label}: ${output()}`);
 }
 async function demo(args: string[], env: NodeJS.ProcessEnv): Promise<any> {
-  const { stdout } = await execFile(process.execPath, ['--import', 'tsx', 'demo/main.ts', ...args], { cwd, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await execFile(process.execPath, ['--import', 'tsx', 'demo/main.ts', ...args], { cwd, env, timeout: testTimeout(120_000), maxBuffer: 4 * 1024 * 1024 });
   return JSON.parse(stdout);
 }
 async function stop(child: ChildProcess): Promise<void> {
@@ -106,7 +107,7 @@ describe('dispatch-lab local acceptance', () => {
     const inspected = await demo(['inspect', ...flags, '--json'], env);
     expect(inspected.scenes).toEqual(expect.arrayContaining(['seed', 'context', 'leases', 'stack']));
     expect(inspected.audit.some((item: any) => item.jobId)).toBe(true);
-  }, 180_000);
+  }, testTimeout(180_000));
 
   it('resolves Wrangler state under the physical checkout through a symlink', async () => {
     const root = await externalTempDir('concord-demo-link-');
@@ -116,7 +117,7 @@ describe('dispatch-lab local acceptance', () => {
     const moduleUrl = pathToFileURL(join(linked, 'demo/scenarios.ts')).href;
     const script = `import { wranglerStateDir } from ${JSON.stringify(moduleUrl)}; console.log(wranglerStateDir(${JSON.stringify(stateDir)}));`;
     const { stdout } = await execFile(process.execPath,
-      ['--preserve-symlinks', '--import', 'tsx', '--input-type=module', '-e', script], { cwd, timeout: 30_000 });
+      ['--preserve-symlinks', '--import', 'tsx', '--input-type=module', '-e', script], { cwd, timeout: testTimeout(30_000) });
     expect(stdout.trim()).toBe(wranglerStateDir(stateDir));
     expect(stdout.trim().startsWith(join(cwd, '.wrangler', 'state') + '/')).toBe(true);
   });
@@ -140,7 +141,7 @@ describe('dispatch-lab local acceptance', () => {
     for (const name of ['families.tsv', 'dispatch.mjs']) await copyFile(join(source, name), join(dir, name));
     const check = async (caseId: string) => {
       const result = await execFile(process.execPath, ['demo/checker.mjs', '--repo', dir, '--unit', 'all', '--case', caseId],
-        { cwd, timeout: 10_000 }).catch(error => ({ stdout: (error as { stdout?: string }).stdout ?? '' }));
+        { cwd, timeout: testTimeout(10_000) }).catch(error => ({ stdout: (error as { stdout?: string }).stdout ?? '' }));
       return JSON.parse(result.stdout);
     };
     expect((await check('seed')).outcome).toBe('PASS');
@@ -240,5 +241,5 @@ describe('dispatch-lab local acceptance', () => {
     expect(inspected.queue.entries.find((entry: any) => entry.changeId === inspected.evidence.aw.changeId)?.state).toBe('landed');
     expect(inspected.audit.some((event: any) => event.resultDigest && event.jobId)).toBe(true);
     expect(inspected.queue.finalCanonicalOid).toBe(inspected.canonicalOid);
-  }, 300_000);
+  }, testTimeout(300_000));
 });

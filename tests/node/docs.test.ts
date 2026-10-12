@@ -9,14 +9,15 @@ import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getCurrentTest } from 'vitest/suite';
 import { wranglerStateDir } from '../../demo/scenarios';
+import { testTimeout } from '../helpers';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
 const children: ChildProcess[] = [];
 const directories: string[] = [];
-const CHILD_TIMEOUT_MS = 30_000;
-const DOCUMENTED_BLOCK_TIMEOUT_MS = 300_000;
-const SETUP_MARGIN_MS = 30_000;
+const CHILD_TIMEOUT_MS = testTimeout(30_000);
+const DOCUMENTED_BLOCK_TIMEOUT_MS = testTimeout(300_000);
+const SETUP_MARGIN_MS = testTimeout(30_000);
 
 function shellCallBudget(maxCalls: number, maxCallMs = CHILD_TIMEOUT_MS) {
   const timeout = maxCalls * maxCallMs + SETUP_MARGIN_MS;
@@ -49,9 +50,18 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+async function freePortAwayFrom(used: Iterable<number>): Promise<number> {
+  const nearby = [...used];
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const candidate = await freePort();
+    // Wrangler may open a sidecar listener near its requested HTTP port.
+    if (nearby.every(port => Math.abs(candidate - port) > 20)) return candidate;
+  }
+  throw new Error('Could not allocate separated loopback ports');
+}
+
 const bridgePort = await freePort();
-let workerPort = await freePort();
-while (workerPort === bridgePort) workerPort = await freePort();
+let workerPort = await freePortAwayFrom([bridgePort]);
 
 function freshShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const fresh = { ...env };
@@ -62,7 +72,7 @@ function freshShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 async function externalTempDir(prefix: string): Promise<string> {
-  for (const base of ['/tmp', join(cwd, '..', 'sandbox-home', 'tmp'), tmpdir()]) {
+  for (const base of [tmpdir(), join(cwd, '..', 'sandbox-home', 'tmp'), '/tmp']) {
     if (!relative(cwd, resolve(base)).startsWith('..')) continue;
     try {
       const root = await mkdtemp(join(base, prefix));
@@ -177,8 +187,14 @@ function assertCallEnvironment(calls: ShellCall[], block: string, runDir: string
 async function runDocumentedBlock(block: string, env: NodeJS.ProcessEnv): Promise<any[]> {
   const marker = '__CONCORD_DOCUMENTED_NPM_CALL__';
   const wrapper = `npm() { printf '\\n${marker}\\n'; command npm "$@"; }`;
-  const { stdout } = await execFile('sh', ['-ec', `${wrapper}\n${block}`],
-    { cwd, env, timeout: DOCUMENTED_BLOCK_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
+  let stdout: string;
+  try {
+    ({ stdout } = await execFile('sh', ['-ec', `${wrapper}\n${block}`],
+      { cwd, env, timeout: DOCUMENTED_BLOCK_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }));
+  } catch (error) {
+    const failed = error as Error & { stdout?: string };
+    throw new Error(`${failed.message}\nLast documented command output: ${(failed.stdout ?? '').split(marker).at(-1)?.slice(-2500) ?? ''}`);
+  }
   const outputs = stdout.split(marker + '\n').slice(1);
   expect(outputs).toHaveLength(commandLines(block).commands.length);
   return outputs.map(output => {
@@ -199,7 +215,7 @@ function start(command: string, env: NodeJS.ProcessEnv): { child: ChildProcess; 
 }
 
 async function waitFor(label: string, predicate: () => Promise<boolean>, output: () => string): Promise<void> {
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + testTimeout(60_000);
   while (Date.now() < deadline) {
     if (await predicate().catch(() => false)) return;
     await new Promise(done => setTimeout(done, 150));
@@ -463,11 +479,11 @@ describe('documented demo commands', () => {
     const env = { ...freshShellEnv(process.env), TMPDIR: relative(cwd, root), XDG_CONFIG_HOME: root,
       CONCORD_DOCS_ABS_TMPDIR: root, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${preload}`.trim(),
     };
-    const workerUrl = `http://127.0.0.1:${workerPort}`;
+    let workerUrl = `http://127.0.0.1:${workerPort}`;
     expect(relative(cwd, resolve(env.TMPDIR)).startsWith('..')).toBe(true);
-    const readme = await taggedBlocks('README.md');
-    const demo = await taggedBlocks('docs/DEMO.md');
-    const deploy = await taggedBlocks('docs/deploy.md');
+    let readme = await taggedBlocks('README.md');
+    let demo = await taggedBlocks('docs/DEMO.md');
+    let deploy = await taggedBlocks('docs/deploy.md');
     expect(readme).toHaveLength(5);
     expect(demo).toHaveLength(1);
     expect(deploy).toHaveLength(1);
@@ -484,19 +500,35 @@ describe('documented demo commands', () => {
     const install = join(root, 'install');
     await mkdir(install);
     await Promise.all(['package.json', 'package-lock.json'].map(file => copyFile(join(cwd, file), join(install, file))));
-    await shell.run(() => execFile('sh', ['-c', readme[0]], { cwd: install, timeout: 120_000, env: {
+    await shell.run(() => execFile('sh', ['-c', readme[0]], { cwd: install, timeout: testTimeout(120_000), env: {
       ...env, TMPDIR: root, NPM_CONFIG_CACHE: join(root, 'npm-cache'), NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_FUND: 'false',
     } }));
     await access(join(install, 'node_modules/.bin/tsx'));
 
     const [preflight] = await shell.run(() => runDocumentedBlock(readme[1], env));
     expect(preflight.status).toBe('ready');
-    const occupiedDefaultPort = shell.run(() => start(`node -e 'const s=require("node:net").createServer(); s.on("error",e=>{if(e.code!=="EADDRINUSE") throw e; console.log("held 8788 (existing process)")}); s.listen(8788,"127.0.0.1",()=>console.log("held 8788"))'`, env));
-    await waitFor('default bridge port held', async () => occupiedDefaultPort.output().includes('held 8788'), occupiedDefaultPort.output);
+    const occupiedPort = await freePortAwayFrom([bridgePort, workerPort]);
+    const occupyingServer = shell.run(() => start(`node -e 'const s=require("node:net").createServer(); s.on("error",e=>{if(e.code!=="EADDRINUSE") throw e; console.log("held ${occupiedPort} (existing process)")}); s.listen(${occupiedPort},"127.0.0.1",()=>console.log("held ${occupiedPort}"))'`, env));
+    await waitFor('loopback port held', async () => occupyingServer.output().includes(`held ${occupiedPort}`), occupyingServer.output);
     const bridge = shell.run(() => start(readme[2], env));
     await waitFor('bridge', async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`), bridge.output);
-    const worker = shell.run(() => start(readme[3], env));
-    await waitFor('Worker health', async () => (await fetch(workerUrl + '/health')).ok, worker.output);
+    let worker = shell.run(() => start(readme[3], env));
+    const attemptedWorkerPorts = new Set([workerPort]);
+    for (let attempt = 0; ; attempt++) {
+      await waitFor('Worker health', async () =>
+        /Address already in use|EADDRINUSE/.test(worker.output()) || (await fetch(workerUrl + '/health')).ok,
+      worker.output);
+      if (!/Address already in use|EADDRINUSE/.test(worker.output())) break;
+      if (attempt === 2) throw new Error(`Worker could not bind after three OS-assigned ports: ${worker.output()}`);
+      await stop(worker.child);
+      workerPort = await freePortAwayFrom([bridgePort, occupiedPort, ...attemptedWorkerPorts]);
+      attemptedWorkerPorts.add(workerPort);
+      workerUrl = `http://127.0.0.1:${workerPort}`;
+      readme = await taggedBlocks('README.md');
+      demo = await taggedBlocks('docs/DEMO.md');
+      deploy = await taggedBlocks('docs/deploy.md');
+      worker = start(readme[3], env);
+    }
     expect((await (await fetch(workerUrl + '/health')).json() as any).data.storageBackend).toBe('bridge');
 
     const execute = async (block: string) => {

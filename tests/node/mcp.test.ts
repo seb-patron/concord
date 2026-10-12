@@ -11,6 +11,7 @@ import { afterEach, expect, it } from 'vitest';
 import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenarios.ts';
 import type { ConcordClient } from '../../cli/client.ts';
 import { callTool } from '../../mcp/tools.ts';
+import { testTimeout } from '../helpers';
 
 it('dispatches issue and milestone MCP tools with issue links', async () => {
   const calls: Array<{ method: string; path: string; options: unknown }> = [];
@@ -53,7 +54,7 @@ function start(file: string, args: string[], env: NodeJS.ProcessEnv): { output: 
   return { output: () => output };
 }
 async function waitFor(test: () => Promise<boolean>): Promise<void> {
-  const end = Date.now() + 30000;
+  const end = Date.now() + testTimeout(30000);
   while (Date.now() < end) {
     if (await test().catch(() => false)) return;
     await new Promise(done => setTimeout(done, 150));
@@ -89,7 +90,7 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   await waitFor(async () => bridge.output().includes(`listening on 127.0.0.1:${bridgePort}`));
   const worker = start(join(cwd, 'node_modules/.bin/wrangler'), ['dev', '--config', 'wrangler.local.jsonc', '--port', String(workerPort), '--persist-to', wranglerStateDir(dir), '--var', 'STORAGE_BACKEND:bridge', '--var', `BRIDGE_URL:http://127.0.0.1:${bridgePort}/?token=${bridgeToken}`, '--var', `TRUSTED_CONFIG:${trustedConfig}`], { ...env, WRANGLER_SEND_METRICS: 'false' });
   await waitFor(async () => (await fetch(url + '/health')).ok);
-  const { stdout } = await execFile(process.execPath, ['--import', 'tsx', 'demo/main.ts', 'seed', '--run', 'mcp', '--state-dir', dir, '--pump-local'], { cwd, env, timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await execFile(process.execPath, ['--import', 'tsx', 'demo/main.ts', 'seed', '--run', 'mcp', '--state-dir', dir, '--pump-local'], { cwd, env, timeout: testTimeout(120000), maxBuffer: 4 * 1024 * 1024 });
   const manifest = JSON.parse(await readFile((JSON.parse(stdout) as { manifestPath: string }).manifestPath, 'utf8')) as Manifest;
   const observed: string[] = [];
   async function mcp(token: string): Promise<{ client: Client; call: (name: string, args: Record<string, unknown>) => Promise<any> }> {
@@ -173,7 +174,7 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   expect(conflict.error.details).toMatchObject({ holderId: 'agent-a', intentText: 'A edits alpha' });
   const published = await a.call('change_publish', { repoId, changeId, worktree, leaseFences: { [unit]: lease.fence } });
   expect(published.data.revision).toBeGreaterThan(0);
-  const { stdout: runnerOutput } = await execFile(process.execPath, ['--import', 'tsx', 'runner/main.ts', '--repo', repoId, '--role', 'checker', '--once', '--profile', manifest.profilePath], { cwd, env: { ...env, CONCORD_TOKEN: 'local-checker', CONCORD_PROFILE_DIGEST: manifest.profileDigest }, timeout: 35000 });
+  const { stdout: runnerOutput } = await execFile(process.execPath, ['--import', 'tsx', 'runner/main.ts', '--repo', repoId, '--role', 'checker', '--once', '--profile', manifest.profilePath], { cwd, env: { ...env, CONCORD_TOKEN: 'local-checker', CONCORD_PROFILE_DIGEST: manifest.profileDigest }, timeout: testTimeout(35000) });
   expect(runnerOutput).toContain('Completed 1 job(s)');
   const snapshot = await reviewer.call('repo_context', { repoId });
   const jobs = snapshot.data.projections.runners.jobs as Array<{ jobId: string; changeId: string; kind: string }>;
@@ -189,7 +190,7 @@ it('runs the agent loop over stdio MCP against the local bridge and Worker witho
   await a.call('events_since', { repoId, after: 0 });
   for (const secret of ['local-agent-a', 'local-agent-b', 'local-reviewer', bridgeToken]) expect(observed.join('\n')).not.toContain(secret);
   expect(worker.output()).not.toContain('local-agent-a');
-}, 180000);
+}, testTimeout(180000));
 
 it('fetches an unreferenced canonical base through a symlinked workdir', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'concord-mcp-base-'));
@@ -231,7 +232,7 @@ it('fetches an unreferenced canonical base through a symlinked workdir', async (
   expect(requested).toEqual(['fork', 'canonical', 'fork']);
   const { stdout: head } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: join(worktree, '.concord', 'changes', 'change-b') });
   expect(head.trim()).toBe(baseOid.trim());
-}, 30000);
+}, testTimeout(30000));
 
 it.each(['A then B', 'B then A'])('isolates same-named branches with an existing fork branch: %s publication', async order => {
   const dir = await mkdtemp(join(tmpdir(), 'concord-mcp-isolation-'));
@@ -288,4 +289,4 @@ it.each(['A then B', 'B then A'])('isolates same-named branches with an existing
     expect(stdout.split('\t')[0]).toBe(oid.trim());
   }
   await expect(callTool(client, 'change_publish', { repoId: 'repo', changeId: 'B', worktree: a.worktree, leaseFences: { b: 1 } })).rejects.toThrow();
-}, 30000);
+}, testTimeout(30000));
