@@ -12,6 +12,24 @@ The header may include `ownerReportedAggregates`, with an explicitly reported va
 
 Synthetic fixtures set `evidenceClass: "synthetic"`. They are accepted by tests with an explicit opt-in but rejected by the CLI's historical validate and compare modes. Do not change this field to make synthetic evidence appear historical.
 
+## GitHub pull-request history
+
+```sh
+npm run replay:export-github -- --repo OWNER/REPO --since 2026-01-01T00:00:00Z --until 2026-02-01T00:00:00Z --out "$CONCORD_TIMELINE"
+```
+
+The export command runs on the owner's machine with the owner's `gh` login (`gh auth login` first). It reads pull requests created inside the `--since`/`--until` window through paginated `gh api` REST calls (pull list, per-PR files, commits, and issue timeline), follows `Link` headers, and backs off on 403/429 responses using `Retry-After`/`X-RateLimit-Reset`. It never reads file contents — only paths, commits, and timeline metadata.
+
+Each selected PR becomes one task: `task_started` at open, `claim_attempted`/`recheck_requested` plus `check_started` at review requests, `check_finished`/`claim_granted`/`review_approved` at submitted reviews, `repair_submitted` at post-open head commits and force-pushes (deduplicated by SHA), `merged`/`task_finished` with `landed` or `refused` outcome at close, and `conflict_observed` for overlapping pairs. Wait, checker, and work durations are recorded as paired events. A PR still open at the window end stays censored with no terminal event. `unitKeys` are `unit:`-prefixed HMAC-SHA256 digests of changed file paths under a random per-export salt; `sourceRef`, `sourceEventRef`, task IDs, and the cohort ID are likewise redacted — titles, bodies, usernames, refs, and SHAs never reach the output. `overlapTaskIds` records pairs that edited the same file while both were open, and `dependencyTaskIds` records in-cohort "supersedes #N"/"superseded by #N" links found in bodies or comments. `ownerReportedAggregates` carries only values computed from the export (counts and medians) with denominators, and `sourceDigest` is the SHA-256 over the fetched JSON pages.
+
+An optional `--approval-ref REF` overrides the `ownerReleaseApprovalRef` attestation (default `owner-local-export`). Keep the output file outside version control.
+
+```sh
+npm run replay -- baseline --input "$CONCORD_TIMELINE"
+```
+
+The baseline command prints the measured GitHub table: pull requests, merged, median and p90 open-to-merge, head changes after first review (stale approvals), superseded share, median review rounds, and overlapping PR pairs, each with its denominator. The export command prints the same table after writing the file. Validate or compare the result with the commands above — the export is ordinary `pr_history` JSONL.
+
 ## Commands
 
 ```sh

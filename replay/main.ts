@@ -1,10 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { parseReplayJsonl } from './schema.ts';
-import { buildReplayReport, renderHtml, unavailableReport } from './report.ts';
+import { buildReplayReport, buildGithubBaseline, renderGithubBaselineTable, renderHtml, unavailableReport } from './report.ts';
 
 function usage(): never {
-  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH');
+  throw new Error('Usage: replay validate --input PATH | replay compare --input PATH --output PATH [--workers N] [--checkers N] | replay compare --explain-missing --output PATH | replay baseline --input PATH');
 }
 function args(argv: string[]): { command: string; values: Map<string, string | true> } {
   const command = argv[0];
@@ -42,6 +42,11 @@ async function main(): Promise<void> {
     const data = parseReplayJsonl(await readFile(required(values, '--input'), 'utf8'));
     console.log(`Valid provenance-bearing historical export: ${data.header.exportId} (${data.events.length} events, ${data.header.selected.taskIds.length} selected tasks)`);
     console.log('Owner release reference is attested provenance; the underlying private source was not independently verified.');
+    return;
+  }
+  if (command === 'baseline') {
+    const data = parseReplayJsonl(await readFile(required(values, '--input'), 'utf8'));
+    console.log(renderGithubBaselineTable(buildGithubBaseline(data), { cohortId: data.header.selected.cohortId, window: data.header.selected.window }));
     return;
   }
   if (command !== 'compare') usage();
