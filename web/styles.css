@@ -26,7 +26,7 @@
 .milestone-head{max-width:1200px;margin:0 auto 16px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px}.milestone-head h1{margin:0;font-size:26px;flex:1 1 300px}
 .milestones-list{max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .milestone-card{background:#fff;border:1px solid #e3e3de;border-radius:12px;padding:18px 20px}
-.milestone-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}.milestone-top h2{margin:0;font-size:18px}.milestone-top a{display:inline-flex;align-items:center;box-sizing:border-box;min-height:44px;padding:8px 10px;color:#16181d;text-decoration:none}.milestone-top a:hover{text-decoration:underline}
+.milestone-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}.milestone-top h2{margin:0;font-size:18px}.milestone-top a{display:inline-flex;align-items:center;box-sizing:border-box;min-width:44px;min-height:44px;padding:8px 10px;color:#16181d;text-decoration:none}.milestone-top a:hover{text-decoration:underline}
 .milestone-due{font-size:13px;color:#4a505c}.milestone-count{margin-left:auto;font-family:'Geist Mono',monospace;font-size:13px}.milestone-closed{font-size:12px;color:#5d6470;border:1px solid #d5d5cf;border-radius:999px;padding:3px 10px}
 .milestone-bar{display:flex;height:10px;border-radius:999px;overflow:hidden;background:#edede8;margin:12px 0 10px}.milestone-bar>span{display:block;height:100%}
 .seg-landed{background:#1e7f4f}.seg-closed{background:#7b8190}.seg-review{background:#1f4fc4}.seg-claimed{background:#c2570c}

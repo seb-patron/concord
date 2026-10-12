@@ -138,6 +138,12 @@ describe('Milestones screen', () => {
     manuallyClosed.data.projections.issues.milestones[0].progress.landedChanges = 0;
     expect(milestoneModel(manuallyClosed, [], now).rows[0]).toMatchObject({ landed: 0, closed: 1, total: 4,
       barLabel: '0 landed, 1 closed without landing, 1 in review, 1 claimed, 1 open' });
+    const duplicateLandings = structuredClone(mdata) as any;
+    duplicateLandings.data.projections.issues.items[3].changes.push({ changeId: 'c4b', status: 'merged' });
+    duplicateLandings.data.projections.issues.items.push({ number: 7, title: 'Closed manually', state: 'closed', milestoneId: 'm1', changes: [] });
+    duplicateLandings.data.projections.issues.milestones[0].progress = { openIssues: 3, closedIssues: 2, landedChanges: 2 };
+    expect(milestoneModel(duplicateLandings, [], now).rows[0]).toMatchObject({ landed: 1, closed: 1, total: 5,
+      barLabel: '1 landed, 1 closed without landing, 1 in review, 1 claimed, 1 open' });
     expect(milestoneModel({ data: { projections: { issues: { status: 'unavailable', items: [] } } } }).state).toBe('unavailable');
     expect(milestoneModel(null).state).toBe('loading');
     expect(milestoneModel({ data: { projections: {} } }).state).toBe('unknown');
@@ -177,14 +183,17 @@ describe('Milestones screen', () => {
       expect(cards[0].querySelector('build')).toBeNull();
       expect(cards[1].textContent).toContain('Not started: 2 issues claimable now');
       expect(cards[1].textContent).toContain('No due date');
+      snapshot.data.projections.issues.milestones[0].title = 'X';
+      screen.render(context);
       Object.defineProperty(dom.window, 'innerWidth', { value: 375, configurable: true });
       const style = dom.window.document.createElement('style');
       style.textContent = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
       dom.window.document.head.append(style);
-      const titleLink = cards[0].querySelector('h2 a') as HTMLAnchorElement;
+      const titleLink = root.querySelector('.milestone-card h2 a') as HTMLAnchorElement;
       expect(dom.window.getComputedStyle(titleLink).minHeight).toBe('44px');
+      expect(dom.window.getComputedStyle(titleLink).minWidth).toBe('44px');
       expect(dom.window.getComputedStyle(titleLink).display).toBe('inline-flex');
-      (cards[0].querySelector('h2 a') as HTMLAnchorElement).click();
+      titleLink.click();
       expect(opened).toBe('m1');
       trackerMounted = false;
       screen.render(context);
@@ -235,6 +244,48 @@ describe('Milestones screen', () => {
       expect(root.textContent).toContain('Unavailable');
       screen.render({ ...context, repoId: null, snapshot: null });
       expect(root.textContent).toContain('Choose a repository');
+    } finally { clearSessionToken(); Object.assign(globalThis, previous); dom.window.close(); }
+  });
+  it('keeps the edit starting version when polling receives a newer milestone', async () => {
+    const dom = new JSDOM('<main id="ms"></main>', { url: 'http://localhost/' });
+    const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+    const calls: any[] = [];
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)); calls.push(body);
+      return body.expectedVersion === 1
+        ? new Response(JSON.stringify({ error: { code: 'STALE_VERSION', message: 'stale' } }), { status: 409 })
+        : new Response(JSON.stringify({ data: {}, version: 3 }), { status: 200 });
+    }) as any;
+    setSessionToken('test-token');
+    try {
+      const root = dom.window.document.getElementById('ms')!;
+      const screen = createMilestones(root, { refresh: async () => {} });
+      const snapshot = structuredClone(mdata) as any;
+      snapshot.data.projections.issues.milestones[0].version = 1;
+      const context = { repoId: 'repo', snapshot, events: [], identity: { roles: ['owner'] } };
+      screen.render(context);
+      (root.querySelector('.milestone-edit') as HTMLButtonElement).click();
+      (root.querySelector('.milestone-card form [name=title]') as HTMLInputElement).value = 'My draft';
+      const newer = structuredClone(snapshot);
+      newer.data.projections.issues.milestones[0].version = 2;
+      newer.data.projections.issues.milestones[0].title = 'Other owner title';
+      screen.render({ ...context, snapshot: newer });
+      const form = root.querySelector('.milestone-card form') as HTMLFormElement;
+      expect((form.elements.namedItem('title') as HTMLInputElement).value).toBe('My draft');
+      form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(calls).toEqual([{ expectedVersion: 1, title: 'My draft', dueDate: '2026-10-16' }]);
+      expect(root.textContent).toContain('STALE_VERSION');
+      screen.render({ ...context, snapshot: newer });
+      (root.querySelector('.milestone-edit') as HTMLButtonElement).click();
+      (root.querySelector('.milestone-edit') as HTMLButtonElement).click();
+      const resolvedForm = root.querySelector('.milestone-card form') as HTMLFormElement;
+      expect((resolvedForm.elements.namedItem('title') as HTMLInputElement).value).toBe('Other owner title');
+      (resolvedForm.elements.namedItem('title') as HTMLInputElement).value = 'Resolved title';
+      resolvedForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(calls[1]).toEqual({ expectedVersion: 2, title: 'Resolved title', dueDate: '2026-10-16' });
     } finally { clearSessionToken(); Object.assign(globalThis, previous); dom.window.close(); }
   });
 });

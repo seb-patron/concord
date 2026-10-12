@@ -45,7 +45,7 @@ const openBucket = (issue, held) => {
 
 /**
  * Pure milestones projection. Bar counts split each milestone's issues into
- * landed (API landedChanges), closed without landing, in review or queued,
+ * landed (distinct closed issues with landing evidence), closed without landing, in review or queued,
  * claimed, and still open;
  * totals come from the milestone progress counts, not invented data.
  */
@@ -60,9 +60,8 @@ export function milestoneModel(snapshot, events = [], now = Date.now()) {
     const members = issues.filter(issue => issue.milestoneId === milestone.milestoneId);
     const closedIssues = Number.isFinite(progress.closedIssues)
       ? progress.closedIssues : members.filter(issue => issue.state === 'closed').length;
-    const landings = Number.isFinite(progress.landedChanges)
-      ? progress.landedChanges : members.filter(issue => issue.state === 'closed' && arr(issue.changes).some(change => change.status === 'merged')).length;
-    const landed = Math.min(closedIssues, landings);
+    const landed = members.filter(issue => issue.state === 'closed'
+      && (issue.closedBy || arr(issue.changes).some(change => change.status === 'merged'))).length;
     const closed = Math.max(0, closedIssues - landed);
     const openIssues = Number.isFinite(progress.openIssues)
       ? progress.openIssues : members.filter(issue => issue.state === 'open').length;
@@ -98,6 +97,7 @@ export function milestoneModel(snapshot, events = [], now = Date.now()) {
 export function createMilestones(root, callbacks) {
   let formOpen = false;
   let editing = null;
+  let editVersion = null;
   let status = '';
   let currentRepo = null;
   let lastFormKey = '';
@@ -106,7 +106,7 @@ export function createMilestones(root, callbacks) {
     const item = el('button', label, className); item.type = 'button'; item.addEventListener('click', action); return item;
   };
   function render(context) {
-    if (currentRepo !== context.repoId) { currentRepo = context.repoId; formOpen = false; editing = null; status = ''; }
+    if (currentRepo !== context.repoId) { currentRepo = context.repoId; formOpen = false; editing = null; editVersion = null; status = ''; }
     const model = milestoneModel(context.snapshot, context.events ?? [], Date.now());
     const canEdit = !!context.identity?.unverified || arr(context.identity?.roles).includes('owner');
     const formKey = `${currentRepo}:${formOpen}:${editing}`;
@@ -209,7 +209,8 @@ export function createMilestones(root, callbacks) {
       const controls = el('div', null, 'milestone-controls');
       controls.append(keyed(button('Save description', () => void submitDesc(milestone, desc, context), 'milestone-save'), `save-${milestone.milestoneId}`),
         keyed(button(editing === milestone.milestoneId ? 'Cancel edit' : 'Edit title and due date',
-          () => { editing = editing === milestone.milestoneId ? null : milestone.milestoneId; status = ''; render(context); }, 'milestone-edit'), `edit-${milestone.milestoneId}`));
+          () => { const opening = editing !== milestone.milestoneId; editing = opening ? milestone.milestoneId : null;
+            editVersion = opening ? milestone.version : null; status = ''; render(context); }, 'milestone-edit'), `edit-${milestone.milestoneId}`));
       card.append(controls);
       if (editing === milestone.milestoneId) {
         const form = el('form', null, 'milestone-form'); form.dataset.formId = milestone.milestoneId;
@@ -218,7 +219,7 @@ export function createMilestones(root, callbacks) {
         form.append(titleLabel, dueLabel);
         const buttons = el('div', null, 'milestone-controls');
         const submit = el('button', 'Save changes', 'milestone-save'); submit.type = 'submit';
-        buttons.append(submit, button('Cancel', () => { editing = null; render(context); }, 'milestone-cancel'));
+        buttons.append(submit, button('Cancel', () => { editing = null; editVersion = null; render(context); }, 'milestone-cancel'));
         form.append(buttons);
         form.addEventListener('submit', event => { event.preventDefault(); void submitEdit(form, context, milestone); });
         card.append(form);
@@ -254,8 +255,8 @@ export function createMilestones(root, callbacks) {
     const dueDate = form.elements.namedItem('dueDate').value;
     try {
       await updateMilestone(context.repoId, milestone.milestoneId,
-        { expectedVersion: milestone.version, title, dueDate: dueDate || null }, newIdempotencyKey());
-      editing = null; status = 'Milestone updated.'; await callbacks.refresh();
+        { expectedVersion: editVersion, title, dueDate: dueDate || null }, newIdempotencyKey());
+      editing = null; editVersion = null; status = 'Milestone updated.'; await callbacks.refresh();
     } catch (error) {
       status = `Could not update milestone (${redactError(error).code}).`;
       if (error?.status === 409) { render(context); await callbacks.refresh?.(); return; }
