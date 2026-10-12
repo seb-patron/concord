@@ -1,4 +1,4 @@
-import { execFile as callback } from 'node:child_process';
+import { execFile as callback, execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,12 +35,104 @@ describe('land input and evidence gates', () => {
     const { dir, commit, parent } = await source();
     expect(await filesChanged(dir, commit)).toEqual({ parent, files: expect.arrayContaining(['first.txt', 'families.tsv', 'renamed.tsv']) });
   });
+  it('checks the full range, and refuses merges, unrelated bases, and empty ranges', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'a.txt'), 'a=0\n'); await writeFile(join(dir, 'b.txt'), 'b=0\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'a.txt'), 'a=1\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'first');
+    const first = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'b.txt'), 'b=1\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'second');
+    const head = await git(dir, 'rev-parse', 'HEAD');
+    expect(await filesChanged(dir, head, base)).toEqual({ parent: base, files: ['a.txt', 'b.txt'] });
+    expect(await filesChanged(dir, head)).toEqual({ parent: first, files: ['b.txt'] });
+    await expect(filesChanged(dir, first, head)).rejects.toThrow('REFUSED: base is not an ancestor of head');
+    await expect(filesChanged(dir, head, head)).rejects.toThrow('REFUSED: range has an empty diff');
+    await git(dir, 'checkout', '-qb', 'side', base);
+    await writeFile(join(dir, 'side.txt'), 'side\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'side');
+    await git(dir, 'checkout', '-q', 'main'); await git(dir, 'merge', '--no-ff', '-qm', 'merge side', 'side');
+    const merged = await git(dir, 'rev-parse', 'HEAD');
+    await expect(filesChanged(dir, merged, base)).rejects.toThrow('REFUSED: range contains a merge commit');
+  });
   it('rejects an out-of-scope file before any API request', async () => {
     const { dir, commit } = await source();
     const allow = join(dir, 'allowed-files.txt'); await writeFile(allow, 'first.txt\n');
     const request = vi.fn();
     await expect(land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'test', allowedFiles: allow,
       client: { request } as never })).rejects.toThrow('OUTSIDE_ALLOWED_FILES: families.tsv, renamed.tsv');
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('preserves leading spaces in Git paths for single commits and ranges', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'seed.txt'), 'seed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, ' a.txt'), 'first\n');
+    await git(dir, 'add', '--', ' a.txt'); await git(dir, 'commit', '-qm', 'first');
+    const first = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'b.txt'), 'second\n');
+    await git(dir, 'add', 'b.txt'); await git(dir, 'commit', '-qm', 'second');
+    const head = await git(dir, 'rev-parse', 'HEAD');
+    const allowed = join(await temp(), 'allowed.txt'); await writeFile(allowed, 'a.txt\nb.txt\n');
+    const request = vi.fn();
+    expect((await filesChanged(dir, first)).files).toEqual([' a.txt']);
+    expect((await filesChanged(dir, head, base)).files).toEqual([' a.txt', 'b.txt']);
+    for (const [commit, rangeBase] of [[first, undefined], [head, base]] as const) {
+      await expect(land({ repo: 'demo', source: dir, commit, base: rangeBase, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+        client: { request } as never })).rejects.toThrow('OUTSIDE_ALLOWED_FILES:  a.txt');
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('refuses invalid UTF-8 Git path bytes in single commits and ranges before API writes', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'seed.txt'), 'seed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    const seedBlob = await git(dir, 'rev-parse', `${base}:seed.txt`);
+    const emptyBlob = await git(dir, 'hash-object', '-w', '--', '/dev/null');
+    const rawName = Buffer.from('ff612e747874', 'hex');
+    const makeTree = (withSecond: boolean): string => {
+      const entries = [Buffer.from(`100644 blob ${seedBlob}\tseed.txt\0`),
+        Buffer.concat([Buffer.from(`100644 blob ${emptyBlob}\t`), rawName, Buffer.from([0])])];
+      if (withSecond) entries.push(Buffer.from(`100644 blob ${emptyBlob}\tb.txt\0`));
+      return execFileSync('git', ['mktree', '-z'], { cwd: dir, input: Buffer.concat(entries) }).toString().trim();
+    };
+    const first = await git(dir, 'commit-tree', makeTree(false), '-p', base, '-m', 'first');
+    const head = await git(dir, 'commit-tree', makeTree(true), '-p', first, '-m', 'second');
+    const allowed = join(await temp(), 'allowed.txt'); await writeFile(allowed, '�a.txt\nb.txt\n');
+    const request = vi.fn();
+    for (const [commit, rangeBase] of [[first, undefined], [head, base]] as const) {
+      await expect(filesChanged(dir, commit, rangeBase)).rejects.toThrow('Git path is not valid UTF-8');
+      await expect(land({ repo: 'demo', source: dir, commit, base: rangeBase, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+        client: { request } as never })).rejects.toThrow('Git path is not valid UTF-8');
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(['single commit', 'range'])('preserves a leading UTF-8 BOM in Git paths for a %s before API requests', async (kind) => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'seed.txt'), 'seed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    const seedBlob = await git(dir, 'rev-parse', `${base}:seed.txt`);
+    const emptyBlob = await git(dir, 'hash-object', '-w', '--', '/dev/null');
+    const rawName = Buffer.from('efbbbf612e747874', 'hex');
+    const makeTree = (withSecond: boolean): string => {
+      const entries = [Buffer.from(`100644 blob ${seedBlob}\tseed.txt\0`),
+        Buffer.concat([Buffer.from(`100644 blob ${emptyBlob}\t`), rawName, Buffer.from([0])])];
+      if (withSecond) entries.push(Buffer.from(`100644 blob ${emptyBlob}\t😀.txt\0`));
+      return execFileSync('git', ['mktree', '-z'], { cwd: dir, input: Buffer.concat(entries) }).toString().trim();
+    };
+    const first = await git(dir, 'commit-tree', makeTree(false), '-p', base, '-m', 'first');
+    const head = await git(dir, 'commit-tree', makeTree(true), '-p', first, '-m', 'second');
+    const commit = kind === 'range' ? head : first;
+    const rangeBase = kind === 'range' ? base : undefined;
+    const raw = execFileSync('git', ['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', base, commit], { cwd: dir });
+    expect(raw.includes(Buffer.concat([rawName, Buffer.from([0])]))).toBe(true);
+    const allowed = join(await temp(), 'allowed.txt'); await writeFile(allowed, 'a.txt\n😀.txt\n');
+    const request = vi.fn();
+    expect((await filesChanged(dir, commit, rangeBase)).files).toContain('\uFEFFa.txt');
+    await expect(land({ repo: 'demo', source: dir, commit, base: rangeBase, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+      client: { request } as never })).rejects.toThrow('OUTSIDE_ALLOWED_FILES: \uFEFFa.txt');
     expect(request).not.toHaveBeenCalled();
   });
   it('requires one unambiguous approval line naming the published SHA', () => {
@@ -69,7 +161,7 @@ describe('land input and evidence gates', () => {
     expect(approvedHead(`${body}APPROVED for merge\nDELEGATE_OUTCOME=completed\n`, head)).toBe(false);
   });
   it('rejects conflicting AW commit and allowed-file overrides before any API request', async () => {
-    const { dir, commit } = await source();
+    const { dir, commit, parent } = await source();
     const run = await temp();
     await writeFile(join(run, 'status.json'), JSON.stringify({ validated_sha: commit, worktree: dir, job_id: 'run_123' }));
     await writeFile(join(run, 'work-spec.md'), 'Goal:\n  Outcome: Ship the command\n');
@@ -79,7 +171,7 @@ describe('land input and evidence gates', () => {
     const other = await git(dir, 'rev-parse', 'HEAD');
     const wider = join(run, 'wider.txt'); await writeFile(wider, 'first.txt\nfamilies.tsv\nrenamed.tsv\nother.txt\n');
     const request = vi.fn();
-    const base = { repo: 'demo', awRun: run, client: { request } as never };
+    const base = { repo: 'demo', awRun: run, base: parent, client: { request } as never };
     await expect(land({ ...base, commit: other })).rejects.toThrow('--commit conflicts with AW validated_sha');
     await expect(land({ ...base, allowedFiles: wider })).rejects.toThrow('--allowed-files conflicts with AW run allowed-files.txt');
     expect(request).not.toHaveBeenCalled();
@@ -146,6 +238,57 @@ describe('land input and evidence gates', () => {
     await writeFile(join(dir, 'allowed-files.txt'), 'first.txt\n');
     expect(await readAwRun(dir)).toEqual({ source: '/tmp/work', commit: sha, intentKey: 'run_123', intent: 'Ship the command', allowedFiles: join(dir, 'allowed-files.txt') });
     expect(await readFile(join(dir, 'allowed-files.txt'), 'utf8')).toBe('first.txt\n');
+  });
+  it('requires an explicit AW base even when status records a base or parent', async () => {
+    const { dir, parent, commit } = await source();
+    const run = await temp();
+    await writeFile(join(run, 'status.json'), JSON.stringify({ validated_sha: commit, worktree: dir, job_id: 'run_123', base_sha: parent, parent_sha: parent }));
+    await writeFile(join(run, 'work-spec.md'), 'Goal:\n  Outcome: Ship the command\n');
+    await writeFile(join(run, 'allowed-files.txt'), 'first.txt\nfamilies.tsv\nrenamed.tsv\n');
+    expect(await readAwRun(run)).not.toHaveProperty('base');
+    const request = vi.fn();
+    await expect(land({ repo: 'demo', awRun: run, client: { request } as never }))
+      .rejects.toThrow('supply --base');
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('does not treat the second commit parent_sha as the AW run base', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'seed.txt'), 'seed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'a.txt'), 'first\n');
+    await git(dir, 'add', 'a.txt'); await git(dir, 'commit', '-qm', 'first');
+    const first = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'b.txt'), 'second\n');
+    await git(dir, 'add', 'b.txt'); await git(dir, 'commit', '-qm', 'second');
+    const head = await git(dir, 'rev-parse', 'HEAD');
+    const run = await temp();
+    await writeFile(join(run, 'status.json'), JSON.stringify({ validated_sha: head, worktree: dir, job_id: 'two_commits', parent_sha: first }));
+    await writeFile(join(run, 'work-spec.md'), 'Goal:\n  Outcome: Land both commits\n');
+    await writeFile(join(run, 'allowed-files.txt'), 'b.txt\n');
+    const request = vi.fn();
+    await expect(land({ repo: 'demo', awRun: run, client: { request } as never })).rejects.toThrow('supply --base');
+    await expect(land({ repo: 'demo', awRun: run, base, client: { request } as never }))
+      .rejects.toThrow('OUTSIDE_ALLOWED_FILES: a.txt');
+    expect(await filesChanged(dir, head, base)).toEqual({ parent: base, files: ['a.txt', 'b.txt'] });
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('requires --base for a single-commit AW run too', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'seed.txt'), 'seed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    await git(dir, 'checkout', '-qb', 'agent');
+    await writeFile(join(dir, 'changed.txt'), 'changed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'candidate');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const run = await temp();
+    await writeFile(join(run, 'status.json'), JSON.stringify({ validated_sha: commit, worktree: dir, job_id: 'single-task' }));
+    await writeFile(join(run, 'work-spec.md'), 'Goal:\n  Outcome: Land one commit\n');
+    await writeFile(join(run, 'allowed-files.txt'), 'other.txt\n');
+    const request = vi.fn();
+    await expect(land({ repo: 'demo', awRun: run, client: { request } as never }))
+      .rejects.toThrow('supply --base');
+    expect(request).not.toHaveBeenCalled();
   });
   it('validates allowed path syntax', () => {
     expect([...parseAllowed('a.txt\nb/c.txt\n')]).toEqual(['a.txt', 'b/c.txt']);
@@ -229,7 +372,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const profile = { ...profileInput, digest: await digest(profileInput) };
   const profilePath = join(dir, 'profile.json'); await writeFile(profilePath, JSON.stringify(profile));
   const bulkFiles = Array.from({ length: 15 }, (_, index) => `bulk-${index}.txt`);
-  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'shared.txt', ...bulkFiles].map(file => [`file:${file}`, {
+  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'shared.txt', 'range-a.txt', 'range-b.txt', ...bulkFiles].map(file => [`file:${file}`, {
     canonicalKey: `file:${file}`, file, resources: [], dependencyKeys: [],
   }]));
   const policyInput = { id: 'generic-land', version: 1, checkerId: 'generic-land', checkerDigest: binary,
@@ -353,6 +496,51 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const carryVerdicts = await api(`/changes/${carryChange.changeId}/verdicts`);
   expect(carryVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid, method: 'patch-id' });
 
+  const rangeSource = await temp(); await git(rangeSource, 'clone', '-q', '-b', 'main', seed, '.');
+  const rangeBase = await git(rangeSource, 'rev-parse', 'HEAD');
+  await git(rangeSource, 'checkout', '-qb', 'agent-range');
+  await writeFile(join(rangeSource, 'range-a.txt'), 'first\n');
+  await git(rangeSource, 'add', 'range-a.txt'); await git(rangeSource, 'commit', '-qm', 'range implementation');
+  const firstRangeCommit = await git(rangeSource, 'rev-parse', 'HEAD');
+  await writeFile(join(rangeSource, 'range-b.txt'), 'second\n');
+  await git(rangeSource, 'add', 'range-b.txt'); await git(rangeSource, 'commit', '-qm', 'range repair');
+  const rangeHead = await git(rangeSource, 'rev-parse', 'HEAD');
+  const rangeRun = await temp();
+  await writeFile(join(rangeRun, 'status.json'), JSON.stringify({ validated_sha: rangeHead, worktree: rangeSource, job_id: 'range-task', parent_sha: firstRangeCommit }));
+  await writeFile(join(rangeRun, 'work-spec.md'), 'Goal:\n  Outcome: Land repaired range\n');
+  await writeFile(join(rangeRun, 'allowed-files.txt'), 'range-a.txt\nrange-b.txt\n');
+  const rangeEvidence = join(dir, 'range-review.txt');
+  const rangeArgs = ['--repo', 'landdemo', '--aw-run', rangeRun, '--base', rangeBase, '--wait-seconds', '150', '--json'];
+  await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', '--repo', 'landdemo',
+    '--aw-run', rangeRun, '--wait-seconds', '150', '--json'], { cwd: root, env: landEnv, timeout: 155_000 }))
+    .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('supply --base') });
+  await writeFile(rangeEvidence, `# ✅ APPROVED FOR MERGE — head ${firstRangeCommit}\nAPPROVED for merge\n`);
+  await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...rangeArgs,
+    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') }));
+  await writeFile(rangeEvidence, `# ✅ APPROVED FOR MERGE — head ${rangeHead}\nAPPROVED for merge\n`);
+  const beforeRange = (await api('')).data.observedCanonicalOid;
+  const rangeResult = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...rangeArgs,
+    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
+  const rangeEvents = rangeResult.stdout.trim().split('\n').map(line => JSON.parse(line));
+  const squashEvent = rangeEvents.find(item => item.state === 'squashed');
+  expect(squashEvent).toMatchObject({ base: rangeBase, headOid: rangeHead,
+    squashOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
+  expect(rangeEvents.map(item => item.state)).toEqual(expect.arrayContaining(['review-carried', 'landed']));
+  const rangeChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'range-task');
+  const rangeCandidate = join(dir, 'bridge', `${rangeChange.candidateStorageName}.git`);
+  const publishedParent = await git(rangeCandidate, 'rev-list', '--parents', '-n', '1', rangeChange.headOid);
+  expect(publishedParent.split(' ')).toEqual([rangeChange.headOid, beforeRange]);
+  expect(await git(rangeCandidate, 'diff', '--binary', beforeRange, rangeChange.headOid)).toBe(
+    await git(rangeSource, 'diff', '--binary', rangeBase, rangeHead));
+  const canonicalAfterRange = (await api('')).data.observedCanonicalOid;
+  expect(await git(canonical, 'show', `${canonicalAfterRange}:range-a.txt`)).toBe('first');
+  expect(await git(canonical, 'show', `${canonicalAfterRange}:range-b.txt`)).toBe('second');
+  expect((await git(canonical, 'rev-list', '--parents', '-n', '1', canonicalAfterRange)).split(' '))
+    .toEqual([canonicalAfterRange, beforeRange, rangeChange.headOid]);
+  const rangeVerdicts = await api(`/changes/${rangeChange.changeId}/verdicts`);
+  expect(rangeVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid: rangeHead, method: 'patch-id' });
+
   const contextSource = await temp(); await git(contextSource, 'clone', '-q', '-b', 'main', canonical, '.');
   const context = await readFile(join(contextSource, 'shared.txt'), 'utf8');
   await writeFile(join(contextSource, 'shared.txt'), context.replace('line-5\n', 'line-5-canonical\n'));
@@ -397,9 +585,19 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const inspected = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
     ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args], { cwd: root, env: item.env, timeout: 155_000 }))));
   for (const item of inspected) expect(item.stdout).toContain('"state":"awaiting-review"');
-  const merged = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
+  const attempts = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
     ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args, '--review-evidence', item.review],
-    { cwd: root, env: item.env, timeout: 155_000 }))));
+    { cwd: root, env: item.env, timeout: 155_000 })
+    .then(result => ({ result }), error => ({ error: error as Error & { stderr?: string } })))));
+  const merged = [];
+  for (const [index, attempt] of attempts.entries()) {
+    if ('result' in attempt) { merged.push(attempt.result); continue; }
+    expect(attempt.error.stderr).toContain('QUEUE_BLOCKED: STALE_MAIN');
+    const item = parallel[index];
+    const retryArgs = [...item.args]; retryArgs[retryArgs.indexOf('--intent-key') + 1] += '-retry';
+    merged.push(await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
+      ...retryArgs, '--review-evidence', item.review], { cwd: root, env: item.env, timeout: 155_000 })));
+  }
   for (const item of merged) expect(item.stdout).toContain('"state":"landed"');
   expect((await api('')).data.observedCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
   const sameFile = await Promise.all([1, 18].map(async (line, index) => {

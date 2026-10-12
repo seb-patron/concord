@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredential } from './client.ts';
-import { git, patchId, rejectCanonicalTarget, validateRemote } from './git.ts';
+import { git, gitBytes, patchId, rejectCanonicalTarget, validateRemote } from './git.ts';
 import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
 
@@ -11,7 +11,7 @@ type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
 export type LandOptions = { repo?: string; source?: string; commit?: string; intentKey?: string; intent?: string;
   allowedFiles?: string; dependsOn?: string[]; reviewEvidence?: string; mirrorTo?: string; waitSeconds?: number;
-  awRun?: string; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient };
+  base?: string; awRun?: string; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient };
 const sha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 const hash = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -64,13 +64,28 @@ async function leases(client: ConcordClient, root: string): Promise<Obj[]> {
   } while (cursor);
   return result;
 }
-export async function filesChanged(source: string, commit: string): Promise<{ parent: string; files: string[] }> {
+export async function filesChanged(source: string, commit: string, base?: string): Promise<{ parent: string; files: string[] }> {
+  if (base !== undefined) {
+    if (!/^[a-f0-9]{40}$/i.test(base)) throw new ConcordError('--base requires a full 40-hex commit OID', 'usage');
+    try {
+      const resolved = await git(['rev-parse', '--verify', `${base}^{commit}`], {}, source);
+      if (resolved.toLowerCase() !== base.toLowerCase()) throw new Error('base did not resolve exactly');
+      await git(['merge-base', '--is-ancestor', base, commit], {}, source);
+    } catch { throw new ConcordError('REFUSED: base is not an ancestor of head', 'usage'); }
+    const history = await git(['rev-list', '--parents', `${base}..${commit}`], {}, source);
+    if (history.split('\n').some(line => line && line.split(' ').length > 2))
+      throw new ConcordError('REFUSED: range contains a merge commit', 'usage');
+  }
   const parents = (await git(['rev-list', '--parents', '-n', '1', commit], {}, source)).split(' ');
-  if (parents.length !== 2 || parents[0] !== commit) throw new ConcordError('land requires a single-parent commit', 'usage');
-  const raw = await git(['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', parents[1], commit], {}, source);
-  const files = raw.split('\0').filter(Boolean);
-  if (!files.length) throw new ConcordError('candidate commit changes no files', 'usage');
-  return { parent: parents[1], files };
+  if ((!base && parents.length !== 2) || parents[0].toLowerCase() !== commit.toLowerCase()) throw new ConcordError('land requires a single-parent commit', 'usage');
+  const parent = base ?? parents[1];
+  const raw = await gitBytes(['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', parent, commit], {}, source);
+  let decoded: string;
+  try { decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw); }
+  catch { throw new ConcordError('REFUSED: Git path is not valid UTF-8', 'usage'); }
+  const files = decoded.split('\0').filter(Boolean);
+  if (!files.length) throw new ConcordError(base ? 'REFUSED: range has an empty diff' : 'candidate commit changes no files', 'usage');
+  return { parent, files };
 }
 export function parseAllowed(text: string): Set<string> {
   const lines = text.split(/\r?\n/).filter(Boolean);
@@ -153,6 +168,18 @@ async function prepareHead(source: string, commit: string, parent: string, base:
     return { work, head: await git(['rev-parse', 'HEAD'], {}, work), cherryPicked: true, cleanup: () => rm(work, { recursive: true, force: true }) };
   } catch (error) { await rm(work, { recursive: true, force: true }); throw error; }
 }
+async function squashRange(source: string, base: string, head: string): Promise<{ work: string; oid: string; cleanup: () => Promise<void> }> {
+  const work = await mkdtemp(join(tmpdir(), 'concord-land-squash-'));
+  try {
+    await git(['clone', '--quiet', '--shared', '--no-checkout', '--', source, work]);
+    const tree = await git(['rev-parse', `${head}^{tree}`], {}, work);
+    const oid = await git(['commit-tree', tree, '-p', base, '-m', `Squash range ${base}..${head}`], { identity: true }, work);
+    if ((await git(['rev-parse', `${oid}^{tree}`], {}, work)) !== tree ||
+        (await git(['rev-parse', `${oid}^`], {}, work)).toLowerCase() !== base.toLowerCase())
+      throw new ConcordError('squash tree or parent does not match reviewed range', 'server');
+    return { work, oid, cleanup: () => rm(work, { recursive: true, force: true }) };
+  } catch (error) { await rm(work, { recursive: true, force: true }); throw error; }
+}
 export function approvedHead(evidence: string, head: string): boolean {
   const lines = evidence.split(/\r?\n/);
   const report = lines.filter(line => line.trim() !== '');
@@ -168,12 +195,15 @@ export function approvedHead(evidence: string, head: string): boolean {
 export async function land(input: LandOptions): Promise<Obj> {
   let options = input;
   if (input.awRun) {
+    if (!input.base) throw new ConcordError('REFUSED: AW run requires an explicit run-start base; supply --base', 'usage');
     const run = await readAwRun(input.awRun);
     if (input.commit !== undefined && input.commit.toLowerCase() !== run.commit.toLowerCase())
       throw new ConcordError('--commit conflicts with AW validated_sha', 'usage');
     if (input.allowedFiles !== undefined && resolve(input.allowedFiles) !== resolve(run.allowedFiles))
       throw new ConcordError('--allowed-files conflicts with AW run allowed-files.txt', 'usage');
-    options = { ...run, ...input, commit: run.commit, allowedFiles: run.allowedFiles };
+    options = { ...run, ...input, source: input.source ?? run.source, intentKey: input.intentKey ?? run.intentKey,
+      intent: input.intent ?? run.intent,
+      commit: run.commit, allowedFiles: run.allowedFiles };
   }
   const repo = required(options.repo, '--repo'); const source = resolve(required(options.source, '--source'));
   const commit = required(options.commit, '--commit'); const intentKey = required(options.intentKey, '--intent-key');
@@ -183,7 +213,7 @@ export async function land(input: LandOptions): Promise<Obj> {
     validateRemote(options.mirrorTo);
     if (new URL(options.mirrorTo).protocol !== 'https:') throw new ConcordError('--mirror-to requires a credential-free HTTPS Git URL', 'usage');
   }
-  const changed = await filesChanged(source, commit);
+  const changed = await filesChanged(source, commit, options.base);
   const allowed = parseAllowed(await readFile(allowedFile, 'utf8'));
   const outside = changed.files.filter(file => !allowed.has(file));
   if (outside.length) throw new ConcordError(`OUTSIDE_ALLOWED_FILES: ${outside.join(', ')}`, 'usage');
@@ -191,6 +221,9 @@ export async function land(input: LandOptions): Promise<Obj> {
   const url = required(process.env.CONCORD_URL, 'CONCORD_URL');
   const client = input.client ?? new ConcordClient({ url, token });
   const emit = (event: Obj) => (options.emit ?? ((value: Obj) => { process.stdout.write(`${JSON.stringify(redactOutput(value))}\n`); }))({ repo, intentKey, ...event });
+  const squash = options.base ? await squashRange(source, changed.parent, commit) : null;
+  if (squash) emit({ state: 'squashed', base: changed.parent, headOid: commit, squashOid: squash.oid });
+  try {
   const root = `/repos/${encodeURIComponent(repo)}`;
   const wait = options.waitSeconds ?? 600;
   if (!Number.isSafeInteger(wait) || wait < 0) throw new ConcordError('--wait-seconds must be a nonnegative integer', 'usage');
@@ -249,7 +282,7 @@ export async function land(input: LandOptions): Promise<Obj> {
     const latestRepo = (await api(client, root)).data;
     const canonical = await access(client, root, latestRepo, 'read', latestRepo.canonicalStorageName);
     const targetBase = alreadyQueued || current.headOid && current.baseOid === latestRepo.observedCanonicalOid ? current.baseOid : latestRepo.observedCanonicalOid;
-    const prepared = await prepareHead(source, commit, changed.parent, targetBase, canonical);
+    const prepared = await prepareHead(squash?.work ?? source, squash?.oid ?? commit, changed.parent, targetBase, canonical);
     try {
       let change = (await api(client, path)).data;
       if (change.headOid && change.baseOid === targetBase && change.headOid !== prepared.head) throw new ConcordError('PUBLISHED_HEAD_MISMATCH: existing intent has a different head', 'conflict');
@@ -283,12 +316,15 @@ export async function land(input: LandOptions): Promise<Obj> {
         const evidence = await readFile(options.reviewEvidence, 'utf8');
         let carried = false;
         if (!approvedHead(evidence, prepared.head)) {
-          if (prepared.cherryPicked && prepared.head !== commit && approvedHead(evidence, commit)) {
+          if ((prepared.cherryPicked || squash) && prepared.head !== commit && approvedHead(evidence, commit)) {
             const published = await filesChanged(prepared.work, prepared.head);
             carried = published.parent === targetBase &&
               published.files.length === changed.files.length &&
               published.files.every(file => allowed.has(file) && changed.files.includes(file)) &&
-              await patchId(source, commit) === await patchId(prepared.work, prepared.head);
+              (!squash || (await git(['rev-parse', `${squash.oid}^{tree}`], {}, squash.work)) ===
+                (await git(['rev-parse', `${commit}^{tree}`], {}, source)) &&
+                (await git(['rev-parse', `${squash.oid}^`], {}, squash.work)).toLowerCase() === changed.parent.toLowerCase()) &&
+              await patchId(squash?.work ?? source, squash?.oid ?? commit) === await patchId(prepared.work, prepared.head);
           }
           if (!carried) throw new ConcordError('review evidence must approve the exact published head SHA', 'usage');
         }
@@ -335,4 +371,5 @@ export async function land(input: LandOptions): Promise<Obj> {
     await refresh().catch(() => {});
     for (const item of held) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
   }
+  } finally { await squash?.cleanup(); }
 }
