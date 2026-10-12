@@ -47,6 +47,8 @@ const original = {
   schedule: runners.hooks['runners.schedule'],
 };
 const originalStorageInfo = FakeStorage.prototype.info;
+const originalStorageResolveRef = FakeStorage.prototype.resolveRef;
+const originalStorageReadCommit = FakeStorage.prototype.readCommit;
 const originalTrustedConfig = (env as Env).TRUSTED_CONFIG;
 let harness: Harness;
 beforeEach(() => {
@@ -192,6 +194,8 @@ afterEach(async () => {
   verdicts.hooks['verdicts.gate'] = original.verdict;
   runners.hooks['runners.schedule'] = original.schedule;
   FakeStorage.prototype.info = originalStorageInfo;
+  FakeStorage.prototype.resolveRef = originalStorageResolveRef;
+  FakeStorage.prototype.readCommit = originalStorageReadCommit;
   (env as Env).TRUSTED_CONFIG = originalTrustedConfig;
 });
 
@@ -1241,6 +1245,37 @@ describe('queue state machine', () => {
     await h.tick(); await h.tick();
     expect((await h.state()).promotion).toMatchObject({ state: 'pending', checkedNewOid: oid('e') });
     expect(h.jobs.filter(item => item.kind === 'promote')).toHaveLength(1);
+  });
+
+  it('retries the queue scratch identity reads when storage visibility lags once', async () => {
+    const h = await setup('A');
+    await h.tick();
+    const job = h.jobs[0];
+    expect((await h.deliver(job, 'PASS')).status).toBe('eligible');
+    if (job.kind !== 'validate-stack') throw new Error('expected stack job');
+
+    let staleRef = true;
+    let staleCommit = true;
+    FakeStorage.prototype.resolveRef = async function(name, ref) {
+      if (name === job.scratchStorageName && ref === job.scratchRef && staleRef) {
+        staleRef = false;
+        return null;
+      }
+      return originalStorageResolveRef.call(this, name, ref);
+    };
+    FakeStorage.prototype.readCommit = async function(name, commitOid) {
+      if (name === job.scratchStorageName && commitOid === oid('e') && staleCommit) {
+        staleCommit = false;
+        return null;
+      }
+      return originalStorageReadCommit.call(this, name, commitOid);
+    };
+
+    await h.tick();
+
+    expect(staleRef).toBe(false);
+    expect(staleCommit).toBe(false);
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', checkedNewOid: oid('e') });
   });
 
   it('rejects a green result whose checked scratch ref moved', async () => {

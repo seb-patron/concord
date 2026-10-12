@@ -6,7 +6,7 @@ import { digest, failure, HttpError, json } from '../http';
 import { eventSequence, sqlState } from '../state';
 import { accepted, arbitrate, type ContestResult } from '../queue/arbitrate';
 import { hashCanonical } from '../verdicts/manifest';
-import { jobInput } from './runners';
+import { jobInput, visibleCommit, visibleRef } from './runners';
 import {
   advanceDiagnosis, COALESCE_MS, MAX_CANDIDATES, selectStack, startDiagnosis, STACK_WIDTH,
   type Diagnosis, type PlannedEntry,
@@ -589,9 +589,9 @@ async function validResultDigest(result: StackResult | PromotionResult): Promise
 async function checkedScratch(context: ModuleContext, record: JobRecord, result: StackResult): Promise<boolean> {
   if (record.job.kind !== 'validate-stack' || !result.composedOid || !result.composedTreeOid
     || result.sourceTreeOid !== result.composedTreeOid) return false;
-  const observed = await context.storage.resolveRef(record.job.scratchStorageName, record.job.scratchRef);
+  const observed = await visibleRef(context.storage, record.job.scratchStorageName, record.job.scratchRef, result.composedOid);
   if (observed !== result.composedOid) return false;
-  const commit = await context.storage.readCommit(record.job.scratchStorageName, result.composedOid);
+  const commit = await visibleCommit(context.storage, record.job.scratchStorageName, result.composedOid);
   return commit?.oid === result.composedOid && commit.treeOid === result.composedTreeOid;
 }
 function resultPolicy(_context: ModuleContext, record: JobRecord) {
