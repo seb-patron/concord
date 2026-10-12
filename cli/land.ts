@@ -79,10 +79,22 @@ export async function filesChanged(source: string, commit: string, base?: string
   const parents = (await git(['rev-list', '--parents', '-n', '1', commit], {}, source)).split(' ');
   if ((!base && parents.length !== 2) || parents[0].toLowerCase() !== commit.toLowerCase()) throw new ConcordError('land requires a single-parent commit', 'usage');
   const parent = base ?? parents[1];
-  const raw = await git(['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', parent, commit], {}, source);
+  const raw = await git(['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', parent, commit], { preserveOutput: true }, source);
   const files = raw.split('\0').filter(Boolean);
   if (!files.length) throw new ConcordError(base ? 'REFUSED: range has an empty diff' : 'candidate commit changes no files', 'usage');
   return { parent, files };
+}
+async function requireAwBaseForRange(source: string, head: string): Promise<void> {
+  const error = new ConcordError('REFUSED: AW run cannot prove the reviewed head is one commit above its base branch; supply --base', 'usage');
+  let branch: string;
+  try { branch = await git(['symbolic-ref', '-q', 'refs/remotes/origin/HEAD'], {}, source); }
+  catch { branch = 'refs/heads/main'; }
+  try {
+    const base = await git(['merge-base', branch, head], {}, source);
+    const history = await git(['rev-list', '--parents', `${base}..${head}`], {}, source);
+    const commits = history.split('\n').filter(Boolean);
+    if (commits.length !== 1 || commits[0].split(' ').length !== 2 || commits[0].split(' ')[1].toLowerCase() !== base.toLowerCase()) throw error;
+  } catch { throw error; }
 }
 export function parseAllowed(text: string): Set<string> {
   const lines = text.split(/\r?\n/).filter(Boolean);
@@ -199,12 +211,15 @@ export async function land(input: LandOptions): Promise<Obj> {
       throw new ConcordError('--allowed-files conflicts with AW run allowed-files.txt', 'usage');
     if (run.base !== undefined && input.base !== undefined && input.base.toLowerCase() !== run.base.toLowerCase())
       throw new ConcordError('--base conflicts with AW run recorded base', 'usage');
-    options = { ...run, ...input, base: run.base ?? input.base, commit: run.commit, allowedFiles: run.allowedFiles };
+    options = { ...run, ...input, source: input.source ?? run.source, intentKey: input.intentKey ?? run.intentKey,
+      intent: input.intent ?? run.intent,
+      base: run.base ?? input.base, commit: run.commit, allowedFiles: run.allowedFiles };
   }
   const repo = required(options.repo, '--repo'); const source = resolve(required(options.source, '--source'));
   const commit = required(options.commit, '--commit'); const intentKey = required(options.intentKey, '--intent-key');
   const intent = required(options.intent, '--intent'); const allowedFile = required(options.allowedFiles, '--allowed-files');
   if (!sha.test(commit) || !/^[A-Za-z0-9_-]{1,128}$/.test(intentKey) || !/^[A-Za-z0-9_-]{1,64}$/.test(repo)) throw new ConcordError('invalid repo, intent key, or commit SHA', 'usage');
+  if (input.awRun && !options.base) await requireAwBaseForRange(source, commit);
   if (options.mirrorTo) {
     validateRemote(options.mirrorTo);
     if (new URL(options.mirrorTo).protocol !== 'https:') throw new ConcordError('--mirror-to requires a credential-free HTTPS Git URL', 'usage');
