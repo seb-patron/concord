@@ -113,10 +113,11 @@ describe('semantic lease identities', () => {
   it('validates owner TSV declarations and maps only matching new keys', () => {
     const declared = structuredClone(policy);
     declared.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],
-      keyColumn: 'job', keyPattern: '^[a-z]+$' }];
+      keyColumn: 'job', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }];
     const registry = unitRegistry(declared);
     expect(resolveUnit(registry, 'row:jobs:zeta')).toMatchObject({ file: 'data/jobs.tsv', resources: ['data/jobs.tsv#zeta'] });
     expect(() => resolveUnit(registry, 'row:jobs:zeta7')).toThrow('Unit key is not registered');
+    expect(() => resolveUnit(registry, 'row:jobs:zeta!')).toThrow('Unit key is not registered');
     expect(() => resolveUnit(registry, 'row:other:zeta')).toThrow('Unit key is not registered');
     expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\nalpha\told\n',
       'job\tvalue\nalpha\told\nzeta\tnew\n').map(unit => unit.key)).toEqual(['row:jobs:zeta']);
@@ -126,16 +127,43 @@ describe('semantic lease identities', () => {
       'job\tchanged\nalpha\told\n').map(unit => unit.key)).toEqual(['file:data/jobs.tsv']);
     const config = { policies: { 'local-demo': declared }, profiles: trusted.profiles };
     expect(loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify(config) }).policies['local-demo'].tables).toEqual(declared.tables);
-    for (const keyPattern of ['[a-z]+', '^([a-z]+)+$', '^x'.repeat(100)]) {
-      declared.tables[0].keyPattern = keyPattern;
-      if (keyPattern === '^([a-z]+)+$') continue;
-      expect(() => loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify(config) })).toThrow('TRUSTED_CONFIG_INVALID');
+    for (const keySpec of [
+      { charset: '^([a-z]+)+$', minLength: 1, maxLength: 256 },
+      { charset: 'lower', minLength: 0, maxLength: 256 },
+      { charset: 'lower', minLength: 1, maxLength: 257 },
+      { charset: ['a', 'a'], minLength: 1, maxLength: 2 },
+      { charset: ['ab'], minLength: 1, maxLength: 2 },
+    ]) {
+      expect(() => loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify({ ...config, policies: {
+        'local-demo': { ...declared, tables: [{ ...declared.tables![0], keySpec }] },
+      } }) })).toThrow('TABLE_KEY_SPEC_INVALID');
     }
+    expect(() => loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify({ ...config, policies: {
+      'local-demo': { ...declared, tables: [{ ...declared.tables![0], keyPattern: '^([a-z]+)+$' }] },
+    } }) })).toThrow('TABLE_KEY_SPEC_INVALID');
+    expect(() => loadTrustedConfig({ CONCORD_MODE: 'local', TRUSTED_CONFIG: JSON.stringify({ ...config, policies: {
+      'local-demo': { ...declared, tables: [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],
+        keyColumn: 'job', keyPattern: '^([a-z]+)+$' }] },
+    } }) })).toThrow('TABLE_KEY_SPEC_INVALID');
+  });
+
+  it('matches complete bounded keys and retains colons in declared row identities', () => {
+    const declared = structuredClone(policy);
+    declared.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'], keyColumn: 'job',
+      keySpec: { charset: ['a', 'b', ':'], minLength: 3, maxLength: 3 } }];
+    declared.units = { 'row:jobs:a:b': { canonicalKey: 'row:jobs:a:b', file: 'data/jobs.tsv',
+      resources: ['data/jobs.tsv#a:b'], dependencyKeys: [] } };
+    const registry = unitRegistry(declared);
+    expect(resolveUnit(registry, 'row:jobs:a:b').resources).toEqual(['data/jobs.tsv#a:b']);
+    expect(() => resolveUnit(registry, 'row:jobs:a:b!')).toThrow('Unit key is not registered');
+    expect(() => resolveUnit(registry, 'row:jobs:a:')).toThrow('Unit key is not registered');
+    expect(changedUnitsForFile(registry, 'data/jobs.tsv', 'job\tvalue\na:b\told\n',
+      'job\tvalue\na:b\tnew\n').map(unit => unit.key)).toEqual(['row:jobs:a:b']);
   });
 
   it('claims and reserves distinct new rows while refusing the same key with holder intent', async () => {
     policy.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],
-      keyColumn: 'job', keyPattern: '^[a-z]+$' }];
+      keyColumn: 'job', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }];
     setupPolicy();
     const repo = 'lease_pattern_rows';
     const zeta = await claim(repo, 'local-agent-a', 'zeta-change', ['row:jobs:zeta'], 'zeta');

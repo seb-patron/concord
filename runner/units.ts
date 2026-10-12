@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
 import { trustedDependencyKeys } from '../src/verdicts/manifest';
-import { patternRow, tableForFile, type TsvTable } from '../src/leases/units';
+import { matchesTableKey, patternRow, tableForFile, type TsvTable } from '../src/leases/units';
 import { command, git, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
-const legacyTable: TsvTable = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keyPattern: '^[a-z]+$' };
+const legacyTable: TsvTable = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } };
 const rowId = (unit: string, table: TsvTable) => unit.startsWith(`row:${table.name}:`) ? unit.slice(`row:${table.name}:`.length) : null;
 const decode = (bytes: Buffer): string | null => {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
@@ -22,7 +22,7 @@ export function parseTsv(text: string, table: TsvTable = legacyTable): Map<strin
   for (const line of lines) {
     const cells = line.split('\t');
     const key = cells[table.header.indexOf(table.keyColumn)];
-    if (cells.length !== table.header.length || !key || !new RegExp(table.keyPattern).test(key) || rows.has(key)) throw new Error('INVALID_TSV_ROW');
+    if (cells.length !== table.header.length || !key || !matchesTableKey(table, key) || rows.has(key)) throw new Error('INVALID_TSV_ROW');
     rows.set(key, line);
   }
   return rows;

@@ -12,6 +12,31 @@ export interface UnitIdentity {
 export type TsvTable = NonNullable<TrustedPolicy['tables']>[number];
 const tableMetadata = new WeakMap<Map<string, UnitIdentity>, TsvTable[]>();
 
+export function matchesTableKey(table: TsvTable, key: string): boolean {
+  const spec = table.keySpec;
+  if (key.length < spec.minLength || key.length > spec.maxLength) return false;
+  const chars = Array.isArray(spec.charset) ? new Set(spec.charset) : null;
+  for (const char of key) {
+    if (chars ? !chars.has(char) :
+      spec.charset === 'lower' ? char < 'a' || char > 'z' :
+      spec.charset === 'alnum' ? !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9') :
+      !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char === '-' || char === '.')) return false;
+  }
+  return true;
+}
+
+function validKeySpec(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const spec = value as TsvTable['keySpec'];
+  if (Object.keys(spec).sort().join(',') !== 'charset,maxLength,minLength' ||
+    !Number.isSafeInteger(spec.minLength) || spec.minLength < 1 ||
+    !Number.isSafeInteger(spec.maxLength) || spec.maxLength < spec.minLength || spec.maxLength > 256) return false;
+  if (Array.isArray(spec.charset)) return spec.charset.length > 0 && spec.charset.length <= 256 &&
+    new Set(spec.charset).size === spec.charset.length && spec.charset.every(char =>
+      typeof char === 'string' && char.length === 1 && char >= '!' && char <= '~');
+  return spec.charset === 'lower' || spec.charset === 'alnum' || spec.charset === 'alnum-dash-dot';
+}
+
 export function declaredTables(policy: TrustedPolicy): TsvTable[] {
   if (policy.tables === undefined) return [];
   if (!Array.isArray(policy.tables) || policy.tables.length > 32) throw new Error('TABLE_POLICY_INVALID');
@@ -23,10 +48,9 @@ export function declaredTables(policy: TrustedPolicy): TsvTable[] {
       !Array.isArray(table.header) || table.header.length < 2 || table.header.length > 64 ||
       !table.header.every(column => typeof column === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(column)) ||
       new Set(table.header).size !== table.header.length || !table.header.includes(table.keyColumn) ||
-      typeof table.keyPattern !== 'string' || table.keyPattern.length < 3 || table.keyPattern.length > 128 ||
-      !table.keyPattern.startsWith('^') || !table.keyPattern.endsWith('$') ||
       names.has(table.name) || files.has(table.file)) throw new Error('TABLE_POLICY_INVALID');
-    try { new RegExp(table.keyPattern); } catch { throw new Error('TABLE_POLICY_INVALID'); }
+    if (Object.keys(table).sort().join(',') !== 'file,header,keyColumn,keySpec,name' || !validKeySpec(table.keySpec))
+      throw new Error('TABLE_KEY_SPEC_INVALID');
     names.add(table.name); files.add(table.file);
   }
   return policy.tables;
@@ -37,7 +61,7 @@ export function patternRow(policy: TrustedPolicy, raw: string): UnitIdentity | n
     const prefix = `row:${table.name}:`;
     if (!raw.startsWith(prefix)) continue;
     const key = raw.slice(prefix.length);
-    if (!validKey(key) || !new RegExp(table.keyPattern).test(key)) return null;
+    if (!validKey(key) || !matchesTableKey(table, key)) return null;
     return { key: raw, file: table.file, resources: [`${table.file}#${key}`], wholeFile: false };
   }
   return null;
@@ -90,7 +114,8 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
       throw new Error('UNIT_REGISTRY_INVALID');
     }
     if (identity.key.startsWith('row:')) {
-      const rowId = identity.key.slice(identity.key.lastIndexOf(':') + 1);
+      const table = tables.find(item => identity.key.startsWith(`row:${item.name}:`) && item.file === identity.file);
+      const rowId = table ? identity.key.slice(`row:${table.name}:`.length) : identity.key.slice(identity.key.lastIndexOf(':') + 1);
       const physicalRow = `${identity.file}\0${rowId}`;
       if (!rowId || rows.has(physicalRow) && rows.get(physicalRow) !== identity.key) {
         throw new Error('UNIT_REGISTRY_INVALID');
@@ -140,7 +165,7 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
       const prefix = `row:${table.name}:`;
       if (!raw.startsWith(prefix)) continue;
       const key = raw.slice(prefix.length);
-      if (validKey(key) && new RegExp(table.keyPattern).test(key))
+      if (validKey(key) && matchesTableKey(table, key))
         identity = { key: raw, file: table.file, resources: [`${table.file}#${key}`], wholeFile: false };
       break;
     }
@@ -193,7 +218,8 @@ export function changedUnitsForFile(
   const rowKeys = new Map<string, UnitIdentity>();
   for (const identity of new Map([...registry.values()].map(unit => [unit.key, unit])).values()) {
     if (identity.file !== file || !identity.key.startsWith('row:') || identity.wholeFile) continue;
-    const rowId = identity.key.slice(identity.key.lastIndexOf(':') + 1);
+    const prefix = table && `row:${table.name}:`;
+    const rowId = prefix && identity.key.startsWith(prefix) ? identity.key.slice(prefix.length) : identity.key.slice(identity.key.lastIndexOf(':') + 1);
     if (!rowId || rowKeys.has(rowId) && rowKeys.get(rowId)?.key !== identity.key) return [wholeFile];
     rowKeys.set(rowId, identity);
   }

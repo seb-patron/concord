@@ -12,11 +12,11 @@ An owner can also declare TSV tables in trusted policy metadata:
 "tables": [{
   "name": "families", "file": "families.tsv",
   "header": ["family", "retry_limit", "timeout_ms"],
-  "keyColumn": "family", "keyPattern": "^[a-z]+$"
+  "keyColumn": "family", "keySpec": { "charset": "lower", "minLength": 1, "maxLength": 256 }
 }]
 ```
 
-The header is an exact ordered column list. `keyColumn` names one header column; `keyPattern` is an anchored, length-bounded regular expression. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Non-TSV changes use the file footprint.
+The header is an exact ordered column list. `keyColumn` names one header column. `keySpec` matches the entire key, character by character, with `minLength` at least 1 and `maxLength` at most 256. `charset` is `lower`, `alnum`, `alnum-dash-dot`, or an explicit list of unique printable nonspace ASCII characters. Regular expressions and other fields are rejected. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Non-TSV changes use the file footprint.
 
 ## Claim and inspect
 

@@ -197,7 +197,7 @@ export function attemptBudget(family) {
   });
 
   it('merges declared tables with nonfirst keys, additions, deletions and collisions', () => {
-    const table = { name: 'jobs', file: 'data/jobs.tsv', header: ['value', 'job'], keyColumn: 'job', keyPattern: '^[a-z]+$' };
+    const table = { name: 'jobs', file: 'data/jobs.tsv', header: ['value', 'job'], keyColumn: 'job', keySpec: { charset: 'lower' as const, minLength: 1, maxLength: 256 } };
     const base = 'value\tjob\nold\talpha\nretired\tomega\n';
     const ours = base + 'left\tzeta\n';
     const theirs = 'value\tjob\nold\talpha\nright\teta\n';
@@ -219,13 +219,31 @@ export function attemptBudget(family) {
       await git(repo, ['commit', '--quiet', '-m', 'append zeta'], 30_000, commitEnv);
       const head = await git(repo, ['rev-parse', 'HEAD']);
       const rowPolicy: TrustedPolicy = { ...policy, tables: [{ name: 'jobs', file: 'jobs.tsv', header: ['value', 'job'],
-        keyColumn: 'job', keyPattern: '^[a-z]+$' }], units: { 'file:jobs.tsv': {
+        keyColumn: 'job', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }], units: { 'file:jobs.tsv': {
         canonicalKey: 'file:jobs.tsv', file: 'jobs.tsv', resources: [], dependencyKeys: [],
       } } };
       const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: rowPolicy } as Job);
       expect(inspected.unitKeys).toEqual(['row:jobs:zeta']);
       expect(inspected.manifest.coverage).toBe('complete');
       expect(normalizeManifest(inspected.manifest, rowPolicy, inspected.unitKeys)).toEqual(inspected.manifest);
+    });
+  });
+
+  it('uses whole-file scope for a Git mode-only change to a TSV', async () => {
+    await gitFixture(async ({ repo }) => {
+      await writeFile(join(repo, 'jobs.tsv'), 'job\tvalue\nalpha\told\n');
+      await git(repo, ['add', 'jobs.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'table'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['update-index', '--chmod=+x', 'jobs.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'mode'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const rowPolicy: TrustedPolicy = { ...policy, tables: [{ name: 'jobs', file: 'jobs.tsv',
+        header: ['job', 'value'], keyColumn: 'job', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }],
+      units: { 'file:jobs.tsv': { canonicalKey: 'file:jobs.tsv', file: 'jobs.tsv', resources: [], dependencyKeys: [] } } };
+      const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: rowPolicy } as Job);
+      expect(inspected.unitKeys).toEqual(['file:jobs.tsv']);
+      expect(inspected.manifest.changedUnits[0]).toMatchObject({ beforeMode: '100644', afterMode: '100755' });
     });
   });
 
@@ -484,7 +502,7 @@ export function attemptBudget(family) {
         const remotes = Object.fromEntries(Object.entries({ canonical, first, [otherName]: otherRemote, scratch: scratchPath })
           .map(([name, path]) => [name, pathToFileURL(path).href]));
         const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, tables: [{ name: 'families', file: 'families.tsv',
-          header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keyPattern: '^[a-z]+$' }] },
+          header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }] },
           kind: 'validate-stack', canonicalBaseOid: base,
           candidates: [
             { changeId: 'alpha', revision: 1, baseOid: base, headOid: firstHead, storageName: 'first', ref: 'refs/heads/main' },
