@@ -3,8 +3,11 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
+import type { Digest, Job, ModuleContext, StackResult, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
+import { queue } from '../../src/features/queue';
+import { jobInput, runners } from '../../src/features/runners';
+import { localFixtureConfig } from '../../src/state';
 import { manifestDigest, normalizeManifest } from '../../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, refOid, temporaryWork, withJobDeadline } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
@@ -722,6 +725,60 @@ export function attemptBudget(family) {
       expect(await refOid(repo, remotes.scratch, 'refs/heads/check')).toBe(base);
     });
   });
+
+  it('submits an executed Git check through runners.result to the queue coordinator hook', async () => {
+    await gitFixture(async ({ repo, canonical, scratch, base }) => {
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const unsealed: Job = { ...jobBase(remotes), kind: 'validate-stack', canonicalBaseOid: base,
+        candidates: [], baseCheck: true, bootstrap: false, stackId: 'stack', scratchStorageName: 'scratch',
+        scratchRef: 'refs/heads/check', expectedRefs: { canonical: base, scratch: null },
+        state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null };
+      const job = { ...unsealed, inputDigest: await digest(jobInput(unsealed)) };
+      const trusted = localFixtureConfig('local');
+      trusted.policies['local-demo'] = policy;
+      trusted.profiles['local-demo'] = { ...trusted.profiles['local-demo'], digest: pin,
+        toolchainDigest: pin, oracleDigest: pin, environmentDigest: pin };
+      const treeOid = await git(repo, ['rev-parse', `${base}^{tree}`]);
+      const data = new Map<string, unknown>();
+      let version = 0;
+      let sequence = 0;
+      const context = {
+        repoId: 'demo', tenantId: 'local',
+        principal: { tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER },
+        trusted, now: Date.now, version: () => version, nextVersion: () => ++version,
+        transaction: (run: () => unknown) => run(), appendEvent: () => ({ sequence: ++sequence }),
+        state: { get: (key: string) => data.get(key) ?? null, put: (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
+          delete: (key: string) => { data.delete(key); } },
+        storage: { readCommit: async () => ({ oid: base, treeOid, parents: [] }), resolveRef: async () => base },
+        call: (name: string, value: StackResult) => {
+          expect(name).toBe('queue.onResult');
+          return queue.hooks['queue.onResult']!(context as unknown as ModuleContext, value);
+        },
+      } as unknown as ModuleContext;
+      context.state.put('data', { generation: 1, observedMain: base, jobs: [{ job, purpose: 'stack', memberIds: [],
+        admissionIds: [], consumed: false }], entries: [], contests: [], ticket: null });
+      expect(runners.hooks['runners.schedule']!(context, job).status).toBe('eligible');
+      const poll = runners.routes.find(route => route.pattern.test('/v1/repos/demo/runner/poll'))!;
+      const claimedResponse = await poll.handle(context, new Request('https://test/v1/repos/demo/runner/poll', { method: 'POST' }),
+        '/v1/repos/demo/runner/poll'.match(poll.pattern)!,
+        { runnerId: 'runner', role: 'checker', supportedProfileDigests: [pin] });
+      expect(claimedResponse.status).toBe(200);
+      const claimed = (await claimedResponse.json() as { data: { job: Job } }).data.job;
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(claimed, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'PASS', composedOid: base });
+      const route = runners.routes.find(entry => entry.method === 'POST' && entry.pattern.test('/v1/repos/demo/jobs/job/result'))!;
+      const response = await route.handle(context, new Request('https://test/v1/repos/demo/jobs/job/result', { method: 'POST' }),
+        '/v1/repos/demo/jobs/job/result'.match(route.pattern)!,
+        { attempt: result.attempt, fence: result.fence, inputDigest: result.inputDigest,
+          resultDigest: result.resultDigest, result });
+      expect(response.status).toBe(200);
+      expect((await response.json() as { data: { dispatch: { status: string } } }).data.dispatch.status).toBe('eligible');
+      expect((context.state.get<{ jobs: Array<{ result?: StackResult }> }>('data'))?.jobs[0].result).toEqual(result);
+    });
+  }, 20_000);
 
   it('rejects a same-tree scratch descendant during base-check reconciliation', async () => {
     await gitFixture(async ({ repo, canonical, scratch, base }) => {

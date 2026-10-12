@@ -222,9 +222,9 @@ async function addChange(h: Harness, id: string, deps: string[] = [], profileId 
 }
 
 async function sendRebase(h: Harness, job: Extract<Job, { kind: 'rebase-candidate' }>,
-  outcome: RebaseResult['outcome'], patchChanged = false, evidence?: ReviewManifest): Promise<void> {
+  outcome: RebaseResult['outcome'], patchChanged = false, evidence?: ReviewManifest, unitKey = 'row:A'): Promise<void> {
   const headOid = outcome === 'PASS' ? oid('f') : null;
-  const manifest: ReviewManifest = { coverage: 'complete', changedUnits: [{ unitKey: 'row:A',
+  const manifest: ReviewManifest = { coverage: 'complete', changedUnits: [{ unitKey,
     beforePath: 'rows.tsv', afterPath: 'rows.tsv', beforeMode: '100644', afterMode: '100644',
     beforeDigest: `sha256:${'1'.repeat(64)}`, afterDigest: `sha256:${'2'.repeat(64)}` }],
     dependencyScope: [], policyVersion: job.unitPolicy.version, policyDigest: job.policyDigest,
@@ -237,9 +237,9 @@ async function sendRebase(h: Harness, job: Extract<Job, { kind: 'rebase-candidat
     log: outcome === 'FAIL' ? 'combined check failed' : '', outcome, baseOid: job.newBaseOid,
     headOid, patchIdBefore: 'a'.repeat(40), patchIdAfter: headOid ? (patchChanged ? 'b' : 'a').repeat(40) : null,
     reviewManifest: headOid ? reviewed : null,
-    reviewManifestDigest: headOid ? await digest(reviewed) : null, unitKeys: headOid ? ['row:A'] : [],
+    reviewManifestDigest: headOid ? await digest(reviewed) : null, unitKeys: headOid ? [unitKey] : [],
     conflictPaths: outcome === 'MERGE_CONFLICT' ? ['rows.tsv'] : [],
-    conflictUnits: outcome === 'MERGE_CONFLICT' ? ['row:A'] : [] };
+    conflictUnits: outcome === 'MERGE_CONFLICT' ? [unitKey] : [] };
   const result = { ...preimage, resultDigest: await digest(preimage) } as RebaseResult;
   const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
   const gateResult = await runInDurableObject<RepoCoordinator, Gate<{ promotionId: string | null }>>(stub, instance => {
@@ -272,7 +272,7 @@ async function deliverChecked(h: Harness, job: Job, outcome: StackResult['outcom
   const claimed = (await responseBody(poll)).data.job as Job;
   if (claimed.jobId !== job.jobId) throw new Error(`unexpected runner job: ${claimed.jobId}`);
   const composedOid = options.composedOid ?? (job.baseCheck && ['PASS', 'FAIL'].includes(outcome) ? main :
-    outcome === 'PASS' ? oid((h.jobs.indexOf(job) + 2).toString(16)) : null);
+    outcome === 'PASS' ? oid((h.jobs.findIndex(item => item.jobId === job.jobId) + 2).toString(16)) : null);
   const tree = options.tree ?? (job.baseCheck ? oid('2') : oid('3'));
   if (composedOid && ['PASS', 'MATCH'].includes(outcome)) {
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
@@ -1250,17 +1250,47 @@ describe('queue state machine', () => {
     expect(h.jobs.some(item => item.kind === 'rebase-candidate')).toBe(false);
   });
 
-  it('keeps an open contest reserved when external main makes both children stale', async () => {
+  it.each([false, true])('rebases an open contest and arbitrates fresh child checks with prior jobs: %s', async priorJobs => {
     const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
     await contestReal(h);
+    if (priorJobs) {
+      await h.tick();
+      expect(h.jobs.filter(job => job.kind === 'validate-stack')).toHaveLength(2);
+    }
     expect((await h.state()).contests[0].state).toBe('open');
-    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('4'), main)).toBe(true);
+    const nextMain = oid('4');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    repos.hooks['repos.applyRebase'] = (_context, pinned, result) => {
+      h.views.set(pinned.candidate.changeId, { ...h.views.get(pinned.candidate.changeId)!, revision: 2,
+        baseOid: pinned.newBaseOid, headOid: result.headOid, branch: pinned.targetRef });
+      return gate({ revision: 2 });
+    };
+    verdicts.hooks['verdicts.carryRebase'] = (_context, job) => gate({ verdictId: `v2-${job.candidate.changeId}` });
+    verdicts.hooks['verdicts.gate'] = (_context, id, revision) => gate({
+      verdictId: revision === 2 ? `v2-${id}` : `v-${id}`, reviewManifestDigest: 'sha256:0', findingSetVersion: 1,
+    });
     await h.tick();
-    expect((await h.state()).contests[0]).toMatchObject({ state: 'open', reason: null });
-    expect((await h.state()).entries.map((entry: any) => [entry.state, entry.blockedReason]))
-      .toEqual([['reserved', null], ['reserved', null]]);
+    for (const id of ['A', 'B']) {
+      if (id === 'B') await h.tick();
+      const job = h.jobs.find(item => item.kind === 'rebase-candidate' && item.candidate.changeId === id);
+      if (!job || job.kind !== 'rebase-candidate') throw new Error(`rebase job missing for ${id}`);
+      expect(job.newBaseOid).toBe(nextMain);
+      await sendRebase(h, job, 'PASS', false, undefined, 'row:J');
+      await h.tick();
+    }
+    expect((await h.state()).entries.map((entry: any) => [entry.state, entry.baseOid, entry.revision]))
+      .toEqual([['reserved', nextMain, 2], ['reserved', nextMain, 2]]);
     expect(await contestReleaseCount(h)).toBe(0);
     await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'open', baseOid: nextMain, resultIds: [] });
+    const fresh = h.jobs.filter(job => job.kind === 'validate-stack' && job.canonicalBaseOid === nextMain);
+    expect(fresh).toHaveLength(2);
+    expect(fresh.map(job => job.kind === 'validate-stack' ? job.candidates[0].revision : null)).toEqual([2, 2]);
+    expect((await h.deliver(fresh[1], 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.deliver(fresh[0], 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'selected', winnerId: 'B', reason: 'FIRST_VALID_GREEN' });
     expect(await contestReleaseCount(h)).toBe(0);
     expect((await h.state()).promotion).toBeNull();
   });
@@ -1531,6 +1561,21 @@ describe('queue state machine', () => {
     expect(h.releases).toEqual(['A']);
     await h.tick();
     expect((h.jobs[2] as any).candidates.map((item: any) => item.changeId)).toEqual(['B']);
+  });
+
+  it('dispatches claimed contest results through runners.result into queue arbitration', async () => {
+    const h = await prepareReal([{ id: 'A', unit: 'row:J' }, { id: 'B', unit: 'row:J' }], ['A']);
+    await contestReal(h);
+    await h.tick();
+    const first = h.jobs[0];
+    const second = h.jobs[1];
+    const deliveredFirst = await deliverChecked(h, first, 'PASS');
+    expect(deliveredFirst.body.data.dispatch.status).toBe('eligible');
+    await h.tick();
+    const deliveredSecond = await deliverChecked(h, second, 'PASS');
+    expect(deliveredSecond.body.data.dispatch.status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).contests[0]).toMatchObject({ state: 'selected', winnerId: 'A', reason: 'FIRST_VALID_GREEN' });
   });
 
   it.each(['A,B', 'B,A'])('settles both valid children delivered %s before one alarm', async order => {

@@ -864,6 +864,8 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
   contest.resultIds.push(record.job.jobId);
   const pair = contest.childIds.map(id => [...state.jobs].reverse().find(item => item.purpose === 'contest'
     && item.contestId === contest.contestId && item.memberIds[0] === id
+    && item.job.generation === state.generation && item.job.kind === 'validate-stack'
+    && item.job.canonicalBaseOid === contest.baseOid
     && item.result?.kind === 'validate-stack' && item.verified && item.consumed && !item.retryIssued));
   if (pair.some(item => !item)) return;
   const [first, second] = pair as [JobRecord, JobRecord];
@@ -1149,9 +1151,16 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
       save(context, state);
       return;
     }
+    if (main && contest.baseOid !== main && contest.admissionIds.every(id => admitted(state, id)?.baseOid === main)) {
+      contest.baseOid = main;
+      contest.resultIds = [];
+      emit(context, 'queue.contest_rebased', contest.childIds, { contestId: contest.contestId, baseOid: main });
+    }
     for (const id of contest.childIds) {
       const admissionId = contest.admissionIds[contest.childIds.indexOf(id)];
-      if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId && record.admissionIds[0] === admissionId)) continue;
+      if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId
+        && record.admissionIds[0] === admissionId && record.job.generation === state.generation
+        && record.job.kind === 'validate-stack' && record.job.canonicalBaseOid === contest.baseOid)) continue;
       const job = await makeStackJob(context, state, [id], false, true);
       context.transaction(() => { schedule(context, state, job, 'contest', [id], contest.contestId); save(context, state); });
     }
@@ -1212,7 +1221,9 @@ export const queue: FeatureModule = {
     if (state.contests.some(contest => contest.state === 'open')) {
       const unscheduled = state.contests.some(contest => contest.state === 'open'
         && contest.childIds.some(id => !state.jobs.some(record => record.purpose === 'contest'
-          && record.contestId === contest.contestId && record.memberIds[0] === id)));
+          && record.contestId === contest.contestId && record.memberIds[0] === id
+          && record.job.generation === state.generation && record.job.kind === 'validate-stack'
+          && record.job.canonicalBaseOid === contest.baseOid)));
       return unscheduled && state.coalesceUntil !== null
         ? Math.max(context.now() + 1, state.coalesceUntil) : context.now() + 10_000;
     }
