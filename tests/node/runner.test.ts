@@ -912,36 +912,38 @@ export function attemptBudget(family) {
     });
   });
 
-  it('stops polling after three network failures', async () => {
+  it('retries a transient poll once in --once mode, then exits with the error', async () => {
     const calls: string[] = [];
     const transport: Transport = async (path, body, key) => {
       calls.push(JSON.stringify({ path, body, key }));
       throw new TypeError('fetch failed');
     };
+    const lines: string[] = [];
     const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin, '--once']);
-    await expect(runLoop(options, transport, null, { sleep: async () => {}, random: () => 0.5 }))
+    await expect(runLoop(options, transport, null, { sleep: async () => {}, random: () => 0.5, log: line => { lines.push(line); } }))
       .rejects.toThrow('fetch failed');
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(2);
     expect(new Set(calls).size).toBe(1);
+    expect(lines).toEqual(['POLL_RETRY code=NETWORK_ERROR delayMs=1000']);
   });
 
   it.each([400, 401, 409])('does not retry HTTP %i', async status => {
     let calls = 0;
-    const transport = retryTransport(async () => { calls++; return { status }; }, { sleep: async () => {} });
+    const transport = retryTransport(async () => { calls++; return { status }; }, { sleep: async () => {}, log: () => {} });
     expect((await transport('runner/poll', {}, 'key')).status).toBe(status);
     expect(calls).toBe(1);
   });
 
-  it.each([429, 502, 503, 504])('retries HTTP %i and caps Retry-After', async status => {
+  it.each([429, 500, 502, 503, 504])('retries HTTP %i and caps Retry-After', async status => {
     const delays: number[] = [];
     let calls = 0;
     const transport = retryTransport(async () => {
       calls++;
-      return calls === 1 ? { status, retryAfterMs: 20_000 } : { status: 200 };
-    }, { sleep: async ms => { delays.push(ms); }, random: () => 0.5 });
+      return calls === 1 ? { status, ...(status === 429 ? { retryAfterMs: 20_000 } : {}) } : { status: 200 };
+    }, { sleep: async ms => { delays.push(ms); }, random: () => 0.5, log: () => {} });
     expect((await transport('runner/poll', {}, 'key')).status).toBe(200);
     expect(calls).toBe(2);
-    expect(delays).toEqual([status === 429 ? 5000 : 250]);
+    expect(delays).toEqual([status === 429 ? 20_000 : 1000]);
   });
 
   it.each(['RPC failed; early EOF', 'HTTP 500'])('retries transient Git fetch (%s) and skips an authentication failure', async failure => {
@@ -1002,5 +1004,212 @@ export function attemptBudget(family) {
       sleep: async () => {},
     })).rejects.toThrow('HTTP 500');
     expect(transientFetches).toBe(3);
+  });
+
+  describe('resilient poll retries', () => {
+    const checkerProfile = (): LocalProfile => ({ id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+      oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
+      executable: process.execPath, argv: ['-e', 'process.exit(0)'] });
+    const inspectJob = (remotes: Record<string, string>, base: string): Job => ({ ...jobBase(remotes),
+      kind: 'inspect-candidate', changeId: 'change', revision: 1,
+      candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: base, storageName: 'candidate', ref: 'refs/heads/main' } });
+    const jobRoutes = (remotes: Record<string, string>): Transport => async (path, body, key) => {
+      if (path.endsWith('/credentials')) return { status: 200, data: { credentials: await credentials(remotes)('fetch') } };
+      if (path.endsWith('/result')) return { status: 200, data: {} };
+      throw new Error('UNEXPECTED_API:' + path);
+    };
+
+    it('runs the job after a PROMOTION_IN_PROGRESS poll with the same key and body', async () => {
+      await gitFixture(async ({ candidate, base }) => {
+        const remotes = { candidate: pathToFileURL(candidate).href };
+        const job = inspectJob(remotes, base);
+        const seen: { key: string; body: string }[] = [];
+        let polls = 0;
+        const transport: Transport = async (path, body, key) => {
+          if (path === 'runner/poll') {
+            seen.push({ key, body: JSON.stringify(body) });
+            polls++;
+            if (polls === 1) return { status: 409, error: { code: 'PROMOTION_IN_PROGRESS' } };
+            return { status: 200, data: { job } };
+          }
+          return jobRoutes(remotes)(path, body, key);
+        };
+        const delays: number[] = [];
+        const lines: string[] = [];
+        const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json', '--once']);
+        expect(await runLoop(options, transport, checkerProfile(),
+          { sleep: async ms => { delays.push(ms); }, random: () => 0.5, log: line => { lines.push(line); } })).toBe(1);
+        expect(polls).toBe(2);
+        expect(seen[0]).toEqual(seen[1]);
+        expect(delays).toEqual([1000]);
+        expect(lines).toEqual(['POLL_RETRY code=PROMOTION_IN_PROGRESS delayMs=1000']);
+      });
+    });
+
+    it('runs the job after a RUNNER_BUSY poll', async () => {
+      await gitFixture(async ({ candidate, base }) => {
+        const remotes = { candidate: pathToFileURL(candidate).href };
+        const job = inspectJob(remotes, base);
+        let polls = 0;
+        const transport: Transport = async (path, body, key) => {
+          if (path === 'runner/poll') {
+            polls++;
+            if (polls === 1) return { status: 409, error: { code: 'RUNNER_BUSY' } };
+            return { status: 200, data: { job } };
+          }
+          return jobRoutes(remotes)(path, body, key);
+        };
+        const delays: number[] = [];
+        const lines: string[] = [];
+        const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json', '--once']);
+        expect(await runLoop(options, transport, checkerProfile(),
+          { sleep: async ms => { delays.push(ms); }, random: () => 0.5, log: line => { lines.push(line); } })).toBe(1);
+        expect(polls).toBe(2);
+        expect(delays).toEqual([1000]);
+        expect(lines).toEqual(['POLL_RETRY code=RUNNER_BUSY delayMs=1000']);
+      });
+    });
+
+    it('honors Retry-After on 429 and caps it at 30 s', async () => {
+      let polls = 0;
+      const transport: Transport = async path => {
+        if (path !== 'runner/poll') throw new Error('UNEXPECTED_API:' + path);
+        polls++;
+        if (polls === 1) return { status: 429, retryAfterMs: 5000 };
+        if (polls === 2) return { status: 429, retryAfterMs: 120_000 };
+        return { status: 204 };
+      };
+      const delays: number[] = [];
+      const lines: string[] = [];
+      const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin, '--max-jobs', '1']);
+      expect(await runLoop(options, transport, null,
+        { sleep: async ms => { delays.push(ms); }, random: () => 0.5, log: line => { lines.push(line); } })).toBe(0);
+      expect(polls).toBe(3);
+      expect(delays).toEqual([5000, 30_000]);
+      expect(lines).toEqual(['POLL_RETRY code=429 delayMs=5000', 'POLL_RETRY code=429 delayMs=30000']);
+    });
+
+    it('retries a 5xx and a network failure before running the job', async () => {
+      await gitFixture(async ({ candidate, base }) => {
+        const remotes = { candidate: pathToFileURL(candidate).href };
+        const job = inspectJob(remotes, base);
+        let polls = 0;
+        const transport: Transport = async (path, body, key) => {
+          if (path === 'runner/poll') {
+            polls++;
+            if (polls === 1) throw new TypeError('fetch failed');
+            if (polls === 2) return { status: 500, error: { code: 'PLATFORM_UNAVAILABLE' } };
+            return { status: 200, data: { job } };
+          }
+          return jobRoutes(remotes)(path, body, key);
+        };
+        const delays: number[] = [];
+        const lines: string[] = [];
+        const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json', '--max-jobs', '1']);
+        expect(await runLoop(options, transport, checkerProfile(),
+          { sleep: async ms => { delays.push(ms); }, random: () => 0.5, log: line => { lines.push(line); } })).toBe(1);
+        expect(polls).toBe(3);
+        expect(delays).toEqual([1000, 2000]);
+        expect(lines).toEqual([
+          'POLL_RETRY code=NETWORK_ERROR delayMs=1000',
+          'POLL_RETRY code=PLATFORM_UNAVAILABLE delayMs=2000',
+        ]);
+      });
+    });
+
+    it.each([
+      [401, 'UNAUTHORIZED', 'POLL_FAILED:UNAUTHORIZED'],
+      [401, undefined, 'POLL_FAILED:401'],
+      [403, 'FORBIDDEN', 'POLL_FAILED:FORBIDDEN'],
+      [400, 'INVALID_POLL', 'POLL_FAILED:INVALID_POLL'],
+      [409, 'RUNNER_ID_CONFLICT', 'POLL_FAILED:RUNNER_ID_CONFLICT'],
+      [409, 'STALE_JOB', 'POLL_FAILED:STALE_JOB'],
+    ] as [number, string | undefined, string][])('exits with %s without retry', async (status, code, expected) => {
+      let polls = 0;
+      const delays: number[] = [];
+      const lines: string[] = [];
+      const transport: Transport = async path => {
+        if (path !== 'runner/poll') throw new Error('UNEXPECTED_API:' + path);
+        polls++;
+        return code === undefined ? { status } : { status, error: { code } };
+      };
+      const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin, '--once']);
+      await expect(runLoop(options, transport, null,
+        { sleep: async ms => { delays.push(ms); }, random: () => 0.5, log: line => { lines.push(line); } }))
+        .rejects.toThrow(expected);
+      expect(polls).toBe(1);
+      expect(delays).toEqual([]);
+      expect(lines).toEqual([]);
+    });
+
+    it('exits with JOB_ROLE_OR_PROFILE_MISMATCH for a foreign job', async () => {
+      await gitFixture(async ({ candidate, base }) => {
+        const remotes = { candidate: pathToFileURL(candidate).href };
+        const job = { ...inspectJob(remotes, base), profileDigest: ('sha256:' + '1'.repeat(64)) as Digest };
+        let polls = 0;
+        const transport: Transport = async path => {
+          if (path !== 'runner/poll') throw new Error('UNEXPECTED_API:' + path);
+          polls++;
+          return { status: 200, data: { job } };
+        };
+        const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json', '--once']);
+        await expect(runLoop(options, transport, checkerProfile(), { sleep: async () => {}, random: () => 0.5, log: () => {} }))
+          .rejects.toThrow('JOB_ROLE_OR_PROFILE_MISMATCH');
+        expect(polls).toBe(1);
+      });
+    });
+
+    it('excludes retry time from the idle timeout', async () => {
+      await gitFixture(async ({ candidate, base }) => {
+        const remotes = { candidate: pathToFileURL(candidate).href };
+        const job = inspectJob(remotes, base);
+        let polls = 0;
+        const transport: Transport = async (path, body, key) => {
+          if (path === 'runner/poll') {
+            polls++;
+            if (polls <= 5) return { status: 503 };
+            if (polls === 8) return { status: 200, data: { job } };
+            return { status: 204 };
+          }
+          return jobRoutes(remotes)(path, body, key);
+        };
+        let fakeNow = 1_000_000;
+        const delays: number[] = [];
+        const lines: string[] = [];
+        const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json',
+          '--max-jobs', '5', '--idle-timeout-seconds', '10']);
+        expect(await runLoop(options, transport, checkerProfile(), {
+          sleep: async ms => { delays.push(ms); fakeNow += ms; },
+          random: () => 0.5, log: line => { lines.push(line); }, now: () => fakeNow,
+        })).toBe(1);
+        // Five 503s back off 1+2+4+8+16 = 31 s; counting that as idle would
+        // have exited at the first 204 instead of running the job.
+        expect(delays.slice(0, 5)).toEqual([1000, 2000, 4000, 8000, 16_000]);
+        expect(lines.slice(0, 5)).toEqual([
+          'POLL_RETRY code=503 delayMs=1000',
+          'POLL_RETRY code=503 delayMs=2000',
+          'POLL_RETRY code=503 delayMs=4000',
+          'POLL_RETRY code=503 delayMs=8000',
+          'POLL_RETRY code=503 delayMs=16000',
+        ]);
+      });
+    });
+
+    it('retries a transient result submission and keeps fence conflicts fatal', async () => {
+      let posts = 0;
+      const transport = retryTransport(async () => {
+        posts++;
+        return posts === 1 ? { status: 409, error: { code: 'PROMOTION_IN_PROGRESS' } } : { status: 200 };
+      }, { sleep: async () => {}, random: () => 0.5, log: () => {} });
+      expect((await transport('jobs/job/result', { attempt: 1 }, 'key')).status).toBe(200);
+      expect(posts).toBe(2);
+      let fatal = 0;
+      const fence = retryTransport(async () => {
+        fatal++;
+        return { status: 409, error: { code: 'STALE_JOB' } };
+      }, { sleep: async () => {}, random: () => 0.5, log: () => {} });
+      expect((await fence('jobs/job/result', { attempt: 1 }, 'key')).status).toBe(409);
+      expect(fatal).toBe(1);
+    });
   });
 });

@@ -2,7 +2,27 @@
 
 The runner is an outbound client for one repository. Run separate processes and credentials for checker and promoter roles. It handles one claimed job at a time. The coordinator issues a 90-second claim for Artifacts and bridge (whose Git token provider minimum is 60 seconds), or a 60-second claim for fake storage; the client renews it every 20 seconds. A crash leaves the job recoverable: the coordinator expires the claim, increases its attempt and fence, and stops after three attempts. Results from an expired fence return 409; retry a lost result response with the identical body and idempotency key.
 
-Runner HTTP calls retry transient network errors and HTTP 429/502/503/504 up to three total attempts with the same `Idempotency-Key` and body (`runner/main.ts`). Git input fetches also retry transient transport failures, including the per-command timeout, up to three attempts when the job deadline leaves time for another attempt. An expired job deadline is never retried; conditional pushes are not retried (`runner/git.ts`).
+Poll, heartbeat, credential, and result HTTP calls share one transient classification (`runner/main.ts`). Heartbeat, credential, and result calls retry the same transient set up to three total attempts per call with the same `Idempotency-Key` and body; the existing fence rules still decide whether the job is lost (`STALE_JOB` and the other non-retryable 409s below are returned, never retried). Git input fetches also retry transient transport failures, including the per-command timeout, up to three attempts when the job deadline leaves time for another attempt. An expired job deadline is never retried; conditional pushes are not retried (`runner/git.ts`).
+
+## Poll resilience
+
+A long-running runner survives transient server responses instead of exiting, so landing never stalls because a runner process died. A transient poll is retried with capped exponential backoff and jitter (start 1 s, doubling per attempt, cap 30 s; `Retry-After` is honored up to the same 30 s cap) with the same `Idempotency-Key` and body. Each retry logs one line with the code and the next delay (`POLL_RETRY code=... delayMs=...`, and `TRANSPORT_RETRY route=... code=... delayMs=...` for job calls); retry logs never include a token, body, or key.
+
+Transient (retried, never exits the runner):
+
+- `409 PROMOTION_IN_PROGRESS`: a repository promotion holds the coordinator lock and checker polls are frozen until reconciliation. The pending promoter's own poll is exempt, so a promoter never sees this code on its own ticket.
+- `409 RUNNER_BUSY`: this runner ID still has an active claim. The claim expires or completes, so a later poll succeeds. A busy response that never clears means two processes share one runner ID; keep one process per runner ID.
+- HTTP `429`, honoring `Retry-After`.
+- Any HTTP `5xx`.
+- Fetch/network errors and timeouts.
+
+Fatal (the runner exits non-zero with `POLL_FAILED:<code>`, as before):
+
+- `400 INVALID_POLL`, `401`/`403` (for example `UNAUTHORIZED`, `TENANT_MISMATCH`, `FORBIDDEN`).
+- `409 RUNNER_ID_CONFLICT` and any other non-retryable 409 (`STALE_JOB`, `RESULT_CONFLICT`, `RESULT_IDENTITY`, `IDEMPOTENCY_CONFLICT`, and unknown codes).
+- A job whose kind or profile digest does not match this runner exits with `JOB_ROLE_OR_PROFILE_MISMATCH`.
+
+Only idle (`204`) responses advance the `--idle-timeout-seconds` clock; time spent backing off on transient failures does not count towards the idle timeout. `--once` still performs a single poll-to-job cycle, with one retry of a transient poll failure before it exits with the error.
 
 The command checker executes code from the composed repository. Run checker workers only on a trusted, isolated machine or container with no valuable host files or credentials accessible to that code. The environment allowlist and credential filtering reduce accidental exposure; they are not an OS sandbox and do not make an untrusted checkout safe on an ordinary workstation.
 
