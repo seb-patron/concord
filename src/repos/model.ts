@@ -34,6 +34,7 @@ export interface BootstrapPending {
   headOid: Oid;
   seedRef: string;
   seedStorageName: string;
+  withHistory?: boolean;
   jobId: string;
   scratchStorageName?: string;
   status: 'provisioning' | 'requested' | 'blocked';

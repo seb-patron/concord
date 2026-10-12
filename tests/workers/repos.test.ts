@@ -342,6 +342,37 @@ describe('repository and change lifecycle', () => {
     });
   });
 
+  it('requires an explicit history declaration for a registered non-root seed', async () => {
+    const repoId = 'history_seed_case';
+    await create(repoId);
+    await fetchApi(apiRequest(`/v1/repos/${repoId}`));
+    const created = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'history-seed', intentText: 'preserve history', baseOid: null,
+      branch: 'refs/heads/seed', unitKeys: [], dependencyChangeIds: [],
+    }, 'history-seed-change'));
+    const change = (await responseBody(created)).data;
+    await fake(repoId, provider => {
+      provider.putCommit(change.candidateStorageName, { oid: a, treeOid: d, parents: [] });
+      provider.putCommit(change.candidateStorageName, { oid: b, treeOid: d, parents: [a] });
+      expect(provider.conditionalUpdateRef(change.candidateStorageName, 'refs/heads/seed', null, b)).toBe(true);
+    });
+    const registered = await fetchApi(mutation(`/v1/repos/${repoId}/branches`, {
+      expectedVersion: 1, storageName: change.candidateStorageName, ref: 'refs/heads/seed', observedHead: b, ownerId: 'owner',
+    }, 'history-seed-branch'));
+    expect(registered.status).toBe(201);
+    const body = { expectedVersion: 2, seedStorageName: change.candidateStorageName,
+      seedRef: 'refs/heads/seed', headOid: b, policyId: 'local-demo', profileId: 'local-demo' };
+    const defaultMode = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, body, 'history-default'));
+    expect(defaultMode.status).toBe(422);
+    expect((await responseBody(defaultMode)).error.code).toBe('SEED_NOT_ROOT');
+    const wrongHead = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, { ...body, headOid: a, withHistory: true }, 'history-wrong-head'));
+    expect(wrongHead.status).toBe(422);
+    expect((await responseBody(wrongHead)).error.code).toBe('SEED_REF_MISMATCH');
+    const accepted = await fetchApi(mutation(`/v1/repos/${repoId}/bootstrap`, { ...body, withHistory: true }, 'history-accepted'));
+    expect(accepted.status).toBe(202);
+    expect((await responseBody(accepted)).data.state).toBe('requested');
+  });
+
   it('records only one bootstrap request from two concurrent retries of the same seed', async () => {
     await create('bootstrap_race_case');
     await fetchApi(apiRequest('/v1/repos/bootstrap_race_case'));

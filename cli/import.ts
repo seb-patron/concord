@@ -18,7 +18,7 @@ const importerGit = (args: string[], options: GitOptions = {}, cwd?: string) =>
 
 export interface ImportOptions {
   source: string; ref: string; repo: string; policyId?: string; profileId?: string;
-  excludes?: string[]; excludeFile?: string; requireMatch?: boolean; printTree?: boolean; verbose?: boolean;
+  excludes?: string[]; excludeFile?: string; requireMatch?: boolean; printTree?: boolean; verbose?: boolean; withHistory?: boolean;
 }
 
 function glob(pattern: string): RegExp {
@@ -74,6 +74,28 @@ async function treeEntries(source: string, tree: string, alternateObjectDirector
   return entries;
 }
 
+async function requireLocalHistory(source: string, commit: string): Promise<void> {
+  const shallow = await importerGit(['-C', source, 'rev-parse', '--is-shallow-repository']).catch(() => {
+    throw new ConcordError('Cannot inspect source history; shallow status is unavailable', 'usage');
+  });
+  if (shallow !== 'false') {
+    throw new ConcordError('Source history is shallow; fetch complete history before importing', 'usage');
+  }
+  let objects: string;
+  try {
+    const result = await execFile('git', ['-c', 'protocol.allow=never', '-C', source, 'rev-list',
+      '--objects', '--no-object-names', '--missing=print', commit], {
+      timeout: 120_000, maxBuffer: 256 * 1024 * 1024,
+      env: gitEnvironment({ noLazyFetch: true }),
+    });
+    objects = result.stdout;
+  } catch {
+    throw new ConcordError('Cannot inspect source history; a required object may be unavailable locally', 'usage');
+  }
+  const missing = /^\?([a-f0-9]{40})$/m.exec(objects)?.[1];
+  if (missing) throw new ConcordError(`Source history object ${missing} is unavailable locally; fetch it before importing`, 'usage');
+}
+
 function data(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || !('data' in value) || !((value as Envelope).data) ||
       typeof (value as Envelope).data !== 'object') throw new ConcordError('Invalid Concord response', 'server');
@@ -100,6 +122,9 @@ async function poll<T>(label: string, action: () => Promise<T>, done: (value: T)
 }
 
 export async function importRepo(options: ImportOptions, client?: ConcordClient): Promise<Record<string, unknown>> {
+  if (options.withHistory && ((options.excludes?.length ?? 0) > 0 || options.excludeFile !== undefined)) {
+    throw new ConcordError('--with-history cannot be combined with --exclude or --exclude-file: all history is copied', 'usage');
+  }
   if (!options.source || !options.ref || options.ref.startsWith('-') || /[\r\n\0]/.test(options.ref) || !/^[A-Za-z0-9_-]{1,64}$/.test(options.repo)) {
     throw new ConcordError('import requires --source PATH --ref REF --repo NAME', 'usage');
   }
@@ -124,6 +149,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
   });
   const objectDirectory = await importerGit(['-C', source, 'rev-parse', '--path-format=absolute', '--git-path', 'objects']);
   const entries = await treeEntries(source, sourceTree);
+  if (options.withHistory) await requireLocalHistory(source, sourceOid);
   const patterns = [...(options.excludes ?? [])];
   if (options.excludeFile) {
     let bytes: Buffer;
@@ -164,7 +190,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     if (options.printTree) return summary;
     if (!client) throw new ConcordError('CONCORD_URL and CONCORD_TOKEN are required', 'usage');
     const message = `Concord import\n\nSource repository: ${JSON.stringify(sourceName)}\nSource ref: ${JSON.stringify(options.ref)}\nSource commit: ${sourceOid}`;
-    const headOid = await importerGit(['commit-tree', treeOid, '-m', message], { ...plumbing, identity: true }, scratch);
+    const headOid = options.withHistory ? sourceOid : await importerGit(['commit-tree', treeOid, '-m', message], { ...plumbing, identity: true }, scratch);
     const root = `/repos/${encodeURIComponent(options.repo)}`;
     const repoBody = { name: options.repo, policyId: options.policyId, profileId: options.profileId };
     await poll('repository provisioning', () => client.request('POST', '/repos',
@@ -174,7 +200,9 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
       if (repository.observedCanonicalOid !== headOid) throw new ConcordError('Canonical main already differs from this import', 'conflict');
       return { ...summary, canonicalOid: headOid, repoId: options.repo, reconciled: true };
     }
-    const intentKey = 'import:' + createHash('sha256').update(message).update('\0').update(patterns.join('\0')).digest('hex');
+    const intentHash = createHash('sha256').update(message).update('\0').update(patterns.join('\0'));
+    if (options.withHistory) intentHash.update('\0history');
+    const intentKey = 'import:' + intentHash.digest('hex');
     const draftBody = { intentKey, intentText: message, baseOid: null, branch: `refs/heads/${branch}`,
       unitKeys: ['import:root'], dependencyChangeIds: [] };
     const changeResponse = await poll('seed fork', () => client.request('POST', `${root}/changes`,
@@ -208,12 +236,13 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     await poll('bootstrap request', async () => {
       const detail = await client.request('GET', root);
       return client.request('POST', `${root}/bootstrap`, { body: { seedStorageName: storageName,
-        seedRef: `refs/heads/${branch}`, headOid, policyId: options.policyId, profileId: options.profileId },
+        seedRef: `refs/heads/${branch}`, headOid, policyId: options.policyId, profileId: options.profileId,
+        ...(options.withHistory ? { withHistory: true } : {}) },
       expectedVersion: version(detail), idempotencyKey: idempotencyKey() });
     }, result => data(result).state === 'requested');
     await poll('canonical main', () => client.request('GET', root), result => {
       const oid = data(result).observedCanonicalOid;
-      if (oid && oid !== headOid) throw new ConcordError('Canonical main differs from imported root', 'conflict');
+      if (oid && oid !== headOid) throw new ConcordError('Canonical main differs from imported commit', 'conflict');
       return oid === headOid;
     }, 300_000);
     return { ...summary, canonicalOid: headOid, repoId: options.repo, reconciled: false };

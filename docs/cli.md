@@ -42,11 +42,12 @@ Mint writes only the newly issued plaintext token followed by a newline to stdou
 
 ## Repository commands
 
-To adopt a committed source tree as one provenance-stamped root commit, see
+To adopt a committed source tree as one provenance-stamped root commit, or
+preserve its exact Git history with `--with-history`, see
 [Import an existing repository](import.md). Use `npm run concord -- import
 --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID` with
 optional repeated `--exclude GLOB`, `--exclude-file FILE`, `--require-match`, `--print-tree`,
-and `--verbose`.
+and `--verbose`. History mode cannot be combined with exclusions.
 
 ```sh
 npm run concord -- repo create --name public-aw --policy-id policy-v1 --profile-id profile-v1
