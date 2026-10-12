@@ -17,8 +17,8 @@ Common: --repo ID --json --idempotency-key KEY --expected-version N
 Mutations generate an idempotency key when omitted. Responses are JSON on stdout; errors are JSON on stderr.
 
 Commands and required fields:
-  land --repo ID --source PATH --commit SHA --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
-  land --repo ID --aw-run RUN_DIR [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
+  land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
+  land --repo ID --aw-run RUN_DIR [--base 40_HEX_OID] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
   principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
@@ -52,7 +52,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -78,6 +78,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     await land({ repo: typeof flags.repo === 'string' ? flags.repo : undefined,
       source: typeof flags.source === 'string' ? flags.source : undefined,
       commit: typeof flags.commit === 'string' ? flags.commit : undefined,
+      base: typeof flags.base === 'string' ? flags.base : undefined,
       intentKey: typeof flags['intent-key'] === 'string' ? flags['intent-key'] : undefined,
       intent: typeof flags.intent === 'string' ? flags.intent : undefined,
       allowedFiles: typeof flags['allowed-files'] === 'string' ? flags['allowed-files'] : undefined,

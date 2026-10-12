@@ -2,6 +2,8 @@
 
 `concord land` takes one existing, single-parent Git commit and drives a Concord change through leases, publication, checker inspection, independent review, queue admission, and confirmed canonical landing. Start a separate `npm run runner` checker and promoter service for the repository; `land` only waits for their results. The source checkout is never rebased or edited. If its commit parent differs from the current canonical base, `land` cherry-picks the commit in a temporary checkout and publishes that new head. A conflict exits as `MERGE_CONFLICT` and removes the temporary checkout.
 
+Use `--base <40-hex oid>` with `--commit <reviewed head>` to land a multi-commit run. The base must be an ancestor of the head, and the range must contain no merge commits or have an empty diff. Land creates one deterministic temporary squash commit with the base as parent and the reviewed head's tree, then carries approval of the reviewed head to the squash or its clean cherry-pick when their stable patch IDs match. `--json` emits `squashed` with the base, reviewed head, and squash OIDs before publication.
+
 ```sh
 export CONCORD_URL=https://concord.example
 export CONCORD_TOKEN='<author token>'
@@ -32,4 +34,4 @@ npm run concord -- land --repo my-repo --aw-run /path/to/run \
   --review-evidence /path/to/independent-review.txt --json
 ```
 
-The adapter reads `status.json`'s `validated_sha` and worktree, `allowed-files.txt`, and the first `Goal: Outcome:` line of `work-spec.md`. The run's stable `job_id` becomes the intent key. Explicit `--commit` or `--allowed-files` values that conflict with the run are rejected. The generic command above works with any agent or orchestrator and does not depend on AW files.
+The adapter reads `status.json`'s `validated_sha`, worktree, and recorded base when present, `allowed-files.txt`, and the first `Goal: Outcome:` line of `work-spec.md`. The run's stable `job_id` becomes the intent key. Explicit `--commit`, `--base`, or `--allowed-files` values that conflict with the run are rejected. The generic command above works with any agent or orchestrator and does not depend on AW files.

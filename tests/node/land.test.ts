@@ -35,6 +35,25 @@ describe('land input and evidence gates', () => {
     const { dir, commit, parent } = await source();
     expect(await filesChanged(dir, commit)).toEqual({ parent, files: expect.arrayContaining(['first.txt', 'families.tsv', 'renamed.tsv']) });
   });
+  it('checks the full range, and refuses merges, unrelated bases, and empty ranges', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'a.txt'), 'a=0\n'); await writeFile(join(dir, 'b.txt'), 'b=0\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'a.txt'), 'a=1\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'first');
+    const first = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, 'b.txt'), 'b=1\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'second');
+    const head = await git(dir, 'rev-parse', 'HEAD');
+    expect(await filesChanged(dir, head, base)).toEqual({ parent: base, files: ['a.txt', 'b.txt'] });
+    expect(await filesChanged(dir, head)).toEqual({ parent: first, files: ['b.txt'] });
+    await expect(filesChanged(dir, first, head)).rejects.toThrow('REFUSED: base is not an ancestor of head');
+    await expect(filesChanged(dir, head, head)).rejects.toThrow('REFUSED: range has an empty diff');
+    await git(dir, 'checkout', '-qb', 'side', base);
+    await writeFile(join(dir, 'side.txt'), 'side\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'side');
+    await git(dir, 'checkout', '-q', 'main'); await git(dir, 'merge', '--no-ff', '-qm', 'merge side', 'side');
+    const merged = await git(dir, 'rev-parse', 'HEAD');
+    await expect(filesChanged(dir, merged, base)).rejects.toThrow('REFUSED: range contains a merge commit');
+  });
   it('rejects an out-of-scope file before any API request', async () => {
     const { dir, commit } = await source();
     const allow = join(dir, 'allowed-files.txt'); await writeFile(allow, 'first.txt\n');
@@ -146,6 +165,18 @@ describe('land input and evidence gates', () => {
     await writeFile(join(dir, 'allowed-files.txt'), 'first.txt\n');
     expect(await readAwRun(dir)).toEqual({ source: '/tmp/work', commit: sha, intentKey: 'run_123', intent: 'Ship the command', allowedFiles: join(dir, 'allowed-files.txt') });
     expect(await readFile(join(dir, 'allowed-files.txt'), 'utf8')).toBe('first.txt\n');
+  });
+  it('uses an AW recorded base and refuses an override', async () => {
+    const { dir, parent, commit } = await source();
+    const run = await temp();
+    await writeFile(join(run, 'status.json'), JSON.stringify({ validated_sha: commit, worktree: dir, job_id: 'run_123', base_sha: parent }));
+    await writeFile(join(run, 'work-spec.md'), 'Goal:\n  Outcome: Ship the command\n');
+    await writeFile(join(run, 'allowed-files.txt'), 'first.txt\nfamilies.tsv\nrenamed.tsv\n');
+    expect(await readAwRun(run)).toMatchObject({ base: parent, commit });
+    const request = vi.fn();
+    await expect(land({ repo: 'demo', awRun: run, base: 'f'.repeat(40), client: { request } as never }))
+      .rejects.toThrow('--base conflicts with AW run recorded base');
+    expect(request).not.toHaveBeenCalled();
   });
   it('validates allowed path syntax', () => {
     expect([...parseAllowed('a.txt\nb/c.txt\n')]).toEqual(['a.txt', 'b/c.txt']);
@@ -352,6 +383,46 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const carryChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'carry-task');
   const carryVerdicts = await api(`/changes/${carryChange.changeId}/verdicts`);
   expect(carryVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid, method: 'patch-id' });
+
+  const rangeSource = await temp(); await git(rangeSource, 'clone', '-q', '-b', 'main', seed, '.');
+  const rangeBase = await git(rangeSource, 'rev-parse', 'HEAD');
+  const shared = await readFile(join(rangeSource, 'shared.txt'), 'utf8');
+  await writeFile(join(rangeSource, 'shared.txt'), shared.replace('line-2\n', 'line-2-first\n'));
+  await git(rangeSource, 'add', 'shared.txt'); await git(rangeSource, 'commit', '-qm', 'range implementation');
+  const firstRangeCommit = await git(rangeSource, 'rev-parse', 'HEAD');
+  const repaired = await readFile(join(rangeSource, 'shared.txt'), 'utf8');
+  await writeFile(join(rangeSource, 'shared.txt'), repaired.replace('line-3\n', 'line-3-repair\n'));
+  await git(rangeSource, 'add', 'shared.txt'); await git(rangeSource, 'commit', '-qm', 'range repair');
+  const rangeHead = await git(rangeSource, 'rev-parse', 'HEAD');
+  const rangeAllowed = join(dir, 'range-allowed.txt'); await writeFile(rangeAllowed, 'shared.txt\n');
+  const rangeEvidence = join(dir, 'range-review.txt');
+  const rangeArgs = ['--repo', 'landdemo', '--source', rangeSource, '--commit', rangeHead, '--base', rangeBase,
+    '--intent-key', 'range-task', '--intent', 'Land repaired range', '--allowed-files', rangeAllowed,
+    '--wait-seconds', '150', '--json'];
+  await writeFile(rangeEvidence, `# ✅ APPROVED FOR MERGE — head ${firstRangeCommit}\nAPPROVED for merge\n`);
+  await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...rangeArgs,
+    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') }));
+  await writeFile(rangeEvidence, `# ✅ APPROVED FOR MERGE — head ${rangeHead}\nAPPROVED for merge\n`);
+  const beforeRange = (await api('')).data.observedCanonicalOid;
+  const rangeResult = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...rangeArgs,
+    '--review-evidence', rangeEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
+  const rangeEvents = rangeResult.stdout.trim().split('\n').map(line => JSON.parse(line));
+  const squashEvent = rangeEvents.find(item => item.state === 'squashed');
+  expect(squashEvent).toMatchObject({ base: rangeBase, headOid: rangeHead,
+    squashOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
+  expect(rangeEvents.map(item => item.state)).toEqual(expect.arrayContaining(['review-carried', 'landed']));
+  const rangeChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'range-task');
+  const rangeCandidate = join(dir, 'bridge', `${rangeChange.candidateStorageName}.git`);
+  const publishedParent = await git(rangeCandidate, 'rev-list', '--parents', '-n', '1', rangeChange.headOid);
+  expect(publishedParent.split(' ')).toEqual([rangeChange.headOid, beforeRange]);
+  expect(await git(rangeCandidate, 'diff', '--binary', beforeRange, rangeChange.headOid)).toBe(
+    await git(rangeSource, 'diff', '--binary', rangeBase, rangeHead));
+  const canonicalAfterRange = (await api('')).data.observedCanonicalOid;
+  expect((await git(canonical, 'rev-list', '--parents', '-n', '1', canonicalAfterRange)).split(' '))
+    .toEqual([canonicalAfterRange, beforeRange, rangeChange.headOid]);
+  const rangeVerdicts = await api(`/changes/${rangeChange.changeId}/verdicts`);
+  expect(rangeVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid: rangeHead, method: 'patch-id' });
 
   const contextSource = await temp(); await git(contextSource, 'clone', '-q', '-b', 'main', canonical, '.');
   const context = await readFile(join(contextSource, 'shared.txt'), 'utf8');
