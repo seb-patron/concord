@@ -11,12 +11,12 @@ import { loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile } from '
 
 const executable = '/bin/sh';
 const commandSettings = { executable, argv: ['scripts/validate.sh'], cwd: 'repo' as const,
-  timeoutSeconds: 2, env: ['PATH', 'TMPDIR', 'LANG'], outputCap: 128 };
+  timeoutSeconds: 2, env: ['PATH', 'TMPDIR', 'LANG'], outputCap: 4096 };
 const filePin = (bytes: Buffer | string) => ('sha256:' + createHash('sha256').update(bytes).digest('hex')) as Digest;
 const commitEnv = childEnvironment({ GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
   GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' });
 
-async function profileIn(dir: string, changes: Record<string, unknown> = {}, maxOutputBytes = 256) {
+async function profileIn(dir: string, changes: Record<string, unknown> = {}, maxOutputBytes = 4096) {
   const binaryPin = filePin(await readFile(executable));
   const settings = { ...commandSettings, ...changes };
   const content = { id: 'command-demo', kind: 'command', checkerId: 'command-demo',
@@ -44,6 +44,46 @@ function jobFor(profile: Awaited<ReturnType<typeof loadProfile>>, remotes: Recor
 }
 
 describe('pinned command checker', () => {
+  it('rejects caps below 4096 bytes and accepts the minimum', async () => {
+    await temporaryWork(async dir => {
+      await expect(loadProfile(await profileIn(dir, { outputCap: 4095 }))).rejects.toThrow('INVALID_COMMAND_PROFILE');
+      expect((await loadProfile(await profileIn(dir, { outputCap: 4096 }))).outputCap).toBe(4096);
+    });
+  });
+
+  it('keeps five exit markers at the minimum cap and rejects excessive gates before execution', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'repo');
+      const canonical = join(dir, 'canonical.git');
+      const scratch = join(dir, 'scratch.git');
+      await git(dir, ['init', '--quiet', repo]);
+      await git(dir, ['init', '--bare', '--quiet', canonical]);
+      await git(dir, ['init', '--bare', '--quiet', scratch]);
+      await mkdir(join(repo, 'scripts'));
+      await writeFile(join(repo, 'scripts/validate.sh'), "printf '%s' '" + 'x'.repeat(4096) + "'\n");
+      await git(repo, ['add', 'scripts/validate.sh']);
+      await git(repo, ['commit', '--quiet', '-m', 'gates'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const profile = await loadProfile(await profileIn(dir));
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job = jobFor(profile, remotes, base);
+      const credentials = async () => Object.entries(remotes).map(([storageName, remote]) =>
+        ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
+      job.unitPolicy.acceptance.gates = Array.from({ length: 5 }, (_, index) =>
+        ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
+      const passing = await executeJob(job, profile, credentials);
+      expect(passing).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
+      expect(passing.log.match(/exit=0\n/g)).toHaveLength(5);
+      expect(Buffer.byteLength(passing.log)).toBeLessThanOrEqual(4096);
+      job.unitPolicy.acceptance.gates = Array.from({ length: 129 }, (_, index) =>
+        ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
+      const rejected = await executeJob(job, profile, credentials);
+      expect(rejected).toMatchObject({ kind: 'validate-stack', outcome: 'ENV_ERROR', gateResults: [] });
+      expect(rejected.log).toContain('TOO_MANY_COMMAND_GATES');
+    });
+  });
+
   it('keeps a later failing gate and its exit marker when combined output reaches the cap', async () => {
     for (const laterBytes of [16_383, 16_384, 16_385]) await temporaryWork(async dir => {
       const repo = join(dir, 'repo');
@@ -147,25 +187,25 @@ describe('pinned command checker', () => {
       expect(failedInspection).toMatchObject({ kind: 'inspect-candidate', outcome: 'FAIL', observedHeadOid: failedBase });
       expect(failedInspection.log).toContain('exit=7');
     });
-  });
+  }, 15_000);
 
   it('fails on timeout and keeps only the capped output tail', async () => {
     await temporaryWork(async dir => {
       const script = join(dir, 'scripts');
       await mkdir(script);
-      const profile = await loadProfile(await profileIn(dir, { timeoutSeconds: 1, outputCap: 48 }));
+      const profile = await loadProfile(await profileIn(dir, { timeoutSeconds: 1 }));
       const pin = profile.checkerDigest as Digest;
       const job = { profileDigest: profile.digest, checkerId: profile.checkerId, checkerDigest: pin,
         oracleDigest: profile.oracleDigest, toolchainDigest: profile.toolchainDigest,
         environmentDigest: profile.environmentDigest, timeoutMs: profile.timeoutMs,
         maxOutputBytes: profile.maxOutputBytes } as Job;
-      await writeFile(join(script, 'validate.sh'), "printf 'DISCARDED-START-abcdefghijklmnopqrstuvwxyz-0123456789END'\nexit 3\n");
+      await writeFile(join(script, 'validate.sh'), "printf 'DISCARDED-START-" + 'x'.repeat(5000) + "END'\nexit 3\n");
       const failed = await pinnedCheck(profile, job, dir);
       expect(failed.outcome).toBe('FAIL');
       expect(failed.log).toContain('exit=3');
       expect(failed.log).toContain('END');
       expect(failed.log).not.toContain('DISCARDED-START');
-      expect(failed.log.length).toBeLessThanOrEqual(48);
+      expect(Buffer.byteLength(failed.log)).toBeLessThanOrEqual(4096);
       const previousLang = process.env.LANG;
       try {
         process.env.LANG = 'private-runner-value';

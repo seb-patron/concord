@@ -15,19 +15,21 @@ const tailLog = (value: string, cap: number): string => {
 function cappedChecks(cap: number, commandProfile: boolean) {
   let body = '';
   const markers: string[] = [];
+  let markerBytes = 0;
   return {
     append(log: string, label = '') {
       const exit = commandProfile ? /^exit=-?\d+(?: timeout)?\n/.exec(log)?.[0] : undefined;
-      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap);
+      if (commandProfile && !exit) throw new Error('COMMAND_EXIT_MARKER_MISSING');
       if (exit) {
-        markers.push(tailLog(label, cap - Buffer.byteLength(exit)) + exit);
-        // Keep complete exit lines, preferring the most recent check if markers alone fill the cap.
-        while (Buffer.byteLength(markers.join('')) > cap) markers.shift();
+        const marker = tailLog(label, cap - Buffer.byteLength(exit)) + exit;
+        markerBytes += Buffer.byteLength(marker);
+        if (markerBytes > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
+        markers.push(marker);
       }
+      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes);
     },
     value() {
-      const suffix = markers.join('');
-      return tailLog(body, cap - Buffer.byteLength(suffix)) + suffix;
+      return body + markers.join('');
     },
   };
 }
@@ -77,6 +79,9 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
 }
 
 async function runGates(profile: LocalProfile, job: Job, directory: string): Promise<{ outcome: CheckOutcome; gates: StackResult['gateResults']; log: string; score: StackResult['score'] }> {
+  // 128 markers fit the 4096-byte command minimum even with 32 bytes reserved per exit line.
+  if (profile.kind === 'command' && job.unitPolicy.acceptance.gates.length > 128)
+    throw new Error('TOO_MANY_COMMAND_GATES');
   const gates: StackResult['gateResults'] = [];
   const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   let score: StackResult['score'] = null;

@@ -87,7 +87,7 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
       !Array.isArray(profile.argv) || profile.argv.some(arg => typeof arg !== 'string' || /\{[^}]*\}/.test(arg)) ||
       !Number.isSafeInteger(profile.timeoutSeconds) || !profile.timeoutSeconds || profile.timeoutSeconds < 1 ||
       profile.timeoutSeconds * 1000 > profile.timeoutMs ||
-      !Number.isSafeInteger(profile.outputCap) || !profile.outputCap || profile.outputCap < 32 ||
+      !Number.isSafeInteger(profile.outputCap) || !profile.outputCap || profile.outputCap < 4096 ||
       profile.outputCap > profile.maxOutputBytes ||
       !Array.isArray(profile.env) || profile.env.some(name => typeof name !== 'string' ||
         !commandEnvNames.includes(name as typeof commandEnvNames[number])) ||
