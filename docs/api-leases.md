@@ -16,9 +16,17 @@ An owner can also declare TSV tables in trusted policy metadata:
 }]
 ```
 
-The header is an exact ordered column list. `keyColumn` names one header column. `keySpec` matches the entire key, character by character, with `minLength` at least 1 and `maxLength` at most 256. `charset` is `lower`, `alnum`, `alnum-dash-dot`, or an explicit list of unique printable nonspace ASCII characters. Regular expressions and other fields are rejected. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Non-TSV changes use the file footprint.
+The header is an exact ordered column list. `keyColumn` names one header column. `keySpec` matches the entire key, character by character, with `minLength` at least 1 and `maxLength` at most 256. `charset` is `lower`, `alnum`, `alnum-dash-dot`, or an explicit list of unique printable nonspace ASCII characters. Regular expressions and other fields are rejected. Any matching key, including a key absent from the base table and absent from `units`, identifies `row:<table>:<key>`. Pattern rows have the narrow resource `<file>#<key>`. Explicit registered rows remain supported. A malformed or duplicate row, changed header, missing file, or mode change falls back to the whole-file unit. The checker still verifies exact declared versus inspected units and current lease fences before queue reservation. A file outside trusted policy metadata is rejected. Changes outside declared TSV and Markdown scopes use the file footprint.
 
 ### Owner file-unit policy generation
+
+An owner can declare Markdown section units in the policy template:
+
+```json
+"markdown": [{ "file": "docs/architecture.md", "headingLevel": 2 }]
+```
+
+The generator records a preamble and each heading at that level from the canonical document in digest-covered `units`. The content before the first heading is `section:<file>:_preamble`. Heading text becomes a lowercase GitHub-style slug; repeated slugs receive `-2`, `-3`, and so on in document order. A section has resource `<file>#<slug>`. A declared file also permits claims on new section slugs before the heading exists. Separate sections can be leased concurrently; `file:<path>` overlaps every section. Inspection maps body edits and new headings to their section units. Heading renames, reordered or removed headings, changed heading structure, invalid UTF-8, and mode changes use the whole-file unit. Composition merges disjoint section edits in base order and puts new sections after their preceding existing heading. Concurrent edits to the same section conflict.
 
 The owner runs `runner/generate-units.ts` against an owner checkout and an explicit canonical commit OID. Supply a trusted policy template and the union of planned new paths from **all** runs in the cohort. Each `--allow-path-file` is a plain text list with one exact repository-relative path per line; repeat the flag for multiple launcher specs and use `--allow-path` for individual paths. The template and path lists must come from owner-approved inputs, never a candidate checkout or candidate-authored data. For example:
 

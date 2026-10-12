@@ -1,5 +1,6 @@
 import type { TrustedPolicy } from '../contracts';
 import { HttpError } from '../http';
+import { compatibleSections, parseMarkdown } from '../../runner/markdown';
 
 /** A policy is the only source of unit identity. Paths never become claims by parsing input. */
 export interface UnitIdentity {
@@ -11,6 +12,38 @@ export interface UnitIdentity {
 
 export type TsvTable = NonNullable<TrustedPolicy['tables']>[number];
 const tableMetadata = new WeakMap<Map<string, UnitIdentity>, TsvTable[]>();
+export type MarkdownDeclaration = NonNullable<TrustedPolicy['markdown']>[number];
+const markdownMetadata = new WeakMap<Map<string, UnitIdentity>, MarkdownDeclaration[]>();
+
+export function declaredMarkdown(policy: TrustedPolicy): MarkdownDeclaration[] {
+  if (policy.markdown === undefined) return [];
+  if (!Array.isArray(policy.markdown) || policy.markdown.length > 128) throw new Error('MARKDOWN_POLICY_INVALID');
+  const files = new Set<string>();
+  for (const item of policy.markdown) {
+    if (!item || Object.keys(item).sort().join(',') !== 'file,headingLevel' ||
+      typeof item.file !== 'string' || !validPath(item.file) || !item.file.endsWith('.md') ||
+      !Number.isInteger(item.headingLevel) || item.headingLevel < 1 || item.headingLevel > 6 || files.has(item.file))
+      throw new Error('MARKDOWN_POLICY_INVALID');
+    files.add(item.file);
+  }
+  if (declaredTables(policy).some(item => files.has(item.file))) throw new Error('MARKDOWN_POLICY_INVALID');
+  return policy.markdown;
+}
+
+export function markdownForFile(policy: TrustedPolicy, file: string): MarkdownDeclaration | undefined {
+  return declaredMarkdown(policy).find(item => item.file === file);
+}
+
+export function patternSection(policy: TrustedPolicy, raw: string): UnitIdentity | null {
+  for (const item of declaredMarkdown(policy)) {
+    const prefix = `section:${item.file}:`;
+    if (!raw.startsWith(prefix)) continue;
+    const slug = raw.slice(prefix.length);
+    if (!slug || slug.length > 256 || !/^[\p{L}\p{N}\p{M}_-]+$/u.test(slug) || slug !== slug.toLowerCase()) return null;
+    return { key: raw, file: item.file, resources: [`${item.file}#${slug}`], wholeFile: false };
+  }
+  return null;
+}
 
 export function matchesTableKey(table: TsvTable, key: string): boolean {
   const spec = table.keySpec;
@@ -85,6 +118,7 @@ function validKey(key: string): boolean {
 export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
   const registry = new Map<string, UnitIdentity>();
   const tables = declaredTables(policy);
+  const markdown = declaredMarkdown(policy);
   const canonical = new Map<string, UnitIdentity>();
   const signatures = new Map<string, string>();
   const rows = new Map<string, string>();
@@ -104,6 +138,11 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
       key: spec.canonicalKey, file: spec.file, resources,
       wholeFile: spec.canonicalKey === `file:${spec.file}` || resources.length === 0,
     };
+    if (identity.key.startsWith('section:')) {
+      const generated = patternSection(policy, identity.key);
+      if (!generated || generated.file !== identity.file || identity.wholeFile ||
+        JSON.stringify(identity.resources) !== JSON.stringify(generated.resources)) throw new Error('MARKDOWN_POLICY_INVALID');
+    }
     const signature = JSON.stringify([identity.file, identity.resources, identity.wholeFile]);
     const previous = canonical.get(identity.key);
     if (previous && JSON.stringify([previous.file, previous.resources, previous.wholeFile]) !== signature) {
@@ -152,7 +191,21 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
     const fileKey = `file:${table.file}`;
     if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file: table.file, resources: [], wholeFile: true });
   }
+  for (const item of markdown) {
+    const prefix = `section:${item.file}:`;
+    for (const [alias, spec] of entries) if (alias.startsWith(prefix) && alias !== spec.canonicalKey)
+      throw new Error('MARKDOWN_POLICY_INVALID');
+    for (const identity of canonical.values()) {
+      if (identity.file !== item.file || !identity.key.startsWith('section:')) continue;
+      const generated = patternSection(policy, identity.key);
+      if (!generated || identity.wholeFile || JSON.stringify(identity.resources) !== JSON.stringify(generated.resources))
+        throw new Error('MARKDOWN_POLICY_INVALID');
+    }
+    const fileKey = `file:${item.file}`;
+    if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file: item.file, resources: [], wholeFile: true });
+  }
   tableMetadata.set(registry, tables);
+  markdownMetadata.set(registry, markdown);
   return registry;
 }
 
@@ -167,6 +220,15 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
       const key = raw.slice(prefix.length);
       if (validKey(key) && matchesTableKey(table, key))
         identity = { key: raw, file: table.file, resources: [`${table.file}#${key}`], wholeFile: false };
+      break;
+    }
+  }
+  if (!identity) {
+    for (const item of markdownMetadata.get(registry) ?? []) {
+      if (!raw.startsWith(`section:${item.file}:`)) continue;
+      const slug = raw.slice(`section:${item.file}:`.length);
+      if (slug && slug.length <= 256 && /^[\p{L}\p{N}\p{M}_-]+$/u.test(slug) && slug === slug.toLowerCase())
+        identity = { key: raw, file: item.file, resources: [`${item.file}#${slug}`], wholeFile: false };
       break;
     }
   }
@@ -213,6 +275,21 @@ export function changedUnitsForFile(
 ): UnitIdentity[] {
   const wholeFile = resolveUnit(registry, `file:${file}`);
   const table = tableMetadata.get(registry)?.find(item => item.file === file);
+  const markdown = markdownMetadata.get(registry)?.find(item => item.file === file);
+  if (markdown) {
+    if (before === null || after === null) return [wholeFile];
+    const oldSections = parseMarkdown(before, markdown.headingLevel);
+    const newSections = parseMarkdown(after, markdown.headingLevel);
+    if (!oldSections || !newSections || !compatibleSections(oldSections, newSections)) return [wholeFile];
+    const old = new Map(oldSections.map(item => [item.slug, item.content]));
+    const changed: UnitIdentity[] = [];
+    for (const section of newSections) {
+      if (old.get(section.slug) === section.content) continue;
+      try { changed.push(resolveUnit(registry, `section:${file}:${section.slug}`)); }
+      catch { return [wholeFile]; }
+    }
+    return changed.sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  }
   if (!file.endsWith('.tsv') || before === null || after === null ||
       (before.endsWith('\n') !== after.endsWith('\n'))) return [wholeFile];
   const rowKeys = new Map<string, UnitIdentity>();

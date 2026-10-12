@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { TrustedPolicy } from '../src/contracts';
 import { compareKeys, hashCanonical } from '../src/verdicts/manifest';
-import { unitRegistry } from '../src/leases/units';
+import { declaredMarkdown, unitRegistry } from '../src/leases/units';
+import { parseMarkdown } from './markdown';
 
 export const GENERATOR_VERSION = 1;
 const oidPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
@@ -239,6 +240,8 @@ function generate(options: Options): { sourceOid: string; generatorVersion: numb
   for (const [alias, unit] of Object.entries(template.units)) {
     if (!pathSet.has(unit.file)) fail(`UNAPPROVED_TEMPLATE_PATH: ${alias} -> ${JSON.stringify(unit.file)}`);
   }
+  for (const item of declaredMarkdown(template)) if (!pathSet.has(item.file))
+    fail(`UNAPPROVED_TEMPLATE_PATH: ${JSON.stringify(item.file)}`);
   const units = { ...template.units };
   for (const path of paths) {
     const alias = `file:${path}`;
@@ -247,6 +250,21 @@ function generate(options: Options): { sourceOid: string; generatorVersion: numb
       if (existing.canonicalKey !== alias || existing.file !== path) fail(`AMBIGUOUS_FILE_UNIT: ${alias}`);
     } else {
       units[alias] = { canonicalKey: alias, file: path, resources: [], dependencyKeys: [] };
+    }
+  }
+  for (const item of declaredMarkdown(template)) {
+    if (!tracked.includes(item.file)) continue; // An approved future file has no headings yet.
+    const source = decodeUtf8(git(options.repo, ['show', `${oid}:${item.file}`]), `INVALID_MARKDOWN_ENCODING: ${item.file}`);
+    const sections = parseMarkdown(source, item.headingLevel);
+    if (!sections) fail(`INVALID_MARKDOWN_STRUCTURE: ${item.file}`);
+    for (const section of sections) {
+      const alias = `section:${item.file}:${section.slug}`;
+      const generated = { canonicalKey: alias, file: item.file, resources: [`${item.file}#${section.slug}`], dependencyKeys: [] as string[] };
+      const existing = units[alias];
+      if (existing) {
+        if (existing.canonicalKey !== alias || existing.file !== item.file ||
+          JSON.stringify(existing.resources) !== JSON.stringify(generated.resources)) fail(`AMBIGUOUS_SECTION_UNIT: ${alias}`);
+      } else units[alias] = generated;
     }
   }
   for (const [alias, unit] of Object.entries(units)) {

@@ -64,6 +64,24 @@ beforeEach(() => {
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
 describe('owner file-unit generator', () => {
+  it('records declared Markdown sections and covers them in the policy digest', () => {
+    const document = 'Preamble\n\n## Storage & time\nA\n## Storage & time\nB\n';
+    writeFileSync(join(repo, 'architecture.md'), document);
+    git('add', 'architecture.md');
+    git('-c', 'user.name=Owner', '-c', 'user.email=owner@example.test', 'commit', '-qm', 'architecture');
+    writeFileSync(template, JSON.stringify({ ...baseTemplate,
+      markdown: [{ file: 'architecture.md', headingLevel: 2 }] }));
+    const envelope = generated(['--oid', git('rev-parse', 'HEAD')]);
+    expect(envelope.policy.markdown).toEqual([{ file: 'architecture.md', headingLevel: 2 }]);
+    for (const slug of ['_preamble', 'storage-time', 'storage-time-2']) {
+      expect(envelope.policy.units[`section:architecture.md:${slug}`]).toEqual({
+        canonicalKey: `section:architecture.md:${slug}`, file: 'architecture.md',
+        resources: [`architecture.md#${slug}`], dependencyKeys: [],
+      });
+    }
+    const { digest, ...preimage } = envelope.policy;
+    expect(digest).toBe(`sha256:${createHash('sha256').update(canonicalJson(preimage)).digest('hex')}`);
+  });
   it('is deterministic, hashes policy alone and preserves declared rows and tables', () => {
     const a = run(['--oid', oid, '--allow-path', 'new/one.txt', '--allow-path', 'new/two.rs']);
     const b = run(['--oid', oid, '--allow-path', 'new/two.rs', '--allow-path', 'new/one.txt']);

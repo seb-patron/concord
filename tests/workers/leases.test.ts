@@ -21,7 +21,7 @@ const trusted: TrustedConfiguration = { policies: { 'local-demo': policy }, prof
 const previousTrustedConfig = (env as Env).TRUSTED_CONFIG;
 const previousChangeView = repos.changeView;
 
-afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; });
+afterEach(() => { (env as Env).TRUSTED_CONFIG = previousTrustedConfig; repos.changeView = previousChangeView; delete policy.tables; delete policy.markdown; });
 
 function setupPolicy(): void {
   (env as Env).TRUSTED_CONFIG = JSON.stringify(trusted);
@@ -110,6 +110,19 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('grants distinct Markdown sections and refuses the same section or whole file', async () => {
+    policy.markdown = [{ file: 'docs/architecture.md', headingLevel: 2 }];
+    setupPolicy();
+    const repo = 'markdown_sections';
+    const storage = 'section:docs/architecture.md:4-storage-and-time';
+    const api = 'section:docs/architecture.md:5-interface-contracts';
+    expect((await claim(repo, 'local-agent-a', 'storage-change', [storage], 'storage')).status).toBe(201);
+    expect((await claim(repo, 'local-agent-b', 'api-change', [api], 'api')).status).toBe(201);
+    const same = await claim(repo, 'local-agent-b', 'same-change', [storage], 'same');
+    expect(same.status).toBe(409);
+    expect((await responseBody(same)).error.code).toBe('LEASE_CONFLICT');
+    expect((await claim(repo, 'local-agent-b', 'file-change', ['file:docs/architecture.md'], 'file')).status).toBe(409);
+  });
   it('validates owner TSV declarations and maps only matching new keys', () => {
     const declared = structuredClone(policy);
     declared.tables = [{ name: 'jobs', file: 'data/jobs.tsv', header: ['job', 'value'],

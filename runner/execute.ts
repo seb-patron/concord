@@ -4,7 +4,8 @@ import { digest } from '../src/http';
 import { compareKeys } from '../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
-import { tableForFile } from '../src/leases/units';
+import { mergeMarkdown } from './markdown';
+import { changedUnitsForFile, markdownForFile, overlaps, tableForFile, unitRegistry } from '../src/leases/units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
@@ -54,7 +55,7 @@ async function fetchInput(directory: string, job: Job, name: string, oid: string
   await fetchOid(directory, item.remote, oid, await gitCredentialEnvironment(directory, item.secret));
 }
 
-async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
+export async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
   await git(directory, ['switch', '--detach', base]);
   const env = childEnvironment({ GIT_AUTHOR_NAME: 'Concord Runner', GIT_AUTHOR_EMAIL: 'runner@concord.invalid',
     GIT_COMMITTER_NAME: 'Concord Runner', GIT_COMMITTER_EMAIL: 'runner@concord.invalid',
@@ -62,6 +63,29 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
   for (const candidate of inputs) {
     if (!await isAncestor(directory, candidate.baseOid, candidate.headOid) ||
       !await isAncestor(directory, candidate.baseOid, await git(directory, ['rev-parse', 'HEAD']))) throw new Error('CANDIDATE_ANCESTRY');
+    if (job.unitPolicy.markdown?.length) {
+      const currentOid = await git(directory, ['rev-parse', 'HEAD']);
+      const registry = unitRegistry(job.unitPolicy);
+      const candidatePaths = (await git(directory, ['diff', '--no-renames', '--name-only', candidate.baseOid, candidate.headOid, '--']))
+        .split('\n').filter(Boolean);
+      const blob = async (oid: string, path: string): Promise<string | null> => {
+        const result = await command('git', ['show', `${oid}:${path}`], directory, 30_000);
+        if (result.truncated) throw new Error('MERGE_CONFLICT');
+        if (result.code !== 0) return null;
+        try { return new TextDecoder('utf-8', { fatal: true }).decode(result.stdoutBytes); }
+        catch { return null; }
+      };
+      for (const path of candidatePaths) {
+        if (!markdownForFile(job.unitPolicy, path)) continue;
+        const before = await blob(candidate.baseOid, path);
+        const incoming = await blob(candidate.headOid, path);
+        const present = await blob(currentOid, path);
+        const candidateUnits = changedUnitsForFile(registry, path, before, incoming);
+        const currentUnits = changedUnitsForFile(registry, path, before, present);
+        if (candidateUnits.some(incomingUnit => currentUnits.some(presentUnit => overlaps(incomingUnit, presentUnit))))
+          throw new Error('MARKDOWN_SECTION_CONFLICT:' + path);
+      }
+    }
     const result = await command('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'),
       'merge', '--no-edit', '--no-ff', candidate.headOid], directory, 60_000, env);
     if (result.code === 0) continue;
@@ -69,7 +93,8 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
     if (!conflicts.length) throw new Error('MERGE_CONFLICT');
     for (const path of conflicts) {
       const table = tableForFile(job.unitPolicy, path);
-      if (!table) throw new Error('MERGE_CONFLICT');
+      const markdown = markdownForFile(job.unitPolicy, path);
+      if (!table && !markdown) throw new Error('MERGE_CONFLICT');
       const stages = await git(directory, ['ls-files', '--stage', '--', path]);
       const modes = stages.split('\n').filter(Boolean).map(line => line.split(' ')[0]);
       if (modes.length !== 3 || new Set(modes).size !== 1) throw new Error('MERGE_CONFLICT');
@@ -78,7 +103,9 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
         if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
         return value.stdout;
       };
-      const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3), table);
+      const baseText = await readStage(1), oursText = await readStage(2), theirsText = await readStage(3);
+      const merged = table ? mergeTsv(baseText, oursText, theirsText, table) :
+        mergeMarkdown(baseText, oursText, theirsText, markdown!.headingLevel);
       await writeFile(directory + '/' + path, merged);
       await git(directory, ['add', '--', path]);
     }

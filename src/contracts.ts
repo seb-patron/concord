@@ -123,6 +123,8 @@ export interface TrustedPolicy {
   /** Owner-declared TSV row namespaces. These are never supplied by a change author. */
   tables?: Array<{ name: string; file: string; header: string[]; keyColumn: string;
     keySpec: { charset: 'lower' | 'alnum' | 'alnum-dash-dot' | string[]; minLength: number; maxLength: number } }>;
+  /** Owner-declared Markdown documents partitioned at this heading level. */
+  markdown?: Array<{ file: string; headingLevel: number }>;
   checkerId: string; checkerDigest: Digest;
   acceptance: AcceptancePolicy;
 }

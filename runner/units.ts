@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
 import { compareKeys, trustedDependencyKeys } from '../src/verdicts/manifest';
-import { matchesTableKey, patternRow, tableForFile, type TsvTable } from '../src/leases/units';
+import { markdownForFile, matchesTableKey, patternRow, patternSection, tableForFile, type TsvTable } from '../src/leases/units';
+import { compatibleSections, parseMarkdown } from './markdown';
 import { command, git, MAX_INSPECTED_BLOB_BYTES, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
@@ -81,9 +82,30 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     const afterMode = await mode(repo, head, path);
     const units = Object.entries(policy.units).filter(([, value]) => value.file === path);
     const table = tableForFile(policy, path) ?? (path === 'families.tsv' && units.some(([key]) => rowId(key, legacyTable)) ? legacyTable : undefined);
+    const markdown = markdownForFile(policy, path);
     const rowUnits = table ? units.filter(([key]) => rowId(key, table)) : [];
     const beforeText = before && decode(before);
     const afterText = after && decode(after);
+    if (markdown && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode) {
+      const oldSections = parseMarkdown(beforeText, markdown.headingLevel);
+      const newSections = parseMarkdown(afterText, markdown.headingLevel);
+      if (oldSections && newSections && compatibleSections(oldSections, newSections)) {
+        const old = new Map(oldSections.map(section => [section.slug, section.content]));
+        const changed = newSections.filter(section => old.get(section.slug) !== section.content);
+        if (changed.length) {
+          for (const section of changed) {
+            const key = `section:${path}:${section.slug}`;
+            const known = units.find(([, value]) => value.canonicalKey === key);
+            evidence.push({ unitKey: known?.[1].canonicalKey ?? key,
+              beforePath: old.has(section.slug) ? path : null, afterPath: path,
+              beforeMode: old.has(section.slug) ? beforeMode : null, afterMode,
+              beforeDigest: old.has(section.slug) ? hash(old.get(section.slug)!) : null,
+              afterDigest: hash(section.content) });
+          }
+          continue;
+        }
+      }
+    }
     if (table && beforeText !== null && afterText !== null && beforeMode !== null && beforeMode === afterMode &&
       beforeText.endsWith('\n') === afterText.endsWith('\n')) {
       let oldRows: Map<string, string> | null = null;
@@ -105,7 +127,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
       }
     }
     const fileUnit = units.find(([key]) => key === 'file:' + path);
-    if (!fileUnit && !table) coverage = 'unknown';
+    if (!fileUnit && !table && !markdown) coverage = 'unknown';
     evidence.push({ unitKey: fileUnit?.[1].canonicalKey ?? 'file:' + path,
       beforePath: before === null ? null : path, afterPath: after === null ? null : path,
       beforeMode, afterMode, beforeDigest: before === null ? null : hash(before), afterDigest: after === null ? null : hash(after) });
@@ -117,17 +139,23 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     try { dependencies = trustedDependencyKeys(policy, evidence.map(item => item.unitKey)); }
     catch { coverage = 'unknown'; }
     for (const key of dependencies) {
-      const unit = policy.units[key] ?? patternRow(policy, key);
+      const unit = policy.units[key] ?? patternRow(policy, key) ?? patternSection(policy, key);
       if (!unit) { coverage = 'unknown'; break; }
       const bytes = await content(repo, head, unit.file, maxInspectedBlobBytes);
       const fileMode = await mode(repo, head, unit.file);
       if (bytes === null || fileMode === null) { coverage = 'unknown'; break; }
       const dependencyTable = tableForFile(policy, unit.file) ?? (unit.file === 'families.tsv' ? legacyTable : undefined);
       const row = dependencyTable && rowId(key, dependencyTable);
+      const dependencyMarkdown = markdownForFile(policy, unit.file);
+      const section = dependencyMarkdown && key.startsWith(`section:${unit.file}:`) ? key.slice(`section:${unit.file}:`.length) : null;
       const decoded = row ? decode(bytes) : null;
       let evidenceBytes: string | Buffer | undefined = row ? undefined : bytes;
       if (row && decoded !== null) {
         try { evidenceBytes = parseTsv(decoded, dependencyTable!).get(row); } catch { /* Unknown scope below. */ }
+      }
+      if (section) {
+        const parsed = decode(bytes);
+        evidenceBytes = parsed === null ? undefined : parseMarkdown(parsed, dependencyMarkdown!.headingLevel)?.find(item => item.slug === section)?.content;
       }
       if (evidenceBytes === undefined) { coverage = 'unknown'; break; }
       dependencyScope.push({ kind: 'unit', unitKey: unit.canonicalKey, path: unit.file, mode: fileMode, contentDigest: hash(evidenceBytes) });
