@@ -18,3 +18,30 @@
 .queue-evidence{grid-column:2 / -1;color:#b4bbc8;overflow-wrap:anywhere}.queue-history{border-top:1px solid #292f39;padding-top:9px}.queue-history summary{cursor:pointer;color:#b4bbc8}.queue-history .queue-row{margin-left:8px}
 .issue-card { padding: .7rem 0; border-bottom: 1px solid var(--line, #ddd); }
 .issue-card p { margin: .3rem 0 0; overflow-wrap: anywhere; }
+
+/* Milestones screen: the approved light-canvas prototype. */
+.main-nav{display:flex;gap:4px;flex-wrap:wrap;padding:8px 24px;background:#16181d}.main-nav button,.main-nav a{border:0;background:transparent;color:#c9cdd5;border-radius:6px;padding:10px 14px;min-height:44px;text-decoration:none}.main-nav button[aria-current=true]{background:#2a2e37;color:#fff;font-weight:600}
+#desk[data-main-view-active=milestones]>.stat-strip,#desk[data-main-view-active=milestones]>.inbox-alert,#desk[data-main-view-active=milestones]>.desk-message{display:none}
+.milestones-view{color:#16181d;background:#f6f6f3;padding:24px 28px 48px;min-height:calc(100vh - 110px)}.milestones-view h1,.milestones-view h2,.milestones-view p{margin-top:0}
+.milestone-head{max-width:1200px;margin:0 auto 16px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px}.milestone-head h1{margin:0;font-size:26px;flex:1 1 300px}
+.milestones-list{max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.milestone-card{background:#fff;border:1px solid #e3e3de;border-radius:12px;padding:18px 20px}
+.milestone-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}.milestone-top h2{margin:0;font-size:18px}.milestone-top a{color:#16181d;text-decoration:none}.milestone-top a:hover{text-decoration:underline}
+.milestone-due{font-size:13px;color:#4a505c}.milestone-count{margin-left:auto;font-family:'Geist Mono',monospace;font-size:13px}.milestone-closed{font-size:12px;color:#5d6470;border:1px solid #d5d5cf;border-radius:999px;padding:3px 10px}
+.milestone-bar{display:flex;height:10px;border-radius:999px;overflow:hidden;background:#edede8;margin:12px 0 10px}.milestone-bar>span{display:block;height:100%}
+.seg-landed{background:#1e7f4f}.seg-review{background:#1f4fc4}.seg-claimed{background:#c2570c}
+.milestone-legend{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;color:#4a505c}.milestone-pace{margin-left:auto}
+.milestone-dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px}.dot-landed{background:#1e7f4f}.dot-review{background:#1f4fc4}.dot-claimed{background:#c2570c}
+.milestone-desc-label{display:block;font-size:12px;color:#5d6470;margin-top:12px}
+.milestone-desc{box-sizing:border-box;width:100%;min-height:64px;margin-top:4px;padding:10px 12px;font:inherit;line-height:1.5;border:1px solid #e3e3de;border-radius:8px;resize:vertical;color:#16181d;background:#fff}.milestone-desc[readonly]{background:#f6f6f3}
+.milestone-controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.milestone-new,.milestone-save,.milestone-edit,.milestone-create,.milestone-cancel{min-height:44px;border-radius:8px;padding:10px 16px;font-weight:600}
+.milestone-new,.milestone-save,.milestone-create{border:1px solid #16181d;background:#16181d;color:#fff}
+.milestone-edit,.milestone-cancel{border:1px solid #d5d5cf;background:#fff;color:#16181d}
+.milestone-form{max-width:1200px;margin:0 auto 14px;display:grid;gap:10px;background:#fff;border:1px solid #e3e3de;border-radius:12px;padding:18px 20px}
+.milestone-card .milestone-form{margin:12px 0 0}
+.milestone-form label{display:grid;gap:4px;font-size:12px;color:#5d6470}.milestone-form h2{font-size:16px;margin:0}
+.milestone-form input,.milestone-form textarea{width:100%;min-height:44px;background:#fff;color:#16181d;border:1px solid #d5d5cf;border-radius:8px;padding:10px 12px;font:inherit}.milestone-form textarea{min-height:80px;resize:vertical}
+.milestone-status,.milestone-error,.milestone-empty{max-width:1200px;margin:0 auto 12px}
+.milestone-error{color:#8b3d24}.milestone-status{color:#4a505c}.milestone-empty{padding:18px 20px;background:#fff;border:1px solid #e3e3de;border-radius:12px;color:#4a505c}
+@media(max-width:767px){.main-nav{padding:6px 12px}.milestones-view{padding:18px 16px 36px}.milestone-head h1{font-size:24px}.milestone-count{margin-left:0;flex-basis:100%}}

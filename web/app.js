@@ -7,6 +7,7 @@ import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
+import { createMilestones } from './milestones.js';
 
 const $ = id => document.getElementById(id);
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
@@ -21,6 +22,9 @@ const node = (tag, value, className) => {
   if (className) n.className = className;
   return n;
 };
+const milestoneScreen = createMilestones($('milestones-view'), {
+  refresh: () => loadRepo(state.generation, false), openTracker,
+});
 const list = value => Array.isArray(value) ? value : [];
 const projections = () => state.snapshot?.data?.projections ?? {};
 const changes = () => snapshotCollections(state.snapshot).changes.items;
@@ -601,7 +605,12 @@ function render() {
     if (!hasToken() || !state.identity) return;
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
+    $('desk').dataset.mainViewActive = state.view;
+    $('milestones-view').hidden=state.view!=='milestones';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
+    for (const tab of document.querySelectorAll('[data-main-view]')) tab.setAttribute('aria-current', String(tab.dataset.mainView === state.view));
+    milestoneScreen.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
+      identity: state.identity, message: state.deskMessage });
     if (!state.snapshot) {
       if (!state.repoId) {
         renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderInbox();renderTabs();
@@ -610,6 +619,17 @@ function render() {
     }
     renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
   });
+}
+function openTracker(milestoneId) {
+  const view = $('tracker-view');
+  if (!view) { state.deskMessage = 'The tracker screen is not mounted in this build.'; render(); return; }
+  state.view = 'tracker';
+  render();
+  const select = view.querySelector('select[data-focus-key="milestone"]');
+  if (select && milestoneId) {
+    select.value = milestoneId;
+    if (select.value === milestoneId) select.dispatchEvent(new window.Event('change'));
+  }
 }
 function selectChange(id) {
   state.selected=id; render(); $('change-detail').hidden=false;
@@ -672,6 +692,7 @@ function boot() {
   $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
+  for (const tab of document.querySelectorAll('[data-main-view]')) tab.addEventListener('click',()=>{state.view=tab.dataset.mainView;render();});
   $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});
   for(const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click',()=>{state.tab=b.dataset.tab;renderTabs();});
   $('work-board').addEventListener('keydown',e=>{
