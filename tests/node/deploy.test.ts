@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { checkLocal, checkRemote, main } from '../../deploy/preflight.ts';
+import { writeTrustedParts } from '../../deploy/trusted-parts.ts';
 
 function documentedCommand(command: string, env: NodeJS.ProcessEnv = {}) {
   mkdirSync('.wrangler', { recursive: true });
@@ -19,12 +20,18 @@ function documentedCommand(command: string, env: NodeJS.ProcessEnv = {}) {
 // These account-requiring commands are reviewed as complete lines. Wrangler's
 // --help exits successfully even when the command also contains an invalid flag.
 const reviewedAccountWranglerCommands = [
+  'npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"',
+  'npx wrangler deploy --config wrangler.jsonc',
+  'npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc',
   'npx wrangler versions upload --config wrangler.jsonc',
   'npx wrangler versions secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
   'npx wrangler versions secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"',
-  'npx wrangler deploy --config wrangler.jsonc',
+  'npx wrangler secret delete TRUSTED_CONFIG --config wrangler.jsonc',
+  'npx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler.jsonc',
+  'npx wrangler secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"',
   'npx wrangler deployments list --config wrangler.jsonc',
   'npx wrangler rollback \'<PRIOR_WORKER_VERSION_ID>\' --config wrangler.jsonc --message \'rollback Concord Worker\'',
+  'npx wrangler secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
 ];
 
 function assertReviewedAccountWranglerCommand(command: string) {
@@ -39,37 +46,32 @@ describe('deployment preflight', () => {
     expect(instructions).toMatch(/<!-- verified-by: 12c -->\s*```sh\s*export CONCORD_RUN_DIR=[^\n]+\nexport CONCORD_URL=[^\n]+\nexport CONCORD_TOKEN=[^\n]+\nexport CONCORD_SHOW_DECOMPILED_C=0\nnpm run demo -- seed /);
     const commands = [...instructions.matchAll(/```sh\n([\s\S]*?)\n```/g)]
       .flatMap(match => match[1].split('\n'))
-      .filter(line => /^(?:CONCORD_TOKEN="\$\w+" )?(?:npm run (?:deploy:check|mirror|runner) |npx wrangler )/.test(line));
-    expect(commands).toEqual([
+      .filter(line => /^(?:CONCORD_TOKEN="\$\w+" )?(?:npm run (?:deploy:check|mirror|runner) |npx wrangler )/.test(line) || line.includes('&& npx wrangler '))
+      .map(line => line.replace(/^.*&& (npx wrangler )/, '$1'));
+    expect(commands.slice(0, 3)).toEqual([
       'npm run deploy:check -- --local',
       'npm run deploy:check -- --remote',
       'npx wrangler deploy --dry-run --config wrangler.jsonc',
-      'npx wrangler versions upload --config wrangler.jsonc',
-      'npx wrangler versions secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
-      'npx wrangler versions secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"',
-      'npx wrangler deploy --config wrangler.jsonc',
-      'npm run deploy:check -- --remote',
-      'CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role checker --profile "$CONCORD_HOME/checker-profile.json" --once',
-      'CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$CONCORD_REPO_ID" --role promoter --profile-digest "$PROFILE_DIGEST" --once',
-      'npm run mirror -- --repo \'<CONCORD_REPO_ID>\' --remote "$CONCORD_MIRROR_REMOTE" --dry-run',
-      'npm run mirror -- --repo \'<CONCORD_REPO_ID>\' --remote "$CONCORD_MIRROR_REMOTE" --execute',
-      'npx wrangler deployments list --config wrangler.jsonc',
-      'npx wrangler rollback \'<PRIOR_WORKER_VERSION_ID>\' --config wrangler.jsonc --message \'rollback Concord Worker\'',
     ]);
 
-    const local = documentedCommand(commands[0]);
+    const local = documentedCommand('npm run deploy:check -- --local');
     expect(local.status, local.stderr).toBe(0);
     expect(local.stdout).toContain('"status":"ready"');
-    const dryRun = documentedCommand(commands[2]);
+    const dryRun = documentedCommand('npx wrangler deploy --dry-run --config wrangler.jsonc');
     expect(dryRun.status, dryRun.stderr).toBe(0);
     expect(dryRun.stdout).toContain('--dry-run: exiting now.');
 
-    for (const command of [commands[1], commands[7]]) {
+    for (const command of ['npm run deploy:check -- --remote']) {
       const result = documentedCommand(command);
       expect(result.status).toBe(2);
       expect(result.stdout).toContain('owner credentials required');
     }
-    const accountWranglerCommands = commands.filter(command => command.startsWith('npx wrangler ') && command !== commands[2]);
+    const partsTokenUpdate = instructions.match(/`(npx wrangler secret put AUTH_TOKENS[^`]+)`/)?.[1];
+    expect(partsTokenUpdate).toBe('npx wrangler secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"');
+    const accountWranglerCommands = [...new Set([
+      ...commands.filter(command => command.startsWith('npx wrangler ') && command !== 'npx wrangler deploy --dry-run --config wrangler.jsonc'),
+      partsTokenUpdate!,
+    ])];
     expect(accountWranglerCommands).toEqual(reviewedAccountWranglerCommands);
     for (const command of accountWranglerCommands) assertReviewedAccountWranglerCommand(command);
 
@@ -77,18 +79,18 @@ describe('deployment preflight', () => {
     try {
       expect(isAbsolute(directory)).toBe(true);
       await writeFile(join(directory, 'checker-profile.json'), '{}');
-      const checker = documentedCommand(commands[8], { CONCORD_HOME: directory, CONCORD_REPO_ID: 'demo',
+      const checker = documentedCommand(commands.find(command => command.startsWith('CONCORD_TOKEN="$CHECKER_TOKEN"'))!, { CONCORD_HOME: directory, CONCORD_REPO_ID: 'demo',
         CHECKER_TOKEN: 'test-checker', CONCORD_URL: 'https://concord.test' });
       expect(checker.status).toBe(1);
       expect(checker.stderr).toContain('INVALID_PROFILE');
       expect(checker.stderr).not.toContain('PROFILE_ABSOLUTE_PATH_REQUIRED');
     } finally { await rm(directory, { recursive: true, force: true }); }
 
-    const promoter = documentedCommand(commands[9], { CONCORD_REPO_ID: 'demo', PROMOTER_TOKEN: 'test-promoter',
+    const promoter = documentedCommand(commands.find(command => command.startsWith('CONCORD_TOKEN="$PROMOTER_TOKEN"'))!, { CONCORD_REPO_ID: 'demo', PROMOTER_TOKEN: 'test-promoter',
       PROFILE_DIGEST: `sha256:${'a'.repeat(64)}` });
     expect(promoter.status).toBe(1);
     expect(promoter.stderr).toContain('CONCORD_URL_AND_TOKEN_REQUIRED');
-    for (const command of [commands[10], commands[11]]) {
+    for (const command of commands.filter(command => command.startsWith('npm run mirror '))) {
       const mirror = documentedCommand(command.replace("'<CONCORD_REPO_ID>'", "'demo'"),
         { CONCORD_MIRROR_REMOTE: 'https://github.com/example/demo.git' });
       expect(mirror.status).toBe(1);
@@ -96,13 +98,98 @@ describe('deployment preflight', () => {
     }
   }, 120_000);
 
-  it('rejects unreviewed Wrangler flags and subcommands without executing them', () => {
+  it('documents a safe trusted-config cutover in both directions', async () => {
+    const instructions = await readFile('docs/deploy.md', 'utf8');
+    const firstDeploy = instructions.split('## Provision secrets and deploy\n')[1]?.split('\n## ')[0];
+    const setup = instructions.split('export AUTH_TOKENS_FILE=')[1]?.split('\n```')[0] ?? '';
+    const release = firstDeploy?.split('### Refresh trusted digests before creating repositories')[0];
+    const refresh = instructions.split('### Refresh trusted digests before creating repositories\n')[1]?.split('\n### ')[0];
+    const section = instructions.split('### Large trusted configurations\n')[1]?.split('\n## ')[0];
+    const smoke = instructions.split('## Deployed smoke and evidence\n')[1]?.split('\n## ')[0];
+    expect(firstDeploy).toMatch(/first deployment with parts[\s\S]*AUTH_TOKENS[\s\S]*every key from that bulk file[\s\S]*Do not include `TRUSTED_CONFIG`/);
+    expect(setup).toMatch(/\nexport TRUSTED_PARTS_FILE='<new absolute private path; parts format only>'/);
+    expect(release).toMatch(/versioned release flow[\s\S]*single-secret format only[\s\S]*not supported for parts in this version/);
+    expect(refresh).toMatch(/If the Worker uses the single-secret format, install the regenerated config with `npx wrangler secret put TRUSTED_CONFIG[\s\S]*If it uses `TRUSTED_CONFIG_PARTS`, regenerate the bulk file and run `npx wrangler secret bulk[\s\S]*while the latest version is deployed; do not put `TRUSTED_CONFIG`/);
+    expect(smoke).toMatch(/For a Worker using the single-secret format, upload the newly generated `AUTH_TOKENS` and `TRUSTED_CONFIG`[\s\S]*For a Worker using `TRUSTED_CONFIG_PARTS`, do not use the versioned flow: run `npx wrangler secret put AUTH_TOKENS[\s\S]*npx wrangler secret bulk "\$TRUSTED_PARTS_FILE"[\s\S]*never put `TRUSTED_CONFIG`/);
+    expect(section).toBeDefined();
+    expect(section).toMatch(/```sh\nnpx wrangler secret delete TRUSTED_CONFIG --config wrangler\.jsonc\nnpx wrangler secret bulk "\$TRUSTED_PARTS_FILE" --config wrangler\.jsonc\n```/);
+    expect(section).toMatch(/```sh\nnpx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler\.jsonc\nnpx wrangler secret put TRUSTED_CONFIG --config wrangler\.jsonc < "\$TRUSTED_CONFIG_FILE"\n```/);
+    expect(section).toMatch(/requests fail closed[^\n]*about a minute/);
+    expect(section).toMatch(/Bulk upload adds or updates only the named secrets; `AUTH_TOKENS` and other existing secrets stay in place/);
+    expect(section).toMatch(/wait about 150 seconds with no traffic[^\n]*before creating repositories/);
+  });
+
+  it('orders first-deploy, parts release, and single-secret versioned commands correctly', async () => {
+    const instructions = await readFile('docs/deploy.md', 'utf8');
+    const firstParts = instructions.split('For a **first deployment with parts**')[1]?.split('\nFor later code-only releases')[0] ?? '';
+    const firstCommands = firstParts.match(/```sh\n([\s\S]*?)\n```/)?.[1].split('\n') ?? [];
+    const firstRelevant = firstCommands.filter(line => line.startsWith('npm run deploy:trusted-parts') || line.startsWith('jq -n') || line.startsWith("  '$parts") || line.startsWith('test -s'));
+    expect(firstRelevant).toEqual([
+      'npm run deploy:trusted-parts -- --in "$TRUSTED_CONFIG_FILE" --out "$TRUSTED_PARTS_FILE"',
+      'jq -n --rawfile auth "$AUTH_TOKENS_FILE" --slurpfile parts "$TRUSTED_PARTS_FILE" \\',
+      "  '$parts[0] + {AUTH_TOKENS:$auth}' > \"$SECRETS_FILE\"",
+      'test -s "$SECRETS_FILE" && npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"',
+    ]);
+    expect(firstParts).not.toMatch(/TRUSTED_CONFIG:|TRUSTED_CONFIG\s*:/);
+
+    const partsRelease = instructions.split('For a parts-based Worker, use this sequence')[1]?.match(/```sh\n([\s\S]*?)\n```/)?.[1] ?? '';
+    expect([...partsRelease.matchAll(/(?:^|\n)(npx wrangler deploy --config wrangler\.jsonc|npm run deploy:trusted-parts[^\n]*|npx wrangler secret bulk[^\n]*)/g)].map(match => match[1])).toEqual([
+      'npx wrangler deploy --config wrangler.jsonc',
+      'npm run deploy:trusted-parts -- --in "$TRUSTED_CONFIG_FILE" --out "$TRUSTED_PARTS_FILE"',
+      'npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc',
+    ]);
+
+    const smoke = instructions.split('## Deployed smoke and evidence\n')[1]?.split('\n## ')[0] ?? '';
+    const smokeParts = smoke.split('For a Worker using `TRUSTED_CONFIG_PARTS`')[1]?.split('Do not reuse a deployment')[0] ?? '';
+    expect([...smokeParts.matchAll(/`(npx wrangler secret (?:put AUTH_TOKENS|bulk)[^`]+)`/g)].map(match => match[1])).toEqual([
+      'npx wrangler secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
+      'npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc',
+    ]);
+
+    const singleVersioned = instructions.split('```sh\ntest -s "$AUTH_TOKENS_FILE"')[1]?.split('\n```')[0] ?? '';
+    expect([...singleVersioned.matchAll(/(?:^|\n)(npx wrangler [^\n]+)/g)].map(match => match[1])).toEqual([
+      'npx wrangler versions upload --config wrangler.jsonc',
+      'npx wrangler versions secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
+      'npx wrangler versions secret put TRUSTED_CONFIG --config wrangler.jsonc < "$TRUSTED_CONFIG_FILE"',
+      'npx wrangler deploy --config wrangler.jsonc',
+    ]);
+    expect(instructions).not.toContain('versions secret bulk');
+  });
+
+  it('builds first-deploy parts secrets from exactly the documented bulk keys', async () => {
+    const instructions = await readFile('docs/deploy.md', 'utf8');
+    const setup = instructions.split('export AUTH_TOKENS_FILE=')[1]?.split('\n```')[0] ?? '';
+    const partsFirstDeploy = instructions.split('For a **first deployment with parts**')[1] ?? '';
+    const recipe = partsFirstDeploy.match(/jq -n --rawfile auth "\$AUTH_TOKENS_FILE" --slurpfile parts "\$TRUSTED_PARTS_FILE" \\\s*'([^']+)'/)?.[1];
+    expect(recipe).toBe('$parts[0] + {AUTH_TOKENS:$auth}');
+    expect(setup).toMatch(/\nexport TRUSTED_PARTS_FILE='<new absolute private path; parts format only>'/);
+    expect(partsFirstDeploy.indexOf('npm run deploy:trusted-parts')).toBeGreaterThanOrEqual(0);
+    expect(partsFirstDeploy.indexOf('npm run deploy:trusted-parts')).toBeLessThan(partsFirstDeploy.indexOf('jq -n'));
+
+    const directory = await mkdtemp(join(resolve(tmpdir()), 'concord-deploy-parts-'));
+    const authPath = join(directory, 'auth.json');
+    const trustedPath = join(directory, 'trusted.json');
+    const partsPath = join(directory, 'parts.json');
+    try {
+      await writeFile(authPath, 'auth-secret');
+      const trustedConfig = '{"trusted":"config"}';
+      await writeFile(trustedPath, trustedConfig);
+      await writeTrustedParts(trustedPath, partsPath);
+      const result = spawnSync('jq', ['-n', '--rawfile', 'auth', authPath, '--slurpfile', 'parts', partsPath, recipe!], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      const secrets = JSON.parse(result.stdout);
+      expect(Object.keys(secrets).sort()).toEqual(['AUTH_TOKENS', 'TRUSTED_CONFIG_PARTS', 'TRUSTED_CONFIG_PART_0'].sort());
+      expect(secrets).toEqual({ AUTH_TOKENS: 'auth-secret', TRUSTED_CONFIG_PARTS: '1', TRUSTED_CONFIG_PART_0: trustedConfig });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('rejects unreviewed Wrangler flags and accepts the documented parts token update', () => {
     expect(() => assertReviewedAccountWranglerCommand(
       'npx wrangler versions secret put AUTH_TOKENS --definitely-invalid --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
     )).toThrow(/unreviewed Wrangler command/);
     expect(() => assertReviewedAccountWranglerCommand(
       'npx wrangler secret put AUTH_TOKENS --config wrangler.jsonc < "$AUTH_TOKENS_FILE"',
-    )).toThrow(/unreviewed Wrangler command/);
+    )).not.toThrow();
   });
 
   it('documents the production profile pin required by the promoter smoke command', async () => {

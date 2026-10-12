@@ -132,13 +132,29 @@ export function localFixtureConfig(mode: Env['CONCORD_MODE']): TrustedConfigurat
   };
 }
 
-export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFIG'>): TrustedConfiguration {
-  if (!env.TRUSTED_CONFIG) {
+export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFIG' | 'TRUSTED_CONFIG_PARTS'>): TrustedConfiguration {
+  let configText: string | undefined = env.TRUSTED_CONFIG;
+  if (env.TRUSTED_CONFIG_PARTS !== undefined) {
+    const countText: unknown = env.TRUSTED_CONFIG_PARTS;
+    if (env.TRUSTED_CONFIG !== undefined || typeof countText !== 'string' || !/^[0-9]+$/.test(countText)) throw new Error('TRUSTED_CONFIG_INVALID');
+    const count = Number(countText);
+    if (!Number.isInteger(count) || count < 1 || count > 64) throw new Error('TRUSTED_CONFIG_INVALID');
+    const bindings = env as unknown as Record<string, unknown>;
+    const parts: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const part = bindings[`TRUSTED_CONFIG_PART_${index}`];
+      if (typeof part !== 'string') throw new Error('TRUSTED_CONFIG_INVALID');
+      parts.push(part);
+    }
+    configText = parts.join('');
+  }
+  if (!configText) {
+    if (env.TRUSTED_CONFIG_PARTS !== undefined) throw new Error('TRUSTED_CONFIG_INVALID');
     if (env.CONCORD_MODE === 'local') return localFixtureConfig(env.CONCORD_MODE);
     throw new Error('TRUSTED_CONFIG_REQUIRED');
   }
   let value: unknown;
-  try { value = JSON.parse(env.TRUSTED_CONFIG); } catch { throw new Error('TRUSTED_CONFIG_INVALID'); }
+  try { value = JSON.parse(configText); } catch { throw new Error('TRUSTED_CONFIG_INVALID'); }
   if (!value || typeof value !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
   const config = value as TrustedConfiguration;
   if (!config.policies || !config.profiles || typeof config.policies !== 'object' || typeof config.profiles !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');

@@ -34,7 +34,7 @@ function validateConfig(production: Config, local: Config, env: NodeJS.ProcessEn
   if (vars.CONCORD_SHOW_DECOMPILED_C !== '0' || (env.CONCORD_SHOW_DECOMPILED_C !== undefined && env.CONCORD_SHOW_DECOMPILED_C !== '0')) throw new Error('decompiled C must remain disabled');
   if (vars.BRIDGE_URL !== undefined || vars.LOCAL_GIT_URL !== undefined || vars.LOCAL_GIT_TOKEN !== undefined ||
       (env.CONCORD_MODE === 'production' && (env.BRIDGE_URL || env.LOCAL_GIT_URL || (env.STORAGE_BACKEND && env.STORAGE_BACKEND !== 'artifacts')))) throw new Error('production cannot use the local Git bridge');
-  if (['AUTH_TOKENS', 'TRUSTED_CONFIG', 'CONCORD_TOKEN', 'CLOUDFLARE_API_TOKEN'].some(key => vars[key] !== undefined)) throw new Error('credentials and trusted config must be Worker secrets');
+  if (Object.keys(vars).some(key => ['AUTH_TOKENS', 'TRUSTED_CONFIG', 'TRUSTED_CONFIG_PARTS', 'CONCORD_TOKEN', 'CLOUDFLARE_API_TOKEN'].includes(key) || key.startsWith('TRUSTED_CONFIG_PART_'))) throw new Error('credentials and trusted config must be Worker secrets');
   if (JSON.stringify(production).includes('local-') || (env.AUTH_TOKENS ?? '').includes('local-')) throw new Error('fixture credentials cannot be used in production');
   const artifacts = production.artifacts as Config[];
   if (!Array.isArray(artifacts) || artifacts.length !== 1 || artifacts[0].binding !== 'ARTIFACTS' || artifacts[0].namespace !== 'concord-demo') throw new Error('Artifacts binding or namespace is missing');
