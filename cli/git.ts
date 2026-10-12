@@ -39,6 +39,21 @@ export async function git(args: string[], options: GitOptions = {}, cwd?: string
   }
 }
 
+/** Keep NUL-delimited path output as bytes until the caller validates UTF-8. */
+export async function gitBytes(args: string[], options: GitOptions = {}, cwd?: string): Promise<Buffer> {
+  if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
+  try {
+    const result = await execFile('git', args, { cwd, env: gitEnvironment(options), encoding: 'buffer',
+      timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+    return result.stdout;
+  } catch (error) {
+    const e = error as NodeJS.ErrnoException & { killed?: boolean };
+    const category = e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn';
+    const exitCode = typeof e.code === 'number' && Number.isSafeInteger(e.code) && e.code >= 0 && e.code <= 255 ? e.code : 'unknown';
+    throw new ConcordError(`Git failed: ${category} (exit code ${exitCode})`, 'transport');
+  }
+}
+
 export async function patchId(worktree: string, oid: string): Promise<string> {
   if (!/^[0-9a-f]{40}$/i.test(oid)) throw new ConcordError('Patch commit OID is malformed', 'usage');
   const patch = await git(['show', '--format=', '--no-ext-diff', '--no-renames', '--binary', oid], { preserveOutput: true }, worktree);

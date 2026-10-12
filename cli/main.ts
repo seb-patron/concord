@@ -18,7 +18,7 @@ Mutations generate an idempotency key when omitted. Responses are JSON on stdout
 
 Commands and required fields:
   land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
-  land --repo ID --aw-run RUN_DIR [--base 40_HEX_OID] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
+  land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
   principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
