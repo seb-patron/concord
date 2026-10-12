@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CandidateInput, DeltaCheckJob, DeltaResult, Digest, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
-import { verdicts, type InspectedRevision } from '../../src/features/verdicts';
+import { verdicts, humanApprovalStatus, type InspectedRevision } from '../../src/features/verdicts';
 import { canonicalJson, dependencyScopeDigest, hashCanonical, manifestDigest, normalizeManifest, trustedDependencyKeys } from '../../src/verdicts/manifest';
 
 const d = (text: string): Digest => hashCanonical(text);
@@ -54,6 +54,11 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
     trusted: { policies: { demo: policy }, profiles: { demo: trustedProfile } }, now: () => 100,
     storage: { resolveRef: async () => canonical, info: async (name: string) => ({ name, remote: `https://example.test/${name}`, status: 'ready' }) },
     state: { get: <T>(key: string) => (state.get(key) ?? null) as T | null, put: <T>(key: string, value: T) => { state.set(key, value); }, delete: (key: string) => { state.delete(key); } },
+    sql: { exec: (_query: string, key: string) => ({ toArray: () => {
+      const actual = key?.startsWith('module:verdicts:') ? key.slice('module:verdicts:'.length) : key;
+      const value = state.get(actual);
+      return value === undefined ? [] : [{ value: JSON.stringify(value) }];
+    } }) },
     version: () => version, nextVersion: () => ++version,
     appendEvent: (_kind: string, _ids: string[], _payload: Record<string, unknown>, eventVersion: number) => ({ sequence: eventVersion }),
     readChange: () => ({ status: 'eligible', version, evidenceIds: ['change'], value: { authorId: author, headOid: head, revision, status: 'ready', unitKeys: [unitKey], frozen } }),
@@ -63,7 +68,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
       throw new Error(`Unknown hook ${name}`);
     },
   } as unknown as ModuleContext;
-  async function route(method: 'GET' | 'POST', path: 'verdicts' | 'carry', body: Record<string, unknown> = {}) {
+  async function route(method: 'GET' | 'POST', path: 'verdicts' | 'carry' | 'human-approval', body: Record<string, unknown> = {}) {
     const pathname = `/v1/repos/repo/changes/change/${path}`;
     const selected = verdicts.routes.find(item => item.method === method && item.pattern.test(pathname))!;
     const response = await selected.handle(context, new Request(`https://concord.test${pathname}`, { method }), pathname.match(selected.pattern)!, body);
@@ -100,6 +105,25 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
 }
 
 describe('content-bound verdicts', () => {
+  it('carries a separate owner approval across a clean rebase', async () => {
+    const h = harness();
+    h.state.set('module:settings:record', { version: 1, protectedPaths: [{ pattern: 'families.tsv', level: 'human-approval' }] });
+    const parent = await h.approve();
+    expect(humanApprovalStatus(h.context, 'change', 1).awaitingHumanApproval).toEqual(['families.tsv']);
+    h.context.principal.principalId = 'owner';
+    h.context.principal.roles = ['owner'];
+    const approval = await h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'approve', evidenceDigest: d('owner-evidence') });
+    expect(approval.status).toBe(201);
+    expect(humanApprovalStatus(h.context, 'change', 1).awaitingHumanApproval).toEqual([]);
+    h.context.principal.principalId = 'reviewer';
+    h.context.principal.roles = ['reviewer'];
+    h.advance();
+    expect(humanApprovalStatus(h.context, 'change', 2).awaitingHumanApproval).toEqual(['families.tsv']);
+    expect((await h.carry(parent)).status).toBe(202);
+    expect(h.evaluate(h.result()).status).toBe('eligible');
+    expect(humanApprovalStatus(h.context, 'change', 2).awaitingHumanApproval).toEqual([]);
+  });
   it('uses canonical byte-sensitive sorted manifests and exact trusted dependency closure', async () => {
     const original = manifest('row:gamma');
     const reversed = { ...original, changedUnits: [...original.changedUnits].reverse(), dependencyScope: [...original.dependencyScope].reverse() } as ReviewManifest;

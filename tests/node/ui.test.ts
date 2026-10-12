@@ -7,7 +7,22 @@ const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
-const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
+const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
+
+it('sends versioned settings and owner decisions to same-origin routes', async () => {
+  const seen: Array<{ path: string; method: string; body: any }> = [];
+  const fake = async (path: string, options: RequestInit) => {
+    seen.push({ path, method: options.method ?? 'GET', body: options.body ? JSON.parse(String(options.body)) : null });
+    return new Response(JSON.stringify({ data: {}, version: 4 }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  await getSettings('repo', fake);
+  await putSettings('repo', { expectedVersion: 3, protectedPaths: [{ pattern: 'AGENTS.md', level: 'human-only' }] }, 'key', fake);
+  await submitHumanApproval('repo', 'change', { expectedVersion: 4, decision: 'approve' }, 'key2', fake);
+  expect(seen.map(call => `${call.method} ${call.path}`)).toEqual([
+    'GET /v1/repos/repo/settings', 'PUT /v1/repos/repo/settings', 'POST /v1/repos/repo/changes/change/human-approval',
+  ]);
+  expect(seen[1].body.protectedPaths[0].level).toBe('human-only');
+});
 
 const fixture = {
   data: { projections: {

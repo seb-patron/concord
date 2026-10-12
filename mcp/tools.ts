@@ -19,6 +19,7 @@ export const tools: Tool[] = [
   tool('repo_list', 'List authorized repositories.', { cursor: s }),
   tool('repo_get', 'Get repository detail and canonical head.', repo, ['repoId']),
   tool('repo_context', 'Get repository snapshot, policy state, changes, leases, queue and findings.', repo, ['repoId']),
+  tool('repo_settings', 'Read repository path protection rules and levels.', repo, ['repoId']),
   tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys: strings, dependencyChangeIds: strings, attempt: n, issueNumber: { type: 'integer', minimum: 1 }, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
   tool('issue_create', 'Create an issue in the repository inbox.', { ...repo, title: s, body: s, labels: strings, milestoneId: s, allowedFiles: strings, idempotencyKey: s }, ['repoId', 'title', 'body']),
   tool('issue_get', 'Get an issue and its linked changes.', { ...repo, issueNumber: { type: 'integer', minimum: 1 } }, ['repoId', 'issueNumber']),
@@ -129,6 +130,7 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
     case 'repo_list': result = await client.request('GET', `/repos${query('cursor', args.cursor)}`); break;
     case 'repo_get': result = await client.request('GET', r); break;
     case 'repo_context': result = await client.request('GET', `${r}/snapshot`); break;
+    case 'repo_settings': result = await client.request('GET', `${r}/settings`); break;
     case 'change_create': {
       const { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds = [], attempt, issueNumber } = args;
       result = await mutation(client, `${r}/changes`, { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds, ...(attempt === undefined ? {} : { attempt }), ...(issueNumber === undefined ? {} : { issueNumber }) }, undefined, args.idempotencyKey);

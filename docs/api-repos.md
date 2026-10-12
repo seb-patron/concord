@@ -156,6 +156,14 @@ After that operation gate, the operator uses the verified fork as the owner seed
 
 The repos module registers its change-view provider through the cross-module hook. The coordinator returns a detached view, including the queue fields, to other modules.
 
+## Path protection settings
+
+`GET /v1/repos/:repoId/settings` is available to every repository reader and returns `{version, protectedPaths}`. A repository without settings returns `{version:0,protectedPaths:[]}`; its paths default to `agents`. An owner replaces the array with `PUT /v1/repos/:repoId/settings`, supplying `expectedVersion` from the latest API envelope and an idempotency key. Each entry is `{pattern,level,note?}`. The server increments the repository version and emits `settings.updated`.
+
+Levels are `agents` (normal lease and queue flow), `human-approval` (agents can lease and edit; queue admission requires a separate owner approval for the current inspected revision), and `human-only` (agent lease claims return `PATH_PROTECTED` with pattern, note and owner holder). The owner can claim normally. Patterns use import globs: `*` and `?` stay within one path segment, `**` spans segments, and a trailing `/` covers a directory. More literal characters win; fewer wildcards and then a longer pattern break ties. Exact patterns can therefore override broad directory rules. Normalized relative Git paths, including `AGENTS.md`, are accepted. New files can be claimed only where the trusted unit policy already permits file units; a matching protection applies to those claims too.
+
+`POST /v1/repos/:repoId/changes/:changeId/human-approval` is owner-only. Its body contains `expectedVersion`, `revision`, `reviewManifestDigest`, `evidenceDigest` (sha256), and `decision` (`approve` or `reject`). The inspected change view shows `awaitingHumanApproval`, `protectedFiles`, `protectedDiffSummary` (before/after paths and byte digests), and `reviewManifestDigest`. The approval is separate from the independent reviewer verdict; both are required for admission. A clean patch-id carry also carries the owner approval after the existing digest and dependency checks pass. A new revision, changed manifest, or newly matching protection requires a new owner decision. The queue projection includes pending patterns for admitted entries.
+
 Bootstrap records the validation request and provisions a scratch repository before scheduling. The queue remains responsible for issuing an owner-authorized absent-ref promotion ticket only after a trusted pass. Local fake storage cannot run a real checker because its `fake://` remote has no Git transport.
 Queue admission must also recheck the candidate's current registered ref and revision, consult the repos module's queue generation after a head change, and mark admitted/promoting changes frozen so `close` cannot bypass that state.
 # Related task records

@@ -110,6 +110,23 @@ function addVerified(state: DurableObjectState, change: Change, unitKeys = chang
 }
 
 describe('semantic lease identities', () => {
+  it('refuses protected whole-file units and new files under a protected prefix', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'lease_protected_paths';
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      sqlState(state.storage.sql).put('module:settings:record', { version: 1, protectedPaths: [
+        { pattern: 'src/code.c', level: 'human-only', note: 'owner edits' },
+        { pattern: 'tests/', level: 'human-only' },
+      ] });
+    });
+    for (const unit of ['file:src/code.c', 'symbol:sub_02000100', 'file:tests/new.test.ts']) {
+      const denied = await claim(repo, 'local-agent-a', `change-${unit.replace(/\W/g, '')}`, [unit], crypto.randomUUID());
+      expect(denied.status).toBe(409);
+      expect((await responseBody(denied)).error.code).toBe('PATH_PROTECTED');
+    }
+    expect((await claim(repo, 'local-agent-a', 'free', ['file:tests/../bad.ts'], 'bad')).status).toBe(422);
+  });
   it('claims exact new paths under a prefix and conflicts only on the same path', async () => {
     policy.newFilePrefixes = ['tests/'];
     setupPolicy();

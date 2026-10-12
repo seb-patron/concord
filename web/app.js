@@ -1,7 +1,7 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
   getSnapshot, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
-  redactError, setSessionToken, submitVerdict, withdrawChange,
+  putSettings, redactError, setSessionToken, submitHumanApproval, submitVerdict, withdrawChange,
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
@@ -482,7 +482,7 @@ function renderActions(target,change) {
       entries().some(e => e.changeId===change.changeId && !['withdrawn','landed'].includes(e.state)),
     verdict: change.status==='ready' && actions().verdict && state.identity?.principalId !== change.authorId,
   } : {};
-  const signature=JSON.stringify([change?.changeId ?? null,eligibility]);
+  const signature=JSON.stringify([change?.changeId ?? null,eligibility,change?.awaitingHumanApproval,change?.reviewManifestDigest]);
   if (target.dataset.actionSignature===signature && target.dataset.changeId===(change?.changeId ?? '')) {
     for (const button of target.querySelectorAll('button')) button.disabled=!snapshotCurrent();
     return;
@@ -495,6 +495,23 @@ function renderActions(target,change) {
   target.dataset.changeId=change?.changeId ?? '';
   target.dataset.actionSignature=signature;
   if (!change) return;
+  if (roles().includes('owner') && list(change.awaitingHumanApproval).length) {
+    const panel=node('section',null,'human-approval');
+    panel.append(node('h3','Owner approval required'), node('p',`Protected patterns: ${change.awaitingHumanApproval.join(', ')}`));
+    const summary=node('ul');
+    for (const unit of list(change.protectedDiffSummary)) summary.append(node('li',`${unit.beforePath ?? '(new)'} → ${unit.afterPath ?? '(deleted)'} · ${unit.beforeDigest ?? 'absent'} → ${unit.afterDigest ?? 'absent'}`));
+    panel.append(summary);
+    const evidence=node('input'); evidence.placeholder='Evidence digest (sha256:…)'; evidence.setAttribute('aria-label','Owner approval evidence digest');
+    panel.append(evidence);
+    for (const [label,decision] of [['Approve','approve'],['Request changes','reject']]) {
+      const button=node('button',label); button.type='button';
+      button.addEventListener('click',()=>void mutate('Owner decision',()=>submitHumanApproval(state.repoId,change.changeId,
+        { expectedVersion:state.snapshot.version, revision:change.revision, reviewManifestDigest:change.reviewManifestDigest,
+          evidenceDigest:evidence.value.trim(), decision },newIdempotencyKey())));
+      panel.append(button);
+    }
+    target.append(panel);
+  }
   const buttons=node('div',null,'action-buttons');
   if (eligibility.enqueue) {
     const form=node('form',null,'action-form');
@@ -608,8 +625,39 @@ function render() {
       }
       return;
     }
-    renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
+    renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderSettings();renderTabs();
   });
+}
+function renderSettings() {
+  const panel=$('settings-panel');
+  panel.hidden=!roles().includes('owner') || !state.repoId;
+  if (panel.hidden) return;
+  const rules=list(projections().settings?.protectedPaths);
+  const signature=JSON.stringify(rules);
+  const target=$('settings-list');
+  if (target.dataset.signature===signature) return;
+  target.dataset.signature=signature;
+  target.replaceChildren();
+  for (const rule of rules) {
+    const row=node('div',null,'settings-rule');
+    row.append(node('strong',rule.pattern),node('span',` · ${rule.level}${rule.note ? ` · ${rule.note}` : ''}`));
+    const remove=node('button','Remove'); remove.type='button';
+    remove.addEventListener('click',()=>void saveSettings(rules.filter(item=>item.pattern!==rule.pattern)));
+    row.append(remove); target.append(row);
+  }
+}
+async function saveSettings(protectedPaths) {
+  if (!snapshotCurrent() || !roles().includes('owner')) return;
+  $('settings-status').textContent='Saving…';
+  try {
+    const response=await putSettings(state.repoId,{expectedVersion:state.snapshot.version,protectedPaths},newIdempotencyKey());
+    observeVersion(state.repoId,response.version);
+    await loadRepo(state.generation,false);
+    $('settings-status').textContent='Settings saved.';
+  } catch(error) {
+    $('settings-status').textContent=`Settings: ${redactError(error).code}.`;
+    await loadRepo(state.generation,false);
+  }
 }
 function selectChange(id) {
   state.selected=id; render(); $('change-detail').hidden=false;
@@ -665,6 +713,17 @@ function doVerdict(change,decision,manifest,evidenceDigest) {
   void mutate('Verdict',()=>submitVerdict(state.repoId,change.changeId,{expectedVersion:state.snapshot.version,revision:evidence.revision,reviewManifestDigest:manifest.trim(),findingSetVersion:evidence.findingSetVersion,decision,evidenceDigest:evidenceDigest.trim()},newIdempotencyKey()));
 }
 function boot() {
+  $('settings-form').addEventListener('submit',event=>{
+    event.preventDefault();
+    const data=new FormData(event.currentTarget);
+    const pattern=String(data.get('pattern') ?? '').trim();
+    const level=String(data.get('level') ?? 'agents');
+    const note=String(data.get('note') ?? '').trim();
+    if (!pattern) return;
+    const rules=list(projections().settings?.protectedPaths).filter(rule=>rule.pattern!==pattern);
+    rules.push({pattern,level,...(note ? {note} : {})});
+    void saveSettings(rules);
+  });
   $('demo-open').hidden=!demo;
   $('demo-open').addEventListener('click',()=>{if(demo) void signIn(demo,window.CONCORD_DEMO_REPO_ID);});
   $('token-form').addEventListener('submit',e=>{e.preventDefault();const token=$('token-input').value.trim();if(token)void signIn(token);});

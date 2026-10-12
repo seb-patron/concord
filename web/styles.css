@@ -18,3 +18,7 @@
 .queue-evidence{grid-column:2 / -1;color:#b4bbc8;overflow-wrap:anywhere}.queue-history{border-top:1px solid #292f39;padding-top:9px}.queue-history summary{cursor:pointer;color:#b4bbc8}.queue-history .queue-row{margin-left:8px}
 .issue-card { padding: .7rem 0; border-bottom: 1px solid var(--line, #ddd); }
 .issue-card p { margin: .3rem 0 0; overflow-wrap: anywhere; }
+.settings-rule { display: flex; align-items: center; gap: .5rem; padding: .35rem 0; flex-wrap: wrap; }
+.settings-rule button { margin-left: auto; }
+.human-approval { border: 1px solid var(--border, #555); border-radius: .5rem; padding: .75rem; margin-block: .75rem; }
+.human-approval ul { overflow-wrap: anywhere; }

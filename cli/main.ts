@@ -21,6 +21,7 @@ Commands and required fields:
   land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
+  settings get|protect|unprotect --repo ID [--pattern GLOB --level agents|human-approval|human-only --note TEXT]
   principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
   principals list [--cursor CURSOR]
   principals revoke ID
@@ -54,7 +55,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'pattern', 'level', 'note', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -172,6 +173,19 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   }
   const rid = requireRepo();
   const root = `/repos/${rid}`;
+  if (noun === 'settings') {
+    if (verb === 'get') return print(await send('GET', `${root}/settings`));
+    if (verb !== 'protect' && verb !== 'unprotect') throw new ConcordError('settings requires get, protect, or unprotect', 'usage');
+    const pattern = required(flags, 'pattern');
+    const current = await send('GET', `${root}/settings`) as { data: { protectedPaths: Array<{ pattern: string; level: string; note?: string }> }; version: number };
+    const protectedPaths = current.data.protectedPaths.filter(rule => rule.pattern !== pattern);
+    if (verb === 'protect') {
+      const level = required(flags, 'level');
+      if (!['agents', 'human-approval', 'human-only'].includes(level)) throw new ConcordError('--level must be agents, human-approval, or human-only', 'usage');
+      protectedPaths.push({ pattern, level, ...(flags.note === undefined ? {} : { note: String(flags.note) }) });
+    }
+    return print(await client.request('PUT', `${root}/settings`, requestOptions(flags, { protectedPaths }, current.version)));
+  }
   if (noun === 'issue') {
     const path = `${root}/issues`;
     if (verb === 'list') return print(await send('GET', `${path}${query({ state: flags.state, label: flags.label, milestoneId: flags['milestone-id'], cursor: flags.cursor, limit: flags.limit })}`));

@@ -13,9 +13,10 @@ import { runners } from './features/runners';
 import { findings } from './features/findings';
 import { verdicts } from './features/verdicts';
 import { issuesFeature } from './features/issues';
+import { settings } from './features/settings';
 
 /** The six modules are registered once. Each supplies migrations, routes, alarms and projections. */
-export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature];
+export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature, settings];
 
 export function selectStorage(env: Env, sql: SqlStorage, now: () => number): RepoStorage {
   if (env.CONCORD_MODE === 'local' && env.STORAGE_BACKEND === 'fake') return new FakeStorage(sqlState(sql), now);
