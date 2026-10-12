@@ -579,7 +579,12 @@ function onResult(context: ModuleContext, result: StackResult | PromotionResult)
       : blocked(context, 'CONFLICTING_RESULT', 'Result digest differs from recorded result');
     record.result = result;
     record.resultSequence = emit(context, 'queue.result_received', record.memberIds, { jobId: result.jobId,
-      outcome: result.outcome, purpose: record.purpose, generation: record.job.generation });
+      outcome: result.outcome, purpose: record.purpose, generation: record.job.generation,
+      ...(result.kind === 'validate-stack' && record.job.kind === 'validate-stack' ? {
+        bootstrap: record.job.bootstrap, candidateCount: record.job.candidates.length, composedTreeOid: result.composedTreeOid,
+        sourceTreeOid: result.sourceTreeOid,
+      } : {}),
+    });
     save(context, state);
     return eligible(context, { promotionId: state.ticket?.promotionId ?? null }, [result.jobId]);
   });
@@ -755,6 +760,10 @@ async function processStackResult(context: ModuleContext, state: QueueState, rec
     return;
   }
   record.verified = true;
+  if (record.purpose === 'diagnostic' && !record.job.bootstrap && record.job.baseCheck && green) {
+    emit(context, 'queue.main_green', [], { jobId: result.jobId, canonicalOid: main,
+      sourceTreeOid: result.sourceTreeOid });
+  }
   if (record.purpose === 'contest') {
     await processContestResult(context, state, record, result, main);
     return;

@@ -11,8 +11,8 @@ export interface RepoMetrics {
   leaseClaimsRefused: Count; distinctIssuesWithRefusedClaims: Count; refusalWait: Duration;
   automaticRebases: Count; approvalsCarriedByPatchId: Count;
   revisionsPerLandedChange: Revision; reworkRevisions: Count;
-  combinedTreeCheckFailures: Count; bisectBlames: Count;
-  mainRedTime: { totalMs: number; n: number; eventKinds: string[] };
+  combinedTreeCheckFailures: Count; stackInfrastructureFailures: Count; bisectBlames: Count;
+  mainRedTime: { totalMs: number; n: number; unresolved: boolean; eventKinds: string[] };
   issuesClosedByLand: Count;
 }
 
@@ -76,23 +76,33 @@ export function measureEvents(events: Event[], since: number, until: number): Re
   const issues = new Set(refused.map(event => event.payload.issueNumber).filter(value => typeof value === 'number'));
   const waits = refused.flatMap(event => {
     const id = changeId(event);
-    const granted = id && (changes.get(id) ?? []).find(item => item.kind === 'lease.claimed' && item.timestamp >= event.timestamp);
+    const keys = Array.isArray(event.payload.keys) ? event.payload.keys.filter((key): key is string => typeof key === 'string') : [];
+    const granted = id && keys.length && (changes.get(id) ?? []).find(item => item.kind === 'lease.claimed'
+      && (item.timestamp > event.timestamp || item.timestamp === event.timestamp && item.sequence > event.sequence)
+      && keys.includes(item.payload.unitKey as string));
     return granted ? [granted.timestamp - event.timestamp] : [];
   });
   const rebases = window.filter(event => ['queue.auto_rebased', 'queue.rebased', 'change.auto_rebased'].includes(event.kind));
   const carried = window.filter(event => event.kind === 'verdict.created' &&
     (event.payload.carriedFrom as { method?: unknown } | null)?.method === 'patch-id');
-  const failures = window.filter(event => event.kind === 'queue.result_received' && event.payload.purpose === 'stack' &&
-    !['PASS', 'MATCH'].includes(String(event.payload.outcome)));
+  const stackResults = byKind('queue.result_received').filter(event => event.payload.purpose === 'stack');
+  const infrastructureFailures = stackResults.filter(event => ['ENV_ERROR', 'TIMEOUT'].includes(String(event.payload.outcome)));
+  const failures = stackResults.filter(event => ['FAIL', 'MISMATCH', 'COMPILE_ERROR', 'UNVERIFIED_TARGET'].includes(String(event.payload.outcome))
+    && event.payload.bootstrap === false
+    && typeof event.payload.candidateCount === 'number' && event.payload.candidateCount > 0
+    && typeof event.payload.composedTreeOid === 'string' && event.payload.composedTreeOid.length > 0
+    && event.payload.sourceTreeOid === event.payload.composedTreeOid);
   const blames = byKind('queue.diagnosis').flatMap(event => Array.isArray(event.payload.blame) ? event.payload.blame : []);
   const issueCloses = byKind('issue.closed').filter(event => event.payload.closedBy && typeof event.payload.closedBy === 'object');
-  const redStarts = ordered.filter(event => event.kind === 'queue.diagnosis' && event.payload.reason === 'BASE_RED');
-  const redEnds = ordered.filter(event => event.kind === 'queue.main_green');
-  const redIntervals = redStarts.flatMap(start => {
-    const end = redEnds.find(item => item.timestamp > start.timestamp && item.timestamp < until);
-    if (!end || end.timestamp <= since) return [];
-    return [Math.max(0, end.timestamp - Math.max(start.timestamp, since))];
-  });
+  const redIntervals: number[] = [];
+  let redStart: number | null = null;
+  for (const event of ordered) {
+    if (event.kind === 'queue.diagnosis' && event.payload.reason === 'BASE_RED' && redStart === null) redStart = event.timestamp;
+    if (event.kind === 'queue.main_green' && redStart !== null) {
+      if (event.timestamp >= since) redIntervals.push(event.timestamp - Math.max(redStart, since));
+      redStart = null;
+    }
+  }
   const revisionValues = revisions.sort((a, b) => a - b);
   return {
     since: new Date(since).toISOString(), until: new Date(until).toISOString(),
@@ -110,8 +120,10 @@ export function measureEvents(events: Event[], since: number, until: number): Re
       n: revisionValues.length, eventKinds: ['change.published', 'queue.promotion_applied'] },
     reworkRevisions: count(revisionValues.reduce((sum, value) => sum + Math.max(0, value - 1), 0), ['change.published', 'queue.promotion_applied'], revisionValues.length),
     combinedTreeCheckFailures: count(failures.length, ['queue.result_received']),
+    stackInfrastructureFailures: count(infrastructureFailures.length, ['queue.result_received']),
     bisectBlames: count(blames.length, ['queue.diagnosis']),
-    mainRedTime: { totalMs: redIntervals.reduce((a, b) => a + b, 0), n: redIntervals.length, eventKinds: ['queue.diagnosis', 'queue.main_green'] },
+    mainRedTime: { totalMs: redIntervals.reduce((a, b) => a + b, 0), n: redIntervals.length,
+      unresolved: redStart !== null, eventKinds: ['queue.diagnosis', 'queue.main_green'] },
     issuesClosedByLand: count(issueCloses.length, ['issue.closed']),
   };
 }

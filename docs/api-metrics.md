@@ -10,12 +10,12 @@ The standard API envelope contains `data`, `version`, and `eventSeq`. Each numbe
 | `publishToLand`, `claimToLand` | First `change.published` or `lease.claimed` for each landed change to its land event. Origins can precede the window. |
 | `reviewWait` | First publish to first approving `verdict.created` for each landed change. |
 | `queueWait` | Latest `queue.enqueued` to land for each landed change. |
-| `leaseClaimsRefused`, `distinctIssuesWithRefusedClaims`, `refusalWait` | `lease.refused` in the window, its recorded `issueNumber`, and each refusal to the next `lease.claimed` for that change. Unresolved refusals have no wait sample. |
+| `leaseClaimsRefused`, `distinctIssuesWithRefusedClaims`, `refusalWait` | `lease.refused` in the window, its recorded `issueNumber`, and each refusal to the next `lease.claimed` for the same change and one of its refused unit keys. Unresolved refusals have no wait sample. |
 | `automaticRebases` | Explicit `queue.auto_rebased`, `queue.rebased`, or `change.auto_rebased` events only. The current queue does not emit these, so the count remains zero with `n: 0` until automatic rebase work adds an event. No clean or conflict breakdown is inferred. |
 | `approvalsCarriedByPatchId` | `verdict.created` with recorded `carriedFrom.method: "patch-id"`. |
 | `revisionsPerLandedChange`, `reworkRevisions` | Distinct `change.published` revisions per landed change; rework sums revisions beyond the first. |
-| `combinedTreeCheckFailures`, `bisectBlames` | Nonpassing `queue.result_received` with `purpose: "stack"`; entries in `queue.diagnosis.payload.blame`. Diagnostic subset failures are excluded from the first count. |
-| `mainRedTime` | Complete `queue.diagnosis` `BASE_RED` to `queue.main_green` intervals overlapping the window. No resolution event currently exists, so unpaired red evidence is not assigned a duration. |
+| `combinedTreeCheckFailures`, `stackInfrastructureFailures`, `bisectBlames` | Failing stack results with a candidate and matching nonempty `sourceTreeOid` and `composedTreeOid` evidence; stack `ENV_ERROR` or `TIMEOUT` results; entries in `queue.diagnosis.payload.blame`. Baseline and diagnostic subset failures are excluded from the first count. |
+| `mainRedTime` | Complete `queue.diagnosis` `BASE_RED` to `queue.main_green` intervals overlapping the window. The queue emits `queue.main_green` after a verified passing baseline check. `unresolved: true` means a red interval remains open at `until`; its unmeasured time is excluded from `totalMs` and `n`. |
 | `issuesClosedByLand` | `issue.closed` with `closedBy` evidence in the window. |
 
 This endpoint does not estimate a GitHub baseline or a speedup ratio. Comparisons need separately measured GitHub events. For a CLI read, run `concord metrics --repo ID --since 2026-10-01T00:00:00.000Z --until 2026-10-02T00:00:00.000Z`. MCP exposes the same data as `repo_metrics` with `repoId`, `since`, and `until` arguments. Tracker uses today's UTC window when this endpoint is available.
