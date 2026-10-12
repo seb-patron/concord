@@ -277,8 +277,11 @@ export async function land(input: LandOptions): Promise<Obj> {
   const alreadyQueued = (existingQueue.entries ?? []).some((item: Obj) => item.changeId === changeId &&
     ['admitted', 'reserved', 'checking', 'landed'].includes(item.state));
   let held: Obj[] = [];
-  const refresh = async () => { held = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active' &&
-    units.some(unit => leaseCovers(item.unitKey, unit, policy))); };
+  let owned: Obj[] = [];
+  const refresh = async () => {
+    owned = (await leases(client, root)).filter(item => item.changeId === changeId && item.state === 'active');
+    held = owned.filter(item => units.some(unit => leaseCovers(item.unitKey, unit, policy)));
+  };
   const renew = async () => {
     await refresh();
     for (const item of held.filter(value => value.remainingSeconds < 60)) {
@@ -407,7 +410,14 @@ export async function land(input: LandOptions): Promise<Obj> {
     } finally { await prepared.cleanup(); }
   } finally {
     await refresh().catch(() => {});
-    if (!started && !adoptedLease && !awaitingReview) for (const item of held) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
+    const latest = await api(client, path).then(result => result.data).catch(() => null);
+    const publishedUnits: string[] | null = latest?.headOid ? latest.unitKeys ?? units : null;
+    for (const item of owned) {
+      const unused = publishedUnits && !publishedUnits.some(unit => leaseCovers(item.unitKey, unit, policy));
+      const abandoned = !started && !adoptedLease && !awaitingReview && held.includes(item);
+      if (unused || abandoned) await api(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`,
+        { fence: item.fence }, await currentVersion(client, root)).catch(() => {});
+    }
   }
   } finally { await squash?.cleanup(); }
 }

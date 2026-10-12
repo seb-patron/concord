@@ -89,6 +89,37 @@ describe('Concord agent CLI client', () => {
     expect(await releaseByIntent('demo', 'task', client)).toEqual({ changeId: 'change', released: ['file:families.tsv'] });
     expect(holdSeconds('2h')).toBe(7200);
   });
+  it('restarts a started change after publication replaces its file unit with a TSV row', async () => {
+    const dir = await tempDir('start-published'); const allowedFiles = join(dir, 'allowed.txt');
+    await writeFile(allowedFiles, 'families.tsv\nunused.txt\n');
+    const base = 'a'.repeat(40);
+    const branch = `refs/heads/land/${(await import('node:crypto')).createHash('sha256').update('task').digest('hex').slice(0, 16)}`;
+    const change = { changeId: 'change', intentKey: 'task', intentText: 'work', baseOid: base, branch,
+      unitKeys: ['row:families:alpha'], headOid: 'b'.repeat(40), status: 'ready' };
+    let lease = { changeId: 'change', leaseId: 'lease', unitKey: 'file:families.tsv', fence: 1,
+      expiresAt: Date.now() + 30_000, state: 'active' };
+    const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, unknown> }) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: base } };
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [lease], nextCursor: null } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { repos: { unitPolicy: {
+        tables: [{ name: 'families', file: 'families.tsv' }], units: {} } } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/leases/lease/renew') {
+        lease = { ...lease, fence: 2, expiresAt: Date.now() + 7200_000 };
+        return { data: { lease } };
+      }
+      if (method === 'POST' && path === '/repos/demo/leases/lease/release') {
+        lease = { ...lease, state: 'released' };
+        return { data: { lease } };
+      }
+      throw new Error(`unexpected ${method} ${path}: ${JSON.stringify(options?.body)}`);
+    });
+    const result = await start({ repo: 'demo', intentKey: 'task', intent: 'work', allowedFiles, client: { request } as never });
+    expect(result).toMatchObject({ changeId: 'change', leases: [{ unitKey: 'file:families.tsv', fence: 2 }] });
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/changes')).toBe(false);
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path === '/repos/demo/leases')).toBe(false);
+    expect(await releaseByIntent('demo', 'task', { request } as never)).toEqual({ changeId: 'change', released: ['file:families.tsv'] });
+  });
   it('reports a start conflict without retrying a partial claim', async () => {
     const dir = await tempDir('start-conflict'); const allowedFiles = join(dir, 'allowed.txt');
     await writeFile(allowedFiles, 'a.txt\nb.txt\n');

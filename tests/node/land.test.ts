@@ -33,6 +33,47 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
+  it('releases fifteen unused started leases after publishing one file without review evidence', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    const files = Array.from({ length: 16 }, (_, index) => `file-${index}.txt`);
+    for (const file of files) await writeFile(join(dir, file), 'original\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const parent = await git(dir, 'rev-parse', 'HEAD');
+    await writeFile(join(dir, files[0]), 'changed\n');
+    await git(dir, 'add', files[0]); await git(dir, 'commit', '-qm', 'candidate');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const allowedFiles = join(await temp(), 'allowed.txt');
+    await writeFile(allowedFiles, `${files.join('\n')}\n`);
+    const change = { changeId: 'started', provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
+      branch: 'refs/heads/work', authorId: 'agent', baseOid: parent, headOid: commit, revision: 1,
+      unitKeys: [`file:${files[0]}`], status: 'ready' };
+    const active = files.map((file, index) => ({ changeId: 'started', state: 'active', unitKey: `file:${file}`,
+      leaseId: `lease-${index}`, fence: 1, remainingSeconds: 7200 }));
+    const released: string[] = [];
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: `file://${dir}` }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'started', revision: 1, jobId: 'pass-job', state: 'completed' },
+      ] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: active.filter(item => !released.includes(item.leaseId)) }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result')
+        throw new ConcordError('result read denied', 'auth', 403);
+      if (method === 'POST' && path.endsWith('/release')) {
+        released.push(path.split('/')[4]); return { data: {}, version: 1 };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    const result = await land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
+      waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
+    expect(result.status).toBe('awaiting-review');
+    expect(released.sort()).toEqual(active.slice(1).map(item => item.leaseId).sort());
+  });
   it.each(['live', 'expired', 'renew'])('adopts a started TSV change with a %s file lease', async mode => {
     const dir = await temp(); await git(dir, 'init', '-q');
     await writeFile(join(dir, 'families.tsv'), 'family\tvalue\nalpha\told\n');

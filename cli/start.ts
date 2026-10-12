@@ -65,22 +65,30 @@ export async function start(input: StartOptions): Promise<Obj> {
   const baseOid = input.base ?? existing?.baseOid ?? repo.observedCanonicalOid;
   if (!oid.test(baseOid)) throw new ConcordError('canonical main is unavailable', 'server');
   const branch = `refs/heads/land/${createHash('sha256').update(input.intentKey).digest('hex').slice(0, 16)}`;
-  if (existing && (existing.baseOid !== baseOid || existing.intentText !== input.intent || existing.branch !== branch ||
-      JSON.stringify([...existing.unitKeys].sort()) !== JSON.stringify(units)))
+  const published = !!existing?.headOid;
+  const snapshot = published ? (await get(client, `${root}/snapshot`)).data : undefined;
+  const policy = snapshot?.projections?.repos?.unitPolicy ?? (snapshot?.projections?.runners?.jobs ?? [])
+    .map((job: Obj) => job.unitPolicy).find((item: Obj | undefined) => item?.digest === repo.policyDigest);
+  const sameUnits = published
+    ? existing.unitKeys.every((unit: string) => units.some(fileUnit => leaseCovers(fileUnit, unit, policy)))
+    : JSON.stringify([...(existing?.unitKeys ?? [])].sort()) === JSON.stringify(units);
+  if (existing && (existing.baseOid !== baseOid || existing.intentText !== input.intent || existing.branch !== branch || !sameUnits))
     throw new ConcordError('INTENT_CONFLICT: existing change differs from start inputs', 'conflict');
-  const change = (await post(client, `${root}/changes`, {
+  const change = existing && published ? existing : (await post(client, `${root}/changes`, {
     intentKey: input.intentKey, intentText: input.intent, baseOid, branch, unitKeys: units, dependencyChangeIds: [],
   })).data;
-  const held = await liveLeases(client, root, change.changeId);
-  const missing = units.filter(unit => !held.some(item => item.unitKey === unit));
+  const needed = published ? change.unitKeys as string[] : units;
+  const held = (await liveLeases(client, root, change.changeId)).filter(item =>
+    needed.some(unit => leaseCovers(item.unitKey, unit, policy)));
+  const missing = needed.filter(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy)));
   if (missing.length) {
     const version = (await get(client, `${root}/snapshot`)).version;
     const claim = (await post(client, `${root}/leases`, { changeId: change.changeId, unitKeys: missing,
       intentText: input.intent, ttlSeconds }, version)).data;
     held.push(...claim.leases);
   }
-  if (units.some(unit => !held.some(item => item.unitKey === unit)))
-    throw new ConcordError('claim response did not cover every allowed file', 'server');
+  if (needed.some(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy))))
+    throw new ConcordError('claim response did not cover every required unit', 'server');
   for (const item of held) {
     if (item.expiresAt > Date.now() + (ttlSeconds - 60) * 1000) continue;
     const version = (await get(client, `${root}/snapshot`)).version;
@@ -95,8 +103,6 @@ export async function releaseByIntent(repo: string, intentKey: string, clientInp
   const client = clientFor(clientInput); const root = `/repos/${encodeURIComponent(repo)}`;
   const change = await changeByIntent(client, root, intentKey);
   if (!change) throw new ConcordError('change for intent key was not found', 'usage');
-  await post(client, `${root}/changes`, { intentKey, intentText: change.intentText, baseOid: change.baseOid,
-    branch: change.branch, unitKeys: change.unitKeys, dependencyChangeIds: change.dependencyChangeIds ?? [] });
   const held = await liveLeases(client, root, change.changeId);
   for (const item of held) {
     const version = (await get(client, `${root}/snapshot`)).version;
