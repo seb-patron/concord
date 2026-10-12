@@ -892,6 +892,16 @@ describe('queue state machine', () => {
     expect(h.releases).toEqual(['A']);
   });
 
+  it.each(['GENERATOR_FAILED', 'GENERATOR_NONDETERMINISTIC'] as const)(
+    'blocks immediately on %s without diagnosing source conflicts', async outcome => {
+      const h = await setup('A');
+      await h.tick();
+      await h.deliver(h.jobs[0], outcome); await h.tick();
+      expect((await h.state()).entries[0]).toMatchObject({ state: 'blocked', blockedReason: outcome });
+      expect((await h.state()).diagnosis).toBeNull();
+      expect(h.releases).toEqual(['A']);
+    });
+
   it('records suspected flake when an environment retry disagrees', async () => {
     const h = await setup('A');
     await h.tick();

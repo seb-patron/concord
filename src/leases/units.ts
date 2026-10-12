@@ -7,6 +7,7 @@ export interface UnitIdentity {
   file: string;
   resources: readonly string[];
   wholeFile: boolean;
+  generatedFiles?: readonly string[];
 }
 
 export type TsvTable = NonNullable<TrustedPolicy['tables']>[number];
@@ -90,6 +91,28 @@ export function declaredNewFilePrefixes(policy: TrustedPolicy): string[] {
   return policy.newFilePrefixes;
 }
 
+export function declaredGenerators(policy: TrustedPolicy): NonNullable<TrustedPolicy['generators']> {
+  if (policy.generators === undefined) return [];
+  if (!Array.isArray(policy.generators) || policy.generators.length > 32) throw new Error('GENERATOR_POLICY_INVALID');
+  const ids = new Set<string>();
+  const outputs = new Set<string>();
+  for (const entry of policy.generators) {
+    if (!entry || Object.keys(entry).sort().join(',') !== 'command,id,outputs' ||
+      typeof entry.id !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(entry.id) ||
+      typeof entry.command !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(entry.command) ||
+      !Array.isArray(entry.outputs) || !entry.outputs.length || entry.outputs.length > 64 ||
+      entry.outputs.some(path => typeof path !== 'string' || !validPath(path) || outputs.has(path)) ||
+      new Set(entry.outputs).size !== entry.outputs.length || ids.has(entry.id)) throw new Error('GENERATOR_POLICY_INVALID');
+    ids.add(entry.id);
+    for (const path of entry.outputs) outputs.add(path);
+  }
+  return policy.generators;
+}
+
+export function generatorForFile(policy: TrustedPolicy, file: string) {
+  return declaredGenerators(policy).find(entry => entry.outputs.includes(file));
+}
+
 export function prefixFileUnit(policy: TrustedPolicy, raw: string): UnitIdentity | null {
   if (!raw.startsWith('file:')) return null;
   const file = raw.slice(5);
@@ -105,12 +128,15 @@ function validKey(key: string): boolean {
 export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
   const registry = new Map<string, UnitIdentity>();
   const tables = declaredTables(policy);
+  const generators = declaredGenerators(policy);
+  if (generators.some(entry => entry.outputs.some(file => tables.some(table => table.file === file)))) throw new Error('GENERATOR_POLICY_INVALID');
   const prefixes = declaredNewFilePrefixes(policy);
   const canonical = new Map<string, UnitIdentity>();
   const signatures = new Map<string, string>();
   const rows = new Map<string, string>();
   const entries = Object.entries(policy.units);
   for (const [alias, spec] of entries) {
+    if (alias.startsWith('gen:') || spec?.canonicalKey?.startsWith('gen:')) throw new Error('UNIT_REGISTRY_INVALID');
     if (!validKey(alias) || !spec || !validKey(spec.canonicalKey) ||
       !validPath(spec.file) || !Array.isArray(spec.resources) ||
       !spec.resources.every(resource => typeof resource === 'string' && validKey(resource)) ||
@@ -173,6 +199,14 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
     const fileKey = `file:${table.file}`;
     if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file: table.file, resources: [], wholeFile: true });
   }
+  for (const entry of generators) {
+    const key = `gen:${entry.id}`;
+    registry.set(key, { key, file: entry.outputs[0], resources: [], wholeFile: true, generatedFiles: entry.outputs });
+    for (const file of entry.outputs) {
+      const fileKey = `file:${file}`;
+      if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file, resources: [], wholeFile: true });
+    }
+  }
   tableMetadata.set(registry, tables);
   prefixMetadata.set(registry, prefixes);
   return registry;
@@ -223,6 +257,11 @@ export function normalizeUnits(registry: Map<string, UnitIdentity>, raw: unknown
 }
 
 export function overlaps(a: UnitIdentity, b: UnitIdentity): boolean {
+  if (a.generatedFiles || b.generatedFiles) {
+    const left = a.generatedFiles ?? [a.file];
+    const right = b.generatedFiles ?? [b.file];
+    return left.some(path => right.includes(path));
+  }
   if (a.file !== b.file) return false;
   if (a.wholeFile || b.wholeFile) return true;
   return a.resources.some(resource => b.resources.includes(resource));

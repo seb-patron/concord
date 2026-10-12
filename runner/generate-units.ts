@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { TrustedPolicy } from '../src/contracts';
 import { compareKeys, hashCanonical } from '../src/verdicts/manifest';
-import { unitRegistry } from '../src/leases/units';
+import { declaredGenerators, unitRegistry } from '../src/leases/units';
 
 export const GENERATOR_VERSION = 1;
 const oidPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
@@ -248,6 +248,9 @@ function generate(options: Options): { sourceOid: string; generatorVersion: numb
   const prefixes = [...new Set([...(template.newFilePrefixes ?? []), ...options.allowNewUnder])].sort(compareKeys);
   for (const [alias, unit] of Object.entries(template.units)) {
     if (!pathSet.has(unit.file)) fail(`UNAPPROVED_TEMPLATE_PATH: ${alias} -> ${JSON.stringify(unit.file)}`);
+  }
+  for (const entry of declaredGenerators(template)) for (const output of entry.outputs) {
+    if (!pathSet.has(output)) fail(`UNAPPROVED_GENERATOR_OUTPUT: ${entry.id} -> ${JSON.stringify(output)}`);
   }
   const units = { ...template.units };
   for (const path of paths) {

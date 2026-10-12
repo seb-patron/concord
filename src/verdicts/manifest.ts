@@ -1,5 +1,5 @@
 import type { DependencyScopeEntry, Digest, ReviewManifest, TrustedPolicy } from '../contracts';
-import { patternRow, prefixFileUnit, tableForFile } from '../leases/units';
+import { declaredGenerators, generatorForFile, patternRow, prefixFileUnit, tableForFile } from '../leases/units';
 
 const sha256 = /^sha256:[a-f0-9]{64}$/;
 const oid = /^[a-f0-9]{40,64}$/;
@@ -93,6 +93,7 @@ export function trustedDependencyKeys(policy: TrustedPolicy, changedKeys: readon
     }
     for (const dependency of unit.dependencyKeys) {
       if (!unitSpec(policy, dependency)) throw new Error(`UNKNOWN_DEPENDENCY:${dependency}`);
+      if (generatorForFile(policy, unitSpec(policy, dependency)!.file)) continue;
       if (!visited.has(dependency)) {
         visited.add(dependency);
         pending.push(dependency);
@@ -107,7 +108,21 @@ export function normalizeManifest(input: ReviewManifest, policy: TrustedPolicy, 
   if (!input || typeof input !== 'object' || !Array.isArray(input.changedUnits) || !Array.isArray(input.dependencyScope)) throw new Error('MANIFEST_INCOMPLETE');
   if (input.policyVersion !== policy.version || input.policyDigest !== policy.digest || input.checkerDigest !== policy.checkerDigest ||
     !validDigest(input.oracleDigest) || !validDigest(input.toolchainDigest)) throw new Error('MANIFEST_PIN_MISMATCH');
-  if (Object.keys(input).sort().join(',') !== 'changedUnits,checkerDigest,coverage,dependencyScope,oracleDigest,policyDigest,policyVersion,toolchainDigest') throw new Error('MANIFEST_EXTRA_FIELDS');
+  const generators = declaredGenerators(policy);
+  const fields = ['changedUnits', 'checkerDigest', 'coverage', 'dependencyScope', 'oracleDigest', 'policyDigest', 'policyVersion', 'toolchainDigest',
+    ...(generators.length ? ['generatedOutputs'] : [])].sort().join(',');
+  if (Object.keys(input).sort().join(',') !== fields) throw new Error('MANIFEST_EXTRA_FIELDS');
+  let generatedOutputs: NonNullable<ReviewManifest['generatedOutputs']> | undefined;
+  if (generators.length) {
+    if (!Array.isArray(input.generatedOutputs) || input.generatedOutputs.length !== generators.length) throw new Error('MANIFEST_GENERATORS_INVALID');
+    generatedOutputs = input.generatedOutputs.map(item => {
+      if (!item || Object.keys(item).sort().join(',') !== 'id,outputDigest' ||
+        typeof item.id !== 'string' || !validDigest(item.outputDigest)) throw new Error('MANIFEST_GENERATORS_INVALID');
+      return { id: item.id, outputDigest: item.outputDigest };
+    }).sort((a, b) => compareKeys(a.id, b.id));
+    if (JSON.stringify(generatedOutputs.map(item => item.id)) !== JSON.stringify(generators.map(item => item.id).sort(compareKeys)))
+      throw new Error('MANIFEST_GENERATORS_INVALID');
+  }
   const keys = [...expectedKeys].sort(compareKeys);
   if (new Set(keys).size !== keys.length || !keys.length || !keys.every(key => unitSpec(policy, key))) throw new Error('UNKNOWN_UNIT_SCOPE');
   const changedUnits = input.changedUnits.map(unit => {
@@ -124,7 +139,8 @@ export function normalizeManifest(input: ReviewManifest, policy: TrustedPolicy, 
   }).sort((a, b) => compareKeys(a.unitKey, b.unitKey));
   if (JSON.stringify(changedUnits.map(unit => unit.unitKey)) !== JSON.stringify(keys)) throw new Error('MANIFEST_UNIT_SCOPE_MISMATCH');
   const pins = { policyVersion: input.policyVersion, policyDigest: input.policyDigest, checkerDigest: input.checkerDigest,
-    oracleDigest: input.oracleDigest, toolchainDigest: input.toolchainDigest };
+    oracleDigest: input.oracleDigest, toolchainDigest: input.toolchainDigest,
+    ...(generatedOutputs ? { generatedOutputs } : {}) };
   if (input.coverage === 'unknown') {
     if (input.dependencyScope.length !== 1 || input.dependencyScope[0].kind !== 'tree' ||
       Object.keys(input.dependencyScope[0]).sort().join(',') !== 'kind,treeOid' || !oid.test(input.dependencyScope[0].treeOid)) throw new Error('MANIFEST_TREE_SCOPE_INVALID');

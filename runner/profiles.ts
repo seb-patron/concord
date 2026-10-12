@@ -13,6 +13,8 @@ export type LocalProfile = {
   oracleDigest: string; toolchainDigest: string; environmentDigest: string;
   timeoutMs: number; maxOutputBytes: number;
   kind?: 'command'; cwd?: 'repo'; timeoutSeconds?: number; env?: string[]; outputCap?: number;
+  /** Owner allow-list of generator argv, executed with the pinned command executable. */
+  generatorCommands?: Record<string, string[]>;
   executable?: string; argv?: string[]; successOutcome?: 'PASS' | 'MATCH'; checkerFile?: string; toolchainFile?: string; oracleFile?: string;
   cases?: Record<string, { rows: Record<string, ExpectedRow>; epsilonChoices?: ExpectedRow[] }>;
   /** Added by the loader; never included in the content digest. */
@@ -23,7 +25,8 @@ const sha = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9]{6
 export const commandEnvNames = ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
   'UV_CACHE_DIR', 'UV_PYTHON', 'UV_PROJECT_ENVIRONMENT', 'XDG_CACHE_HOME'] as const;
 const commandConfig = (profile: LocalProfile) => ({ executable: profile.executable, argv: profile.argv,
-  cwd: profile.cwd, timeoutSeconds: profile.timeoutSeconds, env: profile.env, outputCap: profile.outputCap });
+  cwd: profile.cwd, timeoutSeconds: profile.timeoutSeconds, env: profile.env, outputCap: profile.outputCap,
+  ...(profile.generatorCommands === undefined ? {} : { generatorCommands: profile.generatorCommands }) });
 const fileDigest = async (path: string) => {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(resolve(path))) hash.update(chunk);
@@ -101,11 +104,15 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
       profile.outputCap > profile.maxOutputBytes ||
       !Array.isArray(profile.env) || profile.env.some(name => typeof name !== 'string' ||
         !commandEnvNames.includes(name as typeof commandEnvNames[number])) ||
+      (profile.generatorCommands !== undefined && (!profile.generatorCommands || typeof profile.generatorCommands !== 'object' ||
+        Array.isArray(profile.generatorCommands) || Object.keys(profile.generatorCommands).length > 32 ||
+        Object.entries(profile.generatorCommands).some(([id, argv]) => !/^[a-z][a-z0-9_-]{0,63}$/.test(id) ||
+          !Array.isArray(argv) || argv.length > 64 || argv.some(arg => typeof arg !== 'string' || /\{[^}]*\}/.test(arg))))) ||
       new Set(profile.env).size !== profile.env.length || profile.checkerFile !== undefined ||
       profile.oracleFile !== undefined || profile.successOutcome !== undefined || profile.cases !== undefined ||
       profile.checkerDigest !== profile.toolchainDigest ||
       profile.oracleDigest !== await digest(commandConfig(profile))) throw new Error('INVALID_COMMAND_PROFILE');
-  } else if (profile.kind !== undefined) throw new Error('INVALID_PROFILE');
+  } else if (profile.kind !== undefined || profile.generatorCommands !== undefined) throw new Error('INVALID_PROFILE');
   if (profile.kind !== 'command' && profile.checkerId !== 'dispatch-lab' && (!profile.executable || !isAbsolute(profile.executable) ||
     !Array.isArray(profile.argv) || profile.argv.some(arg => typeof arg !== 'string') ||
     !profile.checkerFile || !isAbsolute(profile.checkerFile) || !profile.oracleFile || !isAbsolute(profile.oracleFile) ||
