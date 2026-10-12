@@ -26,6 +26,7 @@ When promotion lands a linked change, Concord closes its issue with `closedBy: {
 | `POST` | `/milestones` | `title`, optional `description`, `dueDate` (`YYYY-MM-DD`) | Creates a milestone. |
 | `GET` | `/milestones` | Optional `cursor`, `limit` | Page of milestones. |
 | `GET` | `/milestones/:id` | — | Milestone with progress. |
+| `PATCH` | `/milestones/:id` | `expectedVersion` and any of `title`, `description`, `dueDate` | Updates a milestone. Use `null` to clear the due date. |
 | `POST` | `/milestones/:id/close` | `expectedVersion` | Closes a milestone. |
 
-Milestone creation and closure require an owner. Progress contains `openIssues`, `closedIssues`, and `landedChanges`; it is derived from current issues and the queue. Creation, closure, and issue progress emit `milestone.created`, `milestone.closed`, and `milestone.updated` events. A milestone can be closed while issues remain open.
+Milestone creation, editing, and closure require an owner. Progress contains `openIssues`, `closedIssues`, and `landedChanges`; it is derived from current issues and the queue. `closedIssues` includes manual closures, while `landedChanges` counts linked changes that landed. Creation, editing, and issue progress emit `milestone.created` and `milestone.updated` events; closure emits `milestone.closed`. A milestone can be closed while issues remain open.

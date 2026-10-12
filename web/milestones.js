@@ -1,8 +1,8 @@
 /**
  * Concord milestones screen.
  *
- * Renders each milestone's progress split by landed / in review or queued /
- * claimed / open, its due date, a pace note, and an editable description,
+ * Renders each milestone's progress split by landed / manually closed /
+ * in review or queued / claimed / open, its due date, a pace note, and an editable description,
  * following the approved prototype. Data comes from the repository snapshot's
  * `issues.milestones` projection (the same milestone views the milestones API
  * returns, including progress counts) plus issue, change, lease, and queue
@@ -45,7 +45,8 @@ const openBucket = (issue, held) => {
 
 /**
  * Pure milestones projection. Bar counts split each milestone's issues into
- * landed (API closedIssues), in review or queued, claimed, and still open;
+ * landed (API landedChanges), closed without landing, in review or queued,
+ * claimed, and still open;
  * totals come from the milestone progress counts, not invented data.
  */
 export function milestoneModel(snapshot, events = [], now = Date.now()) {
@@ -57,8 +58,12 @@ export function milestoneModel(snapshot, events = [], now = Date.now()) {
   const rows = milestones.map(milestone => {
     const progress = milestone.progress ?? {};
     const members = issues.filter(issue => issue.milestoneId === milestone.milestoneId);
-    const landed = Number.isFinite(progress.closedIssues)
+    const closedIssues = Number.isFinite(progress.closedIssues)
       ? progress.closedIssues : members.filter(issue => issue.state === 'closed').length;
+    const landings = Number.isFinite(progress.landedChanges)
+      ? progress.landedChanges : members.filter(issue => issue.state === 'closed' && arr(issue.changes).some(change => change.status === 'merged')).length;
+    const landed = Math.min(closedIssues, landings);
+    const closed = Math.max(0, closedIssues - landed);
     const openIssues = Number.isFinite(progress.openIssues)
       ? progress.openIssues : members.filter(issue => issue.state === 'open').length;
     const changeIds = new Set(members.flatMap(issue => arr(issue.changes).map(change => change.changeId)));
@@ -80,9 +85,9 @@ export function milestoneModel(snapshot, events = [], now = Date.now()) {
       : workers.size > 0 ? `${workers.size} agent${workers.size === 1 ? '' : 's'} working`
         : landed + review + claimed === 0 && open > 0 ? `Not started: ${open} issue${open === 1 ? '' : 's'} claimable now`
           : 'No landings observed today';
-    const total = landed + review + claimed + open;
-    return { milestone, landed, review, claimed, open, total, pace, due: dueText(milestone.dueDate),
-      barLabel: `${landed} landed, ${review} in review, ${claimed} claimed, ${open} open` };
+    const total = landed + closed + review + claimed + open;
+    return { milestone, landed, closed, review, claimed, open, total, pace, due: dueText(milestone.dueDate),
+      barLabel: `${landed} landed, ${closed} closed without landing, ${review} in review, ${claimed} claimed, ${open} open` };
   });
   const state = !snapshot ? 'loading'
     : projection?.status === 'unavailable' ? 'unavailable'
@@ -167,10 +172,12 @@ export function createMilestones(root, callbacks) {
     const card = el('section', null, 'milestone-card'); card.setAttribute('aria-label', milestone.title);
     const top = el('div', null, 'milestone-top');
     const heading = el('h2');
-    const link = el('a', milestone.title); link.href = '#';
-    link.setAttribute('aria-label', `Open tracker filtered to ${milestone.title}`);
-    link.addEventListener('click', event => { event.preventDefault(); callbacks.openTracker?.(milestone.milestoneId); });
-    heading.append(link);
+    if (callbacks.openTracker && (callbacks.hasTracker?.() ?? true)) {
+      const link = el('a', milestone.title); link.href = '#';
+      link.setAttribute('aria-label', `Open tracker filtered to ${milestone.title}`);
+      link.addEventListener('click', event => { event.preventDefault(); callbacks.openTracker(milestone.milestoneId); });
+      heading.append(link);
+    } else heading.textContent = milestone.title;
     top.append(heading, el('span', row.due, 'milestone-due'), el('span', `${row.landed} / ${row.total} landed`, 'milestone-count'));
     if (milestone.state === 'closed') top.append(el('span', 'Closed', 'milestone-closed'));
     card.append(top);
@@ -180,7 +187,7 @@ export function createMilestones(root, callbacks) {
       item.style.width = `${row.total ? Math.round(100 * count / row.total) : 0}%`;
       return item;
     };
-    bar.append(segment(row.landed, 'seg-landed'), segment(row.review, 'seg-review'), segment(row.claimed, 'seg-claimed'));
+    bar.append(segment(row.landed, 'seg-landed'), segment(row.closed, 'seg-closed'), segment(row.review, 'seg-review'), segment(row.claimed, 'seg-claimed'));
     card.append(bar);
     const legend = el('div', null, 'milestone-legend');
     const dot = (className, text) => {
@@ -188,7 +195,7 @@ export function createMilestones(root, callbacks) {
       item.append(el('span', null, `milestone-dot ${className}`), document.createTextNode(` ${text}`));
       return item;
     };
-    legend.append(dot('dot-landed', `Landed ${row.landed}`), dot('dot-review', `In review or queued ${row.review}`),
+    legend.append(dot('dot-landed', `Landed ${row.landed}`), dot('dot-closed', `Closed without landing ${row.closed}`), dot('dot-review', `In review or queued ${row.review}`),
       dot('dot-claimed', `Claimed ${row.claimed}`), el('span', `Open ${row.open}`), el('span', row.pace, 'milestone-pace'));
     card.append(legend);
     const descLabel = el('label', 'Description', 'milestone-desc-label');

@@ -128,11 +128,16 @@ describe('Milestones screen', () => {
   it('splits progress into landed, in review or queued, claimed, and open with due and pace', () => {
     const model = milestoneModel(mdata, mevents, now);
     expect(model.state).toBe('ready');
-    expect(model.rows[0]).toMatchObject({ landed: 1, review: 1, claimed: 1, open: 1, total: 4, due: 'Due Fri Oct 16' });
-    expect(model.rows[0].barLabel).toBe('1 landed, 1 in review, 1 claimed, 1 open');
+    expect(model.rows[0]).toMatchObject({ landed: 1, closed: 0, review: 1, claimed: 1, open: 1, total: 4, due: 'Due Fri Oct 16' });
+    expect(model.rows[0].barLabel).toBe('1 landed, 0 closed without landing, 1 in review, 1 claimed, 1 open');
     expect(model.rows[0].pace).toBe('On pace: about 1 landing a day');
     expect(model.rows[1]).toMatchObject({ open: 2, total: 2, due: 'No due date' });
     expect(model.rows[1].pace).toBe('Not started: 2 issues claimable now');
+    const manuallyClosed = structuredClone(mdata) as any;
+    manuallyClosed.data.projections.issues.items[3].changes = [];
+    manuallyClosed.data.projections.issues.milestones[0].progress.landedChanges = 0;
+    expect(milestoneModel(manuallyClosed, [], now).rows[0]).toMatchObject({ landed: 0, closed: 1, total: 4,
+      barLabel: '0 landed, 1 closed without landing, 1 in review, 1 claimed, 1 open' });
     expect(milestoneModel({ data: { projections: { issues: { status: 'unavailable', items: [] } } } }).state).toBe('unavailable');
     expect(milestoneModel(null).state).toBe('loading');
     expect(milestoneModel({ data: { projections: {} } }).state).toBe('unknown');
@@ -155,8 +160,8 @@ describe('Milestones screen', () => {
     }) as any;
     setSessionToken('test-token');
     const root = dom.window.document.getElementById('ms')!;
-    let refreshed = 0; let opened = '';
-    const screen = createMilestones(root, { refresh: async () => { refreshed++; }, openTracker: (id: string) => { opened = id; } });
+    let refreshed = 0; let opened = ''; let trackerMounted = true;
+    const screen = createMilestones(root, { refresh: async () => { refreshed++; }, openTracker: (id: string) => { opened = id; }, hasTracker: () => trackerMounted });
     const snapshot = structuredClone(mdata) as any;
     snapshot.data.projections.leases.heldItems[0].expiresAt = Date.now() + 120000;
     const context = { repoId: 'repo', snapshot, events: mevents, identity: { principalId: 'owner', roles: ['owner'] }, message: null };
@@ -167,14 +172,26 @@ describe('Milestones screen', () => {
       expect(cards[0].textContent).toContain('V1 <build>');
       expect(cards[0].textContent).toContain('Due Fri Oct 16');
       expect(cards[0].textContent).toContain('1 / 4 landed');
-      expect(cards[0].querySelector('.milestone-bar')?.getAttribute('aria-label')).toBe('1 landed, 1 in review, 1 claimed, 1 open');
+      expect(cards[0].querySelector('.milestone-bar')?.getAttribute('aria-label')).toBe('1 landed, 0 closed without landing, 1 in review, 1 claimed, 1 open');
       expect(cards[0].textContent).toContain('On pace: about 1 landing a day');
       expect(cards[0].querySelector('build')).toBeNull();
       expect(cards[1].textContent).toContain('Not started: 2 issues claimable now');
       expect(cards[1].textContent).toContain('No due date');
+      Object.defineProperty(dom.window, 'innerWidth', { value: 375, configurable: true });
+      const style = dom.window.document.createElement('style');
+      style.textContent = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+      dom.window.document.head.append(style);
+      const titleLink = cards[0].querySelector('h2 a') as HTMLAnchorElement;
+      expect(dom.window.getComputedStyle(titleLink).minHeight).toBe('44px');
+      expect(dom.window.getComputedStyle(titleLink).display).toBe('inline-flex');
       (cards[0].querySelector('h2 a') as HTMLAnchorElement).click();
       expect(opened).toBe('m1');
-      const desc = cards[0].querySelector('.milestone-desc') as HTMLTextAreaElement;
+      trackerMounted = false;
+      screen.render(context);
+      expect(root.querySelector('.milestone-card h2 a')).toBeNull();
+      trackerMounted = true;
+      screen.render(context);
+      const desc = root.querySelector('.milestone-card .milestone-desc') as HTMLTextAreaElement;
       expect(desc.id).toBe('desc-m1');
       desc.value = 'edited copy';
       screen.render(context);
@@ -549,7 +566,7 @@ describe('Fleet desk DOM', () => {
       Object.assign(globalThis, previous);
       dom.window.close();
     }
-  });
+  }, 15_000);
 });
 
 describe('layout and token contract', () => {

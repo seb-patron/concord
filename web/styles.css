@@ -26,12 +26,12 @@
 .milestone-head{max-width:1200px;margin:0 auto 16px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px}.milestone-head h1{margin:0;font-size:26px;flex:1 1 300px}
 .milestones-list{max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .milestone-card{background:#fff;border:1px solid #e3e3de;border-radius:12px;padding:18px 20px}
-.milestone-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}.milestone-top h2{margin:0;font-size:18px}.milestone-top a{color:#16181d;text-decoration:none}.milestone-top a:hover{text-decoration:underline}
+.milestone-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}.milestone-top h2{margin:0;font-size:18px}.milestone-top a{display:inline-flex;align-items:center;box-sizing:border-box;min-height:44px;padding:8px 10px;color:#16181d;text-decoration:none}.milestone-top a:hover{text-decoration:underline}
 .milestone-due{font-size:13px;color:#4a505c}.milestone-count{margin-left:auto;font-family:'Geist Mono',monospace;font-size:13px}.milestone-closed{font-size:12px;color:#5d6470;border:1px solid #d5d5cf;border-radius:999px;padding:3px 10px}
 .milestone-bar{display:flex;height:10px;border-radius:999px;overflow:hidden;background:#edede8;margin:12px 0 10px}.milestone-bar>span{display:block;height:100%}
-.seg-landed{background:#1e7f4f}.seg-review{background:#1f4fc4}.seg-claimed{background:#c2570c}
+.seg-landed{background:#1e7f4f}.seg-closed{background:#7b8190}.seg-review{background:#1f4fc4}.seg-claimed{background:#c2570c}
 .milestone-legend{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;color:#4a505c}.milestone-pace{margin-left:auto}
-.milestone-dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px}.dot-landed{background:#1e7f4f}.dot-review{background:#1f4fc4}.dot-claimed{background:#c2570c}
+.milestone-dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px}.dot-landed{background:#1e7f4f}.dot-closed{background:#7b8190}.dot-review{background:#1f4fc4}.dot-claimed{background:#c2570c}
 .milestone-desc-label{display:block;font-size:12px;color:#5d6470;margin-top:12px}
 .milestone-desc{box-sizing:border-box;width:100%;min-height:64px;margin-top:4px;padding:10px 12px;font:inherit;line-height:1.5;border:1px solid #e3e3de;border-radius:8px;resize:vertical;color:#16181d;background:#fff}.milestone-desc[readonly]{background:#f6f6f3}
 .milestone-controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}

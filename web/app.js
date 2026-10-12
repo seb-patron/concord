@@ -23,7 +23,7 @@ const node = (tag, value, className) => {
   return n;
 };
 const milestoneScreen = createMilestones($('milestones-view'), {
-  refresh: () => loadRepo(state.generation, false), openTracker,
+  refresh: () => loadRepo(state.generation, false), openTracker, hasTracker: () => !!$('tracker-view'),
 });
 const list = value => Array.isArray(value) ? value : [];
 const projections = () => state.snapshot?.data?.projections ?? {};
@@ -607,6 +607,7 @@ function render() {
     $('desk-message').textContent = state.deskMessage ?? '';
     $('desk').dataset.mainViewActive = state.view;
     $('milestones-view').hidden=state.view!=='milestones';
+    if ($('tracker-view')) $('tracker-view').hidden=state.view!=='tracker';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
     for (const tab of document.querySelectorAll('[data-main-view]')) tab.setAttribute('aria-current', String(tab.dataset.mainView === state.view));
     milestoneScreen.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,

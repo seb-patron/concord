@@ -39,6 +39,13 @@ const checkVersion = (body: Record<string, unknown>, current: number) => {
   if (!Number.isSafeInteger(body.expectedVersion)) error(400, 'EXPECTED_VERSION_REQUIRED', 'expectedVersion required');
   if (body.expectedVersion !== current) throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: current });
 };
+const dueDateFrom = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  const dueDate = string(value, 'dueDate', 32);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || !Number.isFinite(Date.parse(dueDate)) || new Date(dueDate).toISOString().slice(0, 10) !== dueDate)
+    error(422, 'INVALID_DUE_DATE', 'dueDate must be a calendar date in YYYY-MM-DD');
+  return dueDate;
+};
 const linked = (c: ModuleContext, item: Issue) => changes(c).filter(change => change.issueNumber === item.number).map(change => {
   const entry = queueEntries(c).filter(candidate => candidate.changeId === change.changeId).at(-1);
   const status = entry?.state === 'landed' ? 'merged' : entry?.state === 'checking' ? 'checking'
@@ -111,13 +118,23 @@ export const issuesFeature: FeatureModule = {
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, _r, _m, raw) => {
       if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required'); const body = raw as Record<string, unknown>;
       const title = string(body.title, 'title', 256); const description = string(body.description ?? '', 'description', 65536, true);
-      const dueDate = body.dueDate == null ? null : string(body.dueDate, 'dueDate', 32);
-      if (dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || !Number.isFinite(Date.parse(dueDate)) || new Date(dueDate).toISOString().slice(0, 10) !== dueDate)) error(422, 'INVALID_DUE_DATE', 'dueDate must be a calendar date in YYYY-MM-DD');
+      const dueDate = dueDateFrom(body.dueDate);
       const milestoneId = crypto.randomUUID(); const item: Milestone = { milestoneId, title, description, dueDate, state: 'open', version: event(c, 'milestone.created', [milestoneId], { title }) };
       c.state.put('milestones', [...milestones(c), item]); return response(c, milestoneView(c, item), 201);
     } },
     { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, request) => response(c, page(milestones(c).map(item => milestoneView(c, item)), request)) },
     { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)$/, handle: (c, _r, match) => response(c, milestoneView(c, milestone(c, match[1]))) },
+    { method: 'PATCH', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)$/, handle: (c, _r, match, raw) => {
+      if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required');
+      const body = raw as Record<string, unknown>; const old = milestone(c, match[1]); checkVersion(body, old.version);
+      const title = body.title === undefined ? old.title : string(body.title, 'title', 256);
+      const description = body.description === undefined ? old.description : string(body.description, 'description', 65536, true);
+      const dueDate = body.dueDate === undefined ? old.dueDate : dueDateFrom(body.dueDate);
+      const item: Milestone = { ...old, title, description, dueDate,
+        version: event(c, 'milestone.updated', [old.milestoneId], { title }) };
+      c.state.put('milestones', milestones(c).map(candidate => candidate.milestoneId === old.milestoneId ? item : candidate));
+      return response(c, milestoneView(c, item));
+    } },
     { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)\/close$/, handle: (c, _r, match, raw) => {
       if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required'); const old = milestone(c, match[1]); checkVersion(raw as Record<string, unknown>, old.version);
       if (old.state === 'closed') error(409, 'MILESTONE_STATE_CONFLICT', 'Milestone already closed');

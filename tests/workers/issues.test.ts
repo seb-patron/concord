@@ -25,6 +25,37 @@ async function get(repo: string, suffix: string, token = 'local-viewer') {
 }
 
 describe('Concord issues and milestones', () => {
+  it('updates milestone fields for an owner with object versions and rejects invalid edits', async () => {
+    const repo = 'milestone_edit_case'; await setup(repo);
+    const created = await post(repo, '/milestones', { title: 'Release', description: 'Before', dueDate: '2026-12-01' }, 'create-milestone');
+    expect(created.status).toBe(201);
+    const id = created.body.data.milestoneId;
+    const route = `/milestones/${id}`;
+    const initialVersion = created.body.data.version;
+    expect((await patch(repo, route, { expectedVersion: initialVersion, title: 'Agent edit' }, 'agent-edit', 'local-agent-a')).status).toBe(403);
+    expect((await patch(repo, route, { expectedVersion: initialVersion, description: 'Viewer edit' }, 'viewer-edit', 'local-viewer')).status).toBe(403);
+    expect((await patch(repo, route, { title: 'No version' }, 'no-version')).body.error.code).toBe('EXPECTED_VERSION_REQUIRED');
+    expect((await patch(repo, route, { expectedVersion: initialVersion, dueDate: '2026-02-30' }, 'bad-date')).body.error.code).toBe('INVALID_DUE_DATE');
+    expect((await patch(repo, route, { expectedVersion: initialVersion, title: ' ' }, 'bad-title')).body.error.code).toBe('INVALID_TITLE');
+    const described = await patch(repo, route, { expectedVersion: initialVersion, description: 'After' }, 'describe-milestone');
+    expect(described.body.data).toMatchObject({ title: 'Release', description: 'After', dueDate: '2026-12-01' });
+    const updated = await patch(repo, route, { expectedVersion: described.body.data.version, title: 'Release 2', description: '', dueDate: null }, 'update-milestone');
+    expect(updated.status).toBe(200);
+    expect(updated.body.data).toMatchObject({ milestoneId: id, title: 'Release 2', description: '', dueDate: null, state: 'open' });
+    expect(updated.body.data.version).toBeGreaterThan(initialVersion);
+    expect((await get(repo, route)).body.data).toMatchObject({ title: 'Release 2', description: '', dueDate: null, version: updated.body.data.version });
+    expect((await get(repo, '/milestones')).body.data.items[0].title).toBe('Release 2');
+    expect((await get(repo, '/snapshot')).body.data.projections.issues.milestones[0].title).toBe('Release 2');
+    expect((await patch(repo, route, { expectedVersion: initialVersion, title: 'Stale' }, 'stale-milestone-edit')).body.error.code).toBe('STALE_VERSION');
+    const due = await patch(repo, route, { expectedVersion: updated.body.data.version, dueDate: '2027-01-03' }, 'set-due-date');
+    expect(due.body.data).toMatchObject({ title: 'Release 2', description: '', dueDate: '2027-01-03' });
+    const issue = await post(repo, '/issues', { title: 'Manual close', body: '', milestoneId: id }, 'manual-issue');
+    const closed = await post(repo, `/issues/${issue.body.data.number}/close`, { expectedVersion: issue.body.data.version, reason: 'No change landed' }, 'manual-close');
+    expect(closed.status).toBe(200);
+    expect((await get(repo, route)).body.data.progress).toEqual({ openIssues: 0, closedIssues: 1, landedChanges: 0 });
+    expect((await get(repo, '/events')).body.data.items.map((item: { kind: string }) => item.kind)).toContain('milestone.updated');
+  });
+
   it('creates sequential issues, filters and pages, and rejects stale edits', async () => {
     const repo = 'issue_crud_case'; await setup(repo);
     const first = await post(repo, '/issues', { title: 'First task', body: '## Spec', labels: ['needs-review'] }, 'i1', 'local-agent-a');
