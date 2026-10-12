@@ -75,12 +75,17 @@ async function externalTempDir(prefix: string): Promise<string> {
   throw new Error('No writable temporary directory outside the clone');
 }
 
-async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
-  const document = await readFile(join(cwd, path), 'utf8');
+function parseTaggedBlocks(document: string, tag = '12c'): string[] {
   const marker = `<!-- verified-by: ${tag} -->`;
-  const blocks = [...document.matchAll(new RegExp(`${marker}\\s*\`\`\`sh\\n([\\s\\S]*?)\\n\`\`\``, 'g'))]
+  return [...document.matchAll(new RegExp(`${marker}\\s*\`\`\`sh\\n([\\s\\S]*?)\\n\`\`\``, 'g'))]
     .map(match => match[1].replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort))
       .replace(/npm run dev --/g, `npm run dev -- --port ${workerPort}`));
+}
+
+async function taggedBlocks(path: string, tag = '12c'): Promise<string[]> {
+  const document = await readFile(join(cwd, path), 'utf8');
+  const blocks = parseTaggedBlocks(document, tag);
+  const marker = `<!-- verified-by: ${tag} -->`;
   expect(blocks).toHaveLength(document.split(marker).length - 1);
   return blocks;
 }
@@ -237,12 +242,31 @@ describe('UI documentation', () => {
   });
 });
 
-describe('documented demo commands', () => {
-  const blockBudget = shellCallBudget(9);
-  const persistenceBudget = shellCallBudget(5);
-  const pathBudget = shellCallBudget(34);
-  const liveBudget = shellCallBudget(8, DOCUMENTED_BLOCK_TIMEOUT_MS);
+const [readmeDocument, demoDocument, deployDocument, guideDocument] = await Promise.all(
+  ['README.md', 'docs/DEMO.md', 'docs/deploy.md', 'docs/api-repos.md']
+    .map(path => readFile(join(cwd, path), 'utf8')));
+const readmeBlocks = parseTaggedBlocks(readmeDocument);
+const demoBlocks = parseTaggedBlocks(demoDocument);
+const deployBlocks = parseTaggedBlocks(deployDocument);
+const blocks = [...readmeBlocks, ...demoBlocks, ...deployBlocks];
+const persistenceRoots = ['first', 'second'];
+const guideBlocks = [
+  /In a second terminal[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guideDocument)?.[1],
+  /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guideDocument)?.[1],
+].filter((block): block is string => block !== undefined);
+const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(demoDocument)?.[1] ?? '';
+const productionRunners = deployDocument.split('\n').filter(line => line.includes('npm run runner --'));
+const blockBudget = shellCallBudget(blocks.length + 2); // deploy replay and modified token block
+const persistenceBudget = shellCallBudget(persistenceRoots.length * guideBlocks.length + 1); // missing token
+const pathBudget = shellCallBudget(blocks.length + blocks.slice(1).reduce((calls, block) =>
+  calls + commandLines(block).commands.length, 0) + commandLines(manual).commands.length
+  + productionRunners.length + 3); // run directory, deploy seed, and missing-run-directory check
+const liveBlocks = [readmeBlocks[4], demoBlocks[0], deployBlocks[0]]
+  .filter((block): block is string => block !== undefined);
+const liveBudget = shellCallBudget(liveBlocks.length + 5,
+  DOCUMENTED_BLOCK_TIMEOUT_MS); // install, preflight, and three servers
 
+describe('documented demo commands', () => {
   it('rejects shell calls beyond the declared budget', () => {
     const calls = shellCallBudget(1).countCalls();
     calls.run(() => undefined);
@@ -312,7 +336,7 @@ describe('documented demo commands', () => {
     const bridgeBlock = /## Local Git bridge[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(guide)?.[1]
       ?.replaceAll('8788', String(bridgePort)).replaceAll('8787', String(workerPort));
     expect(bridgeBlock).toBeDefined();
-    for (const suffix of ['first', 'second']) {
+    for (const suffix of persistenceRoots) {
       const root = await externalTempDir(`concord-${suffix}-`);
       const env = { ...freshShellEnv(process.env), TMPDIR: root };
       const bridge = await shell.run(() => capturedNpm([], bridgeBlock!, env));
