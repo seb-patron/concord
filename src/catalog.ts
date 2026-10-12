@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { HookName, ModuleContext, Principal, Repo, ServiceHooks } from './contracts';
 import { clock, requireRole, requireTenant } from './auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
-import { appendEvent, applyMigrations, costLimits, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
+import { appendEvent, applyMigrations, catalogVisibility, costLimits, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
 import { selectStorage } from './coordinator';
 import { repos } from './features/repos';
 import { handlePrincipalRoute, initializePrincipals, lookupPrincipal } from './features/principals';
@@ -85,19 +85,15 @@ export class TenantCatalog extends DurableObject<Env> {
         const limitRaw = url.searchParams.get('limit');
         const limit = limitRaw === null ? 100 : Number(limitRaw);
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400, 'INVALID_LIMIT', 'Limit must be 1 to 100');
-        const page = eventsAfter(context.sql, after, limit + 1, principal);
-        const visiblePrincipalIds = principal.repoIds === '*' ? null : new Set([
-          principal.principalId,
-          ...context.sql.exec<{ id: string }>('SELECT id FROM principals_records WHERE parent_id = ?', principal.principalId)
-            .toArray().map(row => row.id),
-        ]);
+        const visibility = catalogVisibility(context.sql, principal);
+        const page = eventsAfter(context.sql, after, limit + 1, visibility);
         const items = page.slice(0, limit).map(event => {
           const payload = { ...event.payload };
           if (!principal.roles.includes('owner')) {
             for (const key of Object.keys(payload)) if (/storageName$/i.test(key)) delete payload[key];
           }
-          if (visiblePrincipalIds && event.kind.startsWith('principal.')) {
-            return { ...event, relatedIds: event.relatedIds.filter(id => visiblePrincipalIds.has(id)), payload };
+          if (!visibility.all && event.kind.startsWith('principal.')) {
+            return { ...event, relatedIds: event.relatedIds.filter(id => visibility.principalIds.has(id)), payload };
           }
           return { ...event, payload };
         });

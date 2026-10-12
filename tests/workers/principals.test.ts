@@ -75,7 +75,7 @@ describe('delegated principals', () => {
     const revoked = await fetchApi(apiRequest(`/v1/principals/${created.id}`, 'local-agent-a', { method: 'DELETE' }));
     expect(revoked.status).toBe(200);
 
-    const first = await fetchApi(apiRequest(`/v1/events?cursor=${cursor}&limit=1`, 'local-viewer'));
+    const first = await fetchApi(apiRequest(`/v1/events?cursor=${cursor}&limit=1`, 'local-owner'));
     expect(first.status).toBe(200);
     const firstPage = await responseBody(first);
     expect(firstPage.data.items).toHaveLength(1);
@@ -98,6 +98,7 @@ describe('delegated principals', () => {
     expect(eventsJson).not.toContain('token_digest');
     expect(eventsJson).not.toContain('tokenDigest');
     expect((await fetchApi(apiRequest('/v1/events', 'local-agent-a'))).status).toBe(403);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}`, 'local-viewer')))).data.items).toEqual([]);
     expect((await fetchApi(apiRequest('/v1/events?cursor=bad!', 'local-viewer'))).status).toBe(400);
     expect((await fetchApi(apiRequest('/v1/events?limit=101', 'local-viewer'))).status).toBe(400);
   });
@@ -160,6 +161,36 @@ describe('delegated principals', () => {
     expect(events.filter((event: { relatedIds: string[] }) => event.relatedIds.includes(ownId))
       .map((event: { kind: string }) => event.kind)).toEqual(['principal.minted', 'principal.revoked']);
     expect(events.some((event: { relatedIds: string[] }) => event.relatedIds.includes(otherId))).toBe(false);
+  });
+
+  it('hides other principals and their events from scoped viewers and agents on every read route', async () => {
+    const parent = await scopedViewerParent();
+    const before = (await responseBody(await fetchApi(apiRequest('/v1/events')))).eventSeq;
+    const beta = (await responseBody(await mint({ roles: ['agent'], repoIds: ['beta'], name: 'beta-private-name' }))).data;
+    const alphaAgent = (await responseBody(await mint({ roles: ['agent', 'viewer'], repoIds: ['alpha'], ttlSeconds: 30, name: 'alpha-agent' }, crypto.randomUUID(), parent))).data;
+    const alphaViewer = (await responseBody(await mint({ roles: ['viewer'], repoIds: ['alpha'], ttlSeconds: 30, name: 'alpha-viewer' }, crypto.randomUUID(), parent))).data;
+    const grandchild = (await responseBody(await mint({ roles: ['viewer'], repoIds: ['alpha'], ttlSeconds: 10, name: 'alpha-grandchild' }, crypto.randomUUID(), alphaAgent.token))).data;
+    const cursor = btoa(String(before));
+
+    for (const token of [parent, alphaAgent.token, alphaViewer.token]) {
+      const listed = (await responseBody(await fetchApi(apiRequest('/v1/principals', token)))).data.items;
+      expect(JSON.stringify(listed)).not.toContain('beta-private-name');
+      expect(listed.some((item: { id: string }) => item.id === beta.id)).toBe(false);
+      const hidden = await fetchApi(apiRequest(`/v1/principals/${beta.id}`, token));
+      expect(hidden.status).toBe(404);
+      const events = (await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}`, token)))).data.items;
+      expect(events.some((event: { relatedIds: string[] }) => event.relatedIds.includes(beta.id))).toBe(false);
+      expect(JSON.stringify(events)).not.toContain(beta.id);
+    }
+    const parentList = (await responseBody(await fetchApi(apiRequest('/v1/principals', parent)))).data.items;
+    expect(parentList.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining([alphaAgent.id, alphaViewer.id, grandchild.id]));
+    const parentEvents = (await responseBody(await fetchApi(apiRequest(`/v1/events?cursor=${cursor}`, parent)))).data.items;
+    expect(parentEvents.map((event: { relatedIds: string[] }) => event.relatedIds[0]))
+      .toEqual(expect.arrayContaining([alphaAgent.id, alphaViewer.id, grandchild.id]));
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/principals/${grandchild.id}`, parent)))).data.id).toBe(grandchild.id);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/principals/${grandchild.id}`, alphaAgent.token)))).data.id).toBe(grandchild.id);
+    expect((await fetchApi(apiRequest(`/v1/principals/${grandchild.id}`, alphaViewer.token))).status).toBe(404);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/principals/${beta.id}`)))).data.name).toBe('beta-private-name');
   });
 
   it('refuses role, repository, TTL, and parent-expiry escalation', async () => {

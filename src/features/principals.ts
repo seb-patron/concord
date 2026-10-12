@@ -1,7 +1,7 @@
 import type { DelegatedPrincipal, ModuleContext, Principal, Role, TrustedConfiguration } from '../contracts';
 import { requireTenant } from '../auth';
 import { encodeCursor, HttpError, json, parseCursor, readJson } from '../http';
-import { eventSequence } from '../state';
+import { catalogVisibility, eventSequence } from '../state';
 
 const idPattern = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -61,9 +61,12 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
   const now = context.now();
   if (path === '/v1/principals' && request.method === 'GET') {
     const cursor = parseCursor(new URL(request.url).searchParams.get('cursor'));
+    const visibility = catalogVisibility(sql, principal);
     // Rows are never deleted, so SQLite rowids give stable, increasing page positions.
     const rows = sql.exec<Row & { page_cursor: number }>(
-      'SELECT rowid AS page_cursor, * FROM principals_records WHERE rowid > ? ORDER BY rowid LIMIT ?', cursor, PAGE_SIZE + 1,
+      `SELECT rowid AS page_cursor, * FROM principals_records WHERE rowid > ?
+        ${visibility.all ? '' : 'AND id IN (SELECT value FROM json_each(?))'} ORDER BY rowid LIMIT ?`,
+      cursor, ...(visibility.all ? [] : [JSON.stringify([...visibility.principalIds])]), PAGE_SIZE + 1,
     ).toArray();
     const items = rows.slice(0, PAGE_SIZE);
     const nextCursor = rows.length > PAGE_SIZE ? encodeCursor(items[items.length - 1].page_cursor) : null;
@@ -126,6 +129,13 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
       parent_id: principal.principalId, created_at: now, revoked_at: null, name: (body.name as string | undefined) ?? null }), token }, context.version(), eventSequence(sql), 201);
   }
   const match = /^\/v1\/principals\/([A-Za-z0-9_-]{1,64})$/.exec(path);
+  if (match && request.method === 'GET') {
+    const visibility = catalogVisibility(sql, principal);
+    if (!visibility.all && !visibility.principalIds.has(match[1])) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
+    const row = sql.exec<Row>('SELECT * FROM principals_records WHERE id = ?', match[1]).toArray()[0];
+    if (!row) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
+    return json(publicRecord(row), context.version(), eventSequence(sql));
+  }
   if (match && request.method === 'DELETE') {
     const target = sql.exec<Row>('SELECT * FROM principals_records WHERE id = ?', match[1]).toArray()[0];
     if (!target) throw new HttpError(404, 'NOT_FOUND', 'Principal not found');
