@@ -159,6 +159,11 @@ export function listRepos(fetchImpl) {
   return apiFetch('/v1/repos', {}, fetchImpl);
 }
 
+export function listPrincipals(cursor = null, fetchImpl) {
+  const query = typeof cursor === 'string' && cursor ? `?${new URLSearchParams({ cursor })}` : '';
+  return apiFetch(`/v1/principals${query}`, {}, typeof cursor === 'function' ? cursor : fetchImpl);
+}
+
 /** Identity is optional during rollout; callers handle a 404 with server-checked actions. */
 export function getMe(fetchImpl) {
   return apiFetch('/v1/me', {}, fetchImpl);
@@ -178,6 +183,17 @@ export function getSnapshot(repoId, fetchImpl) {
 export function getEvents(repoId, after, fetchImpl) {
   const params = new URLSearchParams({ after: String(after), limit: '100' });
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);
+}
+
+/** Human notes in the friction log use the existing issue store. */
+export function createFrictionIssue(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues`,
+    { method: 'POST', body: { ...body, labels: ['friction'] }, idempotencyKey }, fetchImpl);
+}
+
+export function updateIssue(repoId, number, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(number)}`,
+    { method: 'PATCH', body, idempotencyKey }, fetchImpl);
 }
 
 /** POST /v1/repos/:r/leases — creation calls carry no expectedVersion. */

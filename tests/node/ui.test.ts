@@ -8,6 +8,7 @@ const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
+const { trackerModel, createTracker } = require('../../web/tracker.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -103,6 +104,101 @@ describe('Fleet desk derivation', () => {
     expect(repairStatus(findings, []).status).toBe('unresolved');
     expect(repairStatus(findings, [{ roundId: 'r1', status: 'pending' }]).status).toBe('pending-review');
     expect(repairStatus([], []).status).toBe('resolved');
+  });
+});
+
+describe('Repository tracker', () => {
+  const now = new Date('2026-10-12T15:00:00Z').valueOf();
+  const data = { data: { projections: {
+    issues: { items: [
+      { number: 1, title: 'Free <work>', state: 'open', milestoneId: 'm', allowedFiles: ['web/free.js'], labels: [], changes: [], authorId: 'owner', version: 1 },
+      { number: 2, title: 'Held work', state: 'open', milestoneId: 'm', allowedFiles: ['web/held.js'], labels: [], changes: [{ changeId: 'c2', status: 'draft' }], authorId: 'owner', version: 2 },
+      { number: 3, title: 'Review work', state: 'open', milestoneId: 'm', labels: [], changes: [{ changeId: 'c3', status: 'ready' }] },
+      { number: 4, title: 'Queued work', state: 'open', milestoneId: 'm', labels: [], changes: [{ changeId: 'c4', status: 'queued' }] },
+      { number: 5, title: 'Landed work', state: 'closed', milestoneId: 'm', labels: [], closedBy: { changeId: 'c5' }, changes: [{ changeId: 'c5', status: 'merged' }] },
+      { number: 6, title: 'Manual wait', state: 'open', milestoneId: 'm', labels: ['friction'], body: '6 minutes', authorId: 'owner' },
+    ], milestones: [{ milestoneId: 'm', title: 'Release', state: 'open' }] },
+    repos: { changes: [
+      { changeId: 'c2', issueNumber: 2, authorId: 'agent-a', authorModel: 'Codex', status: 'draft', unitKeys: ['fn:held'] },
+      { changeId: 'c3', issueNumber: 3, authorId: 'agent-b', status: 'ready', unitKeys: ['fn:review'] },
+      { changeId: 'c4', issueNumber: 4, authorId: 'agent-c', status: 'queued', unitKeys: ['fn:queue'] },
+      { changeId: 'c5', issueNumber: 5, authorId: 'agent-d', status: 'merged', unitKeys: ['fn:land'] },
+    ] },
+    leases: { heldItems: [{ changeId: 'c2', issueNumber: 2, holderId: 'agent-a', unitKey: 'fn:held', state: 'active', expiresAt: now + 120000 }] },
+    queue: { entries: [{ changeId: 'c4', state: 'waiting', carriedFrom: { sourceOid: 'old' } }, { changeId: 'c5', state: 'merged' }] },
+  } } };
+  const events = [
+    { sequence: 1, kind: 'lease.claimed', timestamp: now, relatedIds: ['c2'], actorId: 'agent-a' },
+    { sequence: 2, kind: 'lease.refused', timestamp: now, relatedIds: ['c2'], actorId: 'agent-b' },
+    { sequence: 3, kind: 'change.rebased', timestamp: now, relatedIds: ['c4'], actorId: 'concord' },
+    { sequence: 4, kind: 'verdict.carried', timestamp: now, relatedIds: ['c4'], actorId: 'reviewer' },
+    { sequence: 5, kind: 'queue.promotion_applied', timestamp: now, relatedIds: ['c5'], actorId: 'concord' },
+  ];
+  it('derives five lanes, live holds, event counts, and friction without sample cards', () => {
+    const model = trackerModel(data, events, { principalId: 'agent-a' }, 'm', now);
+    expect(model.cards.map((card: any) => card.stage)).toEqual(['Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed']);
+    expect(model.cards[0].units).toEqual(['web/free.js']);
+    expect(model.cards[1]).toMatchObject({ holder: 'agent-a', harness: 'Codex', meta: '2m left' });
+    expect(model.cards[3].meta).toBe('rebased · carried');
+    expect(model.stats.map((stat: any) => stat[1])).toEqual([1, 1, 1, 1, 1]);
+    expect(model.friction.map((row: any) => row.what)).toContain('Manual wait');
+  });
+  it('renders filters, drawer, event evidence, edit and friction submissions, and empty/error states', async () => {
+    const dom = new JSDOM('<main id="tracker"></main>', { url: 'http://localhost/' });
+    const previous = { document: globalThis.document, fetch: globalThis.fetch };
+    Object.assign(globalThis, { document: dom.window.document });
+    const calls: any[] = [];
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ data: {}, version: 4 }), { status: 200 });
+    }) as any;
+    setSessionToken('test-token');
+    const root = dom.window.document.getElementById('tracker')!;
+    let refreshed = 0;
+    const tracker = createTracker(root, { refresh: async () => { refreshed++; } });
+    const snapshot = structuredClone(data) as any;
+    snapshot.data.projections.leases.heldItems[0].expiresAt = Date.now() + 120000;
+    const context = { repoId: 'repo', snapshot, events, identity: { principalId: 'owner', roles: ['owner'] }, message: null };
+    try {
+      tracker.render(context);
+      expect(root.textContent).toContain('Release');
+      expect(root.querySelectorAll('.tracker-card')).toHaveLength(5);
+      expect(root.querySelector('free')).toBeNull();
+      (root.querySelector('.tracker-stat') as HTMLButtonElement).click();
+      expect(root.querySelector('.tracker-evidence')?.textContent).toContain('lease.claimed');
+      (root.querySelectorAll('.tracker-filters button')[1] as HTMLButtonElement).click();
+      expect(root.querySelectorAll('.tracker-card')).toHaveLength(1);
+      (root.querySelectorAll('.tracker-filters button')[0] as HTMLButtonElement).click();
+      (root.querySelectorAll('.tracker-card')[1] as HTMLButtonElement).click();
+      expect(root.querySelector('.tracker-drawer')?.textContent).toContain('lease.claimed');
+      (root.querySelector('.tracker-open') as HTMLAnchorElement).click();
+      expect(root.querySelector('.tracker-issue-detail')?.textContent).toContain('Issue #2');
+      (root.querySelector('.tracker-edit') as HTMLButtonElement).click();
+      const edit = root.querySelector('.tracker-drawer form') as HTMLFormElement;
+      (edit.elements.namedItem('title') as HTMLInputElement).value = 'Revised title';
+      tracker.render(context);
+      expect((root.querySelector('.tracker-drawer input[name=title]') as HTMLInputElement).value).toBe('Revised title');
+      (root.querySelector('.tracker-drawer .tracker-submit') as HTMLButtonElement).click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(calls[0].url).toBe('/v1/repos/repo/issues/2');
+      expect(JSON.parse(String(calls[0].init.body)).expectedVersion).toBe(2);
+      expect(refreshed).toBe(1);
+      (root.querySelector('.tracker-friction>button') as HTMLButtonElement).click();
+      const friction = root.querySelector('.tracker-friction form') as HTMLFormElement;
+      (friction.elements.namedItem('title') as HTMLInputElement).value = 'Slow check';
+      (friction.elements.namedItem('cost') as HTMLInputElement).value = '3 minutes';
+      (friction.elements.namedItem('did') as HTMLTextAreaElement).value = 'Retried check';
+      (root.querySelector('.tracker-friction .tracker-submit') as HTMLButtonElement).click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(calls[1].url).toBe('/v1/repos/repo/issues');
+      expect(JSON.parse(String(calls[1].init.body)).labels).toEqual(['friction']);
+      expect(JSON.parse(String(calls[1].init.body)).body).toContain('Concord did: Retried check');
+      expect(refreshed).toBe(2);
+      tracker.render({ ...context, snapshot: null, message: 'Snapshot unavailable' });
+      expect(root.textContent).toContain('Snapshot unavailable');
+      tracker.render({ ...context, repoId: null, snapshot: null });
+      expect(root.textContent).toContain('Choose a repository');
+    } finally { clearSessionToken(); Object.assign(globalThis, previous); dom.window.close(); }
   });
 });
 
@@ -217,6 +313,11 @@ describe('Fleet desk DOM', () => {
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush(); await flush();
       expect(byId('desk').hidden).toBe(false);
+      expect(byId('tracker-view').hidden).toBe(false);
+      expect(byId('tracker-view').textContent).toContain('#1 <task>');
+      expect(byId('tracker-view').querySelector('task')).toBeNull();
+      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      expect(byId('desk-view').hidden).toBe(false);
       expect(byId('work-board').textContent).toContain('Cap retries');
       expect(byId('issue-list').textContent).toContain('#1 <task>');
       expect(byId('issue-list').textContent).toContain('Milestone: Release');
