@@ -15,6 +15,25 @@ const local: Record<string, Omit<Principal, 'expiresAt'>> = {
   'local-viewer': { tenantId: 'local', principalId: 'viewer', roles: ['viewer'], repoIds: '*' },
 };
 
+const localTenants = new Set(Object.values(local).map(principal => principal.tenantId));
+let configured: { raw: string | undefined; mappings: Record<string, Principal>; tenants: ReadonlySet<string> } | undefined;
+
+function configuredAuth(env: Env): NonNullable<typeof configured> {
+  const cached = configured;
+  if (cached && cached.raw === env.AUTH_TOKENS) return cached;
+  let mappings: Record<string, Principal> = {};
+  if (env.AUTH_TOKENS) {
+    try { mappings = JSON.parse(env.AUTH_TOKENS) as Record<string, Principal>; }
+    catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
+  }
+  const tenants = new Set<string>();
+  for (const principal of Object.values(mappings)) {
+    if (principal && typeof principal.tenantId === 'string') tenants.add(principal.tenantId);
+  }
+  configured = { raw: env.AUTH_TOKENS, mappings, tenants };
+  return configured;
+}
+
 export function clock(env: Pick<Env, 'CONCORD_MODE' | 'CONCORD_TEST_NOW'>): () => number {
   if (env.CONCORD_MODE === 'local' && env.CONCORD_TEST_NOW !== undefined) {
     const fixed = Number(env.CONCORD_TEST_NOW);
@@ -36,22 +55,23 @@ export async function authenticate(request: Request, env: Env, now: () => number
   } else if (secret.startsWith('local-')) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Fixture credential is not valid in production');
   }
+  const auth = !principal ? configuredAuth(env) : undefined;
   if (!principal && env.AUTH_TOKENS) {
-    let mappings: Record<string, Principal>;
-    try { mappings = JSON.parse(env.AUTH_TOKENS) as Record<string, Principal>; }
-    catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
     const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
     key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
-    principal = mappings[key];
+    principal = auth?.mappings[key];
   }
   if (!principal) {
     const delegated = /^cct_([A-Za-z0-9_-]{1,64})_([a-f0-9]{64})$/.exec(secret);
     if (delegated) {
+      const tenantId = delegated[1];
+      if (!auth?.tenants.has(tenantId) && !(env.CONCORD_MODE === 'local' && localTenants.has(tenantId))) {
+        throw new HttpError(401, 'UNAUTHORIZED', 'Invalid credential');
+      }
       if (!key) {
         const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
         key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
       }
-      const tenantId = delegated[1];
       const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName(`tenant:${tenantId}`));
       const lookup = await stub.fetch(new Request('https://concord.internal/internal/principals/lookup', {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-concord-tenant': tenantId },

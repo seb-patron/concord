@@ -42,6 +42,41 @@ describe('delegated principals', () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it('rejects unknown delegated tenants before catalog access and charges the auth-failure limiter', async () => {
+    const idFromName = vi.fn(() => { throw new Error('unexpected catalog lookup'); });
+    const get = vi.fn(() => { throw new Error('unexpected catalog lookup'); });
+    const limit = vi.fn().mockResolvedValueOnce({ success: true }).mockResolvedValueOnce({ success: false });
+    const guardedEnv = { CONCORD_MODE: 'production',
+      AUTH_TOKENS: JSON.stringify({ operator: { tenantId: 'known', principalId: 'owner',
+        roles: ['owner'], repoIds: '*', expiresAt: Date.now() + 60_000 } }),
+      TENANT_CATALOG: { idFromName, get }, AUTH_RATE_LIMIT: { limit } } as unknown as Env;
+    const first = await worker.fetch(apiRequest('/v1/repos', `cct_trialA_${'a'.repeat(64)}`), guardedEnv);
+    expect(first.status).toBe(401);
+    expect((await responseBody(first)).error.code).toBe('UNAUTHORIZED');
+    const second = await worker.fetch(apiRequest('/v1/repos', `cct_trialB_${'b'.repeat(64)}`), guardedEnv);
+    expect(second.status).toBe(429);
+    expect((await responseBody(second)).error.code).toBe('RATE_LIMITED');
+    expect(limit).toHaveBeenCalledTimes(2);
+    expect(idFromName).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('looks up a delegated token for a tenant provisioned by AUTH_TOKENS', async () => {
+    const principal = { tenantId: 'known', principalId: 'agent', roles: ['agent'],
+      repoIds: '*', expiresAt: Date.now() + 60_000 };
+    const fetch = vi.fn(async () => Response.json({ data: principal }));
+    const get = vi.fn(() => ({ fetch }));
+    const idFromName = vi.fn(() => 'catalog-id');
+    const guardedEnv = { CONCORD_MODE: 'production',
+      AUTH_TOKENS: JSON.stringify({ operator: { ...principal, principalId: 'owner', roles: ['owner'] } }),
+      TENANT_CATALOG: { idFromName, get } } as unknown as Env;
+    const token = `cct_known_${'a'.repeat(64)}`;
+    await expect(authenticate(apiRequest('/v1/repos', token), guardedEnv)).resolves.toMatchObject(principal);
+    expect(idFromName).toHaveBeenCalledWith('tenant:known');
+    expect(get).toHaveBeenCalledWith('catalog-id');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('does not charge a valid delegated token to the auth-failure limiter', async () => {
     const created = (await responseBody(await mint({ roles: ['agent'] }))).data;
     const limit = vi.fn(async () => ({ success: true }));
