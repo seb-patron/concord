@@ -1,5 +1,5 @@
 import type { Principal } from './contracts';
-import { authenticate, clock, requireRepo, requireRouteRole, requireTenant } from './auth';
+import { authenticateWithExpiry, clock, requireRepo, requireRouteRole, requireTenant } from './auth';
 import { failure, HttpError, json } from './http';
 
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
@@ -57,8 +57,9 @@ export default {
         throw new HttpError(404, 'NOT_FOUND', 'Unknown route');
       }
       let principal: Principal;
+      let credentialExpiresAt: number | null;
       try {
-        principal = await authenticate(request, env, clock(env));
+        ({ principal, expiresAt: credentialExpiresAt } = await authenticateWithExpiry(request, env, clock(env)));
       } catch (error) {
         if (error instanceof HttpError && (error.status === 401 || error.status === 403)) await limitAuthFailure(request, env);
         throw error;
@@ -66,8 +67,8 @@ export default {
       requireTenant(principal, request.headers.get('x-tenant-id') ?? undefined);
       requireRouteRole(principal, request.method, url.pathname);
       if (request.method === 'GET' && url.pathname === '/v1/me') {
-        const { principalId, tenantId, roles, repoIds, expiresAt } = principal;
-        return json({ principalId, tenantId, roles, repoIds, expiresAt: expiresAt ?? null, model: principal.model ?? null });
+        const { principalId, tenantId, roles, repoIds } = principal;
+        return json({ principalId, tenantId, roles, repoIds, expiresAt: credentialExpiresAt, model: principal.model ?? null });
       }
       const repoMatch = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(url.pathname);
       if (repoMatch) requireRepo(principal, repoMatch[1]);

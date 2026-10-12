@@ -10,7 +10,7 @@ export interface Principal {
   principalId: Id;
   roles: Role[];
   repoIds: Id[] | '*';
-  expiresAt: number | null;
+  expiresAt: number;
   model?: string | null;
 }
 

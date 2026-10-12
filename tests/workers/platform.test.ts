@@ -47,6 +47,11 @@ describe('local Worker and SQLite Durable Objects', () => {
       AUTH_TOKENS: JSON.stringify({ [hash]: { ...principal, expiresAt: null } }),
     });
     expect((await responseBody(nonExpiring)).data.expiresAt).toBeNull();
+    const internalPrincipal = await authenticate(apiRequest('/v1/me', token), { ...production,
+      AUTH_TOKENS: JSON.stringify({ [hash]: { ...principal, expiresAt: null } }),
+    });
+    const contractualExpiry: number = internalPrincipal.expiresAt;
+    expect(contractualExpiry).toBe(Number.MAX_SAFE_INTEGER);
   });
   it('authenticates every named local actor as a distinct principal through the Worker', async () => {
     const fixtures = [

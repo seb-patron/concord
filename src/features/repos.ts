@@ -56,7 +56,7 @@ function scheduleInspection(context: ModuleContext, change: Change, job: Inspect
     const pending = context.state.get<InspectionPending>(`inspection:${change.changeId}`);
     if (!pending || pending.jobId !== job.jobId) fail(409, 'INSPECTION_SUPERSEDED', 'Inspection request was superseded');
     context.state.put(`inspection:${change.changeId}`, { ...pending, scheduled: true });
-    return respond(context, change, 202);
+    return respond(context, changeResponse(change), 202);
   } catch {
     return failure(new HttpError(503, 'SCHEDULE_UNAVAILABLE', 'Inspection scheduler did not acknowledge the request'));
   }
@@ -454,7 +454,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
       if (!pendingJob) return fail(503, 'INSPECTION_JOB_MISSING', 'Inspection job intent missing');
       return scheduleInspection(context, change, pendingJob);
     }
-    return respond(context, change);
+    return respond(context, changeResponse(change));
   }
   const profile = context.trusted.profiles[repo.profileId];
   const policy = context.trusted.policies[repo.policyId];
@@ -562,7 +562,7 @@ function close(context: ModuleContext, changeId: string): Response {
     context.state.delete(`review:${changeId}`);
     context.state.put('queueGeneration', (context.state.get<number>('queueGeneration') ?? 0) + 1);
   });
-  return respond(context, change);
+  return respond(context, changeResponse(change));
 }
 
 const sha256Words = [
