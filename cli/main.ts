@@ -27,6 +27,8 @@ Commands and required fields:
   repo clone --repo ID --path PATH                 (read-only canonical clone)
   import --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID [--exclude GLOB ...] [--exclude-file FILE] [--require-match] [--print-tree]
   change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
+  issue create|list|get|edit|close|reopen --repo ID [--id NUMBER] [--title TEXT] [--body TEXT] [--labels JSON_ARRAY] [--milestone-id ID] [--reason TEXT]
+  milestone create|list|get|close --repo ID [--id ID] [--title TEXT] [--description TEXT] [--due-date YYYY-MM-DD]
   change get --repo ID --id ID
   change checkout --repo ID --id ID --worktree PATH
   change publish --repo ID --id ID --worktree PATH --lease-fences JSON_OBJECT
@@ -52,7 +54,7 @@ Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UN
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
-const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run'];
+const OPTION_NAMES = ['repo', 'idempotency-key', 'expected-version', 'body-file', 'name', 'policy-id', 'profile-id', 'path', 'id', 'intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys', 'dependency-change-ids', 'lease-fences', 'reason', 'change-id', 'ttl-seconds', 'fence', 'verdict-id', 'revision', 'unit-key', 'text', 'evidence-digest', 'finding-set-version', 'dispositions', 'round-id', 'decision', 'review-manifest-digest', 'parent-verdict-id', 'new-base-oid', 'after', 'worktree', 'cursor', 'source', 'ref', 'exclude-file', 'commit', 'base', 'intent', 'allowed-files', 'review-evidence', 'mirror-to', 'wait-seconds', 'aw-run', 'issue', 'title', 'body', 'labels', 'milestone-id', 'due-date', 'description', 'state', 'label', 'limit'];
 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
   let parsed;
@@ -170,9 +172,30 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   }
   const rid = requireRepo();
   const root = `/repos/${rid}`;
+  if (noun === 'issue') {
+    const path = `${root}/issues`;
+    if (verb === 'list') return print(await send('GET', `${path}${query({ state: flags.state, label: flags.label, milestoneId: flags['milestone-id'], cursor: flags.cursor, limit: flags.limit })}`));
+    if (verb === 'create') return print(await send('POST', path, body ?? { title: required(flags, 'title'), body: flags.body ?? '', labels: flags.labels ? parseJson(String(flags.labels)) : [], ...(flags['milestone-id'] ? { milestoneId: flags['milestone-id'] } : {}), ...(flags['allowed-files'] ? { allowedFiles: parseJson(String(flags['allowed-files'])) } : {}) }));
+    const number = Number(required(flags, 'id'));
+    if (!Number.isSafeInteger(number) || number < 1) throw new ConcordError('--id must be a positive issue number', 'usage');
+    if (verb === 'get') return print(await send('GET', `${path}/${number}`));
+    if (verb === 'edit') {
+      const payload = body ?? { ...(flags.title !== undefined ? { title: flags.title } : {}), ...(flags.body !== undefined ? { body: flags.body } : {}), ...(flags.labels !== undefined ? { labels: parseJson(String(flags.labels)) } : {}), ...(flags['milestone-id'] !== undefined ? { milestoneId: flags['milestone-id'] } : {}), ...(flags['allowed-files'] !== undefined ? { allowedFiles: parseJson(String(flags['allowed-files'])) } : {}) };
+      if (flags['expected-version'] === undefined) throw new ConcordError('--expected-version is required', 'usage');
+      return print(await send('PATCH', `${path}/${number}`, payload));
+    }
+    if (verb === 'close' || verb === 'reopen') return print(await mutateExisting(`${path}/${number}/${verb}`, body ?? { reason: required(flags, 'reason') }));
+  }
+  if (noun === 'milestone') {
+    const path = `${root}/milestones`;
+    if (verb === 'list') return print(await send('GET', `${path}${query({ cursor: flags.cursor, limit: flags.limit })}`));
+    if (verb === 'create') return print(await send('POST', path, body ?? { title: required(flags, 'title'), description: flags.description ?? '', ...(flags['due-date'] ? { dueDate: flags['due-date'] } : {}) }));
+    if (verb === 'get') return print(await send('GET', `${path}/${encodeURIComponent(required(flags, 'id'))}`));
+    if (verb === 'close') return print(await mutateExisting(`${path}/${encodeURIComponent(required(flags, 'id'))}/close`, body ?? {}));
+  }
   if (noun === 'change' && verb === 'create') {
     const payload = body ?? requiredObject(flags, ['intent-key', 'intent-text', 'base-oid', 'branch', 'unit-keys'], {
-      intentKey: 'intent-key', intentText: 'intent-text', baseOid: ['base-oid', value => value === 'null' ? null : value], branch: 'branch', unitKeys: ['unit-keys', parseJson], dependencyChangeIds: ['dependency-change-ids', parseJson, []],
+      intentKey: 'intent-key', intentText: 'intent-text', baseOid: ['base-oid', value => value === 'null' ? null : value], branch: 'branch', unitKeys: ['unit-keys', parseJson], dependencyChangeIds: ['dependency-change-ids', parseJson, []], issueNumber: ['issue', numberValue],
     });
     return print(await send('POST', `${root}/changes`, payload));
   }

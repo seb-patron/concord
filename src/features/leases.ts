@@ -41,11 +41,17 @@ function policy(context: ModuleContext): TrustedPolicy {
   return selected;
 }
 
-function asLease(row: LeaseRow): Lease {
+function issueFor(context: ModuleContext, changeId: string): { issueNumber: number | null; issueTitle: string | null } {
+  const change = sqlState(context.sql).get<Change>(`module:repos:change:${changeId}`);
+  const issueNumber = change?.issueNumber ?? null;
+  const issues = sqlState(context.sql).get<Array<{ number: number; title: string }>>('module:issues:items') ?? [];
+  return { issueNumber, issueTitle: issues.find(item => item.number === issueNumber)?.title ?? null };
+}
+function asLease(context: ModuleContext, row: LeaseRow): Lease {
   return {
     leaseId: row.lease_id, unitKey: row.unit_key, holderId: row.holder_id,
     changeId: row.change_id, intentText: row.intent_text, fence: row.fence,
-    expiresAt: row.expires_at, state: row.state, version: row.version,
+    expiresAt: row.expires_at, state: row.state, version: row.version, ...issueFor(context, row.change_id),
   };
 }
 
@@ -119,7 +125,7 @@ function claim(context: ModuleContext, body: unknown): Response {
     const conflicts = current.flatMap(row => {
       const identity = resolveUnit(registry, row.unit_key);
       const keys = units.filter(unit => overlaps(identity, unit)).map(unit => unit.key);
-      return keys.length ? [{ holderId: row.holder_id, intentText: row.intent_text,
+      return keys.length ? [{ holderId: row.holder_id, intentText: row.intent_text, ...issueFor(context, row.change_id),
         expiresAt: row.expires_at, keys, leaseId: row.lease_id, state: row.state }] : [];
     });
     if (conflicts.length) {
@@ -133,7 +139,7 @@ function claim(context: ModuleContext, body: unknown): Response {
         nextAction: "Wait for the holder's lease to expire or be released, then retry the claim.",
       }, version);
       return failure(new HttpError(409, 'LEASE_CONFLICT', 'One or more units are already claimed', {
-        holderId: conflicts[0].holderId, intentText: conflicts[0].intentText,
+        holderId: conflicts[0].holderId, intentText: conflicts[0].intentText, issueNumber: conflicts[0].issueNumber, issueTitle: conflicts[0].issueTitle,
         expiresAt: conflicts[0].expiresAt, keys, conflicts,
         nextAction: `Wait until ${new Date(Math.max(...conflicts.map(item => item.expiresAt))).toISOString()} or ask the holder to release, then retry.`,
       }));
@@ -159,7 +165,7 @@ function claim(context: ModuleContext, body: unknown): Response {
         row.lease_id, row.unit_key, row.holder_id, row.change_id, row.intent_text,
         row.fence, row.expires_at, row.state, row.version, row.created_at, row.updated_at);
       sequence = makeEvent(context, 'lease.claimed', row, version);
-      granted.push(asLease(row));
+      granted.push(asLease(context, row));
     }
     return json({ leases: granted, renewAfterSeconds: RENEW_AFTER_SECONDS }, context.version(), sequence, 201);
   });
@@ -189,7 +195,7 @@ function renew(context: ModuleContext, leaseId: string, body: unknown): Response
       nextFence, now + ttlSeconds * 1000, version, now, leaseId);
     const updated = { ...row, fence: nextFence, expires_at: now + ttlSeconds * 1000, version, updated_at: now };
     const sequence = makeEvent(context, 'lease.renewed', updated, version);
-    return json({ lease: asLease(updated), renewAfterSeconds: RENEW_AFTER_SECONDS }, version, sequence);
+    return json({ lease: asLease(context, updated), renewAfterSeconds: RENEW_AFTER_SECONDS }, version, sequence);
   });
 }
 
@@ -200,7 +206,7 @@ function release(context: ModuleContext, leaseId: string, body: unknown): Respon
     const version = context.nextVersion();
     context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, context.now(), leaseId);
     const sequence = makeEvent(context, 'lease.released', row, version);
-    return json({ lease: asLease({ ...row, state: 'released', version }) }, version, sequence);
+    return json({ lease: asLease(context, { ...row, state: 'released', version }) }, version, sequence);
   });
 }
 
@@ -247,7 +253,7 @@ function projection(context: ModuleContext, cursor: LeaseCursor | null = null) {
   if (cursor?.phase === 1) args.push(...position);
   const page = context.sql.exec<LeaseRow & { live_rank: 0 | 1 }>(query, ...args).toArray();
   const items = page.slice(0, 100)
-    .map(row => ({ ...asLease(row),
+    .map(row => ({ ...asLease(context, row),
       state: row.expires_at <= now && (row.state === 'active' || row.state === 'reserved') ? 'expired' : row.state,
       remainingSeconds: row.state === 'active' || row.state === 'reserved' ?
         Math.max(0, Math.ceil((row.expires_at - now) / 1000)) : 0 }));
@@ -439,7 +445,7 @@ export const leases: FeatureModule = {
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
   ],
-  snapshot: context => projection(context),
+  snapshot: context => ({ ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row)) }),
   nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,
   onAlarm: context => context.transaction(() => expireDue(context, context.now())),
   hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation },

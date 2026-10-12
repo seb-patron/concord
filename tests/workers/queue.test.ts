@@ -1292,6 +1292,13 @@ describe('queue state machine', () => {
 
   it('freezes an ambiguous old OID through timeout and merges only after exact readback', async () => {
     const h = await setup('A');
+    h.views.set('A', { ...h.views.get('A')!, issueNumber: 1 });
+    const issueStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(issueStub, (_instance, durable) => {
+      const store = sqlState(durable.storage.sql);
+      store.put('module:issues:items', [{ number: 1, title: 'Queue task', body: '', labels: [], milestoneId: null, allowedFiles: null, state: 'open', authorId: 'owner', version: 1, reason: null, closedBy: null }]);
+      store.put('module:repos:changes', [{ changeId: 'A', issueNumber: 1 }]);
+    });
     await h.tick();
     await h.deliver(h.jobs[0], 'PASS'); await h.tick();
     let state = await h.state();
@@ -1302,6 +1309,7 @@ describe('queue state machine', () => {
     await h.ageTicket(61_000); await h.tick();
     state = await h.state();
     expect(state.promotion).toMatchObject({ state: 'reconcile', reconciliation: 'AMBIGUOUS_OLD_OID' });
+    expect((await h.fetch('/issues/1')).body.data.state).toBe('open');
     expect(state.promotion.jobIds).toHaveLength(2);
     const attempts = h.jobs.filter(job => job.kind === 'promote');
     expect(attempts).toHaveLength(2);
@@ -1323,6 +1331,7 @@ describe('queue state machine', () => {
     state = await h.state();
     expect(state.promotion.state).toBe('applied');
     expect(state.entries[0].state).toBe('landed');
+    expect((await h.fetch('/issues/1')).body.data).toMatchObject({ state: 'closed', closedBy: { changeId: 'A', canonicalOid: oid('e') } });
     expect(state.finalCanonicalOid).toBe(oid('e'));
     expect(h.releases).toEqual(['A']);
   });
@@ -1439,6 +1448,12 @@ describe('queue state machine', () => {
     const h = harness;
     await h.seed(`canonical-${h.repoId}`);
     await h.seed(`scratch-${h.repoId}`, null);
+    const issueStub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(issueStub, (_instance, durable) => {
+      const store = sqlState(durable.storage.sql);
+      store.put('module:issues:items', [{ number: 1, title: 'Contest loser', body: '', labels: [], milestoneId: null, allowedFiles: null, state: 'open', authorId: 'owner', version: 1, reason: null, closedBy: null }]);
+      store.put('module:repos:changes', [{ changeId: 'A', issueNumber: 1 }]);
+    });
     for (const id of ['A', 'B']) {
       await h.seed(`candidate-${h.repoId}-${id}`);
       h.views.set(id, { authorId: 'agent-a', headOid: oid(id.toLowerCase()), revision: 1, status: 'ready',
@@ -1459,6 +1474,7 @@ describe('queue state machine', () => {
     const state = await h.state();
     expect(state.contests[0]).toMatchObject({ state: 'selected', winnerId: 'B', reason: 'FIRST_VALID_GREEN' });
     expect(state.entries.find((entry: any) => entry.changeId === 'A').state).toBe('failed');
+    expect((await h.fetch('/issues/1')).body.data.state).toBe('open');
     expect(['reserved', 'checking']).toContain(state.entries.find((entry: any) => entry.changeId === 'B').state);
     expect(h.releases).toEqual(['A']);
     await h.tick();

@@ -1,0 +1,150 @@
+import type { Change, FeatureModule, Gate, ModuleContext } from '../contracts';
+import { HttpError, json, parseCursor, encodeCursor, unavailableGate } from '../http';
+import { eventSequence, sqlState } from '../state';
+
+type Issue = { number: number; title: string; body: string; labels: string[]; milestoneId: string | null;
+  allowedFiles: string[] | null; state: 'open' | 'closed'; authorId: string; version: number;
+  reason: string | null; closedBy: { changeId: string; canonicalOid: string } | null };
+type Milestone = { milestoneId: string; title: string; description: string; dueDate: string | null;
+  state: 'open' | 'closed'; version: number };
+const issues = (c: ModuleContext) => c.state.get<Issue[]>('items') ?? [];
+const milestones = (c: ModuleContext) => c.state.get<Milestone[]>('milestones') ?? [];
+const changes = (c: ModuleContext) => sqlState(c.sql).get<Change[]>('module:repos:changes') ?? [];
+const queueEntries = (c: ModuleContext) => sqlState(c.sql).get<{ entries?: Array<{ changeId: string; state: string }> }>('module:queue:data')?.entries ?? [];
+const response = (c: ModuleContext, data: unknown, status = 200) => json(data, c.version(), eventSequence(c.sql), status);
+const error = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
+const string = (value: unknown, field: string, max: number, empty = false): string => {
+  if (typeof value !== 'string' || new TextEncoder().encode(value).byteLength > max || (!empty && !value.trim())) error(422, 'INVALID_' + field.toUpperCase(), `${field} is invalid`);
+  return value as string;
+};
+const listStrings = (value: unknown, field: string): string[] => {
+  if (!Array.isArray(value) || value.length > 100 || value.some(item => typeof item !== 'string' || !item.trim() || item.length > 256) || new Set(value).size !== value.length) error(422, 'INVALID_' + field.toUpperCase(), `${field} must be unique strings`);
+  return value as string[];
+};
+const event = (c: ModuleContext, kind: string, ids: string[], payload: Record<string, unknown>) => {
+  const version = c.nextVersion(); c.appendEvent(kind, ids, payload, version); return version;
+};
+const milestoneAdvanced = (c: ModuleContext, milestoneId: string | null, issueNumber: number) => {
+  if (!milestoneId) return;
+  const version = event(c, 'milestone.updated', [milestoneId, String(issueNumber)], { issueNumber });
+  c.state.put('milestones', milestones(c).map(item => item.milestoneId === milestoneId ? { ...item, version } : item));
+};
+const canWrite = (c: ModuleContext) => {
+  if (!c.principal.roles.some(role => role === 'owner' || role === 'agent')) error(403, 'FORBIDDEN', 'Author or owner role required');
+};
+const issue = (c: ModuleContext, number: number) => issues(c).find(item => item.number === number) ?? error(404, 'ISSUE_NOT_FOUND', 'Issue not found');
+const milestone = (c: ModuleContext, id: string) => milestones(c).find(item => item.milestoneId === id) ?? error(404, 'MILESTONE_NOT_FOUND', 'Milestone not found');
+const numberFrom = (raw: string) => /^\d+$/.test(raw) && Number.isSafeInteger(Number(raw)) && Number(raw) > 0 ? Number(raw) : error(404, 'ISSUE_NOT_FOUND', 'Issue not found');
+const checkVersion = (body: Record<string, unknown>, current: number) => {
+  if (!Number.isSafeInteger(body.expectedVersion)) error(400, 'EXPECTED_VERSION_REQUIRED', 'expectedVersion required');
+  if (body.expectedVersion !== current) throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: current });
+};
+const linked = (c: ModuleContext, item: Issue) => changes(c).filter(change => change.issueNumber === item.number).map(change => {
+  const entry = queueEntries(c).filter(candidate => candidate.changeId === change.changeId).at(-1);
+  const status = entry?.state === 'landed' ? 'merged' : entry?.state === 'checking' ? 'checking'
+    : ['admitted', 'reserved'].includes(entry?.state ?? '') ? 'queued'
+      : entry?.state === 'blocked' || entry?.state === 'failed' ? 'blocked' : change.status;
+  return { changeId: change.changeId, status, revision: change.revision };
+});
+const issueView = (c: ModuleContext, item: Issue) => ({ ...item, changes: linked(c, item) });
+const milestoneView = (c: ModuleContext, item: Milestone) => {
+  const members = issues(c).filter(issue => issue.milestoneId === item.milestoneId);
+  const landed = new Set(members.flatMap(issue => linked(c, issue).filter(change => change.status === 'merged').map(change => change.changeId)));
+  return { ...item, progress: { openIssues: members.filter(issue => issue.state === 'open').length,
+    closedIssues: members.filter(issue => issue.state === 'closed').length, landedChanges: landed.size } };
+};
+const page = <T>(items: T[], request: Request) => {
+  const params = new URL(request.url).searchParams;
+  const offset = parseCursor(params.get('cursor'));
+  const limit = params.has('limit') ? Number(params.get('limit')) : 100;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) error(400, 'INVALID_LIMIT', 'Limit must be 1 to 100');
+  return { items: items.slice(offset, offset + limit), nextCursor: offset + limit < items.length ? encodeCursor(offset + limit) : null };
+};
+
+export const issuesFeature: FeatureModule = {
+  name: 'issues', migrations: [],
+  routes: [
+    { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/issues$/, handle: (c, _r, _m, raw) => {
+      canWrite(c); const body = raw as Record<string, unknown>;
+      const title = string(body.title, 'title', 256); const text = string(body.body ?? '', 'body', 65536, true);
+      const labels = listStrings(body.labels ?? [], 'labels');
+      const milestoneId = body.milestoneId == null ? null : string(body.milestoneId, 'milestoneId', 64);
+      if (milestoneId) milestone(c, milestoneId);
+      const allowedFiles = body.allowedFiles == null ? null : listStrings(body.allowedFiles, 'allowedFiles');
+      const number = (c.state.get<number>('nextNumber') ?? 0) + 1;
+      const item: Issue = { number, title, body: text, labels, milestoneId, allowedFiles, state: 'open', authorId: c.principal.principalId,
+        version: event(c, 'issue.created', [String(number)], { number, title }), reason: null, closedBy: null };
+      c.state.put('nextNumber', number); c.state.put('items', [...issues(c), item]); milestoneAdvanced(c, milestoneId, number); return response(c, issueView(c, item), 201);
+    } },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/issues$/, handle: (c, request) => {
+      const params = new URL(request.url).searchParams;
+      const state = params.get('state'); if (state && !['open', 'closed'].includes(state)) error(400, 'INVALID_STATE', 'Invalid issue state');
+      const selected = issues(c).filter(item => (!state || item.state === state) && (!params.has('label') || item.labels.includes(params.get('label')!)) && (!params.has('milestoneId') || item.milestoneId === params.get('milestoneId')));
+      return response(c, page(selected.map(item => issueView(c, item)), request));
+    } },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)$/, handle: (c, _r, match) => response(c, issueView(c, issue(c, numberFrom(match[1])))) },
+    { method: 'PATCH', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)$/, handle: (c, _r, match, raw) => {
+      const body = raw as Record<string, unknown>; const old = issue(c, numberFrom(match[1]));
+      canWrite(c); if (old.authorId !== c.principal.principalId && !c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Only author or owner may edit');
+      checkVersion(body, old.version);
+      const title = body.title === undefined ? old.title : string(body.title, 'title', 256);
+      const text = body.body === undefined ? old.body : string(body.body, 'body', 65536, true);
+      const labels = body.labels === undefined ? old.labels : listStrings(body.labels, 'labels');
+      const milestoneId = body.milestoneId === undefined ? old.milestoneId : body.milestoneId === null ? null : string(body.milestoneId, 'milestoneId', 64);
+      if (milestoneId) milestone(c, milestoneId);
+      const allowedFiles = body.allowedFiles === undefined ? old.allowedFiles : body.allowedFiles === null ? null : listStrings(body.allowedFiles, 'allowedFiles');
+      const item = { ...old, title, body: text, labels, milestoneId, allowedFiles, version: event(c, 'issue.updated', [String(old.number)], { number: old.number }) };
+      c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
+      if (old.milestoneId !== milestoneId) { milestoneAdvanced(c, old.milestoneId, old.number); milestoneAdvanced(c, milestoneId, old.number); }
+      return response(c, issueView(c, item));
+    } },
+    { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/issues\/(\d+)\/(close|reopen)$/, handle: (c, _r, match, raw) => {
+      const body = raw as Record<string, unknown>; const old = issue(c, numberFrom(match[1]));
+      canWrite(c); if (old.authorId !== c.principal.principalId && !c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Only author or owner may change state');
+      checkVersion(body, old.version); const reason = string(body.reason, 'reason', 2000);
+      const state = match[2] === 'close' ? 'closed' : 'open';
+      if (old.state === state) error(409, 'ISSUE_STATE_CONFLICT', 'Issue already in requested state');
+      const item: Issue = { ...old, state, reason, closedBy: null, version: event(c, `issue.${state === 'closed' ? 'closed' : 'reopened'}`, [String(old.number)], { number: old.number, reason }) };
+      c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
+      milestoneAdvanced(c, old.milestoneId, old.number); return response(c, issueView(c, item));
+    } },
+    { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, _r, _m, raw) => {
+      if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required'); const body = raw as Record<string, unknown>;
+      const title = string(body.title, 'title', 256); const description = string(body.description ?? '', 'description', 65536, true);
+      const dueDate = body.dueDate == null ? null : string(body.dueDate, 'dueDate', 32);
+      if (dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || !Number.isFinite(Date.parse(dueDate)) || new Date(dueDate).toISOString().slice(0, 10) !== dueDate)) error(422, 'INVALID_DUE_DATE', 'dueDate must be a calendar date in YYYY-MM-DD');
+      const milestoneId = crypto.randomUUID(); const item: Milestone = { milestoneId, title, description, dueDate, state: 'open', version: event(c, 'milestone.created', [milestoneId], { title }) };
+      c.state.put('milestones', [...milestones(c), item]); return response(c, milestoneView(c, item), 201);
+    } },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones$/, handle: (c, request) => response(c, page(milestones(c).map(item => milestoneView(c, item)), request)) },
+    { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)$/, handle: (c, _r, match) => response(c, milestoneView(c, milestone(c, match[1]))) },
+    { method: 'POST', pattern: /^\/v1\/repos\/[^/]+\/milestones\/([A-Za-z0-9_-]+)\/close$/, handle: (c, _r, match, raw) => {
+      if (!c.principal.roles.includes('owner')) error(403, 'FORBIDDEN', 'Owner required'); const old = milestone(c, match[1]); checkVersion(raw as Record<string, unknown>, old.version);
+      if (old.state === 'closed') error(409, 'MILESTONE_STATE_CONFLICT', 'Milestone already closed');
+      const item: Milestone = { ...old, state: 'closed', version: event(c, 'milestone.closed', [old.milestoneId], {}) };
+      c.state.put('milestones', milestones(c).map(candidate => candidate.milestoneId === old.milestoneId ? item : candidate)); return response(c, milestoneView(c, item));
+    } },
+  ],
+  snapshot: c => ({ status: 'ready', items: issues(c).map(item => issueView(c, item)), milestones: milestones(c).map(item => milestoneView(c, item)) }),
+  nextDeadline: () => null, onAlarm: () => {},
+  hooks: {
+    'issues.validate': (c, number): Gate<{ number: number; title: string }> => {
+      if (!c?.sql) return unavailableGate();
+      const item = issues(c).find(item => item.number === number && item.state === 'open');
+      return item ? { status: 'eligible', version: c.version(), evidenceIds: [String(number)], value: { number, title: item.title } }
+        : { status: 'blocked', version: c.version(), code: 'ISSUE_NOT_OPEN', reason: 'Linked issue must be open', evidenceIds: [] };
+    },
+    'issues.land': (c, changeId, canonicalOid): Gate => {
+      if (!c?.sql) return unavailableGate();
+      const change = changes(c).find(item => item.changeId === changeId);
+      const old = issues(c).find(item => item.number === change?.issueNumber);
+      if (!old || old.state === 'closed') return { status: 'eligible', version: c.version(), evidenceIds: [], value: undefined };
+      const closedBy = { changeId, canonicalOid };
+      const item: Issue = { ...old, state: 'closed', reason: 'Landed change', closedBy,
+        version: event(c, 'issue.closed', [String(old.number), changeId], { number: old.number, closedBy }) };
+      c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
+      milestoneAdvanced(c, old.milestoneId, old.number);
+      return { status: 'eligible', version: c.version(), evidenceIds: [String(old.number)], value: undefined };
+    },
+  },
+};

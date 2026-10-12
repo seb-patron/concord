@@ -55,6 +55,28 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('sends issue, milestone and linked change CLI commands', async () => {
+    const calls: Array<{ method: string; path: string; body: any }> = [];
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let text = ''; for await (const chunk of request) text += chunk;
+      calls.push({ method: request.method ?? '', path: request.url ?? '', body: text ? JSON.parse(text) : null });
+      response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ data: { number: 1, version: 2 }, version: 2 }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('server unavailable');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'owner-token' };
+    const cli = (...args: string[]) => execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', ...args], { cwd: process.cwd(), env });
+    try {
+      await cli('issue', 'create', '--repo', 'r', '--title', 'Task', '--body', 'Spec');
+      await cli('issue', 'list', '--repo', 'r', '--state', 'open');
+      await cli('issue', 'edit', '--repo', 'r', '--id', '1', '--title', 'Revised', '--allowed-files', '["a.ts"]', '--expected-version', '2');
+      await cli('milestone', 'create', '--repo', 'r', '--title', 'Release');
+      await cli('change', 'create', '--repo', 'r', '--intent-key', 'task', '--intent-text', 'Task', '--base-oid', 'null', '--branch', 'task', '--unit-keys', '[]', '--issue', '1');
+      expect(calls.map(call => `${call.method} ${call.path}`)).toEqual(['POST /v1/repos/r/issues', 'GET /v1/repos/r/issues?state=open', 'PATCH /v1/repos/r/issues/1', 'POST /v1/repos/r/milestones', 'POST /v1/repos/r/changes']);
+      expect(calls[2].body).toEqual({ title: 'Revised', allowedFiles: ['a.ts'], expectedVersion: 2 });
+      expect(calls[4].body.issueNumber).toBe(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
   it('requests tenant events without a repository and forwards the page cursor', async () => {
     const paths: string[] = [];
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {

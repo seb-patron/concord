@@ -19,7 +19,12 @@ export const tools: Tool[] = [
   tool('repo_list', 'List authorized repositories.', { cursor: s }),
   tool('repo_get', 'Get repository detail and canonical head.', repo, ['repoId']),
   tool('repo_context', 'Get repository snapshot, policy state, changes, leases, queue and findings.', repo, ['repoId']),
-  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys: strings, dependencyChangeIds: strings, attempt: n, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
+  tool('change_create', 'Create a candidate change. Use the canonical head as baseOid.', { ...repo, intentKey: s, intentText: s, baseOid: s, branch: s, unitKeys: strings, dependencyChangeIds: strings, attempt: n, issueNumber: { type: 'integer', minimum: 1 }, idempotencyKey: s }, ['repoId', 'intentKey', 'intentText', 'baseOid', 'branch', 'unitKeys']),
+  tool('issue_create', 'Create an issue in the repository inbox.', { ...repo, title: s, body: s, labels: strings, milestoneId: s, allowedFiles: strings, idempotencyKey: s }, ['repoId', 'title', 'body']),
+  tool('issue_get', 'Get an issue and its linked changes.', { ...repo, issueNumber: { type: 'integer', minimum: 1 } }, ['repoId', 'issueNumber']),
+  tool('issue_list', 'List issues with optional state, label, milestone and cursor.', { ...repo, state: { type: 'string', enum: ['open', 'closed'] }, label: s, milestoneId: s, cursor: s }, ['repoId']),
+  tool('issue_close', 'Close an issue with a reason and current issue version.', { ...repo, issueNumber: { type: 'integer', minimum: 1 }, reason: s, expectedVersion: n, idempotencyKey: s }, ['repoId', 'issueNumber', 'reason', 'expectedVersion']),
+  tool('milestone_list', 'List milestones with issue and landed change progress.', { ...repo, cursor: s }, ['repoId']),
   tool('change_status', 'Get change status, revision, base, branch and candidate storage.', change, ['repoId', 'changeId']),
   tool('lease_claim', 'Claim semantic units before editing. A conflict is a normal result.', { ...change, unitKeys: strings, intentText: s, ttlSeconds: { type: 'integer', minimum: 1, maximum: 300 }, idempotencyKey: s }, ['repoId', 'changeId', 'unitKeys', 'intentText']),
   tool('lease_release', 'Release one lease using its current fence.', { ...repo, leaseId: s, fence: n, idempotencyKey: s }, ['repoId', 'leaseId', 'fence']),
@@ -125,10 +130,15 @@ export async function callTool(client: ConcordClient, name: string, args: Args):
     case 'repo_get': result = await client.request('GET', r); break;
     case 'repo_context': result = await client.request('GET', `${r}/snapshot`); break;
     case 'change_create': {
-      const { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds = [], attempt } = args;
-      result = await mutation(client, `${r}/changes`, { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds, ...(attempt === undefined ? {} : { attempt }) }, undefined, args.idempotencyKey);
+      const { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds = [], attempt, issueNumber } = args;
+      result = await mutation(client, `${r}/changes`, { intentKey, intentText, baseOid, branch, unitKeys, dependencyChangeIds, ...(attempt === undefined ? {} : { attempt }), ...(issueNumber === undefined ? {} : { issueNumber }) }, undefined, args.idempotencyKey);
       break;
     }
+    case 'issue_create': result = await mutation(client, `${r}/issues`, { title: args.title, body: args.body, labels: args.labels ?? [], ...(args.milestoneId ? { milestoneId: args.milestoneId } : {}), ...(args.allowedFiles ? { allowedFiles: args.allowedFiles } : {}) }, undefined, args.idempotencyKey); break;
+    case 'issue_get': result = await client.request('GET', `${r}/issues/${args.issueNumber}`); break;
+    case 'issue_list': { const params = new URLSearchParams(); for (const key of ['state', 'label', 'milestoneId', 'cursor']) if (typeof args[key] === 'string') params.set(key, args[key] as string); result = await client.request('GET', `${r}/issues${params.size ? '?' + params : ''}`); break; }
+    case 'issue_close': result = await mutation(client, `${r}/issues/${args.issueNumber}/close`, { reason: args.reason }, args.expectedVersion as number, args.idempotencyKey); break;
+    case 'milestone_list': result = await client.request('GET', `${r}/milestones${query('cursor', args.cursor)}`); break;
     case 'change_status': result = await client.request('GET', p()); break;
     case 'lease_claim': {
       const body = { changeId: args.changeId, unitKeys: args.unitKeys, intentText: args.intentText, ttlSeconds: args.ttlSeconds ?? 120 };

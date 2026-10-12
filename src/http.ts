@@ -59,6 +59,7 @@ export function expectVersion(body: Record<string, unknown>, current: number): v
 export function requiresExpectedVersion(method: string, path: string): boolean {
   if (method === 'GET' || method === 'HEAD') return false;
   if (/^\/v1\/repos\/[A-Za-z0-9_-]{1,64}\/(changes|leases|contests|runner\/poll)$/.test(path)) return false;
+  if (/^\/v1\/repos\/[A-Za-z0-9_-]{1,64}\/(issues|milestones)$/.test(path) || /^\/v1\/repos\/[A-Za-z0-9_-]{1,64}\/(issues\/\d+|milestones\/[A-Za-z0-9_-]+(?:\/close)?)(?:\/(?:close|reopen))?$/.test(path)) return false;
   if (/^\/v1\/repos\/[A-Za-z0-9_-]{1,64}\/jobs\/[A-Za-z0-9_-]{1,64}\/(heartbeat|result|credentials)$/.test(path)) return false;
   return true;
 }

@@ -11,6 +11,8 @@ Git conflicts on lines. Agents collide on meaning. Concord is a Git platform for
 
 The [architecture](docs/ARCHITECTURE.md) explains the Worker, Git storage, runner, trust boundaries, and limits. The [nine-minute demo](docs/DEMO.md) shows each local scene; the [judging map](docs/JUDGING.md) maps evidence to the competition criteria.
 
+Concord issues hold task specs and link changes, leases, and milestones. See the [issues API](docs/api-issues.md), [CLI guide](docs/cli.md), and [MCP guide](docs/mcp.md).
+
 ```mermaid
 flowchart LR
   A[Agents and CLI] --> W[Worker: leases, changes, review, queue]

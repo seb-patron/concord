@@ -12,9 +12,10 @@ import { queue } from './features/queue';
 import { runners } from './features/runners';
 import { findings } from './features/findings';
 import { verdicts } from './features/verdicts';
+import { issuesFeature } from './features/issues';
 
 /** The six modules are registered once. Each supplies migrations, routes, alarms and projections. */
-export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts];
+export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature];
 
 export function selectStorage(env: Env, sql: SqlStorage, now: () => number): RepoStorage {
   if (env.CONCORD_MODE === 'local' && env.STORAGE_BACKEND === 'fake') return new FakeStorage(sqlState(sql), now);
@@ -74,6 +75,7 @@ export class RepoCoordinator extends DurableObject<Env> {
             dependencyChangeIds: value.dependencyChangeIds && Object.freeze([...value.dependencyChangeIds]),
             canonicalStorageName: value.canonicalStorageName, scratchStorageName: value.scratchStorageName,
             policyId: value.policyId, profileId: value.profileId, intentKey: value.intentKey,
+            ...(value.issueNumber != null ? { issueNumber: value.issueNumber } : {}),
           }),
         };
       },

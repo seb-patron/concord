@@ -308,6 +308,32 @@ describe('RepoCoordinator lease routes', () => {
     expect((await fetchApi(apiRequest(`${path(repo)}?cursor=%%%`, 'local-viewer'))).status).toBe(400);
   });
 
+  it('exposes all issue-linked held leases in snapshots at 100, 101, and 128', async () => {
+    setupPolicy();
+    for (const count of [100, 101, 128]) {
+      const repo = `lease_issue_snapshot_${count}`;
+      await runInDurableObject(stubFor(repo), async (_instance, state) => {
+        seedClaim(state, repo, 'seed', 'agent-a');
+        const store = sqlState(state.storage.sql);
+        const change = store.get<Change>('module:repos:change:seed')!;
+        store.put('module:repos:change:seed', { ...change, issueNumber: 1 });
+        const now = Date.now();
+        for (let index = 0; index < count; index++) {
+          state.storage.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            `held-${index}`, `row:seed:${index}`, 'agent-a', 'seed', 'Issue work', 1,
+            now + 60_000, 'active', 1, now + index, now + index);
+        }
+      });
+      const response = await fetchApi(apiRequest(`/v1/repos/${repo}/snapshot`, 'local-viewer'));
+      expect(response.status).toBe(200);
+      const projection = (await responseBody(response)).data.projections.leases;
+      expect(projection.items).toHaveLength(100);
+      expect(projection.heldItems).toHaveLength(count);
+      expect(new Set(projection.heldItems.map((item: { leaseId: string }) => item.leaseId)).size).toBe(count);
+      expect(projection.heldItems.every((item: { issueNumber: number; state: string }) => item.issueNumber === 1 && item.state === 'active')).toBe(true);
+    }
+  });
+
   it('keeps every remaining live lease exactly once when a page-one lease is released', async () => {
     setupPolicy();
     const repo = 'lease_page_release';
@@ -551,5 +577,20 @@ describe('RepoCoordinator lease routes', () => {
       expect(reserve(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
       expect(leases.hooks['leases.reservationLive']!(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
     });
+  });
+  it('shows the holder issue on lease lists and conflicts', async () => {
+    setupPolicy();
+    const repo = 'lease_issue_links';
+    expect((await claim(repo, 'local-agent-a', 'issue-holder', ['row:families:alpha'], 'issue-claim')).status).toBe(201);
+    await runInDurableObject(stubFor(repo), (_instance, durable) => {
+      const state = sqlState(durable.storage.sql);
+      const change = state.get<Change>('module:repos:change:issue-holder')!;
+      state.put('module:repos:change:issue-holder', { ...change, issueNumber: 1 });
+      state.put('module:issues:items', [{ number: 1, title: 'Protect alpha' }]);
+    });
+    expect((await listing(repo)).items[0]).toMatchObject({ issueNumber: 1, issueTitle: 'Protect alpha' });
+    const conflict = await claim(repo, 'local-agent-b', 'waiting-change', ['row:families:alpha'], 'waiting-claim');
+    expect(conflict.status).toBe(409);
+    expect((await responseBody(conflict)).error.details).toMatchObject({ issueNumber: 1, issueTitle: 'Protect alpha' });
   });
 });

@@ -158,3 +158,6 @@ The repos module registers its change-view provider through the cross-module hoo
 
 Bootstrap records the validation request and provisions a scratch repository before scheduling. The queue remains responsible for issuing an owner-authorized absent-ref promotion ticket only after a trusted pass. Local fake storage cannot run a real checker because its `fake://` remote has no Git transport.
 Queue admission must also recheck the candidate's current registered ref and revision, consult the repos module's queue generation after a head change, and mark admitted/promoting changes frozen so `close` cannot bypass that state.
+# Related task records
+
+`change create` accepts optional `issueNumber` to link the candidate to an open Concord issue. The change response and subsequent change views expose that number. See the [issues and milestones API](api-issues.md) for task specs, progress, and automatic closure on land.

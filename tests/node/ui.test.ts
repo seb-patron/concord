@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
-  leaseCountdown, environmentBadge, verdictProvenance, repairStatus } = require('../../web/views.js') as any;
+  leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
 
 const fixture = {
@@ -23,6 +23,7 @@ const fixture = {
       { changeId: 'withdrawn-id', state: 'withdrawn', admittedRevision: 3, sequence: 43, blockedReason: 'author request' },
     ], diagnosis: { reason: 'SINGLETON', blame: ['y'] }, observedMain: 'main123',
       activeStackJobId: 'job-2', stackMembers: ['x', 'y'], diagnosticResults: [{ jobId: 'job-1', memberIds: ['x', 'y'], outcome: 'FAIL', sequence: 4 }] },
+    issues: { items: [{ number: 1, title: '<task>', state: 'open', milestoneId: 'm1', changes: [{ changeId: 'x', status: 'ready' }] }], milestones: [{ milestoneId: 'm1', title: 'Release' }] },
     findings: { findingSetVersions: { x: 0 }, findings: [
       { findingId: 'f1', changeId: 'x', status: 'open', unitKey: 'fn:retry', originRevision: 1, text: 'Retry evidence needs repair' },
     ], rounds: [] },
@@ -59,6 +60,25 @@ describe('Fleet desk derivation', () => {
     expect(projectionItems({ status: 'unavailable', items: [] }).state).toBe('unavailable');
     expect(projectionItems({ items: [] }).state).toBe('empty');
     expect(snapshotCollections({ data: { projections: {} } }).changes.state).toBe('unknown');
+  });
+  it('derives open issue cards with milestone, change and held lease', () => {
+    const snapshot = structuredClone(fixture) as any;
+    snapshot.data.projections.leases.items[0].issueNumber = 1;
+    expect(openIssueRows(snapshot)[0]).toMatchObject({ number: 1, title: '<task>', milestone: 'Release', changes: [{ status: 'ready' }], leases: [{ leaseId: 'l1' }] });
+  });
+  it('uses the complete held lease projection for issue cards beyond the first page', () => {
+    for (const count of [100, 101, 128]) {
+      const snapshot = structuredClone(fixture) as any;
+      const held = Array.from({ length: count }, (_, index) => ({
+        leaseId: `held-${index}`, issueNumber: 1, unitKey: `unit:${index}`,
+        holderId: 'agent-a', state: 'active', expiresAt: Date.now() + 120_000,
+      }));
+      snapshot.data.projections.leases.items = held.slice(0, 100);
+      snapshot.data.projections.leases.heldItems = held;
+      const card = openIssueRows(snapshot)[0];
+      expect(card.leases).toHaveLength(count);
+      expect(card.leases.at(-1).leaseId).toBe(`held-${count - 1}`);
+    }
   });
   it('requires live fences and current finding versions for enqueue evidence', () => {
     const change = fixture.data.projections.repos.changes[0];
@@ -198,6 +218,9 @@ describe('Fleet desk DOM', () => {
       await flush(); await flush(); await flush();
       expect(byId('desk').hidden).toBe(false);
       expect(byId('work-board').textContent).toContain('Cap retries');
+      expect(byId('issue-list').textContent).toContain('#1 <task>');
+      expect(byId('issue-list').textContent).toContain('Milestone: Release');
+      expect(byId('issue-list').querySelector('task')).toBeNull();
       expect(byId('work-board').textContent).toContain('model-from-api');
       expect(byId('work-board').textContent).not.toContain('agent-b · model');
       expect(byId('alert-count').textContent).toContain('3 decisions');
