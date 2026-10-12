@@ -71,6 +71,8 @@ function signOut(message) {
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
   state.observedVersions.clear();
   state.selected = null; state.inboxSelected = null;
+  $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = '';
+  $('inbox-detail').replaceChildren(); $('inbox-detail').dataset.itemId = '';
   state.deskMessage = null;
   $('token-input').value = '';
   sessionError(message); showSession();
@@ -111,9 +113,13 @@ async function signIn(token, preferredRepo) {
   }
 }
 async function loadRepo(gen = state.generation, resetSelection = true) {
-  state.snapshot = null; state.verdicts = {}; state.verdictErrors = {}; state.events = [];
-  state.seq = 0; state.version = 0; state.deskMessage = null;
+  if (resetSelection) {
+    state.snapshot = null; state.verdicts = {}; state.verdictErrors = {}; state.events = [];
+    state.seq = 0; state.version = 0;
+  }
+  state.deskMessage = null;
   if (resetSelection) { state.selected = null; state.inboxSelected = null; }
+  if (resetSelection) { $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = ''; }
   render();
   try {
     const body = await getSnapshot(state.repoId);
@@ -362,7 +368,9 @@ function renderLeases() {
   const active=leases().filter(l => ['active','reserved'].includes(l.state) && l.expiresAt > Date.now());
   for (const lease of active) {
     const row=node('div',null,'lease-row');
-    row.append(node('code',lease.unitKey),node('span',lease.holderId),node('span',leaseCountdown(lease,Date.now()).text));
+    row.append(node('code',lease.unitKey),node('span',`Holder: ${lease.holderId ?? 'unknown'}`),
+      node('span',`Intent: ${lease.intentText ?? 'not recorded'}`),node('span',`Fence: ${lease.fence ?? 'unknown'}`),
+      node('span',`Expires: ${fmtTime(lease.expiresAt)} (${leaseCountdown(lease,Date.now()).text})`));
     box.append(row);
   }
   if (!active.length) box.append(node('p','No active leases yet. Agents claim units before editing.','muted'));
@@ -370,7 +378,7 @@ function renderLeases() {
     const conflict=list(refusal.conflicts)[0];
     if (!conflict || conflict.expiresAt <= Date.now() ||
       !active.some(l => l.holderId === conflict.holderId && list(refusal.keys).includes(l.unitKey))) continue;
-    box.append(node('p',`${refusal.requesterId ?? 'Agent'} waits for ${list(refusal.keys).join(', ') || 'a unit'} · ${conflict?.holderId ?? 'another holder'} holds it`,'wait-note'));
+    box.append(node('p',`${refusal.requesterId ?? 'Agent'} waits for ${list(refusal.keys).join(', ') || 'a unit'} · Holder: ${conflict.holderId ?? 'unknown'} · Intent: ${conflict.intentText ?? 'not recorded'} · Expires: ${fmtTime(conflict.expiresAt)}`,'wait-note'));
   }
 }
 function renderQueue() {
@@ -389,6 +397,23 @@ function renderQueue() {
   if (!active.length) box.append(node('p','Merge queue empty. Approved changes enter through Enqueue.','muted'));
   const labels={SINGLETON:'One change failed alone',INTERACTION:'Interaction set failed together',DEPENDENCY_GROUP:'Dependency group blocked',BASE_RED:'Main baseline failed',INCONCLUSIVE:'Diagnosis inconclusive'};
   $('diagnosis').textContent=diag.reason ? `${labels[diag.reason] ?? diag.reason}: ${diag.ids.join(', ') || 'no change blamed'}` : '';
+  const tree=$('queue-tree'); tree.replaceChildren();
+  const queue=projections().queue ?? {};
+  const results=list(queue.diagnosticResults);
+  const members=list(queue.stackMembers);
+  if (!members.length && !results.length && !queue.activeStackJobId) return;
+  const heading=node('h3','Queue bisection tree'); tree.append(heading);
+  const root=node('ul',null,'diagnostic-tree');
+  const stack=node('li',`Stack job: ${queue.activeStackJobId ?? 'none'} · Members: ${members.join(', ') || 'none'}`);
+  root.append(stack);
+  const branches=node('ul'); stack.append(branches);
+  for (const result of results) {
+    const memberIds=list(result.memberIds);
+    const branch=node('li',`Diagnostic job ${result.jobId ?? 'unknown'} · Members: ${memberIds.join(', ') || 'none'} · Outcome: ${result.outcome ?? 'unknown'}${result.sequence ? ` · Event #${result.sequence}` : ''}`);
+    if (memberIds.some(id=>diag.ids.includes(id))) branch.classList.add('highlight');
+    branches.append(branch);
+  }
+  tree.append(root);
 }
 function renderVerdicts(id, target) {
   target.replaceChildren();
@@ -418,7 +443,9 @@ function addAction(target,label,handler,primary=false) {
   const b=node('button',label,primary?'primary':''); b.type='button'; b.addEventListener('click',handler); target.append(b);
 }
 function renderActions(target,change) {
+  if (change && target.dataset.changeId===change.changeId) return;
   target.replaceChildren();
+  target.dataset.changeId=change?.changeId ?? '';
   if (!change || !state.connected) return;
   const buttons=node('div',null,'action-buttons');
   if (change.status==='ready' && actions().enqueue && canManage(change) && change.headOid) {
@@ -427,7 +454,7 @@ function renderActions(target,change) {
     const id=node('input'); id.name='verdictId'; id.required=true; id.placeholder='Verdict ID from reviewer';
     label.append(id); form.append(label);
     const submit=node('button','Enqueue','primary'); submit.type='submit'; form.append(submit);
-    form.addEventListener('submit',e=>{e.preventDefault();doEnqueue(change,id.value.trim());});
+    form.addEventListener('submit',e=>{e.preventDefault();doEnqueue(changeFor(change.changeId) ?? change,id.value.trim());});
     target.append(form);
   }
   if (['draft','ready'].includes(change.status) && actions().claim &&
@@ -440,10 +467,10 @@ function renderActions(target,change) {
       const label=node('label',title); label.append(input); form.append(label);
     }
     const submit=node('button','Claim'); submit.type='submit'; form.append(submit);
-    form.addEventListener('submit',e=>{e.preventDefault();doClaim(change,units.value,intent.value);});
+    form.addEventListener('submit',e=>{e.preventDefault();doClaim(changeFor(change.changeId) ?? change,units.value,intent.value);});
     target.append(form);
   }
-  if (canWithdraw(change) && entries().some(e => e.changeId===change.changeId && !['withdrawn','landed'].includes(e.state))) addAction(buttons,'Withdraw',()=>doWithdraw(change));
+  if (canWithdraw(change) && entries().some(e => e.changeId===change.changeId && !['withdrawn','landed'].includes(e.state))) addAction(buttons,'Withdraw',()=>doWithdraw(changeFor(change.changeId) ?? change));
   target.append(buttons);
   if (change.status==='ready' && actions().verdict && state.identity?.principalId !== change.authorId) {
     const form=node('form',null,'action-form');
@@ -455,7 +482,7 @@ function renderActions(target,change) {
       const wrapper=node('label',label); wrapper.append(input); form.append(wrapper);
     }
     const submit=node('button','Submit verdict','primary'); submit.type='submit'; form.append(submit);
-    form.addEventListener('submit',e=>{e.preventDefault(); void doVerdict(change,decision.value,manifest.value,evidence.value);});
+    form.addEventListener('submit',e=>{e.preventDefault(); void doVerdict(changeFor(change.changeId) ?? change,decision.value,manifest.value,evidence.value);});
     target.append(form);
   }
 }
@@ -488,18 +515,24 @@ function renderInbox() {
     b.addEventListener('click',()=>{state.inboxSelected=item.id;renderInbox();});
     nav.append(b);
   }
-  const detail=$('inbox-detail'); detail.replaceChildren();
+  const detail=$('inbox-detail');
+  const sameItem=detail.dataset.itemId===state.inboxSelected;
+  if (!sameItem) detail.replaceChildren();
+  detail.dataset.itemId=state.inboxSelected ?? '';
   const item=items.find(i=>i.id===state.inboxSelected);
-  if (!item) {detail.append(node('p','Nothing needs a decision right now.'));return;}
-  detail.append(node('span',item.kind,`tone-${item.tone}`),node('h2',item.title),node('p',item.why),node('div',item.evidence,'evidence'));
+  if (!item) {detail.replaceChildren(node('p','Nothing needs a decision right now.'));return;}
+  const content=sameItem ? detail.querySelector('.inbox-content') ?? node('div',null,'inbox-content') : node('div',null,'inbox-content');
+  content.replaceChildren(node('span',item.kind,`tone-${item.tone}`),node('h2',item.title),node('p',item.why),node('div',item.evidence,'evidence'));
+  if (!sameItem || !content.isConnected) detail.prepend(content);
   const c=changeFor(item.changeId);
   if (c) {
     const approval=node('div'); approval.append(node('h3','Approval history'));
-    const records=node('div'); approval.append(records); renderVerdicts(c.changeId,records); detail.append(approval);
+    const records=node('div'); approval.append(records); renderVerdicts(c.changeId,records); content.append(approval);
     const open=node('button','Open change details'); open.type='button';
     open.addEventListener('click',()=>{state.view='desk';selectChange(c.changeId);$('detail-heading').focus();});
-    detail.append(open);
-    const actionPanel=node('div',null,'inbox-actions'); detail.append(actionPanel);
+    content.append(open);
+    const actionPanel=sameItem ? detail.querySelector('.inbox-actions') ?? node('div',null,'inbox-actions') : node('div',null,'inbox-actions');
+    if (!sameItem || !actionPanel.isConnected) detail.append(actionPanel);
     renderActions(actionPanel,c);
   }
 }
@@ -531,14 +564,17 @@ function selectChange(id) {
 function mutationStatus(message) { $('mutation-status').textContent=message; }
 async function mutate(label,call) {
   if (!state.connected || !state.snapshot) return mutationStatus('Current snapshot is unavailable. Refresh before acting.');
-  const gen=state.generation; mutationStatus(`${label}…`);
+  const gen=state.generation; const repoId=state.repoId; mutationStatus(`${label}…`);
   try {
-    await call(); if(gen!==state.generation)return;
+    const response=await call(); if(gen!==state.generation)return;
+    observeVersion(repoId,response?.version);
     await loadRepo(gen,false); mutationStatus(`${label}: accepted.`);
   } catch(error) {
     if(gen!==state.generation)return;
     const refusal=redactError(error);
-    mutationStatus(`${label}: ${error.status===409?'stale or conflicting context':'failed'} (${refusal.code}: ${refusal.message}). Refreshing.`);
+    const conflict=error.code==='LEASE_CONFLICT' && error.details
+      ? ` Holder: ${error.details.holderId ?? 'unknown'}; intent: ${error.details.intentText ?? 'not recorded'}; expires: ${fmtTime(error.details.expiresAt)}.` : '';
+    mutationStatus(`${label}: ${error.status===409?'stale or conflicting context':'failed'} (${refusal.code}: ${refusal.message}).${conflict} Refreshing.`);
     await loadRepo(gen,false);
   }
 }

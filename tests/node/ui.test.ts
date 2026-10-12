@@ -4,8 +4,9 @@ import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
-const { deriveInbox, normalizeDiagnosis } = require('../../web/views.js') as any;
-const { apiFetch, clearSessionToken, setSessionToken } = require('../../web/api.js') as any;
+const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
+  leaseCountdown, environmentBadge, verdictProvenance, repairStatus } = require('../../web/views.js') as any;
+const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -13,9 +14,10 @@ const fixture = {
       { changeId: 'x', authorId: 'agent-a', authorModel: 'model-from-api', intentText: 'Cap retries', unitKeys: ['fn:retry'], status: 'ready', revision: 2, headOid: 'abc123', baseOid: 'base' },
       { changeId: 'y', authorId: 'agent-b', intentText: 'Rename logs', unitKeys: ['file:log'], status: 'blocked', revision: 1, headOid: 'def456' },
     ], repo: { observedCanonicalOid: 'main123' } },
-    leases: { items: [{ leaseId: 'l1', changeId: 'x', holderId: 'agent-a', unitKey: 'fn:retry', fence: 3, expiresAt: Date.now() + 120000, state: 'active' }],
-      refusals: [{ changeId: 'x', requesterId: 'agent-c', keys: ['fn:retry'], createdAt: Date.now(), conflicts: [{ holderId: 'agent-a', expiresAt: Date.now() + 120000 }] }] },
-    queue: { entries: [{ changeId: 'y', state: 'blocked', sequence: 1 }], diagnosis: { reason: 'SINGLETON', blame: ['y'] }, observedMain: 'main123' },
+    leases: { items: [{ leaseId: 'l1', changeId: 'x', holderId: 'agent-a', intentText: 'Protect retry path', unitKey: 'fn:retry', fence: 3, expiresAt: Date.now() + 120000, state: 'active' }],
+      refusals: [{ changeId: 'x', requesterId: 'agent-c', keys: ['fn:retry'], createdAt: Date.now(), conflicts: [{ holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: Date.now() + 120000 }] }] },
+    queue: { entries: [{ changeId: 'y', state: 'blocked', sequence: 1 }], diagnosis: { reason: 'SINGLETON', blame: ['y'] }, observedMain: 'main123',
+      activeStackJobId: 'job-2', stackMembers: ['x', 'y'], diagnosticResults: [{ jobId: 'job-1', memberIds: ['x', 'y'], outcome: 'FAIL', sequence: 4 }] },
     findings: { findingSetVersions: { x: 0 }, findings: [
       { findingId: 'f1', changeId: 'x', status: 'open', unitKey: 'fn:retry', originRevision: 1, text: 'Retry evidence needs repair' },
     ], rounds: [] },
@@ -38,6 +40,45 @@ describe('Fleet desk derivation', () => {
     expect(normalizeDiagnosis({ reason: 'BASE_RED', blame: [] }).ids).toEqual([]);
     expect(normalizeDiagnosis({ reason: 'SINGLETON', blame: ['b'] }).ids).toEqual(['b']);
   });
+  it('keeps interaction and red baseline as group decisions', () => {
+    for (const reason of ['INTERACTION', 'DEPENDENCY_GROUP', 'BASE_RED', 'INCONCLUSIVE']) {
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.queue.diagnosis = { reason, blame: reason === 'BASE_RED' ? [] : ['x', 'y'] };
+      const decisions = deriveInbox(snapshot);
+      expect(decisions[0].evidence).toContain(`Classification: ${reason}`);
+      expect(decisions[0].kind).not.toBe('Blamed by bisection');
+    }
+  });
+  it('labels missing, unavailable, and empty projections explicitly', () => {
+    expect(projectionItems(null).state).toBe('unknown');
+    expect(projectionItems({ status: 'unavailable', items: [] }).state).toBe('unavailable');
+    expect(projectionItems({ items: [] }).state).toBe('empty');
+    expect(snapshotCollections({ data: { projections: {} } }).changes.state).toBe('unknown');
+  });
+  it('requires live fences and current finding versions for enqueue evidence', () => {
+    const change = fixture.data.projections.repos.changes[0];
+    expect(mutationEvidence(change, fixture.data.projections.leases.items, 0).leaseFences).toEqual({ 'fn:retry': 3 });
+    expect(mutationEvidence(change, [], 0).error).toContain('lease fence');
+    expect(mutationEvidence(change, fixture.data.projections.leases.items, undefined).error).toContain('finding-set version');
+  });
+  it('reports expired leases without negative countdowns', () => {
+    expect(leaseCountdown({ state: 'active', expiresAt: Date.now() - 1000 }, Date.now())).toEqual({ text: 'expired', expired: true });
+  });
+  it('does not label an unknown backend as live', () => {
+    expect(environmentBadge(null).label).toBe('unknown backend');
+    expect(environmentBadge({ mode: 'local', storageBackend: 'bridge' }).label).toBe('local bridge');
+  });
+  it('distinguishes direct, carried, and invalidated approval provenance', () => {
+    expect(verdictProvenance({ decision: 'approve', reviewerId: 'r', revision: 2 }).summary).toContain('Direct approve');
+    expect(verdictProvenance({ parentVerdictId: 'v1', deltaResultId: 'd1' }).summary).toContain('delta evidence d1');
+    expect(verdictProvenance({ carryInvalidation: 'head changed' }).summary).toContain('head changed');
+  });
+  it('keeps open findings unresolved until a pending repair exists', () => {
+    const findings = [{ findingId: 'f1', status: 'open' }];
+    expect(repairStatus(findings, []).status).toBe('unresolved');
+    expect(repairStatus(findings, [{ roundId: 'r1', status: 'pending' }]).status).toBe('pending-review');
+    expect(repairStatus([], []).status).toBe('resolved');
+  });
 });
 
 describe('Fleet desk DOM', () => {
@@ -58,6 +99,10 @@ describe('Fleet desk DOM', () => {
     let snapshotVersion = 7;
     let eventVersion = 7;
     let releaseSnapshot8: (() => void) | undefined;
+    let delayNextSnapshot8 = true;
+    let mutationVersion = 8;
+    let claimConflict = false;
+    let interaction = false;
     const history = [
       { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
       { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
@@ -77,7 +122,8 @@ describe('Fleet desk DOM', () => {
       } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
       else if (url.endsWith('/snapshot')) {
         if (token === 'Bearer restricted') { status = 403; body = { error: { code: 'FORBIDDEN', message: 'no scope' } }; }
-        else if (snapshotVersion === 8) return await new Promise<Response>(resolve => {
+        else if (snapshotVersion === 8 && delayNextSnapshot8) return await new Promise<Response>(resolve => {
+          delayNextSnapshot8 = false;
           releaseSnapshot8 = () => resolve(new Response(JSON.stringify({ ...fixture, version: 8,
             data: { projections: { ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
               changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x' ? { ...c, intentText: 'Stale version 8' } : c) } } } })));
@@ -86,6 +132,10 @@ describe('Fleet desk DOM', () => {
           ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
             changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x'
               ? { ...c, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c) },
+          queue: interaction ? { ...fixture.data.projections.queue, diagnosis: { reason: 'INTERACTION', blame: ['x', 'y'] },
+            diagnosticResults: [{ jobId: 'job-1', memberIds: ['x'], outcome: 'PASS', sequence: 4 },
+              { jobId: 'job-2', memberIds: ['y'], outcome: 'PASS', sequence: 5 },
+              { jobId: 'job-3', memberIds: ['x', 'y'], outcome: 'FAIL', sequence: 6 }] } : fixture.data.projections.queue,
         } } };
       }
       else if (url.includes('/events?')) body = { data: { items: eventVersion === 6
@@ -100,7 +150,12 @@ describe('Fleet desk DOM', () => {
       else if (url.endsWith('/changes/x/verdicts?cursor=MTAw')) body = { data: { items: [
         { verdictId: 'v101', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 2, findingSetVersion: 0, parentVerdictId: null },
       ], nextCursor: null } };
-      else body = { data: {}, version: 8 };
+      else if (url.endsWith('/leases') && init.method === 'POST' && claimConflict) {
+        status = 409; body = { error: { code: 'LEASE_CONFLICT', message: 'Already claimed', details: {
+          holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: Date.now() + 120000,
+        } } };
+      }
+      else body = { data: {}, version: mutationVersion };
       return new Response(JSON.stringify(body), { status });
     }) as any;
     try {
@@ -134,6 +189,12 @@ describe('Fleet desk DOM', () => {
       expect(byId('inbox-detail').textContent).toContain('Approval history');
       expect(byId('inbox-detail').textContent).toContain('Direct approve');
       expect(byId('inbox-detail').querySelector('.inbox-actions')).toBeTruthy();
+      const inboxManifest = byId('inbox-detail').querySelector('input[name="manifest"]') as HTMLInputElement;
+      inboxManifest.value = 'sha256:in-progress'; inboxManifest.focus();
+      tick!(); await flush();
+      expect(byId('inbox-detail').querySelector('input[name="manifest"]')).toBe(inboxManifest);
+      expect(inboxManifest.value).toBe('sha256:in-progress');
+      expect(doc.activeElement).toBe(inboxManifest);
       (byId('inbox-detail').querySelector('button') as HTMLButtonElement).click();
       expect(byId('inbox-view').hidden).toBe(true);
       expect(byId('change-detail').hidden).toBe(false);
@@ -141,6 +202,11 @@ describe('Fleet desk DOM', () => {
       expect(byId('finding-list').textContent).toContain('Repair state: unresolved');
       expect(byId('runner-list').textContent).toContain('checker-1 (checker) · idle');
       expect(byId('runner-summary').textContent).toContain('checker-1');
+      expect(byId('lease-list').textContent).toContain('Intent: Protect retry path');
+      expect(byId('lease-list').textContent).toContain('Fence: 3');
+      expect(byId('lease-list').textContent).toContain('Expires:');
+      expect(byId('queue-tree').textContent).toContain('Stack job: job-2 · Members: x, y');
+      expect(byId('queue-tree').textContent).toContain('Diagnostic job job-1 · Members: x, y · Outcome: FAIL');
       expect(byId('replay-body').textContent).toContain('Historical simulation: unavailable');
       expect(byId('event-log').textContent).toContain('change.published by agent-a (v7)');
       expect(byId('verdict-list').querySelector('a[href="#event-1"]')?.textContent).toBe('delta-1');
@@ -159,6 +225,10 @@ describe('Fleet desk DOM', () => {
       const manifest = doc.querySelector('input[name="manifest"]') as HTMLInputElement;
       const evidence = doc.querySelector('input[name="evidence"]') as HTMLInputElement;
       manifest.value = 'sha256:manifest'; evidence.value = 'sha256:evidence';
+      manifest.focus(); tick!(); await flush();
+      expect(doc.querySelector('input[name="manifest"]')).toBe(manifest);
+      expect(manifest.value).toBe('sha256:manifest');
+      expect(doc.activeElement).toBe(manifest);
       (byId('action-panel').querySelector('form') as HTMLFormElement).dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush();
       const request = requests.find(r => r.url === '/v1/repos/demo/changes/x/verdicts' && r.init.method === 'POST')!;
@@ -194,6 +264,11 @@ describe('Fleet desk DOM', () => {
       expect(JSON.parse(String(claim.init.body))).toEqual({ changeId: 'x', unitKeys: ['fn:retry'], intentText: 'Cap retries' });
       expect(new Headers(claim.init.headers).get('idempotency-key')).toBeTruthy();
       await flush();
+      claimConflict = true;
+      claimForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(byId('mutation-status').textContent).toContain('Holder: agent-a; intent: Protect retry path; expires:');
+      claimConflict = false;
       (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       const enqueueForm = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
       (enqueueForm.querySelector('[name="verdictId"]') as HTMLInputElement).value = 'v101';
@@ -232,15 +307,26 @@ describe('Fleet desk DOM', () => {
       eventVersion = 8; snapshotVersion = 8;
       tick!(); await flush();
       expect(releaseSnapshot8).toBeTypeOf('function');
-      snapshotVersion = 9; eventVersion = 9;
+      // The mutation itself reports v9 while both the refresh and older poll still see v8.
+      mutationVersion = 9; eventVersion = 9;
       (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       const raceClaim = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Claim'))!;
       raceClaim.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
-      expect(byId('work-board').textContent).toContain('Current version 9');
       releaseSnapshot8!(); await flush();
+      expect(byId('work-board').textContent).toContain('Cap retries');
+      expect(byId('work-board').textContent).not.toContain('Stale version 8');
+      snapshotVersion = 9;
+      raceClaim.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      expect(byId('work-board').textContent).toContain('Current version 9');
       expect(byId('work-board').textContent).toContain('Current version 9');
       expect(byId('work-board').textContent).not.toContain('Stale version 8');
+      interaction = true; snapshotVersion = 10; eventVersion = 10;
+      tick!(); await flush(); await flush();
+      expect(byId('diagnosis').textContent).toContain('Interaction set failed together: x, y');
+      expect(byId('queue-tree').textContent).toContain('Diagnostic job job-3 · Members: x, y · Outcome: FAIL');
+      expect(byId('queue-tree').querySelectorAll('li.highlight')).toHaveLength(3);
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
     } finally {
@@ -271,5 +357,48 @@ describe('layout and token contract', () => {
       expect(new Headers(seen[0].init.headers).get('authorization')).toBe('Bearer secret');
       expect(seen[0].url).not.toContain('secret');
     } finally { clearSessionToken(); }
+  });
+  it('never sends credentials to an absolute or protocol-relative URL', async () => {
+    setSessionToken('secret');
+    try {
+      for (const path of ['https://example.com/v1/me', '//example.com/v1/me', '/other']) {
+        await expect(apiFetch(path, {}, () => { throw new Error('fetch must not run'); })).rejects.toMatchObject({ code: 'INVALID_PATH' });
+      }
+    } finally { clearSessionToken(); }
+  });
+  it('preserves only safe lease-conflict details', async () => {
+    await expect(apiFetch('/v1/repos/demo/leases', {}, async () => new Response(JSON.stringify({ error: {
+      code: 'LEASE_CONFLICT', message: 'Claim refused', details: { holderId: 'agent-a', intentText: 'Protect retry path',
+        expiresAt: 1700000000000, unrelatedSecret: 'never expose' },
+    } }), { status: 409 }))).rejects.toMatchObject({ status: 409, details: {
+      holderId: 'agent-a', intentText: 'Protect retry path', expiresAt: 1700000000000,
+    } });
+  });
+  it('redacts credential-shaped error text and drops arbitrary details', async () => {
+    try {
+      await apiFetch('/v1/me', {}, async () => new Response(JSON.stringify({ error: {
+        code: 'FORBIDDEN', message: 'Bearer secret?token=hidden', details: { private: 'value' },
+      } }), { status: 403 }));
+      throw new Error('expected rejection');
+    } catch (error) {
+      expect(redactError(error).message).not.toContain('secret');
+      expect((error as any).details).toBeNull();
+    }
+  });
+  it('labels network failures and rejects them as successes', async () => {
+    await expect(apiFetch('/v1/me', {}, async () => { throw new Error('offline'); })).rejects.toMatchObject({
+      status: 0, code: 'NETWORK_UNREACHABLE', retryable: true,
+    });
+  });
+  it('keeps authentication and authorization failures distinct', async () => {
+    for (const [status, code] of [[401, 'UNAUTHORIZED'], [403, 'FORBIDDEN']] as const) {
+      await expect(apiFetch('/v1/me', {}, async () => new Response(JSON.stringify({ error: { code } }), { status })))
+        .rejects.toMatchObject({ status, code });
+    }
+  });
+  it('limits viewer actions while retaining reviewer verdict access', () => {
+    expect(allowedActions(['viewer'])).toEqual({ claim: false, enqueue: false, withdraw: false, verdict: false });
+    expect(allowedActions(['reviewer']).verdict).toBe(true);
+    expect(allowedActions(['agent']).verdict).toBe(false);
   });
 });
