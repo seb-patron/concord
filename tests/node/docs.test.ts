@@ -7,12 +7,15 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
+import { getCurrentTest } from 'vitest/suite';
 import { wranglerStateDir } from '../../demo/scenarios';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
 const children: ChildProcess[] = [];
 const directories: string[] = [];
+const capturedNpmTimeout = 30_000;
+const capturedBlockTimeout = 30_000;
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -75,7 +78,7 @@ async function capturedNpm(exports: string[], command: string, env: NodeJS.Proce
     '}',
     ...exports, command,
   ].join('\n');
-  const { stdout } = await execFile('sh', ['-c', script], { cwd, env, timeout: 30_000 });
+  const { stdout } = await execFile('sh', ['-c', script], { cwd, env, timeout: capturedNpmTimeout });
   const lines = stdout.trimEnd().split('\n');
   return { args: lines.filter(line => line.startsWith('ARG:')).map(line => line.slice(4)),
     values: lines.filter(line => line.startsWith('ENV:')).map(line => line.slice(4)) };
@@ -105,7 +108,7 @@ if (command === 'npm' && process.argv.slice(2).join(' ').startsWith('run demo --
   }
   const cleanEnv = { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: root, TMPDIR: root, CAPTURE_LOG: log };
   await execFile('env', ['-i', ...Object.entries(cleanEnv).map(([key, value]) => `${key}=${value}`),
-    'sh', '-ec', block], { cwd, timeout: 30_000 });
+    'sh', '-ec', block], { cwd, timeout: capturedBlockTimeout });
   return (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as ShellCall);
 }
 
@@ -214,6 +217,8 @@ describe('UI documentation', () => {
 
 describe('documented demo commands', () => {
   it('runs every 12c-tagged block in written order from a clean shell', async () => {
+    // Seven tagged blocks, then the deploy seed and the moved-token mutation.
+    expect(getCurrentTest()?.timeout).toBeGreaterThanOrEqual(9 * capturedBlockTimeout);
     const root = await externalTempDir('concord-docs-shell-');
     const runDir = join(root, 'concord-demo-01');
     for (const path of ['README.md', 'docs/DEMO.md', 'docs/deploy.md']) {
@@ -232,7 +237,7 @@ describe('documented demo commands', () => {
     const mutatedCalls = await capturedBlock(movedToken, root);
     expect(() => assertCallEnvironment(mutatedCalls, movedToken, runDir)).toThrow();
     expect(mutatedCalls.find(call => call.args[3] === 'seed')?.env.CONCORD_TOKEN).toBeUndefined();
-  }, 60_000);
+  }, 9 * capturedBlockTimeout + 30_000);
 
   it('keeps every documented Wrangler dev command persistent inside the clone', async () => {
     async function markdownFiles(dir: string): Promise<string[]> {
@@ -299,6 +304,8 @@ describe('documented demo commands', () => {
     const deploy = await taggedBlocks('docs/deploy.md');
     const blocks = [...readme, ...demo, ...deploy];
     const env = { ...freshShellEnv(process.env), TMPDIR: root };
+    // All tagged blocks, one first-deploy call, twenty commands, two manual runners, two production runners.
+    expect(getCurrentTest()?.timeout).toBeGreaterThanOrEqual((blocks.length + 1 + 20 + 2 + 2) * capturedNpmTimeout);
     expect(relative(cwd, root).startsWith('..')).toBe(true);
     expect(readme).toHaveLength(5);
     for (const block of readme) expect(block).toContain('cd "$(pwd -P)"');
@@ -385,7 +392,7 @@ describe('documented demo commands', () => {
     expect(productionPromoter.args).toEqual(['run', 'runner', '--', '--repo', 'repo-id', '--role', 'promoter',
       '--profile-digest', 'profile-digest', '--once']);
     expect(productionPromoter.values[4]).toBe('promoter-token');
-  }, 60_000);
+  }, 32 * capturedNpmTimeout + 30_000);
 
   it('runs every 12c-tagged local command against the real bridge and Worker', async () => {
     const root = await externalTempDir('concord-docs-');
