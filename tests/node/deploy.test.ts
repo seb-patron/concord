@@ -106,7 +106,15 @@ describe('deployment preflight', () => {
 
   it('documents a safe trusted-config cutover in both directions', async () => {
     const instructions = await readFile('docs/deploy.md', 'utf8');
+    const firstDeploy = instructions.split('## Provision secrets and deploy\n')[1]?.split('\n## ')[0];
+    const release = firstDeploy?.split('### Refresh trusted digests before creating repositories')[0];
+    const refresh = instructions.split('### Refresh trusted digests before creating repositories\n')[1]?.split('\n### ')[0];
     const section = instructions.split('### Large trusted configurations\n')[1]?.split('\n## ')[0];
+    const smoke = instructions.split('## Deployed smoke and evidence\n')[1]?.split('\n## ')[0];
+    expect(firstDeploy).toMatch(/secrets file below provisions `TRUSTED_CONFIG` in the single-secret format[\s\S]*If the Worker will use `TRUSTED_CONFIG_PARTS`[\s\S]*never add parts while `TRUSTED_CONFIG` remains active/);
+    expect(release).toMatch(/`TRUSTED_CONFIG` command in this versioned flow applies only when the Worker uses the single-secret format[\s\S]*For a Worker using `TRUSTED_CONFIG_PARTS`, refresh the config by regenerating the bulk file and running `npx wrangler secret bulk`[\s\S]*do not put `TRUSTED_CONFIG`/);
+    expect(refresh).toMatch(/If the Worker uses the single-secret format, install the regenerated config with `npx wrangler secret put TRUSTED_CONFIG[\s\S]*If it uses `TRUSTED_CONFIG_PARTS`, regenerate the bulk file[\s\S]*run `npx wrangler secret bulk` instead; do not put `TRUSTED_CONFIG`/);
+    expect(smoke).toMatch(/For a Worker using the single-secret format, upload `TRUSTED_CONFIG`[\s\S]*for one using `TRUSTED_CONFIG_PARTS`, regenerate the bulk file and run `npx wrangler secret bulk` without putting `TRUSTED_CONFIG`/);
     expect(section).toBeDefined();
     expect(section).toMatch(/```sh\nnpx wrangler secret delete TRUSTED_CONFIG --config wrangler\.jsonc\nnpx wrangler secret bulk "\$TRUSTED_PARTS_FILE" --config wrangler\.jsonc\n```/);
     expect(section).toMatch(/```sh\nnpx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler\.jsonc\nnpx wrangler secret put TRUSTED_CONFIG --config wrangler\.jsonc < "\$TRUSTED_CONFIG_FILE"\n```/);
