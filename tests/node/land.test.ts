@@ -14,7 +14,7 @@ async function git(dir: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFile('git', args, { cwd: dir, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.test', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.test' } });
   return stdout.trim();
 }
-afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 
 async function source(): Promise<{ dir: string; commit: string; parent: string }> {
   const dir = await temp();
@@ -42,12 +42,56 @@ describe('land input and evidence gates', () => {
       client: { request } as never })).rejects.toThrow('OUTSIDE_ALLOWED_FILES: families.tsv, renamed.tsv');
     expect(request).not.toHaveBeenCalled();
   });
-  it('requires one exact reviewed SHA and an approval line', () => {
+  it('requires one unambiguous approval line naming the published SHA', () => {
     const head = 'a'.repeat(40);
-    expect(approvedHead(`reviewed ${head}\nAPPROVED for merge`, head)).toBe(true);
-    expect(approvedHead(`reviewed ${'b'.repeat(40)}\nAPPROVED for merge`, head)).toBe(false);
-    expect(approvedHead(`reviewed ${head} and ${'b'.repeat(40)}\nAPPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`reviewed ${head}\nAPPROVED for merge: ${head}`, head)).toBe(true);
+    expect(approvedHead(`APPROVED for merge: ${'b'.repeat(40)}`, head)).toBe(false);
+    expect(approvedHead(`reviewed ${'b'.repeat(40)}\nAPPROVED for merge: ${head}`, head)).toBe(false);
     expect(approvedHead(`reviewed ${head}`, head)).toBe(false);
+    expect(approvedHead(`APPROVED for merge: ${head}\nNOT APPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`APPROVED for merge: ${head}\nVERDICT: REQUEST CHANGES`, head)).toBe(false);
+    expect(approvedHead(`APPROVED for merge: ${head}\nVERDICT: REJECT`, head)).toBe(false);
+    expect(approvedHead(`VERDICT: REQUEST CHANGES\n> APPROVED for merge: ${head}`, head)).toBe(false);
+    expect(approvedHead(`> APPROVED for merge: ${head}`, head)).toBe(false);
+    expect(approvedHead(`APPROVED for merge: ${head}\n> APPROVED for merge: ${head}`, head)).toBe(false);
+    expect(approvedHead(`"APPROVED for merge: ${head}"`, head)).toBe(false);
+    expect(approvedHead(`APPROVED for merge: ${head}\nAPPROVED for merge: ${head}`, head)).toBe(false);
+  });
+  it('rejects conflicting AW commit and allowed-file overrides before any API request', async () => {
+    const { dir, commit } = await source();
+    const run = await temp();
+    await writeFile(join(run, 'status.json'), JSON.stringify({ validated_sha: commit, worktree: dir, job_id: 'run_123' }));
+    await writeFile(join(run, 'work-spec.md'), 'Goal:\n  Outcome: Ship the command\n');
+    await writeFile(join(run, 'allowed-files.txt'), 'first.txt\nfamilies.tsv\nrenamed.tsv\n');
+    await writeFile(join(dir, 'first.txt'), 'later\n');
+    await git(dir, 'add', 'first.txt'); await git(dir, 'commit', '-qm', 'other commit');
+    const other = await git(dir, 'rev-parse', 'HEAD');
+    const wider = join(run, 'wider.txt'); await writeFile(wider, 'first.txt\nfamilies.tsv\nrenamed.tsv\nother.txt\n');
+    const request = vi.fn();
+    const base = { repo: 'demo', awRun: run, client: { request } as never };
+    await expect(land({ ...base, commit: other })).rejects.toThrow('--commit conflicts with AW validated_sha');
+    await expect(land({ ...base, allowedFiles: wider })).rejects.toThrow('--allowed-files conflicts with AW run allowed-files.txt');
+    expect(request).not.toHaveBeenCalled();
+  });
+  it('refuses 17 normalized units before creating a change or claiming leases', async () => {
+    const dir = await temp(); await git(dir, 'init', '-q');
+    const names = Array.from({ length: 17 }, (_, index) => `file-${index}.txt`);
+    for (const name of names) await writeFile(join(dir, name), 'before\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    for (const name of names) await writeFile(join(dir, name), 'after\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'candidate');
+    const commit = await git(dir, 'rev-parse', 'HEAD');
+    const allowed = join(await temp(), 'allowed.txt'); await writeFile(allowed, names.join('\n') + '\n');
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: 'a'.repeat(40) } };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [] } } } };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-test'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    await expect(land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+      client: { request } as never })).rejects.toThrow('LAND_TOO_MANY_UNITS: 17 units > 16; split the change');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.every(([method]) => method === 'GET')).toBe(true);
   });
   it('reads the validated AW SHA and stable intent key', async () => {
     const dir = await temp(); const sha = 'a'.repeat(40);
@@ -138,7 +182,8 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     timeoutMs: 10_000, maxOutputBytes: 4096, toolchainFile: '/bin/sh', ...settings };
   const profile = { ...profileInput, digest: await digest(profileInput) };
   const profilePath = join(dir, 'profile.json'); await writeFile(profilePath, JSON.stringify(profile));
-  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'shared.txt'].map(file => [`file:${file}`, {
+  const bulkFiles = Array.from({ length: 15 }, (_, index) => `bulk-${index}.txt`);
+  const units = Object.fromEntries(['check.sh', 'a.txt', 'b.txt', 'shared.txt', ...bulkFiles].map(file => [`file:${file}`, {
     canonicalKey: `file:${file}`, file, resources: [], dependencyKeys: [],
   }]));
   const policyInput = { id: 'generic-land', version: 1, checkerId: 'generic-land', checkerDigest: binary,
@@ -189,6 +234,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await writeFile(join(seed, 'check.sh'), 'exit 0\n');
   await writeFile(join(seed, 'a.txt'), 'a=0\n');
   await writeFile(join(seed, 'b.txt'), 'b=0\n');
+  for (const file of bulkFiles) await writeFile(join(seed, file), 'before\n');
   await writeFile(join(seed, 'shared.txt'), Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n') + '\n');
   await git(seed, 'add', '.'); await git(seed, 'commit', '-qm', 'seed');
   const imported = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'import',
@@ -200,19 +246,21 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const sourceDir = await temp();
   await git(sourceDir, 'clone', '-q', '-b', 'main', canonical, '.');
   await writeFile(join(sourceDir, 'a.txt'), 'a=1\n');
+  for (const file of bulkFiles) await writeFile(join(sourceDir, file), 'after\n');
   await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'agent update');
   const commit = await git(sourceDir, 'rev-parse', 'HEAD');
-  const allowed = join(dir, 'allowed.txt'); await writeFile(allowed, 'a.txt\n');
-  const evidence = join(dir, 'review.txt'); await writeFile(evidence, `Review of ${commit}\nAPPROVED for merge\n`);
+  const allowed = join(dir, 'allowed.txt'); await writeFile(allowed, ['a.txt', ...bulkFiles].join('\n') + '\n');
+  const evidence = join(dir, 'review.txt'); await writeFile(evidence, `Review of ${commit}\nAPPROVED for merge: ${commit}\n`);
   const baseArgs = ['--repo', 'landdemo', '--source', sourceDir, '--commit', commit, '--intent-key', 'generic-task',
     '--intent', 'Update a value', '--allowed-files', allowed, '--wait-seconds', '150', '--json'];
   const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
   const first = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs],
     { cwd: root, env: landEnv, timeout: 155_000 }));
   expect(first.stdout).toContain('"state":"awaiting-review"');
+  expect(first.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.state === 'leased').unitKeys).toHaveLength(16);
   const beforeResume = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'generic-task');
   const wrongEvidence = join(dir, 'wrong-review.txt');
-  await writeFile(wrongEvidence, `Review of ${'f'.repeat(40)}\nAPPROVED for merge\n`);
+  await writeFile(wrongEvidence, `APPROVED for merge: ${'f'.repeat(40)}\n`);
   await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...baseArgs,
     '--review-evidence', wrongEvidence], { cwd: root, env: landEnv, timeout: 30_000 }))
     .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') });
@@ -238,7 +286,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     await git(checkout, 'add', file); await git(checkout, 'commit', '-qm', `parallel ${file}`);
     const oid = await git(checkout, 'rev-parse', 'HEAD');
     const paths = join(dir, `allowed-parallel-${index}.txt`); await writeFile(paths, `${file}\n`);
-    const review = join(dir, `review-parallel-${index}.txt`); await writeFile(review, `${oid}\nAPPROVED for merge\n`);
+    const review = join(dir, `review-parallel-${index}.txt`); await writeFile(review, `APPROVED for merge: ${oid}\n`);
     return { args: ['--repo', 'landdemo', '--source', checkout, '--commit', oid, '--intent-key', `parallel-${index}`,
       '--intent', `Update ${file}`, '--allowed-files', paths, '--wait-seconds', '150', '--json'], review,
       env: { ...environment, CONCORD_TOKEN: index ? 'local-agent-c' : 'local-agent-b', CONCORD_REVIEWER_TOKEN: 'local-reviewer' } };
@@ -258,7 +306,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     await git(checkout, 'add', 'shared.txt'); await git(checkout, 'commit', '-qm', `same file ${index}`);
     const oid = await git(checkout, 'rev-parse', 'HEAD');
     const paths = join(dir, `allowed-shared-${index}.txt`); await writeFile(paths, 'shared.txt\n');
-    const review = join(dir, `review-shared-${index}.txt`); await writeFile(review, `${oid}\nAPPROVED for merge\n`);
+    const review = join(dir, `review-shared-${index}.txt`); await writeFile(review, `APPROVED for merge: ${oid}\n`);
     return { args: ['--repo', 'landdemo', '--source', checkout, '--commit', oid, '--intent-key', `shared-${index}`,
       '--intent', `Edit shared line ${line}`, '--allowed-files', paths, '--wait-seconds', '150', '--json'], review,
       env: { ...environment, CONCORD_TOKEN: index ? 'local-agent-c' : 'local-agent-b', CONCORD_REVIEWER_TOKEN: 'local-reviewer' } };
@@ -276,7 +324,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const secondEvents = secondResult.stdout.trim().split('\n').map(line => JSON.parse(line));
   const approved = secondEvents.find(item => item.state === 'awaiting-review');
   expect(approved.headOid).toMatch(/^[a-f0-9]{40}$/);
-  await writeFile(sameFile[1].review, `${approved.headOid}\nAPPROVED for merge\n`);
+  await writeFile(sameFile[1].review, `APPROVED for merge: ${approved.headOid}\n`);
   const secondLanded = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
     ...sameFile[1].args, '--review-evidence', sameFile[1].review],
   { cwd: root, env: sameFile[1].env, timeout: 155_000 }));

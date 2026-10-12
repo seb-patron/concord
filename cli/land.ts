@@ -147,11 +147,25 @@ async function prepareHead(source: string, commit: string, parent: string, base:
   } catch (error) { await rm(work, { recursive: true, force: true }); throw error; }
 }
 export function approvedHead(evidence: string, head: string): boolean {
+  const lines = evidence.split(/\r?\n/);
+  const approval = /^APPROVED for merge: ([a-f0-9]{40}(?:[a-f0-9]{24})?)$/i;
+  const approvals = lines.filter(line => approval.test(line));
   const named = [...new Set((evidence.match(/\b[a-f0-9]{40}(?:[a-f0-9]{24})?\b/gi) ?? []).map(found => found.toLowerCase()))];
-  return /APPROVED for merge/i.test(evidence) && named.length === 1 && named[0] === head.toLowerCase();
+  return approvals.length === 1 && approval.exec(approvals[0])?.[1].toLowerCase() === head.toLowerCase() &&
+    named.length === 1 && named[0] === head.toLowerCase() &&
+    !/\b(?:NOT\s+APPROVED|REQUEST\s+CHANGES|REJECT(?:ED|ION)?)\b/i.test(evidence) &&
+    !lines.some(line => /APPROVED for merge/i.test(line) && !approval.test(line));
 }
 export async function land(input: LandOptions): Promise<Obj> {
-  const options = input.awRun ? { ...await readAwRun(input.awRun), ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) } : input;
+  let options = input;
+  if (input.awRun) {
+    const run = await readAwRun(input.awRun);
+    if (input.commit !== undefined && input.commit.toLowerCase() !== run.commit.toLowerCase())
+      throw new ConcordError('--commit conflicts with AW validated_sha', 'usage');
+    if (input.allowedFiles !== undefined && resolve(input.allowedFiles) !== resolve(run.allowedFiles))
+      throw new ConcordError('--allowed-files conflicts with AW run allowed-files.txt', 'usage');
+    options = { ...run, ...input, commit: run.commit, allowedFiles: run.allowedFiles };
+  }
   const repo = required(options.repo, '--repo'); const source = resolve(required(options.source, '--source'));
   const commit = required(options.commit, '--commit'); const intentKey = required(options.intentKey, '--intent-key');
   const intent = required(options.intent, '--intent'); const allowedFile = required(options.allowedFiles, '--allowed-files');
@@ -178,6 +192,7 @@ export async function land(input: LandOptions): Promise<Obj> {
   const policy = (initialSnapshot.projections?.runners?.jobs ?? []).map((job: Obj) => job.unitPolicy)
     .find((item: Obj | undefined) => item?.digest === repository.policyDigest);
   const units = await unitKeys(source, changed.parent, commit, changed.files, policy);
+  if (units.length > 16) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${units.length} units > 16; split the change`, 'usage');
   const branch = `refs/heads/land/${hash(intentKey).slice(7, 23)}`;
   const createBody = { intentKey, intentText: intent, baseOid: repository.observedCanonicalOid, branch, unitKeys: units, dependencyChangeIds: options.dependsOn ?? [] };
   let created = (await api(client, `${root}/changes`, createBody)).data;
