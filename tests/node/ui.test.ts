@@ -148,6 +148,7 @@ describe('Fleet desk DOM', () => {
     let claimConflict = false;
     let interaction = false;
     let changeStatus = 'ready';
+    let ownerPreview = false;
     const history = [
       { verdictId: 'v1', changeId: 'x', reviewerId: 'other-reviewer', decision: 'approve', revision: 1, findingSetVersion: 0, parentVerdictId: null },
       { verdictId: 'v2', changeId: 'x', reviewerId: 'other-reviewer', decision: 'reject', revision: 1, findingSetVersion: 0, parentVerdictId: 'v1', deltaResultId: 'delta-1' },
@@ -163,6 +164,7 @@ describe('Fleet desk DOM', () => {
         if (token === 'Bearer bad') { status = 401; body = { error: { code: 'UNAUTHORIZED', message: 'bad token' } }; }
         else if (token === 'Bearer local-agent-a') { status = 404; body = { error: { code: 'NOT_FOUND' } }; }
         else if (token === 'Bearer empty') body = { data: { principalId: 'owner', roles: ['owner'], repoIds: '*', model: null } };
+        else if (token === 'Bearer local-owner') body = { data: { principalId: 'owner', roles: ['owner'], repoIds: '*', model: null } };
         else body = { data: { principalId: 'reviewer', roles: ['reviewer'], repoIds: ['demo'], model: null } };
       } else if (url === '/v1/repos') body = { data: { items: token === 'Bearer empty' ? [] : [{ repoId: 'demo', displayName: 'Demo' }] } };
       else if (url.endsWith('/snapshot')) {
@@ -184,13 +186,17 @@ describe('Fleet desk DOM', () => {
         else body = { ...fixture, version: snapshotVersion, data: { projections: {
           ...fixture.data.projections, repos: { ...fixture.data.projections.repos,
             changes: fixture.data.projections.repos.changes.map(c => c.changeId === 'x'
-              ? { ...c, status: changeStatus, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText } : c) },
+              ? { ...c, status: changeStatus, intentText: snapshotVersion === 9 ? 'Current version 9' : c.intentText,
+                ...(ownerPreview ? { awaitingHumanApproval: ['AGENTS.md'], reviewManifestDigest: 'sha256:manifest',
+                  protectedDiffSummary: [{ beforePath: 'AGENTS.md', afterPath: 'AGENTS.md', beforeDigest: 'old', afterDigest: 'new' }] } : {}) } : c) },
           queue: interaction ? { ...fixture.data.projections.queue, diagnosis: { reason: 'INTERACTION', blame: ['x', 'y'] },
             diagnosticResults: [{ jobId: 'job-1', memberIds: ['x'], outcome: 'PASS', sequence: 4 },
               { jobId: 'job-2', memberIds: ['y'], outcome: 'PASS', sequence: 5 },
               { jobId: 'job-3', memberIds: ['x', 'y'], outcome: 'FAIL', sequence: 6 }] } : fixture.data.projections.queue,
         } } };
       }
+      else if (url.endsWith('/changes/x/human-approval/diff')) body = { data: { revision: 2,
+        reviewManifestDigest: 'sha256:manifest', items: [{ beforePath: 'AGENTS.md', afterPath: 'AGENTS.md', summary: '- old rule\n+ new rule' }] } };
       else if (url.includes('/events?')) body = { data: { items: eventVersion === 6
         ? [{ sequence: 2, kind: 'stale.event', actorId: 'old', version: 6, relatedIds: ['x'] }]
         : eventVersion === 7 && url.includes('after=0')
@@ -442,6 +448,16 @@ describe('Fleet desk DOM', () => {
       expect(byId('action-panel').querySelectorAll('form')).toHaveLength(0);
       eventVersion = 6; tick!(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
+      byId('token-clear').click();
+      ownerPreview = true; changeStatus = 'ready'; snapshotVersion = 13; eventVersion = 13;
+      (byId('token-input') as HTMLInputElement).value = 'local-owner';
+      byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush(); await flush();
+      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      await flush();
+      expect(byId('action-panel').querySelector('.protected-preview')?.textContent).toContain('- old rule\n+ new rule');
+      expect(requests.some(request => request.url.endsWith('/changes/x/human-approval/diff'))).toBe(true);
+      expect((byId('action-panel').querySelector('.human-approval button') as HTMLButtonElement).disabled).toBe(false);
     } finally {
       releaseSnapshot10?.();
       clearSessionToken();

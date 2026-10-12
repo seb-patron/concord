@@ -127,6 +127,24 @@ describe('semantic lease identities', () => {
     }
     expect((await claim(repo, 'local-agent-a', 'free', ['file:tests/../bad.ts'], 'bad')).status).toBe(422);
   });
+  it('refuses renewal when an owner protects an already leased file', async () => {
+    setupPolicy();
+    const repo = 'lease_newly_protected';
+    const grant = await claim(repo, 'local-agent-a', 'first', ['symbol:sub_02000100'], 'first');
+    expect(grant.status).toBe(201);
+    const lease = (await responseBody(grant)).data.leases[0];
+    const stub = stubFor(repo);
+    await runInDurableObject(stub, async (_instance, state) => {
+      sqlState(state.storage.sql).put('module:settings:record', { version: 2, protectedPaths: [
+        { pattern: 'src/code.c', level: 'human-only' },
+      ] });
+    });
+    const renewPath = `${path(repo)}/${lease.leaseId}/renew`;
+    const refused = await fetchApi(mutation(renewPath, { expectedVersion: 1, fence: lease.fence }, 'protected-renew', 'local-agent-a'));
+    expect(refused.status).toBe(409);
+    expect((await responseBody(refused)).error.code).toBe('PATH_PROTECTED');
+    expect((await listing(repo)).items.find((item: { leaseId: string }) => item.leaseId === lease.leaseId).fence).toBe(lease.fence);
+  });
   it('claims exact new paths under a prefix and conflicts only on the same path', async () => {
     policy.newFilePrefixes = ['tests/'];
     setupPolicy();

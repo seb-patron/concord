@@ -24,7 +24,7 @@ const isId = (value: unknown): value is Id => typeof value === 'string' && /^[A-
 const view = (context: ModuleContext, changeId: Id) => context.readChange?.(changeId) ?? reject(context, 'MODULE_UNAVAILABLE', 'Trusted change view unavailable');
 const storedVerdict = (context: ModuleContext, id: Id) => context.state.get<Verdict>(`verdict:${id}`);
 const ids = (context: ModuleContext, changeId: Id) => context.state.get<Id[]>(`list:${changeId}`) ?? [];
-interface HumanApproval { revision: number; headOid: string; manifestDigest: Digest; ownerId: Id; decision: 'approve' | 'reject'; version: number; patterns: string[] }
+interface HumanApproval { revision: number; headOid: string; manifestDigest: Digest; evidenceDigest: Digest; ownerId: Id; decision: 'approve' | 'reject'; version: number; patterns: string[] }
 export function humanApprovalStatus(context: ModuleContext, changeId: Id, revision: number) {
   const record = sqlState(context.sql).get<InspectedRevision>(`module:verdicts:inspection:${changeId}`);
   if (!record || record.revision !== revision) return { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null };
@@ -205,10 +205,60 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
 const verdictPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/verdicts$/;
 const carryPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/carry$/;
 const humanPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/human-approval$/;
+const humanDiffPath = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})\/changes\/([A-Za-z0-9_-]{1,64})\/human-approval\/diff$/;
+
+function textPreview(before: Uint8Array | null, after: Uint8Array | null): string {
+  const decode = (bytes: Uint8Array | null) => {
+    if (bytes === null) return '';
+    if (bytes.length > 256 * 1024) return null;
+    try {
+      const value = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return value.includes('\0') ? null : value;
+    } catch { return null; }
+  };
+  const oldText = decode(before), newText = decode(after);
+  if (oldText === null || newText === null) return 'Binary or large file; inspect the repository diff before deciding.';
+  if (oldText === newText) return 'Text unchanged; path or mode changed.';
+  const oldLines = oldText.split('\n'), newLines = newText.split('\n');
+  let first = 0;
+  while (first < oldLines.length && first < newLines.length && oldLines[first] === newLines[first]) first++;
+  const start = Math.max(0, first - 2);
+  const end = Math.min(Math.max(oldLines.length, newLines.length), first + 10);
+  const output: string[] = [];
+  for (let i = start; i < end; i++) {
+    if (oldLines[i] === newLines[i]) output.push(`  ${oldLines[i] ?? ''}`);
+    else {
+      if (i < oldLines.length) output.push(`- ${oldLines[i]}`);
+      if (i < newLines.length) output.push(`+ ${newLines[i]}`);
+    }
+  }
+  if (end < Math.max(oldLines.length, newLines.length)) output.push('… more lines in repository diff');
+  return output.join('\n').slice(0, 4096);
+}
 
 export const verdicts: FeatureModule = {
   name: 'verdicts', migrations: [],
   routes: [
+    { method: 'GET', pattern: humanDiffPath, handle: async (context, _request, match) => {
+      requireRole(context.principal, 'owner');
+      const current = inspection(context, match[2]);
+      if (current.status === 'blocked') throw new HttpError(409, current.code, current.reason);
+      const record = current.value.record;
+      const units = record.reviewManifest.changedUnits.filter(unit =>
+        [unit.beforePath, unit.afterPath].some(path => !!path && protectionFor(context, path)?.level === 'human-approval'));
+      const items = await Promise.all(units.map(async unit => {
+        const before = unit.beforePath ? await context.storage.readFile(record.canonicalStorageName, record.candidate.baseOid, unit.beforePath) : null;
+        const after = unit.afterPath ? await context.storage.readFile(record.candidate.storageName, record.candidate.headOid, unit.afterPath) : null;
+        return { beforePath: unit.beforePath, afterPath: unit.afterPath,
+          summary: (unit.beforePath && before === null) || (unit.afterPath && after === null)
+            ? 'Preview unavailable; inspect the repository diff before deciding.' : textPreview(before, after) };
+      }));
+      return json({ revision: record.revision, reviewManifestDigest: record.reviewManifestDigest, items }, context.version());
+    } },
+    { method: 'GET', pattern: humanPath, handle: (context, _request, match) => {
+      requireRole(context.principal, 'owner');
+      return json({ items: context.state.get<HumanApproval[]>(`human-history:${match[2]}`) ?? [] }, context.version());
+    } },
     { method: 'POST', pattern: humanPath, handle: (context, _request, match, raw) => {
       requireRole(context.principal, 'owner');
       const body = raw as Record<string, unknown>;
@@ -222,11 +272,13 @@ export const verdicts: FeatureModule = {
       if (!matching.length) throw new HttpError(409, 'NO_HUMAN_APPROVAL_REQUIRED', 'No protected path needs owner approval');
       const version = context.nextVersion();
       const approval: HumanApproval = { revision: current.value.record.revision, headOid: current.value.record.candidate.headOid,
-        manifestDigest: current.value.record.reviewManifestDigest, ownerId: context.principal.principalId,
+        manifestDigest: current.value.record.reviewManifestDigest, evidenceDigest: body.evidenceDigest as Digest,
+        ownerId: context.principal.principalId,
         decision: body.decision as 'approve' | 'reject', version, patterns: matching.map(rule => rule.pattern) };
       context.state.put(`human:${changeId}`, approval);
+      context.state.put(`human-history:${changeId}`, [...(context.state.get<HumanApproval[]>(`human-history:${changeId}`) ?? []), approval]);
       const event = context.appendEvent('verdict.human_approval', [changeId], { decision: approval.decision,
-        revision: approval.revision, patterns: matching.map(rule => rule.pattern) }, version);
+        revision: approval.revision, evidenceDigest: approval.evidenceDigest, patterns: approval.patterns }, version);
       return json(approval, version, event.sequence, 201);
     } },
     { method: 'GET', pattern: verdictPath, handle: (context, request, match) => {

@@ -5,7 +5,7 @@ import worker from '../../src/worker';
 import type { ModuleContext, Principal } from '../../src/contracts';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { protectionFor, repoSettings } from '../../src/features/settings';
-import { humanApprovalStatus } from '../../src/features/verdicts';
+import { humanApprovalStatus, verdicts } from '../../src/features/verdicts';
 import { repos } from '../../src/features/repos';
 import { localFixtureConfig, sqlState } from '../../src/state';
 import { manifestDigest } from '../../src/verdicts/manifest';
@@ -40,7 +40,7 @@ describe('repository path settings', () => {
     } });
     try {
       const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${id}`));
-      await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
         const principal: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
         const context = (instance as unknown as { context(name: 'verdicts', principal: Principal, repoId: string): ModuleContext }).context('verdicts', principal, id);
         const store = sqlState(context.sql);
@@ -51,6 +51,14 @@ describe('repository path settings', () => {
           canonicalStorageName: 'canonical', policyId: 'local-demo', profileId: 'local-demo', reviewManifest: manifest,
           reviewManifestDigest: digest, outcome: 'PASS' });
         expect(humanApprovalStatus(context, changeId, 1).awaitingHumanApproval).toEqual(['**/*.md']);
+        const diffPath = `/v1/repos/${id}/changes/${changeId}/human-approval/diff`;
+        const diffRoute = verdicts.routes.find(route => route.method === 'GET' && route.pattern.test(diffPath))!;
+        const previewContext: ModuleContext = { ...context, storage: { ...context.storage,
+          readFile: async (_name, oid) => new TextEncoder().encode(oid === head ? 'rule: new\n' : 'rule: old\n'),
+        } as ModuleContext['storage'] };
+        const preview = await diffRoute.handle(previewContext, new Request(`https://concord.test${diffPath}`),
+          diffPath.match(diffRoute.pattern)!, null);
+        expect((await responseBody(preview)).data.items[0].summary).toContain('- rule: old\n+ rule: new');
       });
       const route = `/v1/repos/${id}/changes/${changeId}/human-approval`;
       const body = { expectedVersion: 1, revision: 1, reviewManifestDigest: digest, evidenceDigest: `sha256:${'3'.repeat(64)}`, decision: 'approve' };
@@ -58,10 +66,19 @@ describe('repository path settings', () => {
       expect(denied.status).toBe(403);
       const approved = await worker.fetch(mutation(route, body, crypto.randomUUID(), 'local-owner'), env);
       expect(approved.status).toBe(201);
+      const approvedBody = await responseBody(approved);
+      expect(approvedBody.data.evidenceDigest).toBe(body.evidenceDigest);
+      const rejectedDigest = `sha256:${'4'.repeat(64)}`;
+      const rejected = await worker.fetch(mutation(route, { ...body, expectedVersion: approvedBody.version,
+        evidenceDigest: rejectedDigest, decision: 'reject' }, crypto.randomUUID(), 'local-owner'), env);
+      expect(rejected.status).toBe(201);
+      const history = await worker.fetch(apiRequest(route, 'local-owner'), env);
+      expect((await responseBody(history)).data.items.map((item: { evidenceDigest: string; decision: string }) =>
+        [item.decision, item.evidenceDigest])).toEqual([['approve', body.evidenceDigest], ['reject', rejectedDigest]]);
       await runInDurableObject<RepoCoordinator, void>(stub, instance => {
         const principal: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
         const context = (instance as unknown as { context(name: 'verdicts', principal: Principal, repoId: string): ModuleContext }).context('verdicts', principal, id);
-        expect(humanApprovalStatus(context, changeId, 1).awaitingHumanApproval).toEqual([]);
+        expect(humanApprovalStatus(context, changeId, 1).awaitingHumanApproval).toEqual(['**/*.md']);
         const store = sqlState(context.sql);
         store.put('module:settings:record', { version: 3, protectedPaths: [{ pattern: 'AGENTS.md', level: 'human-approval' }, { pattern: '**/*.md', level: 'human-approval' }] });
         expect(humanApprovalStatus(context, changeId, 1).awaitingHumanApproval).toEqual(['AGENTS.md']);

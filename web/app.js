@@ -1,6 +1,6 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
-  getSnapshot, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
+  getSnapshot, getVerdicts, getHumanApprovalDiff, hasToken, isForbidden, listRepos, newIdempotencyKey,
   putSettings, redactError, setSessionToken, submitHumanApproval, submitVerdict, withdrawChange,
 } from './api.js';
 import {
@@ -484,7 +484,8 @@ function renderActions(target,change) {
   } : {};
   const signature=JSON.stringify([change?.changeId ?? null,eligibility,change?.awaitingHumanApproval,change?.reviewManifestDigest]);
   if (target.dataset.actionSignature===signature && target.dataset.changeId===(change?.changeId ?? '')) {
-    for (const button of target.querySelectorAll('button')) button.disabled=!snapshotCurrent();
+    for (const button of target.querySelectorAll('button')) button.disabled=!snapshotCurrent() ||
+      (button.closest('.human-approval')?.dataset.previewReady !== undefined && button.closest('.human-approval').dataset.previewReady !== 'true');
     return;
   }
   const retained={};
@@ -501,10 +502,27 @@ function renderActions(target,change) {
     const summary=node('ul');
     for (const unit of list(change.protectedDiffSummary)) summary.append(node('li',`${unit.beforePath ?? '(new)'} → ${unit.afterPath ?? '(deleted)'} · ${unit.beforeDigest ?? 'absent'} → ${unit.afterDigest ?? 'absent'}`));
     panel.append(summary);
+    const preview=node('div','Loading protected text changes…','protected-preview');
+    panel.append(preview);
+    panel.dataset.previewReady='false';
+    void getHumanApprovalDiff(state.repoId,change.changeId).then(response=>{
+      if (!panel.isConnected || response?.data?.revision!==change.revision ||
+          response?.data?.reviewManifestDigest!==change.reviewManifestDigest) return;
+      const items=list(response.data.items);
+      preview.replaceChildren();
+      for (const item of items) {
+        preview.append(node('h4',`${item.beforePath ?? '(new)'} → ${item.afterPath ?? '(deleted)'}`),node('pre',item.summary));
+      }
+      if (!items.length) preview.append(node('p','No protected text changes were returned.'));
+      panel.dataset.previewReady=items.length>0 && items.every(item=>
+        typeof item.summary==='string' && !item.summary.startsWith('Preview unavailable') && !item.summary.startsWith('Binary or large')) ? 'true' : 'false';
+      for (const button of panel.querySelectorAll('button')) button.disabled=!snapshotCurrent() || panel.dataset.previewReady!=='true';
+    }).catch(()=>{ if (panel.isConnected) preview.textContent='Protected text preview unavailable. Refresh and inspect the repository diff.'; });
     const evidence=node('input'); evidence.placeholder='Evidence digest (sha256:…)'; evidence.setAttribute('aria-label','Owner approval evidence digest');
     panel.append(evidence);
     for (const [label,decision] of [['Approve','approve'],['Request changes','reject']]) {
       const button=node('button',label); button.type='button';
+      button.disabled=true;
       button.addEventListener('click',()=>void mutate('Owner decision',()=>submitHumanApproval(state.repoId,change.changeId,
         { expectedVersion:state.snapshot.version, revision:change.revision, reviewManifestDigest:change.reviewManifestDigest,
           evidenceDigest:evidence.value.trim(), decision },newIdempotencyKey())));

@@ -196,6 +196,13 @@ function renew(context: ModuleContext, leaseId: string, body: unknown): Response
   const ttlSeconds = ttl(input.ttlSeconds);
   return context.transaction(() => {
     const row = currentLease(context, leaseId, input.fence);
+    if (!context.principal.roles.includes('owner')) {
+      const rule = protectionFor(context, resolveUnit(unitRegistry(policy(context)), row.unit_key).file);
+      if (rule?.level === 'human-only') throw new HttpError(409, 'PATH_PROTECTED', 'Owner-only path cannot be renewed by an agent', {
+        holderId: 'owner', pattern: rule.pattern, note: rule.note ?? null,
+        keys: [row.unit_key], nextAction: 'Release this lease and ask a repository owner to claim this path.',
+      });
+    }
     const now = context.now();
     const nextFence = row.fence + 1;
     const version = context.nextVersion();

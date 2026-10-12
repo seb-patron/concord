@@ -188,6 +188,10 @@ export function submitHumanApproval(repoId, changeId, body, idempotencyKey, fetc
     { method: 'POST', body, idempotencyKey }, fetchImpl);
 }
 
+export function getHumanApprovalDiff(repoId, changeId, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/human-approval/diff`, {}, fetchImpl);
+}
+
 export function getEvents(repoId, after, fetchImpl) {
   const params = new URLSearchParams({ after: String(after), limit: '100' });
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);
