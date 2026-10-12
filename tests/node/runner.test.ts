@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
-import { normalizeManifest } from '../../src/verdicts/manifest';
+import { manifestDigest, normalizeManifest } from '../../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, refOid, temporaryWork, withJobDeadline } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
 import { dispatchArgv, loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
@@ -222,6 +222,38 @@ export function attemptBudget(family) {
       expect(inspected.manifest.coverage).toBe('complete');
       expect(inspected.manifest.changedUnits[0].afterDigest).toBe('sha256:' + createHash('sha256').update(bytes).digest('hex'));
       expect(inspected.digest).toBe(await digest(inspected.manifest));
+    });
+  });
+
+  it.each([
+    { name: 'period and underscore', paths: ['pkg/a_b.py', 'pkg/a.py'], expected: ['file:pkg/a.py', 'file:pkg/a_b.py'] },
+    { name: 'hyphen, period and underscore', paths: ['pkg/a_b.py', 'pkg/a.b.py', 'pkg/a-b.py'],
+      expected: ['file:pkg/a-b.py', 'file:pkg/a.b.py', 'file:pkg/a_b.py'] },
+  ])('matches the server manifest digest for $name', async ({ paths, expected }) => {
+    await gitFixture(async ({ repo }) => {
+      await mkdir(join(repo, 'pkg'));
+      const dependencies = ['pkg/dep_b.py', 'pkg/dep.py'];
+      for (const path of dependencies) await writeFile(join(repo, path), 'dependency\n');
+      await git(repo, ['add', 'pkg']);
+      await git(repo, ['commit', '--quiet', '-m', 'dependencies'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      for (const path of paths) await writeFile(join(repo, path), 'changed\n');
+      await git(repo, ['add', 'pkg']);
+      await git(repo, ['commit', '--quiet', '-m', 'changed files'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const filePolicy: TrustedPolicy = { ...policy, units: Object.fromEntries([...paths, ...dependencies].map(path => [
+        `file:${path}`, { canonicalKey: `file:${path}`, file: path, resources: [],
+          dependencyKeys: paths.includes(path) ? dependencies.map(dependency => `file:${dependency}`) : [] },
+      ])) };
+      const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: filePolicy } as Job);
+      expect(inspected.unitKeys).toEqual(expected);
+      expect(inspected.manifest.coverage).toBe('complete');
+      expect(inspected.manifest.changedUnits.map(unit => unit.unitKey)).toEqual(expected);
+      if (inspected.manifest.coverage !== 'complete') throw new Error('unknown');
+      expect(inspected.manifest.dependencyScope.map(unit => unit.unitKey)).toEqual(['file:pkg/dep.py', 'file:pkg/dep_b.py']);
+      const normalized = normalizeManifest(inspected.manifest, filePolicy, inspected.unitKeys);
+      expect(normalized).toEqual(inspected.manifest);
+      expect(inspected.digest).toBe(manifestDigest(normalized, filePolicy, inspected.unitKeys));
     });
   });
 

@@ -1,6 +1,7 @@
 import { writeFile } from 'node:fs/promises';
 import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '../src/contracts';
 import { digest } from '../src/http';
+import { compareKeys } from '../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
 import { tableForFile } from '../src/leases/units';
@@ -104,7 +105,7 @@ async function runGates(profile: LocalProfile, job: Job, directory: string): Pro
 }
 
 async function runAffected(profile: LocalProfile, job: Job, directory: string, unitKeys: string[]): Promise<{ outcome: CheckOutcome; log: string }> {
-  const targets = profile.checkerId === 'dispatch-lab' ? ['all'] : [...new Set(unitKeys)].sort();
+  const targets = profile.checkerId === 'dispatch-lab' ? ['all'] : [...new Set(unitKeys)].sort(compareKeys);
   if (!targets.length) return { outcome: 'UNVERIFIED_TARGET', log: 'No affected units identified' };
   const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   for (const unit of targets) {

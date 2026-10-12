@@ -3,7 +3,7 @@ import { patternRow, tableForFile } from '../leases/units';
 
 const sha256 = /^sha256:[a-f0-9]{64}$/;
 const oid = /^[a-f0-9]{40,64}$/;
-const compareKeys = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+export const compareKeys = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const unitSpec = (policy: TrustedPolicy, key: string) => policy.units[key] ?? (() => {
   if (key.startsWith('file:') && tableForFile(policy, key.slice(5))) return {
     canonicalKey: key, file: key.slice(5), resources: [], dependencyKeys: [],
@@ -99,7 +99,7 @@ export function trustedDependencyKeys(policy: TrustedPolicy, changedKeys: readon
       }
     }
   }
-  return [...visited].sort();
+  return [...visited].sort(compareKeys);
 }
 
 /** Rejects extra fields as well as omissions, so every accepted digest has one meaning. */
@@ -108,7 +108,7 @@ export function normalizeManifest(input: ReviewManifest, policy: TrustedPolicy, 
   if (input.policyVersion !== policy.version || input.policyDigest !== policy.digest || input.checkerDigest !== policy.checkerDigest ||
     !validDigest(input.oracleDigest) || !validDigest(input.toolchainDigest)) throw new Error('MANIFEST_PIN_MISMATCH');
   if (Object.keys(input).sort().join(',') !== 'changedUnits,checkerDigest,coverage,dependencyScope,oracleDigest,policyDigest,policyVersion,toolchainDigest') throw new Error('MANIFEST_EXTRA_FIELDS');
-  const keys = [...expectedKeys].sort();
+  const keys = [...expectedKeys].sort(compareKeys);
   if (new Set(keys).size !== keys.length || !keys.length || !keys.every(key => unitSpec(policy, key))) throw new Error('UNKNOWN_UNIT_SCOPE');
   const changedUnits = input.changedUnits.map(unit => {
     if (!unit || Object.keys(unit).sort().join(',') !== 'afterDigest,afterMode,afterPath,beforeDigest,beforeMode,beforePath,unitKey' ||

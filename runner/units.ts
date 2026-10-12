@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
-import { trustedDependencyKeys } from '../src/verdicts/manifest';
+import { compareKeys, trustedDependencyKeys } from '../src/verdicts/manifest';
 import { matchesTableKey, patternRow, tableForFile, type TsvTable } from '../src/leases/units';
 import { command, git, MAX_INSPECTED_BLOB_BYTES, treeOid } from './git';
 
@@ -63,7 +63,7 @@ async function changedPaths(repo: string, base: string | null, head: string): Pr
   const args = base ? ['diff', '--no-renames', '--name-only', base, head, '--'] : ['diff-tree', '--no-renames', '--root', '--no-commit-id', '--name-only', '-r', head];
   const result = await command('git', args, repo, 30_000);
   if (result.code !== 0 || result.truncated) throw new Error('DIFF_UNAVAILABLE');
-  return result.stdout.trim().split('\n').filter(Boolean).sort();
+  return result.stdout.trim().split('\n').filter(Boolean).sort(compareKeys);
 }
 
 export async function inspectUnits(repo: string, base: string | null, head: string, job: Job,
@@ -110,7 +110,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
       beforePath: before === null ? null : path, afterPath: after === null ? null : path,
       beforeMode, afterMode, beforeDigest: before === null ? null : hash(before), afterDigest: after === null ? null : hash(after) });
   }
-  evidence.sort((a, b) => a.unitKey.localeCompare(b.unitKey));
+  evidence.sort((a, b) => compareKeys(a.unitKey, b.unitKey));
   const dependencyScope: UnitDependencyScopeEntry[] = [];
   if (coverage === 'complete') {
     let dependencies: string[] = [];
@@ -138,5 +138,5 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
   const manifest: ReviewManifest = coverage === 'complete'
     ? { ...common, coverage, dependencyScope }
     : { ...common, coverage: 'unknown', dependencyScope: [{ kind: 'tree', treeOid: await treeOid(repo, head) }] };
-  return { unitKeys: [...new Set(evidence.map(item => item.unitKey))], manifest, digest: hash(stableJson(manifest)) };
+  return { unitKeys: [...new Set(evidence.map(item => item.unitKey))].sort(compareKeys), manifest, digest: hash(stableJson(manifest)) };
 }

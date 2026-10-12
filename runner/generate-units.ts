@@ -4,13 +4,12 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { TrustedPolicy } from '../src/contracts';
-import { hashCanonical } from '../src/verdicts/manifest';
+import { compareKeys, hashCanonical } from '../src/verdicts/manifest';
 import { unitRegistry } from '../src/leases/units';
 
 export const GENERATOR_VERSION = 1;
 const oidPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
-const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 
 type PolicyTemplate = TrustedPolicy & Record<string, unknown>;
 interface Options {
@@ -226,7 +225,7 @@ function templateFrom(file: string): PolicyTemplate {
 function generate(options: Options): { sourceOid: string; generatorVersion: number; policy: PolicyTemplate; policyDigest: string } {
   const oid = (options.oid ?? options.readBackOid)!;
   const tracked = trackedPaths(options.repo, oid);
-  const paths = [...new Set([...tracked, ...plannedPaths(options)])].sort(compare);
+  const paths = [...new Set([...tracked, ...plannedPaths(options)])].sort(compareKeys);
   const pathSet = new Set(paths);
   for (const path of paths) {
     let slash = path.indexOf('/');
