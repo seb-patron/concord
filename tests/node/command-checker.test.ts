@@ -276,7 +276,30 @@ describe('pinned command checker', () => {
         { outputCap: 4096, tail: true, redact: [secret] });
       expect(result.code).toBe(0);
       expect(result.outputTail?.match(/\[redacted\]/g)).toHaveLength(101);
-      expect(result.outputTail).toContain('!');
+      expect(result.outputTail).toBe('[redacted]'.repeat(101) + '!');
+      for (let start = 0; start <= secret.length - 4; start++)
+        expect(result.outputTail).not.toContain(secret.slice(start, start + 4));
+    });
+  });
+
+  it('keeps earlier stderr before later stdout at the capped redacted tail boundary', async () => {
+    await temporaryWork(async dir => {
+      const secret = 'private-' + 'Q'.repeat(84) + '-value';
+      const plainScript = "process.stderr.write('B'.repeat(50));\n" +
+        "setTimeout(() => process.stdout.write('A'.repeat(4090)), 30);";
+      const plain = await command(process.execPath, ['-e', plainScript], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(plain.code).toBe(0);
+      expect(plain.outputTail).toBe('B'.repeat(6) + 'A'.repeat(4090));
+
+      const script = `process.stderr.write('B'.repeat(50));\n` +
+        `setTimeout(() => process.stdout.write('A'.repeat(4080) + ${JSON.stringify(secret.slice(0, 50))}), 30);\n` +
+        `setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(50))} + 'Z'), 60);`;
+      const result = await command(process.execPath, ['-e', script], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(result.code).toBe(0);
+      expect(result.outputTail).toBe('B'.repeat(5) + 'A'.repeat(4080) + '[redacted]Z');
+      expect(Buffer.byteLength(result.outputTail ?? '')).toBe(4096);
       for (let start = 0; start <= secret.length - 4; start++)
         expect(result.outputTail).not.toContain(secret.slice(start, start + 4));
     });
