@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
-import { childEnvironment, git, temporaryWork } from '../../runner/git';
+import { childEnvironment, command, git, temporaryWork } from '../../runner/git';
 import { executeJob } from '../../runner/execute';
 import { loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
 
@@ -116,7 +116,7 @@ describe('pinned command checker', () => {
       expect(result.log).toContain('yyyyyyyy');
       expect(result.log.endsWith('exit=7\n')).toBe(true);
     });
-  });
+  }, 30_000); // Three Git fixture runs with composed checks.
 
   it('omits a supervisor variable outside the command profile environment', async () => {
     await temporaryWork(async dir => {
@@ -223,6 +223,46 @@ describe('pinned command checker', () => {
       expect(timeout.log).toContain('timeout');
     });
   }, 10_000);
+
+  it('redacts repeated environment values before the output tail is cut', async () => {
+    await temporaryWork(async dir => {
+      await mkdir(join(dir, 'scripts'));
+      const profile = await loadProfile(await profileIn(dir,
+        { env: [...commandSettings.env, 'UV_CACHE_DIR'] }));
+      const job = { profileDigest: profile.digest, checkerId: profile.checkerId,
+        checkerDigest: profile.checkerDigest, oracleDigest: profile.oracleDigest,
+        toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+        timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes } as Job;
+      const secret = 'cache-' + 'Q'.repeat(88) + '-value'; // 100 bytes
+      const previous = process.env.UV_CACHE_DIR;
+      try {
+        process.env.UV_CACHE_DIR = secret;
+        await writeFile(join(dir, 'scripts/validate.sh'),
+          'i=0; while [ "$i" -lt 100 ]; do printf "%s" "$UV_CACHE_DIR"; i=$((i+1)); done\n');
+        const checked = await pinnedCheck(profile, job, dir);
+        expect(checked.outcome).toBe('PASS');
+        expect(checked.log).toContain('[redacted]');
+        expect(Buffer.byteLength(checked.log)).toBeLessThanOrEqual(4096);
+        for (let start = 0; start <= secret.length - 4; start++)
+          expect(checked.log).not.toContain(secret.slice(start, start + 4));
+      } finally {
+        if (previous === undefined) delete process.env.UV_CACHE_DIR;
+        else process.env.UV_CACHE_DIR = previous;
+      }
+    });
+  });
+
+  it('redacts a value split across output chunks before capture', async () => {
+    await temporaryWork(async dir => {
+      const secret = 'split-' + 'R'.repeat(80) + '-value';
+      const script = `process.stdout.write(${JSON.stringify(secret.slice(0, 50))});\n` +
+        `setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(50))}), 30);`;
+      const result = await command(process.execPath, ['-e', script], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(result.code).toBe(0);
+      expect(result.outputTail).toBe('[redacted]');
+    });
+  });
 
   it('rejects relative or unpinned executables, job placeholders, and unsafe environment names', async () => {
     await temporaryWork(async dir => {

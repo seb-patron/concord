@@ -191,11 +191,9 @@ export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string,
     for (const name of profile.env!) if (process.env[name] !== undefined) env[name] = process.env[name];
     const values = [...new Set(profile.env!.map(name => process.env[name]).filter((value): value is string => !!value))]
       .sort((a, b) => b.length - a.length);
-    const captureBytes = profile.outputCap! + Math.max(0, ...values.map(value => Buffer.byteLength(value)));
     const result = await command(profile.executable!, profile.argv!, repo, profile.timeoutSeconds! * 1000,
-      env, { outputCap: captureBytes, tail: true });
-    let output = result.outputTail ?? '';
-    for (const value of values) output = output.replaceAll(value, '[redacted]');
+      env, { outputCap: profile.outputCap!, tail: true, redact: values });
+    const output = result.outputTail ?? '';
     const prefix = `exit=${result.code}${result.timedOut ? ' timeout' : ''}\n`;
     const remaining = profile.outputCap! - Buffer.byteLength(prefix);
     const bytes = Buffer.from(output);

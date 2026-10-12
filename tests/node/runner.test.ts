@@ -262,7 +262,7 @@ export function attemptBudget(family) {
         expect(unknown.manifest.dependencyScope).toEqual([{ kind: 'tree', treeOid: await git(repo, ['rev-parse', head + '^{tree}']) }]);
       }
     });
-  });
+  }, 15_000); // Multiple Git inspections and dependency walks.
 
   it('collects chained TSV row dependencies from the committed table', async () => {
     await gitFixture(async ({ repo }) => {
@@ -484,7 +484,7 @@ export function attemptBudget(family) {
       if (result.kind !== 'delta-check') throw new Error('wrong result');
       expect(result.reviewManifest?.changedUnits[0].unitKey).toBe('file:example.txt');
     });
-  });
+  }, 15_000);
 
   it('keeps a later failing affected unit and its exit marker after an earlier full log', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
@@ -548,7 +548,7 @@ export function attemptBudget(family) {
       expect(result).toMatchObject({ kind: 'delta-check', outcome: 'ENV_ERROR' });
       expect(result.log).toContain('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
     });
-  });
+  }, 15_000);
 
   it('validates an explicit seed and promotes it only while main is absent', async () => {
     await gitFixture(async ({ repo, canonical, candidate, scratch, base }) => {

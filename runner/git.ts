@@ -23,7 +23,7 @@ export function childEnvironment(extra: Record<string, string> = {}): NodeJS.Pro
 
 /** No shell interpolation, and output is capped while it is collected. */
 export async function command(file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv = childEnvironment(),
-  capture?: { outputCap: number; tail: true }): Promise<CommandResult> {
+  capture?: { outputCap: number; tail: true; redact?: string[] }): Promise<CommandResult> {
   const remaining = jobDeadline.getStore() === undefined ? timeoutMs : Math.min(timeoutMs, jobDeadline.getStore()! - Date.now());
   if (remaining <= 0) throw new Error('JOB_TIMEOUT');
   return new Promise((resolveResult, reject) => {
@@ -34,11 +34,42 @@ export async function command(file: string, args: string[], cwd: string, timeout
     let killer: Promise<void> | null = null;
     let truncated = false;
     let outputTail = Buffer.alloc(0);
+    const redactions = (capture?.redact ?? []).filter(Boolean).map(value => Buffer.from(value))
+      .sort((a, b) => b.length - a.length);
+    const maxRedactionBytes = redactions[0]?.length ?? 0;
+    const marker = Buffer.from('[redacted]');
+    let pending = Buffer.alloc(0);
     const collectTail = (chunk: Buffer) => {
       if (!capture) return;
       const next = Buffer.concat([outputTail, chunk]);
       if (next.length > capture.outputCap) truncated = true;
       outputTail = next.subarray(Math.max(0, next.length - capture.outputCap));
+    };
+    const collectRedactedTail = (chunk: Buffer, final = false) => {
+      if (!capture) return;
+      if (!redactions.length) { collectTail(chunk); return; }
+      pending = Buffer.concat([pending, chunk]);
+      // A match may begin in the final max(value length)-1 bytes and finish in
+      // the next chunk. Keep that window until it can be classified safely.
+      const safeEnd = final ? pending.length : Math.max(0, pending.length - maxRedactionBytes + 1);
+      let cursor = 0;
+      while (cursor < safeEnd) {
+        let first = pending.length;
+        let match: Buffer | undefined;
+        for (const value of redactions) {
+          const at = pending.indexOf(value, cursor);
+          if (at >= 0 && at < first) { first = at; match = value; }
+        }
+        if (!match || first >= safeEnd) {
+          collectTail(pending.subarray(cursor, safeEnd));
+          cursor = safeEnd;
+          break;
+        }
+        collectTail(pending.subarray(cursor, first));
+        collectTail(marker);
+        cursor = first + match.length;
+      }
+      pending = pending.subarray(cursor);
     };
     const collect = (previous: Buffer, chunk: Buffer) => {
       if (previous.length >= OUTPUT_CAP) { truncated = true; return previous; }
@@ -46,8 +77,8 @@ export async function command(file: string, args: string[], cwd: string, timeout
       if (next.length > OUTPUT_CAP) truncated = true;
       return next.subarray(0, OUTPUT_CAP);
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); collectTail(chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); collectTail(chunk); });
+    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); collectRedactedTail(chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); collectRedactedTail(chunk); });
     const timer = setTimeout(() => {
       timedOut = true;
       if (process.platform !== 'win32' && child.pid) {
@@ -64,6 +95,7 @@ export async function command(file: string, args: string[], cwd: string, timeout
     child.once('close', async code => {
       clearTimeout(timer);
       if (killer) await killer;
+      collectRedactedTail(Buffer.alloc(0), true);
       resolveResult({ code: code ?? -1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), stdoutBytes: stdout,
         timedOut, truncated, outputTail: capture ? outputTail.toString('utf8') : undefined });
     });
