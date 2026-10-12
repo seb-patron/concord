@@ -9,7 +9,7 @@ const jobDeadline = new AsyncLocalStorage<number>();
 export function withJobDeadline<T>(deadline: number, run: () => Promise<T>): Promise<T> {
   return jobDeadline.run(deadline, run);
 }
-export type CommandResult = { code: number; stdout: string; stderr: string; stdoutBytes: Buffer; timedOut: boolean; truncated: boolean; outputTail?: string };
+export type CommandResult = { code: number; stdout: string; stderr: string; stdoutBytes: Buffer; timedOut: boolean; jobTimedOut: boolean; truncated: boolean; outputTail?: string };
 
 export function childEnvironment(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const keep = ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP', 'LANG'];
@@ -24,7 +24,10 @@ export function childEnvironment(extra: Record<string, string> = {}): NodeJS.Pro
 /** No shell interpolation, and output is capped while it is collected. */
 export async function command(file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv = childEnvironment(),
   capture?: { outputCap: number; tail: true; redact?: string[] }): Promise<CommandResult> {
-  const remaining = jobDeadline.getStore() === undefined ? timeoutMs : Math.min(timeoutMs, jobDeadline.getStore()! - Date.now());
+  const deadline = jobDeadline.getStore();
+  const deadlineRemaining = deadline === undefined ? undefined : deadline - Date.now();
+  const remaining = deadlineRemaining === undefined ? timeoutMs : Math.min(timeoutMs, deadlineRemaining);
+  const deadlineLimited = deadlineRemaining !== undefined && deadlineRemaining <= timeoutMs;
   if (remaining <= 0) throw new Error('JOB_TIMEOUT');
   return new Promise((resolveResult, reject) => {
     const child = spawn(file, args, { cwd, env, shell: false, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
@@ -128,14 +131,15 @@ export async function command(file: string, args: string[], cwd: string, timeout
       streams.sort((a, b) => (pending[a].origins[0]?.order ?? Infinity) - (pending[b].origins[0]?.order ?? Infinity));
       for (const stream of streams) collectRedactedTail(stream, Buffer.alloc(0), ++eventOrder, true);
       resolveResult({ code: code ?? -1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), stdoutBytes: stdout,
-        timedOut, truncated, outputTail: capture ? Buffer.concat(orderedTail.map(part => part.bytes), tailBytes).toString('utf8') : undefined });
+        timedOut, jobTimedOut: timedOut && deadlineLimited, truncated,
+        outputTail: capture ? Buffer.concat(orderedTail.map(part => part.bytes), tailBytes).toString('utf8') : undefined });
     });
   });
 }
 
 export async function git(cwd: string, args: string[], timeoutMs = 30_000, env: NodeJS.ProcessEnv = childEnvironment()): Promise<string> {
   const result = await command('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), ...args], cwd, timeoutMs, env);
-  if (result.timedOut) throw new Error('GIT_TIMEOUT');
+  if (result.timedOut) throw new Error(result.jobTimedOut ? 'JOB_TIMEOUT' : 'GIT_TIMEOUT');
   if (result.truncated) throw new Error('GIT_OUTPUT_TRUNCATED');
   if (result.code !== 0) throw new Error('GIT_ERROR: ' + result.stderr.slice(0, 1024));
   return result.stdout.trim();
@@ -151,10 +155,25 @@ export async function initWorktree(directory: string): Promise<void> {
 }
 
 /** The runner never resolves a moving branch name for an input. */
-export async function fetchOid(directory: string, remote: string, oid: string, env?: NodeJS.ProcessEnv): Promise<void> {
+export async function fetchOid(directory: string, remote: string, oid: string, env?: NodeJS.ProcessEnv,
+  retry: { runGit?: typeof git; sleep?: (ms: number) => Promise<void>; random?: () => number } = {}): Promise<void> {
   if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(oid)) throw new Error('INVALID_OID');
-  await git(directory, ['fetch', '--no-tags', remote, oid], 60_000, env);
-  const readback = await git(directory, ['rev-parse', 'FETCH_HEAD^{commit}']);
+  const runGit = retry.runGit ?? git;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await runGit(directory, ['fetch', '--no-tags', remote, oid], 60_000, env);
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (attempt === 2 || /(?:401|403|authentication failed|access denied|not authorized|could not read username)/i.test(message) ||
+        !(/^(?:GIT_TIMEOUT)$/i.test(message) || /(?:Could not resolve host|Connection reset|early EOF|RPC failed|the remote end hung up unexpectedly|Operation timed out|HTTP 5\d\d|returned error: 50[234])/i.test(message))) throw error;
+      const delay = (attempt === 0 ? 250 : 1000) * (0.5 + (retry.random ?? Math.random)());
+      const deadline = jobDeadline.getStore();
+      if (deadline !== undefined && Date.now() + delay >= deadline) throw new Error('JOB_TIMEOUT');
+      await (retry.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms))))(delay);
+    }
+  }
+  const readback = await runGit(directory, ['rev-parse', 'FETCH_HEAD^{commit}']);
   if (readback !== oid) throw new Error('FETCH_OID_MISMATCH');
 }
 

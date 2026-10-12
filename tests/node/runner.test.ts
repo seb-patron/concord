@@ -6,11 +6,11 @@ import { describe, expect, it } from 'vitest';
 import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
 import { normalizeManifest } from '../../src/verdicts/manifest';
-import { childEnvironment, command, conditionalPush, git, refOid, temporaryWork } from '../../runner/git';
+import { childEnvironment, command, conditionalPush, fetchOid, git, refOid, temporaryWork, withJobDeadline } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
 import { dispatchArgv, loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
 import { inspectUnits, mergeTsv } from '../../runner/units';
-import { parseArgs, runLoop, type Transport } from '../../runner/main';
+import { apiTransport, parseArgs, retryTransport, runLoop, type Transport } from '../../runner/main';
 
 const pin = ('sha256:' + '0'.repeat(64)) as Digest;
 const policy: TrustedPolicy = { id: 'local-demo', digest: pin, version: 1, checkerId: 'local-demo', checkerDigest: pin,
@@ -749,7 +749,7 @@ export function attemptBudget(family) {
           const encoded = JSON.stringify({ body, key });
           if (sent && sent !== encoded) throw new Error('REPLAY_CHANGED');
           sent = encoded;
-          if (posts === 1) throw new Error('RESPONSE_LOST_AFTER_SUCCESS');
+          if (posts === 1) throw new TypeError('fetch failed');
           return { status: 200, data: { dispatch: { status: 'eligible' } } };
         }
         throw new Error('UNEXPECTED_API');
@@ -758,5 +758,127 @@ export function attemptBudget(family) {
       expect(await runLoop(options, transport, profile)).toBe(1);
       expect(posts).toBe(2);
     });
+  });
+
+  it.each(['poll', 'credentials'])('retries a transient %s request with the same key and body through runLoop', async failedRoute => {
+    await gitFixture(async ({ candidate, base }) => {
+      const remotes = { candidate: pathToFileURL(candidate).href };
+      const job: Job = { ...jobBase(remotes), kind: 'inspect-candidate', changeId: 'change', revision: 1,
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: base, storageName: 'candidate', ref: 'refs/heads/main' } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
+        executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const calls: { route: string; key: string; body: string }[] = [];
+      const fakeFetch: typeof fetch = async (input, init) => {
+        const route = new URL(String(input)).pathname.split('/').slice(4).join('/');
+        calls.push({ route, key: new Headers(init?.headers).get('idempotency-key')!, body: String(init?.body) });
+        if (route.endsWith(failedRoute) && calls.filter(call => call.route === route).length === 1) {
+          if (failedRoute === 'poll') throw new TypeError('fetch failed');
+          return Response.json({ error: { code: 'TEMPORARY' } }, { status: 503 });
+        }
+        if (route === 'runner/poll') return Response.json({ data: { job } });
+        if (route.endsWith('/credentials')) return Response.json({ data: { credentials: await credentials(remotes)('fetch') } });
+        if (route.endsWith('/result')) return Response.json({ data: {} });
+        throw new Error('UNEXPECTED_API:' + route);
+      };
+      const options = parseArgs(['--repo', 'demo', '--role', 'checker', '--profile', '/owner/profile.json', '--once']);
+      expect(await runLoop(options, apiTransport('https://example.invalid', 'secret', 'demo', fakeFetch), profile,
+        { sleep: async () => {}, random: () => 0.5 })).toBe(1);
+      const repeated = calls.filter(call => call.route.endsWith(failedRoute));
+      expect(repeated).toHaveLength(2);
+      expect(repeated[0]).toEqual(repeated[1]);
+    });
+  });
+
+  it('stops polling after three network failures', async () => {
+    const calls: string[] = [];
+    const transport: Transport = async (path, body, key) => {
+      calls.push(JSON.stringify({ path, body, key }));
+      throw new TypeError('fetch failed');
+    };
+    const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin, '--once']);
+    await expect(runLoop(options, transport, null, { sleep: async () => {}, random: () => 0.5 }))
+      .rejects.toThrow('fetch failed');
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls).size).toBe(1);
+  });
+
+  it.each([400, 401, 409])('does not retry HTTP %i', async status => {
+    let calls = 0;
+    const transport = retryTransport(async () => { calls++; return { status }; }, { sleep: async () => {} });
+    expect((await transport('runner/poll', {}, 'key')).status).toBe(status);
+    expect(calls).toBe(1);
+  });
+
+  it.each([429, 502, 503, 504])('retries HTTP %i and caps Retry-After', async status => {
+    const delays: number[] = [];
+    let calls = 0;
+    const transport = retryTransport(async () => {
+      calls++;
+      return calls === 1 ? { status, retryAfterMs: 20_000 } : { status: 200 };
+    }, { sleep: async ms => { delays.push(ms); }, random: () => 0.5 });
+    expect((await transport('runner/poll', {}, 'key')).status).toBe(200);
+    expect(calls).toBe(2);
+    expect(delays).toEqual([status === 429 ? 5000 : 250]);
+  });
+
+  it.each(['RPC failed; early EOF', 'HTTP 500'])('retries transient Git fetch (%s) and skips an authentication failure', async failure => {
+    const oid = 'a'.repeat(40);
+    const calls: string[] = [];
+    const runGit: typeof git = async (_dir, args) => {
+      calls.push(args[0]);
+      if (args[0] === 'fetch' && calls.filter(value => value === 'fetch').length === 1)
+        throw new Error('GIT_ERROR: ' + failure);
+      return oid;
+    };
+    await fetchOid('/unused', 'https://example.invalid/repo', oid, undefined,
+      { runGit, sleep: async () => {}, random: () => 0.5 });
+    expect(calls).toEqual(['fetch', 'fetch', 'rev-parse']);
+    let denied = 0;
+    await expect(fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { denied++; throw new Error('GIT_ERROR: HTTP 401 authentication failed'); },
+      sleep: async () => {},
+    })).rejects.toThrow('HTTP 401');
+    expect(denied).toBe(1);
+  });
+
+  it('retries a per-command Git timeout while the job deadline permits another attempt', async () => {
+    const oid = 'a'.repeat(40);
+    let fetches = 0;
+    const runGit: typeof git = async (_dir, args) => {
+      if (args[0] === 'fetch' && ++fetches === 1) throw new Error('GIT_TIMEOUT');
+      return oid;
+    };
+    await withJobDeadline(Date.now() + 10_000, () => fetchOid('/unused', 'https://example.invalid/repo', oid, undefined,
+      { runGit, sleep: async () => {}, random: () => 0.5 }));
+    expect(fetches).toBe(2);
+  });
+
+  it('does not retry a fetch timeout when the job deadline leaves no time after backoff', async () => {
+    const oid = 'a'.repeat(40);
+    let fetches = 0;
+    await expect(withJobDeadline(Date.now() + 50, () => fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { fetches++; throw new Error('GIT_TIMEOUT'); },
+      sleep: async () => {},
+      random: () => 0.5,
+    }))).rejects.toThrow('JOB_TIMEOUT');
+    expect(fetches).toBe(1);
+  });
+
+  it('never retries an expired job deadline and bounds transient fetch exhaustion to three attempts', async () => {
+    const oid = 'a'.repeat(40);
+    let deadlineFetches = 0;
+    await expect(fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { deadlineFetches++; throw new Error('JOB_TIMEOUT'); },
+      sleep: async () => {},
+    })).rejects.toThrow('JOB_TIMEOUT');
+    expect(deadlineFetches).toBe(1);
+
+    let transientFetches = 0;
+    await expect(fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { transientFetches++; throw new Error('GIT_ERROR: HTTP 500'); },
+      sleep: async () => {},
+    })).rejects.toThrow('HTTP 500');
+    expect(transientFetches).toBe(3);
   });
 });
