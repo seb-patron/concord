@@ -14,6 +14,12 @@ export interface Principal {
   model?: string | null;
 }
 
+/** Public metadata for a runtime delegated identity. The token digest is never returned. */
+export interface DelegatedPrincipal {
+  id: Id; roles: Role[]; repoIds: Id[] | '*'; expiresAt: number;
+  parentId: Id; createdAt: number; revokedAt: number | null; name?: string;
+}
+
 export interface Repo extends Versioned {
   repoId: Id; tenantId: Id; displayName: string; canonicalStorageName: string;
   defaultBranch: 'main'; observedCanonicalOid: Oid | null;
@@ -126,6 +132,7 @@ export interface TrustedProfile {
 export interface TrustedConfiguration {
   policies: Record<string, TrustedPolicy>;
   profiles: Record<string, TrustedProfile>;
+  delegatedPrincipals?: { maxTtlMs?: number; activeLimit?: number; totalLimit?: number };
 }
 
 export interface ApiSuccess<T> { data: T; version: number; eventSeq: number }

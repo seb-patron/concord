@@ -55,6 +55,54 @@ function publishCli(url: string, worktree: string, fences: string, extraEnv: Nod
 }
 
 describe('Concord agent CLI client', () => {
+  it('requests tenant events without a repository and forwards the page cursor', async () => {
+    const paths: string[] = [];
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      paths.push(request.url ?? '');
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ data: { items: [{ sequence: 7, kind: 'principal.minted' }], nextCursor: null }, version: 2, eventSeq: 7 }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local server');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'viewer-token' };
+    try {
+      const result = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'events', '--tenant'], { cwd: process.cwd(), env });
+      expect(JSON.parse(result.stdout)).toMatchObject({ data: { items: [{ kind: 'principal.minted' }] }, eventSeq: 7 });
+      await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'events', '--tenant', '--cursor', 'Nw'], { cwd: process.cwd(), env });
+      expect(paths).toEqual(['/v1/events', '/v1/events?cursor=Nw']);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('mints one plaintext token on stdout and sends scoped principal commands', async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const token = `cct_local_${'a'.repeat(64)}`;
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      calls.push({ method: request.method ?? '', path: request.url ?? '', body: body ? JSON.parse(body) : null });
+      response.setHeader('content-type', 'application/json');
+      if (request.method === 'POST') response.end(JSON.stringify({ data: { id: 'child', token } }));
+      else if (request.method === 'GET') response.end(JSON.stringify({ data: { items: [{ id: 'child' }] } }));
+      else response.end(JSON.stringify({ data: { revokedIds: ['child'] } }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local server');
+    const env = { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'parent-token' };
+    try {
+      const minted = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'mint', '--role', 'agent', '--repo', 'alpha', '--ttl', '2h', '--name', 'worker'], { cwd: process.cwd(), env });
+      expect(minted.stdout).toBe(`${token}\n`);
+      expect(minted.stderr).not.toContain(token);
+      expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/principals', body: { roles: ['agent'], repoIds: ['alpha'], ttlSeconds: 7200, name: 'worker' } });
+      const listed = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'list'], { cwd: process.cwd(), env });
+      expect(JSON.parse(listed.stdout)).toMatchObject({ data: { items: [{ id: 'child' }] } });
+      await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'list', '--cursor', 'MjU'], { cwd: process.cwd(), env });
+      const revoked = await execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'principals', 'revoke', 'child'], { cwd: process.cwd(), env });
+      expect(JSON.parse(revoked.stdout)).toMatchObject({ data: { revokedIds: ['child'] } });
+      expect(calls.map(call => `${call.method} ${call.path}`)).toEqual(['POST /v1/principals', 'GET /v1/principals', 'GET /v1/principals?cursor=MjU', 'DELETE /v1/principals/child']);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
   it('drives a complete fake transport lifecycle with JSON envelopes', async () => {
     const state: { repo?: string; change?: string; lease?: string; queue?: string } = {};
     const calls: Array<{ method: string; path: string }> = [];

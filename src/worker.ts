@@ -73,7 +73,7 @@ export default {
       const repoMatch = /^\/v1\/repos\/([A-Za-z0-9_-]{1,64})(?:\/|$)/.exec(url.pathname);
       if (repoMatch) requireRepo(principal, repoMatch[1]);
       request = await enforceBodyLimit(request);
-      if (url.pathname === '/v1/repos') {
+      if (url.pathname === '/v1/events' || url.pathname === '/v1/repos' || url.pathname === '/v1/principals' || /^\/v1\/principals\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
         const name = `tenant:${principal.tenantId}`;
         return forward(request, principal, env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName(name)));
       }

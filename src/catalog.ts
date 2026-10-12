@@ -1,10 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { HookName, ModuleContext, Principal, Repo, ServiceHooks } from './contracts';
-import { clock, requireTenant } from './auth';
+import { clock, requireRole, requireTenant } from './auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, readJson } from './http';
-import { appendEvent, applyMigrations, costLimits, eventSequence, initialize, loadTrustedConfig, sqlState } from './state';
+import { appendEvent, applyMigrations, catalogVisibility, costLimits, eventSequence, eventsAfter, initialize, loadTrustedConfig, sqlState } from './state';
 import { selectStorage } from './coordinator';
 import { repos } from './features/repos';
+import { handlePrincipalRoute, initializePrincipals, lookupPrincipal } from './features/principals';
 
 /** Tenant-scoped index. Landing authorization remains in RepoCoordinator. */
 export class TenantCatalog extends DurableObject<Env> {
@@ -13,6 +14,7 @@ export class TenantCatalog extends DurableObject<Env> {
     super(ctx, env);
     this.now = clock(env);
     initialize(ctx.storage.sql);
+    initializePrincipals(ctx.storage.sql);
     applyMigrations(ctx.storage, repos);
   }
 
@@ -42,6 +44,15 @@ export class TenantCatalog extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     try {
+      const path = new URL(request.url).pathname;
+      if (path === '/internal/principals/lookup' && request.method === 'POST') {
+        const tenantId = request.headers.get('x-concord-tenant');
+        const identity = sqlState(this.ctx.storage.sql).get<string>('catalog:tenantId');
+        if (!tenantId || tenantId !== identity) throw new HttpError(401, 'UNAUTHORIZED', 'Catalog identity mismatch');
+        const { digest: tokenDigest } = await readJson(request);
+        const found = lookupPrincipal(this.ctx.storage.sql, tokenDigest as string, tenantId, this.now());
+        return json(found);
+      }
       const principal = JSON.parse(request.headers.get('x-concord-principal') ?? 'null') as Principal | null;
       if (!principal) throw new HttpError(401, 'UNAUTHORIZED', 'Identity missing');
       requireTenant(principal, request.headers.get('x-concord-tenant') ?? undefined);
@@ -50,7 +61,6 @@ export class TenantCatalog extends DurableObject<Env> {
       if (identity && identity !== principal.tenantId) throw new HttpError(403, 'TENANT_MISMATCH', 'Catalog identity mismatch');
       if (!identity) identityStore.put('catalog:tenantId', principal.tenantId);
       const context = this.context(principal);
-      const path = new URL(request.url).pathname;
       if (path === '/internal/token-quota' && request.method === 'POST') {
         const state = sqlState(context.sql);
         const day = Math.floor(this.now() / 86_400_000);
@@ -67,6 +77,30 @@ export class TenantCatalog extends DurableObject<Env> {
         state.put('catalog:forkCount', count + 1);
         return json({ reserved: true });
       }
+      if (path === '/v1/events') {
+        if (request.method !== 'GET') throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
+        requireRole(principal, 'owner', 'viewer');
+        const url = new URL(request.url);
+        const after = parseCursor(url.searchParams.get('cursor'));
+        const limitRaw = url.searchParams.get('limit');
+        const limit = limitRaw === null ? 100 : Number(limitRaw);
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new HttpError(400, 'INVALID_LIMIT', 'Limit must be 1 to 100');
+        const visibility = catalogVisibility(context.sql, principal);
+        const page = eventsAfter(context.sql, after, limit + 1, visibility);
+        const items = page.slice(0, limit).map(event => {
+          const payload = { ...event.payload };
+          if (!principal.roles.includes('owner')) {
+            for (const key of Object.keys(payload)) if (/storageName$/i.test(key)) delete payload[key];
+          }
+          if (!visibility.all && event.kind.startsWith('principal.')) {
+            return { ...event, relatedIds: event.relatedIds.filter(id => visibility.principalIds.has(id)), payload };
+          }
+          return { ...event, payload };
+        });
+        const nextCursor = page.length > limit ? encodeCursor(items[items.length - 1].sequence) : null;
+        return json({ items, nextCursor }, context.version(), eventSequence(context.sql));
+      }
+      if (path === '/v1/principals' || path.startsWith('/v1/principals/')) return await handlePrincipalRoute(context, request, path);
       if (path !== '/v1/repos') throw new HttpError(404, 'NOT_FOUND', 'Unknown catalog route');
       if (request.method === 'GET') {
         const repos = (context.state.get<Repo[]>('catalog:index') ?? []).filter(repo => repo.tenantId === principal.tenantId && (principal.repoIds === '*' || principal.repoIds.includes(repo.repoId)));

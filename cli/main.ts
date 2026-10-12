@@ -18,6 +18,9 @@ Mutations generate an idempotency key when omitted. Responses are JSON on stdout
 Commands and required fields:
   repo create --name NAME --policy-id ID --profile-id ID
   repo list [--cursor CURSOR]
+  principals mint --role agent [--repo ID] [--ttl 2h] [--name NAME]
+  principals list [--cursor CURSOR]
+  principals revoke ID
   repo clone --repo ID --path PATH                 (read-only canonical clone)
   import --source PATH --ref REF --repo NAME --policy-id ID --profile-id ID [--exclude GLOB ...] [--exclude-file FILE] [--require-match] [--print-tree]
   change create --repo ID --intent-key KEY --intent-text TEXT --base-oid OID|null --branch NAME --unit-keys JSON_ARRAY [--dependency-change-ids JSON_ARRAY]
@@ -39,6 +42,7 @@ Commands and required fields:
   verdict add --repo ID --change-id ID --revision N --review-manifest-digest sha256:... --finding-set-version N --decision approve|reject --evidence-digest sha256:... --expected-version N
   verdict carry --repo ID --change-id ID --parent-verdict-id ID --revision N --new-base-oid OID --expected-version N
   events list --repo ID [--after SEQUENCE]
+  events --tenant [--cursor CURSOR]
   api METHOD PATH [--body-file PATH]                 (advanced API; mutations need --idempotency-key)
 
 Generic JSON bodies may also be supplied through --body-file. HTTP 501 MODULE_UNAVAILABLE responses remain explicit server errors.
@@ -51,13 +55,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   let parsed;
   try {
     const options: Record<string, { type: 'string'; multiple?: boolean } | { type: 'boolean' }> = {};
-    for (const name of OPTION_NAMES) options[name] = { type: 'string' };
+    for (const name of [...OPTION_NAMES, 'role', 'ttl']) options[name] = { type: 'string' };
     options.exclude = { type: 'string', multiple: true };
     options.json = { type: 'boolean' };
     options.help = { type: 'boolean' };
     options['print-tree'] = { type: 'boolean' };
     options['require-match'] = { type: 'boolean' };
     options.verbose = { type: 'boolean' };
+    options.tenant = { type: 'boolean' };
     options['token-stdin'] = { type: 'boolean' };
     parsed = parseArgs({ args: argv, options, allowPositionals: true, strict: true });
   } catch (error) { throw new ConcordError(`${error instanceof Error ? error.message : error}\n\n${HELP}`, 'usage'); }
@@ -94,6 +99,34 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     return client.request('POST', path, options);
   };
 
+  if (noun === 'principals') {
+    if (verb === 'list') return print(await client.request('GET', `/principals${query({ cursor: flags.cursor })}`));
+    if (verb === 'revoke') {
+      if (args.length !== 1 || !/^[A-Za-z0-9_-]{1,64}$/.test(args[0])) throw new ConcordError('principals revoke requires an ID', 'usage');
+      return print(await client.request('DELETE', `/principals/${args[0]}`));
+    }
+    if (verb === 'mint') {
+      const role = required(flags, 'role');
+      if (!['agent', 'reviewer', 'viewer'].includes(role)) throw new ConcordError('--role must be agent, reviewer, or viewer', 'usage');
+      const payload: Record<string, unknown> = { roles: [role] };
+      if (repo) payload.repoIds = [repo];
+      if (flags.name !== undefined) payload.name = flags.name;
+      if (flags.ttl !== undefined) {
+        const match = /^([1-9][0-9]*)([smh])$/.exec(String(flags.ttl));
+        if (!match) throw new ConcordError('--ttl must use positive seconds, minutes, or hours (for example 2h)', 'usage');
+        const seconds = Number(match[1]) * ({ s: 1, m: 60, h: 3600 } as const)[match[2] as 's' | 'm' | 'h'];
+        if (!Number.isSafeInteger(seconds)) throw new ConcordError('--ttl is too large', 'usage');
+        payload.ttlSeconds = seconds;
+      }
+      const result = unwrap(await client.request('POST', '/principals', requestOptions(flags, payload)));
+      if (!result || typeof result !== 'object' || typeof (result as { token?: unknown }).token !== 'string' || !/^cct_[A-Za-z0-9_-]+_[a-f0-9]{64}$/.test((result as { token: string }).token)) {
+        throw new ConcordError('Mint response did not include a valid token', 'server');
+      }
+      process.stdout.write(`${(result as { token: string }).token}\n`);
+      return;
+    }
+  }
+
   if (noun === 'repo' && verb === 'list') return print(await send('GET', `/repos${query({ cursor: flags.cursor })}`));
   if (noun === 'repo' && verb === 'create') {
     const payload = body ?? requiredObject(flags, ['name', 'policy-id', 'profile-id'], { name: 'name', policyId: 'policy-id', profileId: 'profile-id' });
@@ -111,6 +144,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     return print({ cloned: true, repoId: repo, path: destination, access: 'read-only' });
   }
 
+  if (noun === 'events' && flags.tenant && (!verb || verb === 'list')) {
+    if (repo || flags.after !== undefined) throw new ConcordError('Tenant events use --cursor without --repo or --after', 'usage');
+    return print(await send('GET', `/events${query({ cursor: flags.cursor })}`));
+  }
   const rid = requireRepo();
   const root = `/repos/${rid}`;
   if (noun === 'change' && verb === 'create') {

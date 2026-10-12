@@ -1,4 +1,4 @@
-import type { Event, FeatureModule, Migration, ModuleContext, PromotionFreezeProvider, TrustedConfiguration } from './contracts';
+import type { Event, FeatureModule, Migration, ModuleContext, Principal, PromotionFreezeProvider, TrustedConfiguration } from './contracts';
 import { unitRegistry } from './leases/units';
 
 /** Queue's slice-01 placeholder until its promotion ticket state exists. */
@@ -63,9 +63,52 @@ export function eventSequence(sql: SqlStorage): number {
   return sql.exec<{ sequence: number }>('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM concord_events').toArray()[0].sequence;
 }
 
-export function eventsAfter(sql: SqlStorage, after: number, limit = 100): Event[] {
+export interface CatalogVisibility {
+  all: boolean;
+  principalIds: Set<string>;
+  repoIds: string[] | '*';
+}
+
+/** Shared catalog read boundary for principal records and tenant events. */
+export function catalogVisibility(sql: SqlStorage, principal: Principal): CatalogVisibility {
+  const all = principal.roles.includes('owner') && principal.repoIds === '*';
+  if (all) return { all, principalIds: new Set(), repoIds: '*' };
+  const withinScope = (encoded: string): boolean => {
+    const scope = JSON.parse(encoded) as string[] | '*';
+    return principal.repoIds === '*' || (scope !== '*' && scope.every(id => principal.repoIds.includes(id)));
+  };
+  const callerRow = sql.exec<{ repo_ids: string }>('SELECT repo_ids FROM principals_records WHERE id = ?', principal.principalId).toArray()[0];
+  const principalIds = new Set<string>();
+  if (!callerRow || withinScope(callerRow.repo_ids)) principalIds.add(principal.principalId);
+  const descendants = sql.exec<{ id: string; repo_ids: string }>(`WITH RECURSIVE descendants(id, repo_ids) AS (
+    SELECT id, repo_ids FROM principals_records WHERE parent_id = ?
+    UNION ALL
+    SELECT child.id, child.repo_ids FROM principals_records AS child JOIN descendants ON child.parent_id = descendants.id
+  ) SELECT id, repo_ids FROM descendants`, principal.principalId).toArray();
+  for (const row of descendants) {
+    if (withinScope(row.repo_ids)) principalIds.add(row.id);
+  }
+  return { all, principalIds, repoIds: principal.repoIds };
+}
+
+export function eventsAfter(sql: SqlStorage, after: number, limit = 100, visibility?: CatalogVisibility): Event[] {
+  const filter = visibility && !visibility.all ? `AND (
+      (kind LIKE 'repo.%' AND ${visibility.repoIds === '*' ? '1 = 1' : `EXISTS (
+        SELECT 1 FROM json_each(?) AS allowed WHERE allowed.value = json_extract(concord_events.related_ids, '$[0]')
+      )`}) OR (kind LIKE 'principal.%' AND EXISTS (
+        SELECT 1 FROM json_each(concord_events.related_ids) AS related
+        JOIN json_each(?) AS allowed ON allowed.value = related.value
+      ))
+    )` : '';
+  const args: (number | string)[] = [after];
+  if (visibility && !visibility.all) {
+    if (visibility.repoIds !== '*') args.push(JSON.stringify(visibility.repoIds));
+    args.push(JSON.stringify([...visibility.principalIds]));
+  }
+  args.push(Math.min(101, limit));
   return sql.exec<{ sequence: number; kind: string; actor_id: string; timestamp: number; version: number; related_ids: string; payload: string }>(
-    'SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload FROM concord_events WHERE sequence > ? ORDER BY sequence LIMIT ?', after, Math.min(101, limit),
+    `SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload FROM concord_events WHERE sequence > ? ${filter} ORDER BY sequence LIMIT ?`,
+    ...args,
   ).toArray().map(row => ({ sequence: row.sequence, kind: row.kind, actorId: row.actor_id, timestamp: row.timestamp, version: row.version, relatedIds: JSON.parse(row.related_ids) as string[], payload: JSON.parse(row.payload) as Record<string, unknown> }));
 }
 

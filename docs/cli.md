@@ -28,6 +28,16 @@ CLI stdout and stderr are redacted as structured values before JSON serializatio
 
 Safe GET requests and keyed mutations retry transient transport failures, HTTP 429, and server errors for at most three attempts. A retry reuses the same request body and idempotency key and honors `Retry-After` (bounded to 30 seconds). Other requests are not retried.
 
+## Delegated principals
+
+```sh
+npm run concord -- principals mint --role agent --repo REPO_ID --ttl 2h --name worker-1
+npm run concord -- principals list [--cursor CURSOR]
+npm run concord -- principals revoke PRINCIPAL_ID
+```
+
+Mint writes only the newly issued plaintext token followed by a newline to stdout, once. Store it securely at creation; list and revoke never show it. `--ttl` accepts positive seconds (`s`), minutes (`m`), or hours (`h`); the default is 24 hours. Omit `--repo` to inherit the caller's full repository scope. The server enforces role and repository subsets, parent expiry, the trusted TTL maximum, 100 repository IDs per stored scope, and active and total tenant caps. `principals list` returns up to 25 items and a `nextCursor`; pass it with `--cursor` to continue. See [the principals API](api-principals.md) for authorization and response details.
+
 ## Repository commands
 
 To adopt a committed source tree as one provenance-stamped root commit, see
@@ -82,9 +92,10 @@ npm run concord -- repair review --repo REPO_ID --change-id CHANGE_ID --round-id
 npm run concord -- verdict add --repo REPO_ID --change-id CHANGE_ID --revision 2 --review-manifest-digest sha256:0123 --finding-set-version 3 --decision approve --evidence-digest sha256:4567 --expected-version 4
 npm run concord -- verdict carry --repo REPO_ID --change-id CHANGE_ID --parent-verdict-id VERDICT_ID --revision 3 --new-base-oid FULL_OID --expected-version 4
 npm run concord -- events list --repo REPO_ID --after 0
+npm run concord -- events --tenant [--cursor CURSOR]
 ```
 
-Queue enqueue requires `changeId`, `verdictId`, and the unit-to-fence `leaseFences` map. Withdraw requires `changeId` and `reason`. Finding add requires `revision`, `unitKey`, `text`, and `evidenceDigest`. Repair submit requires `revision`, `findingSetVersion`, and a complete `dispositions` array; each disposition has `findingId`, `explanation`, and `evidenceDigest`. Repair review requires the round ID in the path plus `revision`, `findingSetVersion`, `decision` (`accept` or `reject`), and `evidenceDigest`. Verdict add requires `revision`, `reviewManifestDigest`, `findingSetVersion`, `decision` (`approve` or `reject`), and `evidenceDigest`. Carry requires `parentVerdictId`, `revision`, and `newBaseOid`. Events accepts an optional monotonic `after` sequence.
+Queue enqueue requires `changeId`, `verdictId`, and the unit-to-fence `leaseFences` map. Withdraw requires `changeId` and `reason`. Finding add requires `revision`, `unitKey`, `text`, and `evidenceDigest`. Repair submit requires `revision`, `findingSetVersion`, and a complete `dispositions` array; each disposition has `findingId`, `explanation`, and `evidenceDigest`. Repair review requires the round ID in the path plus `revision`, `findingSetVersion`, `decision` (`accept` or `reject`), and `evidenceDigest`. Verdict add requires `revision`, `reviewManifestDigest`, `findingSetVersion`, `decision` (`approve` or `reject`), and `evidenceDigest`. Carry requires `parentVerdictId`, `revision`, and `newBaseOid`. Repository events accept an optional monotonic `after` sequence. `events --tenant` reads the tenant catalog log with an owner or viewer token; it includes principal mint and revoke events and returns a paginated JSON envelope. Pass `nextCursor` to `--cursor` for the next page. See [the principals API](api-principals.md#tenant-events) for event fields and polling behavior.
 
 ## Advanced API
 

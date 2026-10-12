@@ -15,13 +15,15 @@ const local: Record<string, Omit<Principal, 'expiresAt'>> = {
   'local-viewer': { tenantId: 'local', principalId: 'viewer', roles: ['viewer'], repoIds: '*' },
 };
 
+const localTenants = new Set(Object.values(local).map(principal => principal.tenantId));
 const modelLabel = /^[A-Za-z0-9._:/-]{1,64}$/;
 type TokenPrincipal = Omit<Principal, 'expiresAt'> & { expiresAt: number | null };
-let cachedTokens: { source: string; mappings: Record<string, TokenPrincipal> } | undefined;
+type AuthConfig = { source: string; mappings: Record<string, TokenPrincipal>; tenants: ReadonlySet<string> };
+let cachedTokens: AuthConfig | undefined;
 
-/** Validate the entire secret mapping when loaded, before selecting a credential. */
-export function loadAuthTokens(source: string): Record<string, TokenPrincipal> {
-  if (cachedTokens?.source === source) return cachedTokens.mappings;
+/** Validate the entire secret mapping when loaded, and cache its operator tenant IDs for delegated-token routing. */
+function loadAuthConfig(source: string): AuthConfig {
+  if (cachedTokens?.source === source) return cachedTokens;
   let value: unknown;
   try { value = JSON.parse(source); } catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -30,8 +32,17 @@ export function loadAuthTokens(source: string): Record<string, TokenPrincipal> {
     throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable');
   }
   const mappings = value as Record<string, TokenPrincipal>;
-  cachedTokens = { source, mappings };
-  return mappings;
+  const tenants = new Set<string>();
+  for (const principal of Object.values(mappings)) {
+    if (typeof principal.tenantId === 'string') tenants.add(principal.tenantId);
+  }
+  cachedTokens = { source, mappings, tenants };
+  return cachedTokens;
+}
+
+/** Validate the entire secret mapping when loaded, before selecting a credential. */
+export function loadAuthTokens(source: string): Record<string, TokenPrincipal> {
+  return loadAuthConfig(source).mappings;
 }
 
 export function clock(env: Pick<Env, 'CONCORD_MODE' | 'CONCORD_TEST_NOW'>): () => number {
@@ -49,17 +60,41 @@ Promise<{ principal: Principal; expiresAt: number | null }> {
   if (!match) throw new HttpError(401, 'UNAUTHORIZED', 'Bearer credential required');
   const secret = match[1];
   let credential: TokenPrincipal | undefined;
+  let key: string | undefined;
   if (env.CONCORD_MODE === 'local') {
     const fixture = local[secret];
     if (fixture) credential = { ...fixture, expiresAt: Number.MAX_SAFE_INTEGER };
   } else if (secret.startsWith('local-')) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Fixture credential is not valid in production');
   }
-  if (!credential && env.AUTH_TOKENS) {
-    const mappings = loadAuthTokens(env.AUTH_TOKENS);
+  const auth = !credential && env.AUTH_TOKENS ? loadAuthConfig(env.AUTH_TOKENS) : undefined;
+  if (!credential && auth) {
     const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
-    const key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
-    credential = mappings[key];
+    key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+    credential = auth.mappings[key];
+  }
+  if (!credential) {
+    const delegated = /^cct_([A-Za-z0-9_-]{1,64})_([a-f0-9]{64})$/.exec(secret);
+    if (delegated) {
+      const tenantId = delegated[1];
+      if (!auth?.tenants.has(tenantId) && !(env.CONCORD_MODE === 'local' && localTenants.has(tenantId))) {
+        throw new HttpError(401, 'UNAUTHORIZED', 'Invalid credential');
+      }
+      if (!key) {
+        const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+        key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+      }
+      const stub = env.TENANT_CATALOG.get(env.TENANT_CATALOG.idFromName(`tenant:${tenantId}`));
+      const lookup = await stub.fetch(new Request('https://concord.internal/internal/principals/lookup', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-concord-tenant': tenantId },
+        body: JSON.stringify({ digest: key }),
+      }));
+      if (lookup.ok) {
+        const found = (await lookup.json() as { data: Principal | null }).data;
+        // Delegated principals always carry a bounded numeric expiry; never treat a missing one as non-expiring.
+        if (found && typeof found.expiresAt === 'number') credential = found;
+      }
+    }
   }
   const validId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
   const validRoles: Role[] = ['owner', 'agent', 'reviewer', 'checker', 'promoter', 'viewer'];
