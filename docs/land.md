@@ -23,6 +23,9 @@ When land cleanly cherry-picks a source commit onto canonical main, evidence may
 
 `--json` emits one JSON object per state transition. States include `created`, `leased`, `LEASE_CONFLICT`, `lease-renewed`, `published`, `change` (inspection status), `awaiting-review`, `reviewed`, `enqueued`, `queue` (queue status and diagnostic reason), `landed` (ticket and canonical SHA), and `mirrored`. Output is redacted before serialization. A queue failure exits nonzero with its diagnostic reason. Landing succeeds only after ticket application and a canonical main readback equal to the queue's confirmed SHA.
 
+With owner or reviewer credentials (set `CONCORD_REVIEWER_TOKEN` for an agent run), completed inspections with a non-PASS outcome fail immediately as `INSPECTION_FAILED: <outcome>`; the `--json` error details include the redacted checker log tail.
+Re-running the same intent retries ENV_ERROR or TIMEOUT with a new revision of the same tree when the change is not admitted; FAIL and MERGE_CONFLICT remain content verdicts, and an admitted environment failure requires a new intent key.
+
 `--mirror-to https://github.com/OWNER/REPO.git` mirrors confirmed canonical main through the existing mirror implementation. Set `CONCORD_MIRROR_TOKEN` for a private destination. The mirror checks that destination main is absent or an ancestor and uses a normal push; it never force pushes.
 
 ## AW launcher adapter

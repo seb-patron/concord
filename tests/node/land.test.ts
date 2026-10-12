@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { approvedHead, filesChanged, land, parseAllowed, unitKeys } from '../../cli/land.ts';
+import { approvedHead, filesChanged, land, parseAllowed, retryInspectionHead, unitKeys, waitChange } from '../../cli/land.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 
@@ -31,6 +31,32 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
+  it.each(['ENV_ERROR', 'FAIL'])(`fails immediately with the completed %s inspection log`, async (outcome) => {
+    const change = { changeId: 'change', revision: 3, status: 'draft' };
+    const request = vi.fn(async (_method: string, path: string) => {
+      if (path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [
+        { kind: 'inspect-candidate', changeId: 'change', revision: 3, jobId: 'job', state: 'completed' },
+      ] } } } };
+      if (path === '/repos/demo/changes/change') return { data: change };
+      if (path === '/repos/demo/jobs/job/result') return { data: { result: { outcome, log: 'checker diagnostic tail' } } };
+      throw new Error(`unexpected ${path}`);
+    });
+    await expect(waitChange({ request } as never, '/repos/demo/changes/change', Date.now() + 10_000, () => {}, async () => {}))
+      .rejects.toMatchObject({ message: `INSPECTION_FAILED: ${outcome}`, payload: { log: 'checker diagnostic tail' } });
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+  it('creates a fresh same-tree revision only for environment inspection failures', async () => {
+    const { dir, commit, parent } = await source();
+    const retry = await retryInspectionHead(dir, parent, { headOid: commit, revision: 4 }, { outcome: 'ENV_ERROR' }, false);
+    expect(retry).not.toBe(commit);
+    expect(await git(dir, 'rev-parse', `${retry}^{tree}`)).toBe(await git(dir, 'rev-parse', `${commit}^{tree}`));
+    expect((await git(dir, 'rev-list', '--parents', '-n', '1', retry)).split(' ')).toEqual([retry, parent]);
+    await expect(retryInspectionHead(dir, parent, { headOid: commit, revision: 4 },
+      { outcome: 'TIMEOUT', log: 'runner log' }, true)).rejects.toMatchObject({
+      message: expect.stringContaining('use a new intent key'), payload: { log: 'runner log' },
+    });
+    expect(await retryInspectionHead(dir, parent, { headOid: commit }, { outcome: 'FAIL' }, false)).toBe(commit);
+  });
   it('treats a rename as a deleted and an added path', async () => {
     const { dir, commit, parent } = await source();
     expect(await filesChanged(dir, commit)).toEqual({ parent, files: expect.arrayContaining(['first.txt', 'families.tsv', 'renamed.tsv']) });

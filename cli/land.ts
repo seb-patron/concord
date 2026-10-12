@@ -143,13 +143,32 @@ async function inspection(client: ConcordClient, root: string, change: Obj): Pro
   const jobs = snapshot.projections?.runners?.jobs ?? [];
   const job = [...jobs].reverse().find((item: Obj) => item.kind === 'inspect-candidate' && item.changeId === change.changeId && item.revision === change.revision);
   if (!job || job.state !== 'completed') return null;
-  return (await api(client, `${root}/jobs/${encodeURIComponent(job.jobId)}/result`)).data.result;
+  try { return (await api(client, `${root}/jobs/${encodeURIComponent(job.jobId)}/result`)).data.result; }
+  catch (error) {
+    if (error instanceof ConcordError && error.status === 403)
+      throw new ConcordError('INSPECTION_RESULT_FORBIDDEN: result reads require owner or reviewer credentials; set CONCORD_REVIEWER_TOKEN', 'auth');
+    throw error;
+  }
 }
-async function waitChange(client: ConcordClient, path: string, deadline: number, emit: (event: Obj) => void, onTick: () => Promise<void>): Promise<Obj> {
+function failInspection(result: Obj): never {
+  const outcome = typeof result.outcome === 'string' ? result.outcome : 'UNKNOWN';
+  throw new ConcordError(`INSPECTION_FAILED: ${outcome}`, 'server', undefined,
+    typeof result.log === 'string' ? { log: redactOutput(result.log) } : undefined);
+}
+export async function retryInspectionHead(worktree: string, baseOid: string, change: Obj, result: Obj, queued: boolean): Promise<string> {
+  if (!['ENV_ERROR', 'TIMEOUT'].includes(result.outcome)) return change.headOid;
+  if (queued) throw new ConcordError(`INSPECTION_FAILED: ${result.outcome}; this admitted change cannot be re-inspected, use a new intent key`, 'server', undefined,
+    typeof result.log === 'string' ? { log: redactOutput(result.log) } : undefined);
+  const tree = await git(['rev-parse', `${change.headOid}^{tree}`], {}, worktree);
+  return git(['commit-tree', tree, '-p', baseOid, '-m', `Retry inspection after revision ${change.revision}`], { identity: true }, worktree);
+}
+export async function waitChange(client: ConcordClient, path: string, deadline: number, emit: (event: Obj) => void, onTick: () => Promise<void>, inspector = client): Promise<Obj> {
   let last = '';
   while (Date.now() < deadline) {
     const change = (await api(client, path)).data;
     if (change.status !== last) { emit({ state: 'change', status: change.status, changeId: change.changeId }); last = change.status; }
+    const result = await inspection(inspector, path.slice(0, path.lastIndexOf('/changes/')), change);
+    if (result && result.outcome !== 'PASS') failInspection(result);
     if (['ready', 'queued', 'checking', 'landed', 'blocked', 'failed', 'closed'].includes(change.status)) return change;
     await onTick();
     await pause(1000);
@@ -220,6 +239,10 @@ export async function land(input: LandOptions): Promise<Obj> {
   const token = required(process.env.CONCORD_TOKEN, 'CONCORD_TOKEN');
   const url = required(process.env.CONCORD_URL, 'CONCORD_URL');
   const client = input.client ?? new ConcordClient({ url, token });
+  if (options.reviewEvidence && process.env.CONCORD_REVIEWER_TOKEN === token)
+    throw new ConcordError('reviewer token must differ from author token', 'usage');
+  const inspector = !input.client && process.env.CONCORD_REVIEWER_TOKEN && process.env.CONCORD_REVIEWER_TOKEN !== token
+    ? new ConcordClient({ url, token: process.env.CONCORD_REVIEWER_TOKEN }) : client;
   const emit = (event: Obj) => (options.emit ?? ((value: Obj) => { process.stdout.write(`${JSON.stringify(redactOutput(value))}\n`); }))({ repo, intentKey, ...event });
   const squash = options.base ? await squashRange(source, changed.parent, commit) : null;
   if (squash) emit({ state: 'squashed', base: changed.parent, headOid: commit, squashOid: squash.oid });
@@ -286,7 +309,16 @@ export async function land(input: LandOptions): Promise<Obj> {
     try {
       let change = (await api(client, path)).data;
       if (change.headOid && change.baseOid === targetBase && change.headOid !== prepared.head) throw new ConcordError('PUBLISHED_HEAD_MISMATCH: existing intent has a different head', 'conflict');
-      if (!change.headOid || change.baseOid !== targetBase) {
+      if (change.headOid && change.baseOid === targetBase && !alreadyQueued) {
+        const priorInspection = await inspection(inspector, root, change);
+        if (priorInspection) prepared.head = await retryInspectionHead(prepared.work, targetBase, change, priorInspection, false);
+      } else if (change.headOid && change.baseOid === targetBase && alreadyQueued) {
+        const priorInspection = await inspection(inspector, root, change);
+        if (priorInspection) await retryInspectionHead(prepared.work, targetBase, change, priorInspection, true);
+      }
+      if (change.headOid !== prepared.head || !change.headOid || change.baseOid !== targetBase) {
+        if (change.headOid && change.baseOid === targetBase && alreadyQueued)
+          throw new ConcordError('INSPECTION_FAILED: environment inspection cannot be retried for an admitted change; use a new intent key', 'server');
         const candidate = await access(client, root, repository, 'write', change.candidateStorageName);
         rejectCanonicalTarget(change.candidateStorageName, repository.canonicalStorageName, candidate.remote, repository.canonicalRemote);
         await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', candidate.remote, `${prepared.head}:${change.branch}`], { token: candidate.token }, prepared.work);
@@ -301,7 +333,7 @@ export async function land(input: LandOptions): Promise<Obj> {
         if (current.headOid !== prepared.head || current.baseOid !== targetBase || current.revision !== publishedRevision)
           throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change head, base, or revision changed during land', 'conflict');
       };
-      change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : renew);
+      change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : renew, inspector);
       if (!['ready', 'queued', 'checking', 'landed'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
       requirePublishedChange(change);
       if (!alreadyQueued) await renew();
