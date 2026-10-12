@@ -680,6 +680,86 @@ describe('repository and change lifecycle', () => {
     expect(attemptTwo.status).toBe(201);
   });
 
+  it('grants published-head read tokens to the author, reviewers and owners in any change status', async () => {
+    const repo = await create('read_token_case');
+    await fetchApi(apiRequest('/v1/repos/read_token_case'));
+    await fake('read_token_case', provider => {
+      provider.putCommit(repo.canonicalStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(repo.canonicalStorageName, 'refs/heads/main', null, a);
+    });
+    const input = { intentKey: 'task', intentText: 'read candidate', baseOid: a, branch: 'refs/heads/candidate', unitKeys: [], dependencyChangeIds: [] };
+    const created = await fetchApi(mutation('/v1/repos/read_token_case/changes', input, 'read-change', 'local-agent-a'));
+    expect(created.status).toBe(201);
+    const change = (await responseBody(created)).data;
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:read_token_case'));
+    const repoVersion = async () => (await responseBody(await fetchApi(apiRequest('/v1/repos/read_token_case')))).version;
+    const gitToken = (scope: 'read' | 'write', key: string, token = 'local-owner') =>
+      repoVersion().then(expectedVersion => fetchApi(mutation('/v1/repos/read_token_case/git-token',
+        { expectedVersion, storageName: change.candidateStorageName, scope, ttlSeconds: 60 }, key, token)));
+    const directToken = (scope: 'read' | 'write', key: string, principalId: string, roles: string[]) =>
+      repoVersion().then(expectedVersion => runInDurableObject(stub, instance => instance.fetch(new Request('https://concord.test/v1/repos/read_token_case/git-token', {
+        method: 'POST', headers: {
+          'x-concord-principal': JSON.stringify({ tenantId: 'local', principalId, roles, repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER }),
+          'idempotency-key': key, 'content-type': 'application/json',
+        },
+        body: JSON.stringify({ expectedVersion, storageName: change.candidateStorageName, scope, ttlSeconds: 60 }),
+      }))));
+
+    const unpublished = await directToken('read', 'read-unpublished', 'reviewer', ['reviewer']);
+    expect(unpublished.status).toBe(403);
+    expect((await responseBody(unpublished)).error.code).toBe('FORK_NOT_OWNED');
+
+    await fake('read_token_case', provider => {
+      provider.putCommit(change.candidateStorageName, { oid: b, treeOid: c, parents: [a] });
+      provider.conditionalUpdateRef(change.candidateStorageName, input.branch, null, b);
+    });
+    const registered = await fetchApi(mutation('/v1/repos/read_token_case/branches', {
+      expectedVersion: await repoVersion(), storageName: change.candidateStorageName, ref: input.branch, observedHead: b, ownerId: 'agent-a',
+    }, 'read-register', 'local-agent-a'));
+    expect(registered.status).toBe(201);
+    const published = await fetchApi(mutation(`/v1/repos/read_token_case/changes/${change.changeId}/publish`, {
+      expectedVersion: await repoVersion(), baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {},
+    }, 'read-publish', 'local-agent-a'));
+    expect(published.status).toBe(409);
+    const current = (await responseBody(await fetchApi(apiRequest(`/v1/repos/read_token_case/changes/${change.changeId}`)))).data;
+    expect(current).toMatchObject({ revision: 1, headOid: b, status: 'draft' });
+
+    const reviewerRead = await directToken('read', 'read-reviewer', 'reviewer', ['reviewer']);
+    expect(reviewerRead.status).toBe(200);
+    expect((await responseBody(reviewerRead)).data.secret).toMatch(/^fake-token:/);
+    const reviewerWrite = await directToken('write', 'write-reviewer', 'reviewer', ['reviewer']);
+    expect(reviewerWrite.status).toBe(403);
+    expect((await responseBody(reviewerWrite)).error.code).toBe('FORK_NOT_OWNED');
+    const agentRead = await gitToken('read', 'read-agent-b', 'local-agent-b');
+    expect(agentRead.status).toBe(403);
+    expect((await responseBody(agentRead)).error.code).toBe('FORK_NOT_OWNED');
+    const viewerRead = await directToken('read', 'read-viewer', 'viewer', ['viewer']);
+    expect(viewerRead.status).toBe(403);
+    expect((await responseBody(viewerRead)).error.code).toBe('FORK_NOT_OWNED');
+    const authorRead = await gitToken('read', 'read-author', 'local-agent-a');
+    expect(authorRead.status).toBe(200);
+    const ownerRead = await gitToken('read', 'read-owner');
+    expect(ownerRead.status).toBe(200);
+
+    const closed = await fetchApi(mutation(`/v1/repos/read_token_case/changes/${change.changeId}/close`, { expectedVersion: await repoVersion() }, 'read-close', 'local-agent-a'));
+    expect(closed.status).toBe(200);
+    expect((await gitToken('read', 'read-author-closed', 'local-agent-a')).status).toBe(200);
+
+    await runInDurableObject(stub, (_instance, durable) => {
+      const state = sqlState(durable.storage.sql);
+      const changes = state.get<Change[]>('module:repos:changes')!;
+      const found = changes.find(item => item.changeId === change.changeId)!;
+      const merged = { ...found, status: 'merged' as const };
+      state.put('module:repos:changes', changes.map(item => item.changeId === change.changeId ? merged : item));
+      state.put(`module:repos:change:${change.changeId}`, merged);
+    });
+    expect((await gitToken('read', 'read-author-landed', 'local-agent-a')).status).toBe(200);
+    expect((await directToken('read', 'read-reviewer-landed', 'reviewer', ['reviewer'])).status).toBe(200);
+    const landedWrite = await directToken('write', 'write-author-landed', 'agent-a', ['agent']);
+    expect(landedWrite.status).toBe(403);
+    expect((await responseBody(landedWrite)).error.code).toBe('FORK_NOT_OWNED');
+  });
+
   it('keeps a failed fork visible and reconciles a retry without allocating another change', async () => {
     await create('retry_case');
     await fetchApi(apiRequest('/v1/repos/retry_case'));

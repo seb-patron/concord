@@ -177,9 +177,12 @@ export class ConcordClient {
           continue;
         }
         const kind: ConcordErrorKind = response.status === 409 ? 'conflict' : response.status === 401 || response.status === 403 ? 'auth' : 'server';
-        if (url.pathname.endsWith('/git-token')) throw new ConcordError(`Git token request failed with HTTP ${response.status}`, kind, response.status);
         const count = { omittedMembers: 0 };
         const safePayload = redactOutput(payload, count);
+        if (url.pathname.endsWith('/git-token')) {
+          const detail = errorDetail(safePayload);
+          throw new ConcordError(`Git token request failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}`, kind, response.status, safePayload, count.omittedMembers);
+        }
         throw new ConcordError(errorMessage(safePayload, response.status), kind, response.status, safePayload, count.omittedMembers);
       } catch (error) {
         if (error instanceof ConcordError) throw error;
@@ -206,15 +209,15 @@ export class ConcordClient {
 
 export function idempotencyKey(value?: string): string { return value ?? randomUUID(); }
 
+function errorDetail(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const error = (payload as { error?: { message?: unknown; code?: unknown } }).error;
+  if (!error || typeof error.message !== 'string') return undefined;
+  const code = typeof error.code === 'string' ? `${error.code}: ` : '';
+  return `${code}${error.message}`;
+}
 function errorMessage(payload: unknown, status: number): string {
-  if (payload && typeof payload === 'object') {
-    const error = (payload as { error?: { message?: unknown; code?: unknown } }).error;
-    if (error) {
-      const code = typeof error.code === 'string' ? `${error.code}: ` : '';
-      if (typeof error.message === 'string') return `${code}${error.message}`;
-    }
-  }
-  return `Concord returned HTTP ${status}`;
+  return errorDetail(payload) ?? `Concord returned HTTP ${status}`;
 }
 function safeMessage(error: unknown): string {
   return redactString(String(error instanceof Error ? error.message : error ?? 'unknown error'));

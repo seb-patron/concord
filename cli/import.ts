@@ -211,10 +211,23 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
     const change = data(changeResponse);
     const storageName = field(change, 'candidateStorageName');
     const repoDetail = await client.request('GET', root);
-    const access = data(await client.request('POST', `${root}/git-token`, {
-      body: { storageName, scope: 'write', ttlSeconds: 300 },
-      expectedVersion: version(repoDetail), idempotencyKey: idempotencyKey(),
-    }));
+    const requestAccess = async (seed: number): Promise<Record<string, unknown>> => {
+      let expected = seed;
+      for (let retries = 0; ; retries++) {
+        try {
+          return data(await client.request('POST', `${root}/git-token`, {
+            body: { storageName, scope: 'write', ttlSeconds: 300 },
+            expectedVersion: expected, idempotencyKey: idempotencyKey(),
+          }));
+        } catch (error) {
+          const conflict = error instanceof ConcordError ? (error.payload as { error?: { code?: unknown; details?: { currentVersion?: unknown } } } | undefined)?.error : undefined;
+          const moved = conflict?.details?.currentVersion;
+          if (!(error instanceof ConcordError) || error.status !== 409 || conflict?.code !== 'STALE_VERSION' || retries >= 3) throw error;
+          expected = typeof moved === 'number' && Number.isSafeInteger(moved) ? moved : version(await client.request('GET', root));
+        }
+      }
+    };
+    const access = await requestAccess(version(repoDetail));
     const remote = field(access, 'remote');
     const secret = typeof access.secret === 'string' ? access.secret : field(access, 'token');
     rememberCredential(secret);

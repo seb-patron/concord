@@ -35,7 +35,7 @@ async function publicationServer(baseOid: string, onToken?: () => Promise<void>)
     calls.push({ path: request.url ?? '', body: body ? JSON.parse(body) : undefined });
     response.setHeader('content-type', 'application/json');
     if (request.url === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { candidateStorageName: 'fork', branch: 'agent-branch', baseOid, unitKeys: ['unit:a'], version: 1 } }));
-    else if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', canonicalRemote: 'https://git.invalid/canonical.git', version: 1 } }));
+    else if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', canonicalRemote: 'https://git.invalid/canonical.git', version: 1 }, version: 7 }));
     else if (request.url === '/v1/repos/repo-1/git-token') {
       if (onToken) await onToken();
       response.end(JSON.stringify({ data: { remote: 'https://git.invalid/fork.git', plaintext: 'git-test-token' } }));
@@ -232,10 +232,62 @@ describe('Concord agent CLI client', () => {
       await client.request('POST', '/repos/r/git-token', { body: { scope: 'read' } });
       throw new Error('expected Git-token request to fail');
     } catch (error) {
-      expect(error).toMatchObject({ kind: 'server', status: 400, message: 'Git token request failed with HTTP 400' });
-      expect((error as ConcordError).payload).toBeUndefined();
+      expect(error).toMatchObject({ kind: 'server', status: 400, message: 'Git token request failed with HTTP 400: [REDACTED]' });
+      expect(JSON.stringify((error as ConcordError).payload)).not.toContain(secret);
       expect(JSON.stringify(error)).not.toContain(secret);
     }
+  });
+
+  it('sends the repository envelope version to git-token and retries a stale version once', async () => {
+    const calls: Array<{ path: string; body: any }> = [];
+    let attempts = 0;
+    const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
+      let body = '';
+      for await (const chunk of request) body += chunk;
+      calls.push({ path: request.url ?? '', body: body ? JSON.parse(body) : undefined });
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 }, version: 7 }));
+      else if (request.url === '/v1/repos/repo-1/git-token') {
+        attempts += 1;
+        if (attempts === 1) {
+          response.statusCode = 409;
+          response.end(JSON.stringify({ error: { code: 'STALE_VERSION', message: 'Object version is stale', details: { currentVersion: 8 } }, requestId: 'race-1' }));
+        } else response.end(JSON.stringify({ data: { remote: 'https://git.invalid/repo.git', plaintext: 'git-test-token' } }));
+      } else { response.statusCode = 404; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const root = await tempDir('clone-version-race');
+    try {
+      // The token retry succeeds, then the Git clone to the unreachable remote fails.
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', join(root, 'clone')], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+      })).rejects.toMatchObject({ code: 5, stdout: '' });
+      const tokenCalls = calls.filter(call => call.path === '/v1/repos/repo-1/git-token');
+      expect(tokenCalls.map(call => call.body.expectedVersion)).toEqual([7, 8]);
+      expect(tokenCalls.map(call => call.body.scope)).toEqual(['read', 'read']);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it('shows the server error code and message when a git-token request is refused', async () => {
+    const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 }, version: 7 }));
+      else if (request.url === '/v1/repos/repo-1/git-token') {
+        response.statusCode = 403;
+        response.end(JSON.stringify({ error: { code: 'FORK_NOT_OWNED', message: 'The caller cannot read this candidate fork' }, requestId: 'refused-1' }));
+      } else { response.statusCode = 404; response.end('{}'); }
+    }));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected local test server address');
+    const root = await tempDir('clone-refused');
+    try {
+      await expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'repo', 'clone', '--repo', 'repo-1', '--path', join(root, 'clone')], {
+        cwd: process.cwd(), env: { ...process.env, CONCORD_URL: `http://127.0.0.1:${address.port}`, CONCORD_TOKEN: 'api-token' },
+      })).rejects.toMatchObject({ code: 4, stdout: '', stderr: expect.stringContaining('FORK_NOT_OWNED: The caller cannot read this candidate fork') });
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
   it('keeps CLI JSON stdout separate from structured stderr and server exit status', async () => {
@@ -263,7 +315,7 @@ describe('Concord agent CLI client', () => {
     const secret = 'plaintext-git-secret';
     const server = await import('node:http').then(({ createServer }) => createServer(async (request, response) => {
       response.setHeader('content-type', 'application/json');
-      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 } }));
+      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 }, version: 7 }));
       else if (request.url === '/v1/repos/repo-1/git-token') response.end(JSON.stringify({ data: { plaintext: secret, nested: { arbitrary: 'another-secret' }, scope: 'read' } }));
       else { response.statusCode = 404; response.end('{}'); }
     }));
@@ -297,7 +349,7 @@ describe('Concord agent CLI client', () => {
     await chmod(join(shimDir, 'git'), 0o755);
     const server = await import('node:http').then(({ createServer }) => createServer((request, response) => {
       response.setHeader('content-type', 'application/json');
-      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 } }));
+      if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', version: 1 }, version: 7 }));
       else response.end(JSON.stringify({ data: { remote: 'https://git.invalid/repo.git', plaintext: secret } }));
     }));
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -392,7 +444,7 @@ describe('Concord agent CLI client', () => {
       calls.push(request.url ?? '');
       response.setHeader('content-type', 'application/json');
       if (request.url === '/v1/repos/repo-1/changes/change-1') response.end(JSON.stringify({ data: { candidateStorageName: 'fork', branch: 'agent-branch', baseOid, unitKeys: ['unit:a'], version: 1 } }));
-      else if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', canonicalRemote: 'https://git.invalid/canonical.git', version: 1 } }));
+      else if (request.url === '/v1/repos/repo-1') response.end(JSON.stringify({ data: { canonicalStorageName: 'canonical', canonicalRemote: 'https://git.invalid/canonical.git', version: 1 }, version: 7 }));
       else { response.statusCode = 500; response.end('{}'); }
     }));
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
