@@ -162,6 +162,10 @@ export function loadTrustedConfig(env: Pick<Env, 'CONCORD_MODE' | 'TRUSTED_CONFI
   if (limits !== undefined && (!limits || typeof limits !== 'object' || Array.isArray(limits) ||
     Object.keys(limits).some(key => !['maxReposPerTenant', 'maxForksPerTenant', 'maxTokenMintsPerTenantPerDay'].includes(key)) ||
     Object.values(limits).some(value => !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 10000))) throw new Error('TRUSTED_CONFIG_INVALID');
+  if (config.queue !== undefined && (!config.queue || typeof config.queue !== 'object' || Array.isArray(config.queue) ||
+    Object.keys(config.queue).some(key => key !== 'maxAutomaticRebases') ||
+    config.queue.maxAutomaticRebases !== undefined && (!Number.isSafeInteger(config.queue.maxAutomaticRebases) ||
+      config.queue.maxAutomaticRebases < 1 || config.queue.maxAutomaticRebases > 100))) throw new Error('TRUSTED_CONFIG_INVALID');
   for (const [id, policy] of Object.entries(config.policies)) {
     if (!policy || typeof policy !== 'object') throw new Error('TRUSTED_CONFIG_INVALID');
     if (id !== policy.id || !/^sha256:[a-f0-9]{64}$/.test(policy.digest) || !/^sha256:[a-f0-9]{64}$/.test(policy.checkerDigest) || !policy.units || typeof policy.units !== 'object' || Array.isArray(policy.units)) throw new Error('TRUSTED_CONFIG_INVALID');

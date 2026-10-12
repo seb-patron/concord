@@ -183,6 +183,29 @@ export async function treeOid(directory: string, oid: string): Promise<string> {
   return git(directory, ['rev-parse', oid + '^{tree}']);
 }
 
+/** Stable patch identity for the complete candidate delta, streamed without a size-limited capture. */
+export async function patchId(directory: string, base: string, head: string): Promise<string> {
+  const env = childEnvironment();
+  const diff = spawn('git', ['diff', '--no-ext-diff', '--binary', base, head, '--'],
+    { cwd: directory, env, shell: false, stdio: ['ignore', 'pipe', 'ignore'] });
+  const patch = spawn('git', ['patch-id', '--stable'],
+    { cwd: directory, env, shell: false, stdio: ['pipe', 'pipe', 'ignore'] });
+  diff.stdout.pipe(patch.stdin);
+  let output = '';
+  patch.stdout.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); });
+  const deadline = jobDeadline.getStore();
+  const timeout = Math.max(1, Math.min(60_000, (deadline ?? Date.now() + 60_000) - Date.now()));
+  const timer = setTimeout(() => { diff.kill('SIGKILL'); patch.kill('SIGKILL'); }, timeout);
+  try {
+    const [diffCode, patchCode] = await Promise.all([
+      new Promise<number>((resolve, reject) => { diff.once('error', reject); diff.once('close', code => resolve(code ?? -1)); }),
+      new Promise<number>((resolve, reject) => { patch.once('error', reject); patch.once('close', code => resolve(code ?? -1)); }),
+    ]);
+    if (diffCode !== 0 || patchCode !== 0 || !/^[a-f0-9]{40,64}\s/.test(output)) throw new Error('PATCH_ID_UNAVAILABLE');
+    return output.split(/\s+/)[0];
+  } finally { clearTimeout(timer); }
+}
+
 export async function isAncestor(directory: string, ancestor: string, descendant: string): Promise<boolean> {
   const result = await command('git', ['merge-base', '--is-ancestor', ancestor, descendant], directory, 30_000);
   if (result.timedOut || result.code > 1) throw new Error('ANCESTRY_CHECK_FAILED');

@@ -1,6 +1,6 @@
 import type {
-  BootstrapHandoff, CandidateInput, ChangeView, Digest, FeatureModule, FrozenAdmission, Gate, Id,
-  Job, ModuleContext, Promotion, PromotionResult, Repo, SeedInput, StackResult, ValidateStackJob,
+  BootstrapHandoff, CandidateInput, Change, ChangeView, Digest, FeatureModule, Finding, FrozenAdmission, Gate, Id,
+  Job, ModuleContext, Promotion, PromotionResult, RebaseCandidateJob, RebaseResult, Repo, SeedInput, StackResult, ValidateStackJob,
 } from '../contracts';
 import { digest, failure, HttpError, json } from '../http';
 import { eventSequence, sqlState } from '../state';
@@ -15,6 +15,7 @@ import {
 type EntryState = 'admitted' | 'reserved' | 'checking' | 'landed' | 'blocked' | 'withdrawn' | 'failed';
 interface Entry extends PlannedEntry {
   issueNumber?: number | null;
+  rebasedFromOid?: string;
   entryId: Id; revision: number; baseOid: string; headOid: string; storageName: string; ref: string;
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
   policyDigest: Digest; profileDigest: Digest;
@@ -23,9 +24,9 @@ interface Entry extends PlannedEntry {
   contestId: Id | null;
 }
 interface JobRecord {
-  job: Job; purpose: 'stack' | 'diagnostic' | 'contest' | 'promotion'; memberIds: Id[];
+  job: Job; purpose: 'stack' | 'diagnostic' | 'contest' | 'promotion' | 'rebase'; memberIds: Id[];
   admissionIds: Id[];
-  contestId?: Id; result?: StackResult | PromotionResult; resultSequence?: number;
+  contestId?: Id; result?: StackResult | RebaseResult | PromotionResult; resultSequence?: number;
   consumed: boolean; retryOf?: Id; retryIssued?: boolean;
   verified?: boolean;
 }
@@ -56,6 +57,7 @@ interface QueueState {
     jobId: Id; memberIds: Id[]; outcome: string; composedOid: string | null; sequence: number;
   }>;
   finalCanonicalOid: string | null; coalesceUntil: number | null; blockedReason: string | null; dispatchCaseId?: string;
+  rebaseAttempts?: Record<Id, number>;
 }
 const empty = (): QueueState => ({
   generation: 0, observedMain: null, entries: [], jobs: [], contests: [], ticket: null, bootstrap: null,
@@ -152,10 +154,7 @@ function checkAdmission(context: ModuleContext, state: QueueState, changeId: Id,
       throw new HttpError(409, 'DEPENDENCY_UNAVAILABLE', 'Prerequisite is not admitted or merged');
     }
   }
-  if (view.baseOid !== main && !view.dependencyChangeIds.some(id => state.entries.some(entry =>
-    entry.changeId === id && ['reserved', 'checking'].includes(entry.state) && entry.headOid === view.baseOid))) {
-    throw new HttpError(409, 'STALE_BASE', 'Candidate base is neither canonical main nor an admitted prerequisite head');
-  }
+  // A published, approved stale base enters the queue so the trusted runner can rebase it.
   const { policy, profile } = policyAndProfile(context, view.policyId, view.profileId);
   return {
     changeId, revision: view.revision, baseOid: view.baseOid!, headOid: view.headOid!,
@@ -312,7 +311,7 @@ function schedule(context: ModuleContext, state: QueueState, job: Job, purpose: 
   const record: JobRecord = { job, purpose, memberIds: [...memberIds],
     admissionIds: entries.map(entry => entry!.entryId), contestId, consumed: false };
   state.jobs.push(record);
-  if (purpose === 'stack' || purpose === 'diagnostic') state.activeStackJobId = job.jobId;
+  if (purpose === 'stack' || purpose === 'diagnostic' || purpose === 'rebase') state.activeStackJobId = job.jobId;
   const version = context.nextVersion();
   context.appendEvent('queue.job_scheduled', memberIds, { jobId: job.jobId, kind: job.kind, purpose,
     generation: state.generation, subset: memberIds }, version);
@@ -338,16 +337,65 @@ function blockEntry(context: ModuleContext, state: QueueState, entry: Entry, rea
   emit(context, 'queue.entry_blocked', [entry.changeId], { reason, confidence: 'none' });
   invalidate(context, state, reason, [entry.changeId]);
 }
-function blockOldBaseEntries(context: ModuleContext, state: QueueState, main: string | null): void {
-  for (const entry of state.entries) if (active(entry) && entry.baseOid !== main) {
-    blockEntry(context, state, entry, 'STALE_MAIN');
-  }
-}
 function observeMain(context: ModuleContext, state: QueueState, main: string | null, ids: Id[] = []): void {
   if (state.observedMain === main) return;
   state.observedMain = main;
   invalidate(context, state, 'MAIN_CHANGED', ids);
-  blockOldBaseEntries(context, state, main);
+}
+async function makeRebaseJob(context: ModuleContext, state: QueueState, entry: Entry, main: string): Promise<RebaseCandidateJob> {
+  const { policy, profile } = policyAndProfile(context, entry.policyId, entry.profileId);
+  const [candidate, canonical] = await Promise.all([
+    context.storage.info(entry.storageName), context.storage.info(entry.canonicalStorageName),
+  ]);
+  if (!candidate || !canonical || candidate.status !== 'ready' || canonical.status !== 'ready')
+    throw new HttpError(503, 'STORAGE_UNAVAILABLE', 'Rebase storage unavailable');
+  const jobId = crypto.randomUUID();
+  const job: RebaseCandidateJob = { kind: 'rebase-candidate', version: 1, jobId, repoId: context.repoId,
+    generation: state.generation, profileDigest: profile.digest, policyId: policy.id,
+    policyDigest: policy.digest, unitPolicy: structuredClone(policy),
+    expectedRefs: { [entry.storageName]: entry.headOid, [entry.canonicalStorageName]: main },
+    storageRemotes: { [entry.storageName]: candidate.remote, [entry.canonicalStorageName]: canonical.remote },
+    checkerId: policy.checkerId, checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest,
+    toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+    timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes,
+    ...(policy.checkerId === 'dispatch-lab' ? { caseId: dispatchCase(state, [entry], false) } : {}),
+    state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null,
+    candidate: { changeId: entry.changeId, revision: entry.revision, baseOid: entry.baseOid,
+      headOid: entry.headOid, storageName: entry.storageName, ref: entry.ref },
+    newBaseOid: main, canonicalStorageName: entry.canonicalStorageName,
+    targetRef: `refs/heads/concord-rebase-${jobId}`, verdictId: entry.verdictId,
+    inputDigest: policy.digest };
+  job.inputDigest = await digest(jobInput(job));
+  return job;
+}
+
+function rebaseFinding(context: ModuleContext, entry: Entry, revision: number, reason: string,
+  units: string[], evidenceDigest: Digest): void {
+  const shared = sqlState(context.sql);
+  const current = shared.get<{ findingIds: Id[]; findingSetVersion: number; nextRound: number; pendingRound: number | null }>(`module:findings:ledger:${entry.changeId}`)
+    ?? { findingIds: [], findingSetVersion: 0, nextRound: 1, pendingRound: null };
+  for (const unitKey of units.length ? units : ['unknown:rebase']) {
+    const version = context.nextVersion();
+    const findingId = crypto.randomUUID();
+    const record: Finding = { findingId, changeId: entry.changeId, originRevision: revision, unitKey,
+      evidenceDigest, text: reason, status: 'open', repairRound: null, resolvedAtRevision: null,
+      resolvingReviewerId: null, semanticAnchor: { kind: entry.unitKeys.includes(unitKey) ? 'unit' : 'unknown', key: unitKey }, version };
+    shared.put(`module:findings:finding:${findingId}`, record);
+    current.findingIds.push(findingId);
+    current.findingSetVersion++;
+    context.appendEvent('finding.created', [findingId, entry.changeId],
+      { originRevision: revision, unitKey, text: reason, findingSetVersion: current.findingSetVersion }, version);
+  }
+  shared.put(`module:findings:ledger:${entry.changeId}`, current);
+  const indexed = shared.get<Id[]>('module:findings:changes') ?? [];
+  if (!indexed.includes(entry.changeId)) shared.put('module:findings:changes', [...indexed, entry.changeId]);
+}
+
+function rebaseEvent(context: ModuleContext, kind: string, entry: Entry, payload: Record<string, unknown>): void {
+  const change = (sqlState(context.sql).get<Change[]>('module:repos:changes') ?? []).find(item => item.changeId === entry.changeId);
+  const issue = entry.issueNumber?.toString() ?? /(?:\/issues\/|#)(\d+)/.exec(change?.intentText ?? '')?.[1];
+  emit(context, kind, [entry.changeId, ...(issue ? [`issue-${issue}`] : [])],
+    { changeId: entry.changeId, ...(issue ? { issue } : {}), ...payload });
 }
 function closeContest(context: ModuleContext, state: QueueState, contest: ContestState, reason: string): void {
   contest.state = 'blocked'; contest.reason = reason;
@@ -546,10 +594,10 @@ function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate
   });
 }
 
-function onResult(context: ModuleContext, result: StackResult | PromotionResult): Gate<{ promotionId: Id | null }> {
+function onResult(context: ModuleContext, result: StackResult | RebaseResult | PromotionResult): Gate<{ promotionId: Id | null }> {
   if (!result) return { status: 'blocked', version: 0, code: 'MODULE_UNAVAILABLE',
     reason: 'No scheduled result', evidenceIds: [] };
-  if (result.kind === 'validate-stack' && !context.principal.roles.includes('checker')
+  if (result.kind !== 'promote' && !context.principal.roles.includes('checker')
     || result.kind === 'promote' && !context.principal.roles.includes('promoter')) {
     return blocked(context, 'FORBIDDEN', 'Trusted runner role required');
   }
@@ -585,7 +633,7 @@ function onResult(context: ModuleContext, result: StackResult | PromotionResult)
   });
 }
 
-async function validResultDigest(result: StackResult | PromotionResult): Promise<boolean> {
+async function validResultDigest(result: StackResult | RebaseResult | PromotionResult): Promise<boolean> {
   const { resultDigest, ...preimage } = result;
   return await digest(preimage) === resultDigest;
 }
@@ -768,6 +816,20 @@ async function processStackResult(context: ModuleContext, state: QueueState, rec
       emit(context, 'queue.bootstrap_blocked', [state.bootstrap!.stackId], { reason: result.outcome });
       return;
     }
+    if (record.memberIds.length === 1) {
+      const entry = member(state, record, record.memberIds[0]);
+      if (entry?.rebasedFromOid && active(entry)) {
+        const reason = `Rebased combined tree check returned ${result.outcome}: ${result.log}`;
+        context.transaction(() => {
+          rebaseFinding(context, entry, entry.revision, reason, entry.unitKeys, result.resultDigest);
+          rebaseEvent(context, 'queue.rebase_blocked', entry,
+            { reason: 'REBASE_CHECK_FAIL', outcome: result.outcome, jobId: result.jobId });
+          blockEntry(context, state, entry, 'REBASE_CHECK_FAIL');
+          save(context, state);
+        });
+        return;
+      }
+    }
     const started = startDiagnosis(record.memberIds);
     state.diagnosis = { ...started.diagnosis, admissionIds: [...record.admissionIds] };
     emit(context, 'queue.diagnosis_started', record.memberIds, { outcome: result.outcome, next: started.next });
@@ -802,6 +864,8 @@ async function processContestResult(context: ModuleContext, state: QueueState, r
   contest.resultIds.push(record.job.jobId);
   const pair = contest.childIds.map(id => [...state.jobs].reverse().find(item => item.purpose === 'contest'
     && item.contestId === contest.contestId && item.memberIds[0] === id
+    && item.job.generation === state.generation && item.job.kind === 'validate-stack'
+    && item.job.canonicalBaseOid === contest.baseOid
     && item.result?.kind === 'validate-stack' && item.verified && item.consumed && !item.retryIssued));
   if (pair.some(item => !item)) return;
   const [first, second] = pair as [JobRecord, JobRecord];
@@ -949,6 +1013,61 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
     failRecord(context, state, record, 'ENVIRONMENT_FAILURE');
     return;
   }
+  if (record.purpose === 'rebase') {
+    const job = record.job;
+    if (job.kind !== 'rebase-candidate' || result.kind !== 'rebase-candidate') return;
+    const entry = admitted(state, record.admissionIds[0]);
+    if (!entry || !active(entry) || main !== job.newBaseOid || !admissionStillValid(context, entry)) return;
+    if (result.outcome !== 'PASS' || !result.headOid || !result.reviewManifestDigest) {
+      const conflict = result.outcome === 'MERGE_CONFLICT';
+      const reason = conflict ? 'REBASE_CONFLICT' : `REBASE_CHECK_${result.outcome}`;
+      const units = conflict ? result.conflictUnits : entry.unitKeys;
+      context.transaction(() => {
+        rebaseFinding(context, entry, entry.revision,
+          conflict ? `Rebase conflict in ${result.conflictPaths.join(', ')} (${units.join(', ')})` :
+            `Rebased combined tree check returned ${result.outcome}: ${result.log}`, units, result.resultDigest);
+        rebaseEvent(context, 'queue.rebase_blocked', entry,
+          { reason, paths: result.conflictPaths, units, outcome: result.outcome, jobId: job.jobId });
+        blockEntry(context, state, entry, reason);
+        save(context, state);
+      });
+      return;
+    }
+    context.transaction(() => {
+      const applied = context.call('repos.applyRebase', job, result);
+      if (applied.status === 'blocked') {
+        rebaseFinding(context, entry, entry.revision, applied.reason, entry.unitKeys, result.resultDigest);
+        rebaseEvent(context, 'queue.rebase_blocked', entry,
+          { reason: applied.code, units: entry.unitKeys, jobId: job.jobId });
+        blockEntry(context, state, entry, applied.code);
+        save(context, state);
+        return;
+      }
+      const carried = context.call('verdicts.carryRebase', job, result, applied.value.revision, entry.findingSetVersion);
+      entry.revision = applied.value.revision;
+      entry.rebasedFromOid = job.candidate.headOid;
+      entry.baseOid = job.newBaseOid;
+      entry.headOid = result.headOid!;
+      entry.ref = job.targetRef;
+      entry.unitKeys = [...result.unitKeys];
+      if (carried.status === 'blocked') {
+        const units = carried.evidenceIds.length ? carried.evidenceIds : result.unitKeys;
+        rebaseFinding(context, entry, entry.revision, carried.reason, units, result.resultDigest);
+        rebaseEvent(context, 'queue.rebase_review_required', entry,
+          { reason: carried.reason, units, jobId: job.jobId });
+        blockEntry(context, state, entry, 'REVIEW_REQUIRED');
+      } else {
+        entry.verdictId = carried.value.verdictId;
+        rebaseEvent(context, 'queue.rebased', entry,
+          { revision: entry.revision, baseOid: entry.baseOid, headOid: entry.headOid,
+            carriedFrom: { sourceOid: job.candidate.headOid, method: 'patch-id' },
+            mergedUnits: result.patchIdBefore === result.patchIdAfter ? [] : result.unitKeys });
+        bump(context, state, 'REBASED', [entry.changeId]);
+      }
+      save(context, state);
+    });
+    return;
+  }
   if (result.kind !== 'validate-stack') return;
   await processStackResult(context, state, record, result, main);
 }
@@ -992,6 +1111,38 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
   }
   if (state.blockedReason === 'SUSPECTED_FLAKE' || state.blockedReason === 'RESULT_DIGEST_MISMATCH'
     || state.blockedReason === 'CHECKED_SCRATCH_MISMATCH') { save(context, state); return; }
+  if (main && !state.activeStackJobId) {
+    const stale = ordered(state).find(entry => active(entry) && entry.baseOid !== main &&
+      !entry.dependencyChangeIds.some(id => state.entries.some(parent => active(parent) &&
+        parent.changeId === id && parent.headOid === entry.baseOid)));
+    if (stale) {
+      const limit = context.trusted.queue?.maxAutomaticRebases ?? 5;
+      state.rebaseAttempts ??= {};
+      if ((state.rebaseAttempts[stale.changeId] ?? 0) >= limit) {
+        context.transaction(() => {
+          rebaseEvent(context, 'queue.rebase_blocked', stale,
+            { reason: 'REBASE_LIMIT', maxAutomaticRebases: limit, baseOid: stale.baseOid, main });
+          blockEntry(context, state, stale, 'REBASE_LIMIT');
+          save(context, state);
+        });
+        return;
+      }
+      const prior = state.jobs.find(record => record.purpose === 'rebase' &&
+        record.admissionIds[0] === stale.entryId && record.job.kind === 'rebase-candidate' &&
+        record.job.newBaseOid === main && !record.consumed);
+      if (prior) { save(context, state); return; }
+      const job = await makeRebaseJob(context, state, stale, main);
+      context.transaction(() => {
+        schedule(context, state, job, 'rebase', [stale.changeId]);
+        state.rebaseAttempts![stale.changeId] = (state.rebaseAttempts![stale.changeId] ?? 0) + 1;
+        rebaseEvent(context, 'queue.rebase_scheduled', stale,
+          { jobId: job.jobId, fromBaseOid: stale.baseOid, toBaseOid: main,
+            attempt: state.rebaseAttempts![stale.changeId] });
+        save(context, state);
+      });
+      return;
+    }
+  }
   const contest = state.contests.find(item => item.state === 'open');
   if (contest) {
     if (contest.admissionIds.some(id => { const entry = admitted(state, id); return !entry || entry.state !== 'reserved' || !admissionStillValid(context, entry); })) {
@@ -1000,9 +1151,16 @@ async function queueAlarm(context: ModuleContext): Promise<void> {
       save(context, state);
       return;
     }
+    if (main && contest.baseOid !== main && contest.admissionIds.every(id => admitted(state, id)?.baseOid === main)) {
+      contest.baseOid = main;
+      contest.resultIds = [];
+      emit(context, 'queue.contest_rebased', contest.childIds, { contestId: contest.contestId, baseOid: main });
+    }
     for (const id of contest.childIds) {
       const admissionId = contest.admissionIds[contest.childIds.indexOf(id)];
-      if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId && record.admissionIds[0] === admissionId)) continue;
+      if (state.jobs.some(record => record.purpose === 'contest' && record.contestId === contest.contestId
+        && record.admissionIds[0] === admissionId && record.job.generation === state.generation
+        && record.job.kind === 'validate-stack' && record.job.canonicalBaseOid === contest.baseOid)) continue;
       const job = await makeStackJob(context, state, [id], false, true);
       context.transaction(() => { schedule(context, state, job, 'contest', [id], contest.contestId); save(context, state); });
     }
@@ -1063,7 +1221,9 @@ export const queue: FeatureModule = {
     if (state.contests.some(contest => contest.state === 'open')) {
       const unscheduled = state.contests.some(contest => contest.state === 'open'
         && contest.childIds.some(id => !state.jobs.some(record => record.purpose === 'contest'
-          && record.contestId === contest.contestId && record.memberIds[0] === id)));
+          && record.contestId === contest.contestId && record.memberIds[0] === id
+          && record.job.generation === state.generation && record.job.kind === 'validate-stack'
+          && record.job.canonicalBaseOid === contest.baseOid)));
       return unscheduled && state.coalesceUntil !== null
         ? Math.max(context.now() + 1, state.coalesceUntil) : context.now() + 10_000;
     }

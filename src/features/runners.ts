@@ -175,6 +175,12 @@ function validJob(c: ModuleContext, job: Job): boolean {
   }
   if (job.kind === 'delta-check') return !!job.candidate.baseOid && !!job.storageRemotes[job.candidate.storageName] &&
     Object.entries(job.expectedRefs).filter(([name, oid]) => name !== job.candidate.storageName && oid === job.newBaseOid).length === 1;
+  if (job.kind === 'rebase-candidate') return !!job.candidate.baseOid &&
+    !!job.storageRemotes[job.candidate.storageName] && !!job.storageRemotes[job.canonicalStorageName] &&
+    job.candidate.storageName !== job.canonicalStorageName &&
+    job.expectedRefs[job.candidate.storageName] === job.candidate.headOid &&
+    job.expectedRefs[job.canonicalStorageName] === job.newBaseOid &&
+    /^refs\/heads\/concord-rebase-[A-Za-z0-9-]+$/.test(job.targetRef) && validId(job.verdictId);
   if (job.kind === 'promote') {
     if (!job.storageRemotes[job.scratchStorageName]) return false;
     const canonical = Object.entries(job.expectedRefs).filter(([name]) => name !== job.scratchStorageName);
@@ -242,11 +248,13 @@ async function credentials(c: ModuleContext, id: string, body: JobCredentialsBod
   if (!stored) throw new HttpError(409, 'STALE_JOB', 'Job claim missing');
   const fence = { ...body, inputDigest: stored.job.inputDigest };
   const job = current(c, id, fence).job;
-  if (body.operation !== 'fetch' && body.operation !== 'scratch-push' && body.operation !== 'canonical-push') throw new HttpError(400, 'INVALID_OPERATION', 'Unknown operation');
+  if (body.operation !== 'fetch' && body.operation !== 'scratch-push' && body.operation !== 'canonical-push' && body.operation !== 'candidate-push') throw new HttpError(400, 'INVALID_OPERATION', 'Unknown operation');
   if (body.operation === 'scratch-push' && job.kind !== 'validate-stack' ||
-    body.operation === 'canonical-push' && job.kind !== 'promote') throw new HttpError(403, 'FORBIDDEN', 'Operation unavailable');
+    body.operation === 'canonical-push' && job.kind !== 'promote' ||
+    body.operation === 'candidate-push' && job.kind !== 'rebase-candidate') throw new HttpError(403, 'FORBIDDEN', 'Operation unavailable');
   const names = body.operation === 'fetch' ? Object.keys(job.storageRemotes) :
     body.operation === 'scratch-push' ? [job.kind === 'validate-stack' ? job.scratchStorageName : ''] :
+      body.operation === 'candidate-push' ? [job.kind === 'rebase-candidate' ? job.candidate.storageName : ''] :
       [Object.keys(job.expectedRefs).find(name => name !== (job.kind === 'promote' ? job.scratchStorageName : '')) ?? ''];
   if (names.some(name => !name || !job.storageRemotes[name])) conflict('MISSING_REMOTE');
   const tokens: Array<{ storageName: string; remote: string; secret: string; expiresAt: number }> = [];
@@ -403,6 +411,25 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       if (ancestry !== 'found') identityConflict(job, 'promote-ancestry', ancestry);
     }
   }
+  if (value.kind === 'rebase-candidate' && value.outcome === 'PASS') {
+    if (job.kind !== 'rebase-candidate' || !value.headOid || value.baseOid !== job.newBaseOid ||
+      !/^[a-f0-9]{40,64}$/.test(value.patchIdBefore ?? '') ||
+      !/^[a-f0-9]{40,64}$/.test(value.patchIdAfter ?? '') ||
+      !validManifest(job, value.reviewManifest) ||
+      value.reviewManifestDigest !== inputHash(stableJson(value.reviewManifest)) ||
+      value.reviewManifest!.coverage !== 'complete' ||
+      stableJson([...new Set(value.reviewManifest!.changedUnits.map(unit => unit.unitKey))].sort()) !==
+        stableJson([...value.unitKeys].sort())) conflict('RESULT_EVIDENCE');
+    const rebased = job as Extract<Job, { kind: 'rebase-candidate' }>;
+    const headOid = value.headOid as string;
+    const head = await visibleCommit(c.storage, rebased.candidate.storageName, headOid);
+    if (head?.treeOid !== value.sourceTreeOid) identityConflict(job, 'rebase-tree', head ? 'different-oid' : 'null');
+    const ref = await visibleRef(c.storage, rebased.candidate.storageName, rebased.targetRef, headOid);
+    if (ref !== headOid) identityConflict(job, 'rebase-ref', oidVisibility(ref));
+    const baseAncestry = await ancestor(c.storage, rebased.candidate.storageName, rebased.newBaseOid, headOid);
+    const sourceAncestry = await ancestor(c.storage, rebased.candidate.storageName, rebased.candidate.headOid, headOid);
+    if (baseAncestry !== 'found' || sourceAncestry !== 'found') identityConflict(job, 'rebase-ancestry', 'different-oid');
+  }
   if (value.kind === 'promote') {
     const promotion = job.kind === 'promote' ? job : null;
     const canonicalName = promotion && Object.keys(promotion.expectedRefs).find(name => name !== promotion.scratchStorageName);
@@ -414,7 +441,7 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
     current(c, id, body);
     const dispatched = job.kind === 'inspect-candidate' ? c.call('repos.inspectRevision', value as Extract<JobResult, { kind: 'inspect-candidate' }>) :
       job.kind === 'delta-check' ? c.call('verdicts.evaluateCarry', value as Extract<JobResult, { kind: 'delta-check' }>) :
-        c.call('queue.onResult', value as Extract<JobResult, { kind: 'validate-stack' | 'promote' }>);
+        c.call('queue.onResult', value as Extract<JobResult, { kind: 'validate-stack' | 'rebase-candidate' | 'promote' }>);
     const version = c.nextVersion();
     save(c, { job: { ...job, state: 'completed', runnerId: null, expiresAt: null, version }, result: value, dispatch: dispatched,
       completedPrincipalId: c.principal.principalId });

@@ -3,8 +3,11 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
+import type { Digest, Job, ModuleContext, StackResult, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
+import { queue } from '../../src/features/queue';
+import { jobInput, runners } from '../../src/features/runners';
+import { localFixtureConfig } from '../../src/state';
 import { manifestDigest, normalizeManifest } from '../../src/verdicts/manifest';
 import { childEnvironment, command, conditionalPush, fetchOid, git, refOid, temporaryWork, withJobDeadline } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
@@ -49,11 +52,146 @@ function jobBase(storageRemotes: Record<string, string>) {
 function credentials(remotes: Record<string, string>): CredentialProvider {
   return async operation => Object.entries(remotes).filter(([name]) =>
     operation === 'fetch' || operation === 'scratch-push' && name === 'scratch' ||
-    operation === 'canonical-push' && name === 'canonical').map(([storageName, remote]) =>
+    operation === 'canonical-push' && name === 'canonical' ||
+    operation === 'candidate-push' && name === 'candidate').map(([storageName, remote]) =>
     ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
 }
 
 describe('local runner Git and checker execution', () => {
+  it('rebases a clean patch onto moving main with the stable patch identity', async () => {
+    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+      await writeFile(join(repo, 'example.txt'), 'candidate\n');
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'candidate'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/work']);
+      await git(repo, ['switch', '--detach', base]);
+      await writeFile(join(repo, 'other.txt'), 'main moved\n');
+      await git(repo, ['add', 'other.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'main moved'], 30_000, commitEnv);
+      const nextMain = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const unitPolicy: TrustedPolicy = { ...policy, units: { 'file:example.txt': {
+        canonicalKey: 'file:example.txt', file: 'example.txt', resources: [], dependencyKeys: [],
+      } } };
+      const job: Job = { ...jobBase(remotes), kind: 'rebase-candidate', unitPolicy,
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: head,
+          storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: nextMain,
+        canonicalStorageName: 'canonical', targetRef: 'refs/heads/concord-rebase-job', verdictId: 'verdict',
+        expectedRefs: { canonical: nextMain, candidate: head } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'rebase-candidate', outcome: 'PASS', baseOid: nextMain,
+        patchIdBefore: expect.any(String), patchIdAfter: expect.any(String), unitKeys: ['file:example.txt'] });
+      if (result.kind !== 'rebase-candidate') throw new Error('wrong result kind');
+      expect(result.patchIdAfter).toBe(result.patchIdBefore);
+      expect(await refOid(repo, remotes.candidate, job.targetRef)).toBe(result.headOid);
+    });
+  }, 20_000);
+
+  it.each(['same-file', 'declared-dependency'] as const)('reports rebased %s byte evidence from Git', async scenario => {
+    await gitFixture(async ({ repo, canonical, candidate }) => {
+      const initial = ['candidate-line', ...Array.from({ length: 12 }, (_, index) => `middle-${index}`),
+        'main-line', ''].join('\n');
+      await writeFile(join(repo, 'example.txt'), initial);
+      await writeFile(join(repo, 'b.txt'), 'dep-before\n');
+      await git(repo, ['add', 'example.txt', 'b.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'fixture'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      for (const remote of [canonical, candidate]) await git(repo, ['push', '--quiet', remote, 'HEAD:refs/heads/main']);
+      await writeFile(join(repo, 'example.txt'), initial.replace('candidate-line', 'candidate-edit'));
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'candidate'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/work']);
+      await git(repo, ['switch', '--detach', base]);
+      if (scenario === 'same-file') {
+        await writeFile(join(repo, 'example.txt'), initial.replace('main-line', 'main-edit'));
+        await git(repo, ['add', 'example.txt']);
+      } else {
+        await writeFile(join(repo, 'b.txt'), 'dep-after\n');
+        await git(repo, ['add', 'b.txt']);
+      }
+      await git(repo, ['commit', '--quiet', '-m', 'main moved'], 30_000, commitEnv);
+      const nextMain = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const unitPolicy: TrustedPolicy = { ...policy, units: {
+        'file:example.txt': { canonicalKey: 'file:example.txt', file: 'example.txt', resources: [],
+          dependencyKeys: scenario === 'declared-dependency' ? ['file:b.txt'] : [] },
+        'file:b.txt': { canonicalKey: 'file:b.txt', file: 'b.txt', resources: [], dependencyKeys: [] },
+      } };
+      const job: Job = { ...jobBase(remotes), kind: 'rebase-candidate', unitPolicy,
+        candidate: { changeId: 'change', revision: 1, baseOid: base, headOid: head,
+          storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: nextMain,
+        canonicalStorageName: 'canonical', targetRef: `refs/heads/rebase-${scenario}`, verdictId: 'verdict',
+        expectedRefs: { canonical: nextMain, candidate: head } };
+      const old = await inspectUnits(repo, base, head, job);
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'rebase-candidate', outcome: 'PASS', unitKeys: ['file:example.txt'] });
+      if (result.kind !== 'rebase-candidate' || !result.reviewManifest) throw new Error('rebase failed');
+      expect(result.patchIdAfter).toBe(result.patchIdBefore);
+      const { resultDigest, ...unsigned } = result;
+      expect(resultDigest).toBe(await digest(unsigned));
+      expect(result.reviewManifestDigest).not.toBe(old.digest);
+      if (scenario === 'same-file') {
+        expect(result.reviewManifest.changedUnits[0].beforeDigest).not.toBe(old.manifest.changedUnits[0].beforeDigest);
+        expect(result.reviewManifest.changedUnits[0].afterDigest).not.toBe(old.manifest.changedUnits[0].afterDigest);
+      } else {
+        expect(result.reviewManifest.changedUnits).toEqual(old.manifest.changedUnits);
+        expect(result.reviewManifest.dependencyScope[0]).toMatchObject({ unitKey: 'file:b.txt',
+          contentDigest: 'sha256:' + createHash('sha256').update('dep-after\n').digest('hex') });
+        expect(result.reviewManifest.dependencyScope).not.toEqual(old.manifest.dependencyScope);
+      }
+    });
+  }, 20_000);
+
+  it('uses declared TSV row composition for a rebase and reports a row collision', async () => {
+    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+      const original = 'family\tretry_limit\ttimeout_ms\nalpha\t1\t1000\nbeta\t2\t1000\n';
+      await writeFile(join(repo, 'families.tsv'), original);
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'table'], 30_000, commitEnv);
+      const tableBase = await git(repo, ['rev-parse', 'HEAD']);
+      for (const remote of [canonical, candidate]) await git(repo, ['push', '--quiet', remote, 'HEAD:refs/heads/main']);
+      await writeFile(join(repo, 'families.tsv'), original.replace('alpha\t1', 'alpha\t2'));
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'alpha'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/work']);
+      await git(repo, ['switch', '--detach', tableBase]);
+      await writeFile(join(repo, 'families.tsv'), original.replace('beta\t2', 'beta\t3'));
+      await git(repo, ['add', 'families.tsv']);
+      await git(repo, ['commit', '--quiet', '-m', 'beta'], 30_000, commitEnv);
+      const nextMain = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
+      const table = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'],
+        keyColumn: 'family', keySpec: { charset: 'lower' as const, minLength: 1, maxLength: 256 } };
+      const unitPolicy: TrustedPolicy = { ...policy, tables: [table], units: {} };
+      const job: Job = { ...jobBase(remotes), kind: 'rebase-candidate', unitPolicy,
+        candidate: { changeId: 'change', revision: 1, baseOid: tableBase, headOid: head,
+          storageName: 'candidate', ref: 'refs/heads/work' }, newBaseOid: nextMain,
+        canonicalStorageName: 'canonical', targetRef: 'refs/heads/concord-rebase-row', verdictId: 'verdict',
+        expectedRefs: { canonical: nextMain, candidate: head } };
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(job, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'rebase-candidate', outcome: 'PASS', unitKeys: ['row:families:alpha'] });
+      if (result.kind !== 'rebase-candidate' || !result.headOid) throw new Error('rebase failed');
+      await git(repo, ['fetch', '--quiet', candidate, result.headOid]);
+      expect(await git(repo, ['show', result.headOid + ':families.tsv']))
+        .toContain('alpha\t2\t1000\nbeta\t3\t1000');
+      expect(await refOid(repo, remotes.candidate, job.targetRef)).toBe(result.headOid);
+    });
+  }, 20_000);
   it('requires every reviewed dispatch scene case and checks its expected tree', async () => {
     await temporaryWork(async dir => {
       const a1 = { retry_limit: 1, timeout_ms: 1000, output: 1000 };
@@ -587,6 +725,60 @@ export function attemptBudget(family) {
       expect(await refOid(repo, remotes.scratch, 'refs/heads/check')).toBe(base);
     });
   });
+
+  it('submits an executed Git check through runners.result to the queue coordinator hook', async () => {
+    await gitFixture(async ({ repo, canonical, scratch, base }) => {
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const unsealed: Job = { ...jobBase(remotes), kind: 'validate-stack', canonicalBaseOid: base,
+        candidates: [], baseCheck: true, bootstrap: false, stackId: 'stack', scratchStorageName: 'scratch',
+        scratchRef: 'refs/heads/check', expectedRefs: { canonical: base, scratch: null },
+        state: 'pending', attempt: 0, runnerId: null, fence: 0, expiresAt: null };
+      const job = { ...unsealed, inputDigest: await digest(jobInput(unsealed)) };
+      const trusted = localFixtureConfig('local');
+      trusted.policies['local-demo'] = policy;
+      trusted.profiles['local-demo'] = { ...trusted.profiles['local-demo'], digest: pin,
+        toolchainDigest: pin, oracleDigest: pin, environmentDigest: pin };
+      const treeOid = await git(repo, ['rev-parse', `${base}^{tree}`]);
+      const data = new Map<string, unknown>();
+      let version = 0;
+      let sequence = 0;
+      const context = {
+        repoId: 'demo', tenantId: 'local',
+        principal: { tenantId: 'local', principalId: 'checker', roles: ['checker'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER },
+        trusted, now: Date.now, version: () => version, nextVersion: () => ++version,
+        transaction: (run: () => unknown) => run(), appendEvent: () => ({ sequence: ++sequence }),
+        state: { get: (key: string) => data.get(key) ?? null, put: (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
+          delete: (key: string) => { data.delete(key); } },
+        storage: { readCommit: async () => ({ oid: base, treeOid, parents: [] }), resolveRef: async () => base },
+        call: (name: string, value: StackResult) => {
+          expect(name).toBe('queue.onResult');
+          return queue.hooks['queue.onResult']!(context as unknown as ModuleContext, value);
+        },
+      } as unknown as ModuleContext;
+      context.state.put('data', { generation: 1, observedMain: base, jobs: [{ job, purpose: 'stack', memberIds: [],
+        admissionIds: [], consumed: false }], entries: [], contests: [], ticket: null });
+      expect(runners.hooks['runners.schedule']!(context, job).status).toBe('eligible');
+      const poll = runners.routes.find(route => route.pattern.test('/v1/repos/demo/runner/poll'))!;
+      const claimedResponse = await poll.handle(context, new Request('https://test/v1/repos/demo/runner/poll', { method: 'POST' }),
+        '/v1/repos/demo/runner/poll'.match(poll.pattern)!,
+        { runnerId: 'runner', role: 'checker', supportedProfileDigests: [pin] });
+      expect(claimedResponse.status).toBe(200);
+      const claimed = (await claimedResponse.json() as { data: { job: Job } }).data.job;
+      const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
+        oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000,
+        maxOutputBytes: 16 * 1024, executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+      const result = await executeJob(claimed, profile, credentials(remotes));
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'PASS', composedOid: base });
+      const route = runners.routes.find(entry => entry.method === 'POST' && entry.pattern.test('/v1/repos/demo/jobs/job/result'))!;
+      const response = await route.handle(context, new Request('https://test/v1/repos/demo/jobs/job/result', { method: 'POST' }),
+        '/v1/repos/demo/jobs/job/result'.match(route.pattern)!,
+        { attempt: result.attempt, fence: result.fence, inputDigest: result.inputDigest,
+          resultDigest: result.resultDigest, result });
+      expect(response.status).toBe(200);
+      expect((await response.json() as { data: { dispatch: { status: string } } }).data.dispatch.status).toBe('eligible');
+      expect((context.state.get<{ jobs: Array<{ result?: StackResult }> }>('data'))?.jobs[0].result).toEqual(result);
+    });
+  }, 20_000);
 
   it('rejects a same-tree scratch descendant during base-check reconciliation', async () => {
     await gitFixture(async ({ repo, canonical, scratch, base }) => {
