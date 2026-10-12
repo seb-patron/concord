@@ -150,15 +150,12 @@ async function inspection(client: ConcordClient, root: string, change: Obj): Pro
     throw error;
   }
 }
-function failInspection(result: Obj, sameKeyRetry = false): never {
+function failInspection(result: Obj): never {
   const outcome = typeof result.outcome === 'string' ? result.outcome : 'UNKNOWN';
-  const retry = sameKeyRetry && ['ENV_ERROR', 'TIMEOUT'].includes(outcome)
+  const retry = ['ENV_ERROR', 'TIMEOUT'].includes(outcome)
     ? '; fix the environment, then re-run land with a new --intent-key' : '';
   throw new ConcordError(`INSPECTION_FAILED: ${outcome}${retry}`, 'server', undefined,
     typeof result.log === 'string' ? { log: redactOutput(result.log) } : undefined);
-}
-export function failSameKeyInspection(result: Obj): void {
-  if (result.outcome !== 'PASS') failInspection(result, true);
 }
 export async function waitChange(client: ConcordClient, path: string, deadline: number, emit: (event: Obj) => void, onTick: () => Promise<void>, inspector = client): Promise<Obj> {
   let last = '';
@@ -266,10 +263,6 @@ export async function land(input: LandOptions): Promise<Obj> {
   if (created.provisioning?.state !== 'observed') throw new ConcordError('FORK_TIMEOUT: candidate fork was not provisioned', 'server');
   const changeId = required(created.changeId, 'changeId'); const path = `${root}/changes/${encodeURIComponent(changeId)}`;
   emit({ state: 'created', changeId, baseOid: created.baseOid });
-  if (created.headOid) {
-    const priorInspection = await inspection(inspector, root, created);
-    if (priorInspection) failSameKeyInspection(priorInspection);
-  }
   const existingQueue = (await api(client, `${root}/queue`)).data;
   const alreadyQueued = (existingQueue.entries ?? []).some((item: Obj) => item.changeId === changeId &&
     ['admitted', 'reserved', 'checking', 'landed'].includes(item.state));
@@ -310,13 +303,16 @@ export async function land(input: LandOptions): Promise<Obj> {
     const prepared = await prepareHead(squash?.work ?? source, squash?.oid ?? commit, changed.parent, targetBase, canonical);
     try {
       let change = (await api(client, path)).data;
-      if (change.headOid && change.baseOid === targetBase && change.headOid !== prepared.head) throw new ConcordError('PUBLISHED_HEAD_MISMATCH: existing intent has a different head', 'conflict');
+      if (change.revision !== current.revision || change.headOid !== current.headOid || change.baseOid !== current.baseOid)
+        throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change changed during preparation', 'conflict');
       if (change.headOid !== prepared.head || !change.headOid || change.baseOid !== targetBase) {
         if (change.headOid && change.baseOid === targetBase && alreadyQueued)
           throw new ConcordError('INSPECTION_FAILED: environment inspection cannot be retried for an admitted change; use a new intent key', 'server');
         const candidate = await access(client, root, repository, 'write', change.candidateStorageName);
         rejectCanonicalTarget(change.candidateStorageName, repository.canonicalStorageName, candidate.remote, repository.canonicalRemote);
-        await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags', '--', candidate.remote, `${prepared.head}:${change.branch}`], { token: candidate.token }, prepared.work);
+        await git(['-c', 'core.hooksPath=/dev/null', 'push', '--no-follow-tags',
+          ...(change.headOid ? [`--force-with-lease=${change.branch}:${change.headOid}`] : []),
+          '--', candidate.remote, `${prepared.head}:${change.branch}`], { token: candidate.token }, prepared.work);
         await api(client, `${root}/branches`, { storageName: change.candidateStorageName, ref: change.branch, observedHead: prepared.head, ownerId: change.authorId }, await currentVersion(client, root));
         change = (await api(client, path)).data;
         await api(client, `${path}/publish`, { baseOid: targetBase, headOid: prepared.head, branch: change.branch, unitKeys: units, leaseFences: fences() }, (await api(client, path)).version);
