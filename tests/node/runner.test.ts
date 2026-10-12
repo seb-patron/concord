@@ -11,6 +11,7 @@ import { executeJob, type CredentialProvider } from '../../runner/execute';
 import { dispatchArgv, loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
 import { inspectUnits, mergeTsv } from '../../runner/units';
 import { apiTransport, parseArgs, retryTransport, runLoop, type Transport } from '../../runner/main';
+import { testTimeout } from '../helpers';
 
 const pin = ('sha256:' + '0'.repeat(64)) as Digest;
 const policy: TrustedPolicy = { id: 'local-demo', digest: pin, version: 1, checkerId: 'local-demo', checkerDigest: pin,
@@ -468,7 +469,7 @@ export function attemptBudget(family) {
         expect(unknown.manifest.dependencyScope).toEqual([{ kind: 'tree', treeOid: await git(repo, ['rev-parse', head + '^{tree}']) }]);
       }
     });
-  }, 15_000); // Multiple Git inspections and dependency walks.
+  }, testTimeout(15_000)); // Multiple Git inspections and dependency walks.
 
   it('collects chained TSV row dependencies from the committed table', async () => {
     await gitFixture(async ({ repo }) => {
@@ -570,7 +571,7 @@ export function attemptBudget(family) {
       const retry = await executeJob({ ...job, attempt: 2, fence: 2 }, profile, credentials(remotes));
       expect(retry).toMatchObject({ kind: 'validate-stack', outcome: 'PASS', composedOid: result.composedOid });
     });
-  }, 15_000);
+  }, testTimeout(15_000));
 
   it('checks the canonical commit and tree for a base-check job', async () => {
     await gitFixture(async ({ repo, canonical, scratch, base }) => {
@@ -674,7 +675,7 @@ export function attemptBudget(family) {
       expect(rejected).toMatchObject({ outcome: 'MERGE_CONFLICT' });
       expect(await refOid(seed, pathToFileURL(scratchCollision).href, 'refs/heads/check')).toBeNull();
     });
-  }, 20_000); // Six bare repos, three native commits and three composed checks.
+  }, testTimeout(20_000)); // Six bare repos, three native commits and three composed checks.
 
   it('delta-check reruns the affected unit with the pinned profile', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
@@ -700,7 +701,7 @@ export function attemptBudget(family) {
       if (result.kind !== 'delta-check') throw new Error('wrong result');
       expect(result.reviewManifest?.changedUnits[0].unitKey).toBe('file:example.txt');
     });
-  }, 15_000);
+  }, testTimeout(15_000));
 
   it('keeps a later failing affected unit and its exit marker after an earlier full log', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
@@ -733,7 +734,7 @@ export function attemptBudget(family) {
       expect(result.log).toContain('file:later.txt: exit=7');
       expect(result.log).toContain('yyyyyyyy');
     });
-  }, 15_000);
+  }, testTimeout(15_000));
 
   it('fails closed when affected-unit exit markers cannot all fit', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
@@ -764,7 +765,7 @@ export function attemptBudget(family) {
       expect(result).toMatchObject({ kind: 'delta-check', outcome: 'ENV_ERROR' });
       expect(result.log).toContain('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
     });
-  }, 15_000);
+  }, testTimeout(15_000));
 
   it('validates an explicit seed and promotes it only while main is absent', async () => {
     await gitFixture(async ({ repo, canonical, candidate, scratch, base }) => {

@@ -27,6 +27,7 @@ if [ "${1:-}" = "--self-test-zero-tests" ]; then
   mkdir -p "$scratch/scripts" "$scratch/tests/node"
   cp package.json vitest.config.ts wrangler.local.jsonc "$scratch/"
   cp scripts/validate.sh "$scratch/scripts/"
+  cp tests/helpers.ts "$scratch/tests/"
   ln -s "$root/node_modules" "$scratch/node_modules"
   : > "$scratch/tests/node/empty.test.ts"
   if output="$(cd "$scratch" && sh scripts/validate.sh --test-count 2>&1)"; then
@@ -47,6 +48,13 @@ if [ -z "${XDG_CONFIG_HOME:-}" ]; then
   XDG_CONFIG_HOME="${TMPDIR:-/tmp}"
   export XDG_CONFIG_HOME
 fi
+if [ -z "${CONCORD_TEST_TIMEOUT_SCALE:-}" ]; then
+  # The five-minute load average smooths short spikes during the suite.
+  load="$(node -e 'process.stdout.write(String(require("node:os").loadavg()[1]))')"
+  CONCORD_TEST_TIMEOUT_SCALE="$(node -e 'const n=Number(process.argv[1]); process.stdout.write(String(n < 8 ? 1 : n < 20 ? 2 : 3))' "$load")"
+  export CONCORD_TEST_TIMEOUT_SCALE
+fi
+printf 'CONCORD_TEST_TIMEOUT_SCALE=%s\n' "$CONCORD_TEST_TIMEOUT_SCALE"
 if [ ! -d node_modules ]; then
   npm ci --no-audit --no-fund
 fi

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
+import { testTimeout } from '../helpers';
 
 const execFile = promisify(execFileCallback);
 const tempDirs: string[] = [];
@@ -374,7 +375,7 @@ describe('Concord agent CLI client', () => {
       expect(JSON.parse(success.stdout).data.echo).toBe('[REDACTED]');
       expect(JSON.parse(success.stdout).data.lowerEncoded).toBe('[REDACTED]');
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
-  }, 60_000);
+  }, testTimeout(60_000));
 
   it('rejects a mismatched publication identity before requesting Git write access', async () => {
     const root = await tempDir('publish-identity');

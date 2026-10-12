@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { testTimeout, waitForCondition } from '../helpers';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
@@ -209,13 +210,13 @@ describe('Fleet desk DOM', () => {
       expect(byId('demo-open').hidden).toBe(true);
       (byId('token-input') as HTMLInputElement).value = 'bad';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-      await flush();
+      await waitForCondition(() => byId('session-error').textContent?.includes('Sign in again') ?? false, 5_000, 'sign-in error');
       expect(byId('signed-out').hidden).toBe(false);
       expect(doc.body.textContent).not.toContain('Unknown state');
       expect(byId('session-error').textContent).toContain('Sign in again');
       (byId('token-input') as HTMLInputElement).value = 'good';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-      await flush(); await flush(); await flush();
+      await waitForCondition(() => byId('work-board').textContent?.includes('Cap retries') ?? false, 5_000, 'desk render');
       expect(byId('desk').hidden).toBe(false);
       expect(byId('work-board').textContent).toContain('Cap retries');
       expect(byId('issue-list').textContent).toContain('#1 <task>');
@@ -433,7 +434,7 @@ describe('Fleet desk DOM', () => {
       Object.assign(globalThis, previous);
       dom.window.close();
     }
-  });
+  }, testTimeout(30_000));
 });
 
 describe('layout and token contract', () => {
