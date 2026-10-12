@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
 import { normalizeManifest } from '../../src/verdicts/manifest';
-import { childEnvironment, command, conditionalPush, fetchOid, git, refOid, temporaryWork } from '../../runner/git';
+import { childEnvironment, command, conditionalPush, fetchOid, git, refOid, temporaryWork, withJobDeadline } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
 import { dispatchArgv, loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile, type LocalProfile } from '../../runner/profiles';
 import { inspectUnits, mergeTsv } from '../../runner/units';
@@ -840,5 +840,45 @@ export function attemptBudget(family) {
       sleep: async () => {},
     })).rejects.toThrow('HTTP 401');
     expect(denied).toBe(1);
+  });
+
+  it('retries a per-command Git timeout while the job deadline permits another attempt', async () => {
+    const oid = 'a'.repeat(40);
+    let fetches = 0;
+    const runGit: typeof git = async (_dir, args) => {
+      if (args[0] === 'fetch' && ++fetches === 1) throw new Error('GIT_TIMEOUT');
+      return oid;
+    };
+    await withJobDeadline(Date.now() + 10_000, () => fetchOid('/unused', 'https://example.invalid/repo', oid, undefined,
+      { runGit, sleep: async () => {}, random: () => 0.5 }));
+    expect(fetches).toBe(2);
+  });
+
+  it('does not retry a fetch timeout when the job deadline leaves no time after backoff', async () => {
+    const oid = 'a'.repeat(40);
+    let fetches = 0;
+    await expect(withJobDeadline(Date.now() + 50, () => fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { fetches++; throw new Error('GIT_TIMEOUT'); },
+      sleep: async () => {},
+      random: () => 0.5,
+    }))).rejects.toThrow('JOB_TIMEOUT');
+    expect(fetches).toBe(1);
+  });
+
+  it('never retries an expired job deadline and bounds transient fetch exhaustion to three attempts', async () => {
+    const oid = 'a'.repeat(40);
+    let deadlineFetches = 0;
+    await expect(fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { deadlineFetches++; throw new Error('JOB_TIMEOUT'); },
+      sleep: async () => {},
+    })).rejects.toThrow('JOB_TIMEOUT');
+    expect(deadlineFetches).toBe(1);
+
+    let transientFetches = 0;
+    await expect(fetchOid('/unused', 'https://example.invalid/repo', oid, undefined, {
+      runGit: async () => { transientFetches++; throw new Error('GIT_ERROR: HTTP 500'); },
+      sleep: async () => {},
+    })).rejects.toThrow('HTTP 500');
+    expect(transientFetches).toBe(3);
   });
 });
