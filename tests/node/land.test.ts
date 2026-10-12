@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { approvedHead, filesChanged, land, parseAllowed, retryInspectionHead, unitKeys, waitChange } from '../../cli/land.ts';
+import { approvedHead, failSameKeyInspection, filesChanged, land, parseAllowed, unitKeys, waitChange } from '../../cli/land.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 
@@ -45,17 +45,16 @@ describe('land input and evidence gates', () => {
       .rejects.toMatchObject({ message: `INSPECTION_FAILED: ${outcome}`, payload: { log: 'checker diagnostic tail' } });
     expect(request).toHaveBeenCalledTimes(3);
   });
-  it('creates a fresh same-tree revision only for environment inspection failures', async () => {
-    const { dir, commit, parent } = await source();
-    const retry = await retryInspectionHead(dir, parent, { headOid: commit, revision: 4 }, { outcome: 'ENV_ERROR' }, false);
-    expect(retry).not.toBe(commit);
-    expect(await git(dir, 'rev-parse', `${retry}^{tree}`)).toBe(await git(dir, 'rev-parse', `${commit}^{tree}`));
-    expect((await git(dir, 'rev-list', '--parents', '-n', '1', retry)).split(' ')).toEqual([retry, parent]);
-    await expect(retryInspectionHead(dir, parent, { headOid: commit, revision: 4 },
-      { outcome: 'TIMEOUT', log: 'runner log' }, true)).rejects.toMatchObject({
-      message: expect.stringContaining('use a new intent key'), payload: { log: 'runner log' },
-    });
-    expect(await retryInspectionHead(dir, parent, { headOid: commit }, { outcome: 'FAIL' }, false)).toBe(commit);
+  it.each(['ENV_ERROR', 'TIMEOUT'])('requires a new intent key after a same-key %s inspection failure', outcome => {
+    try {
+      failSameKeyInspection({ outcome, log: 'checker diagnostic tail' });
+      throw new Error('same-key inspection failure unexpectedly returned');
+    } catch (error) {
+      expect(error).toMatchObject({
+        message: `INSPECTION_FAILED: ${outcome}; fix the environment, then re-run land with a new --intent-key`,
+        payload: { log: 'checker diagnostic tail' },
+      });
+    }
   });
   it('treats a rename as a deleted and an added path', async () => {
     const { dir, commit, parent } = await source();
