@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { ConcordError } from './client.ts';
 
 const execFile = promisify(execFileCallback);
-export interface GitOptions { token?: string; timeoutMs?: number; alternateObjectDirectory?: string; identity?: boolean; indexFile?: string; noLazyFetch?: boolean }
+export interface GitOptions { token?: string; timeoutMs?: number; alternateObjectDirectory?: string; identity?: boolean; indexFile?: string; noLazyFetch?: boolean; preserveOutput?: boolean }
 
 // Never let a caller's Git context redirect an importer command into its source repository.
 export function gitEnvironment(options: GitOptions = {}): NodeJS.ProcessEnv {
@@ -30,7 +30,7 @@ export async function git(args: string[], options: GitOptions = {}, cwd?: string
   if (args.some(arg => arg.includes('\0'))) throw new ConcordError('Invalid Git argument', 'usage');
   try {
     const result = await execFile('git', args, { cwd, env: gitEnvironment(options), timeout: options.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
-    return result.stdout.trim();
+    return options.preserveOutput ? result.stdout : result.stdout.trim();
   } catch (error) {
     const e = error as NodeJS.ErrnoException & { killed?: boolean };
     const category = e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn';

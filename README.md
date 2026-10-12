@@ -89,6 +89,6 @@ npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 
 The local Worker, bridge, fixture checker, runner, scenario driver, CLI, and browser UI run without an account. Cloudflare Artifacts hosting, a public deployment, and any mirror require the owner's account, credentials, authorization, and the live evidence in the [deployment runbook](docs/deploy.md); a local bridge run is not that evidence. The AW scene uses a public mock adapter, not the private launcher. Historical improvement claims require an approved sanitized timeline and are not inferred from the supplied aggregates.
 
-Agents can follow [AGENTS.md](AGENTS.md) and connect through the [MCP server](docs/mcp.md).
+Agents can follow [AGENTS.md](AGENTS.md), connect through the [MCP server](docs/mcp.md), and [land a finished agent run](docs/land.md).
 
 The default is `CONCORD_SHOW_DECOMPILED_C=0`. The public fixture contains no ROM bytes, proprietary compiler inputs, or decompiled C. Licensed under [MIT](LICENSE).
