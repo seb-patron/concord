@@ -44,9 +44,10 @@ excluded path.
 It verifies the completed tree against the selected paths before contacting
 Concord. Git paths are never printed merely because they were excluded.
 Import disables Git's lazy fetching. A partial clone must already have the
-source commit, tree, and blob objects locally; an unavailable object stops the
-import before it contacts Concord. Import does not change source objects,
-index, or refs.
+source commit and selected tree's blobs locally. With `--with-history`, all
+commits, trees, and blobs reachable from that commit must also be local.
+Import checks the required objects before contacting Concord; an unavailable
+object stops the import. Import does not change source objects, index, or refs.
 
 ```sh
 npm run concord -- import --source ./existing-repo --ref main --repo adopted \

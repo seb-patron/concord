@@ -74,6 +74,22 @@ async function treeEntries(source: string, tree: string, alternateObjectDirector
   return entries;
 }
 
+async function requireLocalHistory(source: string, commit: string): Promise<void> {
+  let objects: string;
+  try {
+    const result = await execFile('git', ['-c', 'protocol.allow=never', '-C', source, 'rev-list',
+      '--objects', '--no-object-names', '--missing=print', commit], {
+      timeout: 120_000, maxBuffer: 256 * 1024 * 1024,
+      env: gitEnvironment({ noLazyFetch: true }),
+    });
+    objects = result.stdout;
+  } catch {
+    throw new ConcordError('Cannot inspect source history; a required object may be unavailable locally', 'usage');
+  }
+  const missing = /^\?([a-f0-9]{40})$/m.exec(objects)?.[1];
+  if (missing) throw new ConcordError(`Source history object ${missing} is unavailable locally; fetch it before importing`, 'usage');
+}
+
 function data(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || !('data' in value) || !((value as Envelope).data) ||
       typeof (value as Envelope).data !== 'object') throw new ConcordError('Invalid Concord response', 'server');
@@ -127,6 +143,7 @@ export async function importRepo(options: ImportOptions, client?: ConcordClient)
   });
   const objectDirectory = await importerGit(['-C', source, 'rev-parse', '--path-format=absolute', '--git-path', 'objects']);
   const entries = await treeEntries(source, sourceTree);
+  if (options.withHistory) await requireLocalHistory(source, sourceOid);
   const patterns = [...(options.excludes ?? [])];
   if (options.excludeFile) {
     let bytes: Buffer;

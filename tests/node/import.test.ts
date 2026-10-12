@@ -11,7 +11,6 @@ import { prepareLocal, wranglerStateDir } from '../../demo/scenarios';
 import { ConcordClient } from '../../cli/client.ts';
 import { gitEnvironment } from '../../cli/git.ts';
 import { importRepo } from '../../cli/import.ts';
-import { mirrorGit } from '../../deploy/mirror.ts';
 
 const execFile = promisify(execFileCallback);
 const cwd = realpathSync(resolve('.'));
@@ -159,37 +158,40 @@ async function importWithLocalStack(root: string, source: string, extraArgs: str
   await waitFor(async () => (await fetch(url + '/health')).ok, Boolean, worker.output);
   const args = ['cli/main.ts', 'import', '--source', source, '--ref', 'main', '--repo', 'adopted',
     '--policy-id', 'dispatch-lab', '--profile-id', 'dispatch-lab', ...extraArgs];
-  const invocation = execFile(process.execPath, ['--import', 'tsx', ...args],
-    { cwd, env, timeout: 180_000, maxBuffer: 1024 * 1024 });
   const api = async (path: string) => {
     const response = await fetch(url + '/v1/repos/adopted' + (path ? '/' + path : ''),
       { headers: { authorization: 'Bearer local-owner' } });
     return response.ok ? response.json() as Promise<any> : null;
   };
-  let finished = false;
-  invocation.finally(() => { finished = true; }).catch(() => {});
-  const until = Date.now() + 150_000;
-  const handled = new Set<string>();
-  while (!finished && Date.now() < until) {
-    const snapshot = await api('snapshot').catch(() => null);
-    const pending = snapshot?.data?.projections?.runners?.jobs?.find((job: any) =>
-      job.state === 'pending' && !handled.has(job.jobId));
-    if (pending) {
-      handled.add(pending.jobId);
-      const role = pending.kind === 'promote' ? 'promoter' : 'checker';
-      const runnerArgs = ['runner/main.ts', '--repo', 'adopted', '--role', role, '--once'];
-      if (role === 'checker') runnerArgs.push('--profile', profile.sourcePath!);
-      const run = await execFile(process.execPath, ['--import', 'tsx', ...runnerArgs],
-        { cwd, env: { ...env, CONCORD_TOKEN: `local-${role}`, CONCORD_PROFILE_DIGEST: profile.digest },
-          timeout: 40_000, maxBuffer: 1024 * 1024 });
-      expect(run.stdout).toContain('Completed 1 job(s)');
-    } else await new Promise(done => setTimeout(done, 150));
+  async function drive<T>(work: Promise<T>): Promise<T> {
+    let finished = false;
+    work.finally(() => { finished = true; }).catch(() => {});
+    const until = Date.now() + 150_000;
+    const handled = new Set<string>();
+    while (!finished && Date.now() < until) {
+      const snapshot = await api('snapshot').catch(() => null);
+      const pending = snapshot?.data?.projections?.runners?.jobs?.find((job: any) =>
+        job.state === 'pending' && !handled.has(job.jobId));
+      if (pending) {
+        handled.add(pending.jobId);
+        const role = pending.kind === 'promote' ? 'promoter' : 'checker';
+        const runnerArgs = ['runner/main.ts', '--repo', 'adopted', '--role', role, '--once'];
+        if (role === 'checker') runnerArgs.push('--profile', profile.sourcePath!);
+        const run = await execFile(process.execPath, ['--import', 'tsx', ...runnerArgs],
+          { cwd, env: { ...env, CONCORD_TOKEN: `local-${role}`, CONCORD_PROFILE_DIGEST: profile.digest },
+            timeout: 40_000, maxBuffer: 1024 * 1024 });
+        expect(run.stdout).toContain('Completed 1 job(s)');
+      } else await new Promise(done => setTimeout(done, 150));
+    }
+    if (!finished) throw new Error('runner pump timed out: ' + worker.output());
+    return work;
   }
-  const first = await invocation;
+  const first = await drive(execFile(process.execPath, ['--import', 'tsx', ...args],
+    { cwd, env, timeout: 180_000, maxBuffer: 1024 * 1024 }));
   const imported = JSON.parse(first.stdout) as { canonicalOid: string; treeOid: string };
   const detail = (await api(''))?.data;
   const canonical = join(root, 'bridge', detail.canonicalStorageName + '.git');
-  return { args, env, first, imported, detail, canonical };
+  return { args, env, first, imported, detail, canonical, drive };
 }
 afterEach(async () => {
   await Promise.all(children.splice(0).map(stop));
@@ -284,6 +286,31 @@ describe('adopted root import', () => {
     const client = new ConcordClient({ url: 'http://127.0.0.1:1', fetch: fetcher });
     await expect(importRepo({ source, ref: 'main', repo: 'adopted', policyId: 'policy',
       profileId: 'profile' }, client)).rejects.toThrow(/unavailable locally/);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await sourceState(source)).toEqual(before);
+  });
+
+  it('rejects a missing historical blob before provisioning in history mode', async () => {
+    const root = await temporary();
+    const { source: original } = await fixture(root);
+    await writeFile(join(original, 'historical.txt'), 'only in an ancestor\n');
+    await git(original, 'add', 'historical.txt');
+    await git(original, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'historical blob');
+    const historicalBlob = await git(original, 'rev-parse', 'HEAD:historical.txt');
+    await git(original, 'rm', 'historical.txt');
+    await git(original, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'remove historical blob');
+    const source = await partialClone(root, original, true);
+    const before = await sourceState(source);
+    const head = await execFile('git', ['ls-tree', '-r', '-l', 'HEAD'], { cwd: source,
+      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+    expect(head.stdout).not.toMatch(/ (?:-|BAD)\t/);
+    const reachable = await execFile('git', ['rev-list', '--objects', '--missing=print', 'HEAD'], { cwd: source,
+      env: { ...gitEnv, GIT_NO_LAZY_FETCH: '1' }, timeout: 30_000 });
+    expect(reachable.stdout).toContain(`?${historicalBlob}`);
+    const fetcher = vi.fn(() => { throw new Error('API contacted for missing history'); });
+    const client = new ConcordClient({ url: 'http://127.0.0.1:1', fetch: fetcher });
+    await expect(importRepo({ source, ref: 'main', repo: 'adopted', policyId: 'policy',
+      profileId: 'profile', withHistory: true }, client)).rejects.toThrow(/unavailable locally/);
     expect(fetcher).not.toHaveBeenCalled();
     expect(await sourceState(source)).toEqual(before);
   });
@@ -391,13 +418,13 @@ describe('adopted root import', () => {
     expect(await git(root, '--git-dir', canonical, 'rev-list', '--count', 'refs/heads/main')).toBe('1');
   }, 210_000);
 
-  it('imports a three-commit merge unchanged and can mirror to an ancestor', async () => {
+  it('imports a three-commit merge unchanged, then lands and mirrors a descendant to an ancestor', async () => {
     const root = await temporary();
     const { source, sourceOid, ancestor } = await mergeFixture(root);
     expect(await git(source, 'rev-list', '--count', sourceOid)).toBe('3');
     expect((await git(source, 'rev-list', '--parents', '-n', '1', sourceOid)).split(' ')).toHaveLength(3);
     const beforeSource = await sourceState(source);
-    const { args, env, first, imported, detail, canonical } = await importWithLocalStack(root, source, ['--with-history']);
+    const { args, env, first, imported, detail, canonical, drive } = await importWithLocalStack(root, source, ['--with-history']);
     expect(first.stderr).not.toContain('local-owner');
     expect(imported.canonicalOid).toBe(sourceOid);
     expect(detail.observedCanonicalOid).toBe(sourceOid);
@@ -411,10 +438,46 @@ describe('adopted root import', () => {
     const destination = join(root, 'destination.git');
     await git(root, 'init', '--quiet', '--bare', destination);
     await git(source, 'push', destination, `${ancestor}:refs/heads/main`);
-    const input = { sourceRemote: pathToFileURL(canonical).href, sourceOid,
-      destinationRemote: pathToFileURL(destination).href };
-    expect(await mirrorGit(input)).toMatchObject({ destinationOid: ancestor, action: 'advance', executed: false });
-    expect(await mirrorGit({ ...input, execute: true })).toMatchObject({ destinationOid: ancestor, action: 'advance', executed: true });
-    expect(await git(root, '--git-dir', destination, 'rev-parse', 'refs/heads/main')).toBe(sourceOid);
+    const candidate = join(root, 'candidate');
+    await git(root, 'clone', '--quiet', '--branch', 'main', canonical, candidate);
+    const table = join(candidate, 'families.tsv');
+    await writeFile(table, (await readFile(table, 'utf8')).replace('alpha\t1\t1000', 'alpha\t2\t1000'));
+    await git(candidate, 'add', 'families.tsv');
+    await git(candidate, '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'advance alpha');
+    const candidateOid = await git(candidate, 'rev-parse', 'HEAD');
+    const allowed = join(root, 'allowed.txt');
+    await writeFile(allowed, 'families.tsv\n');
+    const evidence = join(root, 'review.txt');
+    await writeFile(evidence, `# ✅ APPROVED FOR MERGE — head ${candidateOid}\nAPPROVED for merge\n`);
+
+    // Route only the destination HTTPS URL to a local bare repo; land and mirror still run their real Git paths.
+    const mirrorTo = 'https://mirror.invalid/adopted.git';
+    const gitBinary = (await execFile('which', ['git'])).stdout.trim();
+    const bin = join(root, 'bin');
+    await mkdir(bin);
+    await writeFile(join(bin, 'git'), `#!${process.execPath}\n` +
+      `const { spawnSync } = require('node:child_process');\n` +
+      `const result = spawnSync(${JSON.stringify(gitBinary)}, process.argv.slice(2).map(arg => ` +
+      `arg === ${JSON.stringify(mirrorTo)} ? ${JSON.stringify(pathToFileURL(destination).href)} : arg), ` +
+      `{ stdio: 'inherit' });\nprocess.exit(result.status ?? 1);\n`, { mode: 0o755 });
+    const landEnv = { ...env, PATH: `${bin}:${process.env.PATH ?? ''}`, CONCORD_TOKEN: 'local-agent-a',
+      CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
+    const landArgs = ['cli/main.ts', 'land', '--repo', 'adopted', '--source', candidate, '--commit', candidateOid,
+      '--intent-key', 'A', '--intent', 'Advance alpha after history import',
+      '--allowed-files', allowed, '--mirror-to', mirrorTo, '--wait-seconds', '150', '--json'];
+    expect(await git(root, '--git-dir', destination, 'rev-parse', 'refs/heads/main')).toBe(ancestor);
+    const landed = await drive(execFile(process.execPath, ['--import', 'tsx', ...landArgs,
+      '--review-evidence', evidence], { cwd, env: landEnv, timeout: 155_000 }));
+    const events = landed.stdout.trim().split('\n').map(line => JSON.parse(line));
+    const landedOid = events.find(event => event.state === 'landed')?.canonicalOid;
+    expect(landedOid).toMatch(/^[a-f0-9]{40}$/);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: 'landed', canonicalOid: landedOid }),
+      expect.objectContaining({ state: 'mirrored', sourceOid: landedOid,
+        destinationOid: ancestor, action: 'advance', executed: true }),
+    ]));
+    expect(await git(root, '--git-dir', canonical, 'rev-parse', 'refs/heads/main')).toBe(landedOid);
+    expect(await git(root, '--git-dir', destination, 'rev-parse', 'refs/heads/main')).toBe(landedOid);
+    await git(root, '--git-dir', destination, 'merge-base', '--is-ancestor', ancestor, landedOid);
   }, 210_000);
 });
