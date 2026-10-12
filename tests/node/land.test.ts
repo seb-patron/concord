@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { approvedHead, filesChanged, land, parseAllowed, unitKeys } from '../../cli/land.ts';
+import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 
 const execFile = promisify(callback);
@@ -102,6 +103,41 @@ describe('land input and evidence gates', () => {
       client: { request } as never })).rejects.toThrow('LAND_TOO_MANY_UNITS: 17 units > 16; split the change');
     expect(request).toHaveBeenCalledTimes(2);
     expect(request.mock.calls.every(([method]) => method === 'GET')).toBe(true);
+  });
+  it.each(['wait result', 'current readback'])('rejects a concurrent republication in the %s without submitting a verdict', async (race) => {
+    const { dir, commit, parent } = await source();
+    const allowed = join(dir, 'allowed.txt');
+    await writeFile(allowed, 'first.txt\nfamilies.tsv\nrenamed.tsv\n');
+    const evidence = join(dir, 'review.txt');
+    await writeFile(evidence, `# ✅ APPROVED FOR MERGE — head ${commit}\nAPPROVED for merge\n`);
+    const original = { changeId: 'change', provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
+      branch: 'refs/heads/work', authorId: 'agent', baseOid: parent, headOid: commit, revision: 1, status: 'ready' };
+    const republished = { ...original, headOid: 'b'.repeat(40), revision: 2 };
+    let reads = 0;
+    const request = vi.fn(async (method: string, path: string) => {
+      if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: parent,
+        canonicalStorageName: 'canonical', canonicalRemote: 'file:///tmp/canonical.git' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [] } } }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/changes') return { data: original, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [
+        'families.tsv', 'first.txt', 'renamed.tsv'].map((file, index) => ({ changeId: 'change', state: 'active',
+          unitKey: `file:${file}`, leaseId: `lease-${index}`, fence: 1, remainingSeconds: 300 })) }, version: 1 };
+      if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: 'file:///tmp/canonical.git', token: 'local-git-token' }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/change') {
+        reads++;
+        return { data: reads >= (race === 'wait result' ? 2 : 3) ? republished : original, version: 1 };
+      }
+      if (method === 'POST' && path.startsWith('/repos/demo/leases/') && path.endsWith('/release')) return { data: {}, version: 1 };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    vi.stubEnv('CONCORD_TOKEN', 'local-agent'); vi.stubEnv('CONCORD_URL', 'http://127.0.0.1:1234');
+    vi.stubEnv('CONCORD_REVIEWER_TOKEN', 'local-reviewer');
+    await expect(land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+      reviewEvidence: evidence, waitSeconds: 2, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} }))
+      .rejects.toThrow('PUBLISHED_HEAD_MISMATCH');
+    expect(request.mock.calls.some(([method, path]) => method === 'POST' && path.endsWith('/verdicts'))).toBe(false);
+    expect(reads).toBeGreaterThanOrEqual(race === 'wait result' ? 2 : 3);
   });
   it('reads the validated AW SHA and stable intent key', async () => {
     const dir = await temp(); const sha = 'a'.repeat(40);
@@ -290,6 +326,63 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   for (const value of ['local-agent-a', 'local-reviewer', secret]) {
     expect(landed.stdout + landed.stderr).not.toContain(value);
   }
+  const oldSource = await temp(); await git(oldSource, 'clone', '-q', '-b', 'main', seed, '.');
+  await writeFile(join(oldSource, 'b.txt'), 'b=carried\n');
+  await git(oldSource, 'add', 'b.txt'); await git(oldSource, 'commit', '-qm', 'old-parent update');
+  const sourceOid = await git(oldSource, 'rev-parse', 'HEAD');
+  const carryAllowed = join(dir, 'carry-allowed.txt'); await writeFile(carryAllowed, 'b.txt\n');
+  const carryEvidence = join(dir, 'carry-review.txt');
+  await writeFile(carryEvidence, `# ✅ APPROVED FOR MERGE — head ${sourceOid}\nAPPROVED for merge\n`);
+  const carryArgs = ['--repo', 'landdemo', '--source', oldSource, '--commit', sourceOid,
+    '--intent-key', 'carry-task', '--intent', 'Carry old-parent update', '--allowed-files', carryAllowed,
+    '--wait-seconds', '150', '--json'];
+  const otherEvidence = join(dir, 'other-review.txt');
+  await writeFile(otherEvidence, `# ✅ APPROVED FOR MERGE — head ${'f'.repeat(40)}\nAPPROVED for merge\n`);
+  await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
+    '--review-evidence', otherEvidence], { cwd: root, env: landEnv, timeout: 155_000 }))
+    .rejects.toMatchObject({ code: 2, stderr: expect.stringContaining('exact published head SHA') }));
+  const carried = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...carryArgs,
+    '--review-evidence', carryEvidence], { cwd: root, env: landEnv, timeout: 155_000 }));
+  const carriedEvents = carried.stdout.trim().split('\n').map(line => JSON.parse(line));
+  const carryEvent = carriedEvents.find(item => item.state === 'review-carried');
+  expect(carryEvent).toMatchObject({ sourceOid, publishedOid: expect.stringMatching(/^[a-f0-9]{40}$/) });
+  expect(carryEvent.publishedOid).not.toBe(sourceOid);
+  expect(carriedEvents.findIndex(item => item.state === 'review-carried')).toBeLessThan(carriedEvents.findIndex(item => item.state === 'reviewed'));
+  expect(carriedEvents.at(-1).state).toBe('landed');
+  const carryChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'carry-task');
+  const carryVerdicts = await api(`/changes/${carryChange.changeId}/verdicts`);
+  expect(carryVerdicts.data.items.at(-1).carriedFrom).toEqual({ sourceOid, method: 'patch-id' });
+
+  const contextSource = await temp(); await git(contextSource, 'clone', '-q', '-b', 'main', canonical, '.');
+  const context = await readFile(join(contextSource, 'shared.txt'), 'utf8');
+  await writeFile(join(contextSource, 'shared.txt'), context.replace('line-5\n', 'line-5-canonical\n'));
+  await git(contextSource, 'add', 'shared.txt'); await git(contextSource, 'commit', '-qm', 'change nearby context');
+  const contextOid = await git(contextSource, 'rev-parse', 'HEAD');
+  const sharedAllowed = join(dir, 'shared-allowed.txt'); await writeFile(sharedAllowed, 'shared.txt\n');
+  const contextEvidence = join(dir, 'context-review.txt');
+  await writeFile(contextEvidence, `# ✅ APPROVED FOR MERGE — head ${contextOid}\nAPPROVED for merge\n`);
+  const contextLand = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
+    '--repo', 'landdemo', '--source', contextSource, '--commit', contextOid, '--intent-key', 'context-task',
+    '--intent', 'Update shared context', '--allowed-files', sharedAllowed, '--review-evidence', contextEvidence,
+    '--wait-seconds', '150', '--json'], { cwd: root, env: landEnv, timeout: 155_000 }));
+  expect(contextLand.stdout).toContain('"state":"landed"');
+  const staleContext = await temp(); await git(staleContext, 'clone', '-q', '-b', 'main', seed, '.');
+  const stale = await readFile(join(staleContext, 'shared.txt'), 'utf8');
+  await writeFile(join(staleContext, 'shared.txt'), stale.replace('line-7\n', 'line-7-source\n'));
+  await git(staleContext, 'add', 'shared.txt'); await git(staleContext, 'commit', '-qm', 'old-context patch');
+  const staleOid = await git(staleContext, 'rev-parse', 'HEAD');
+  const staleEvidence = join(dir, 'stale-review.txt');
+  await writeFile(staleEvidence, `# ✅ APPROVED FOR MERGE — head ${staleOid}\nAPPROVED for merge\n`);
+  const staleArgs = ['--repo', 'landdemo', '--source', staleContext, '--commit', staleOid,
+    '--intent-key', 'stale-context-task', '--intent', 'Update nearby line', '--allowed-files', sharedAllowed,
+    '--review-evidence', staleEvidence, '--wait-seconds', '150', '--json'];
+  await drive(expect(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...staleArgs],
+    { cwd: root, env: landEnv, timeout: 155_000 })).rejects.toMatchObject({ code: 2,
+    stderr: expect.stringContaining('exact published head SHA') }));
+  const staleChange = (await api('/snapshot')).data.projections.repos.changes.find((item: any) => item.intentKey === 'stale-context-task');
+  const staleCandidate = join(dir, 'bridge', `${staleChange.candidateStorageName}.git`);
+  expect((await filesChanged(staleCandidate, staleChange.headOid)).files).toEqual(['shared.txt']);
+  expect(await patchId(staleContext, staleOid)).not.toBe(await patchId(staleCandidate, staleChange.headOid));
   const parallel = await Promise.all(['a.txt', 'b.txt'].map(async (file, index) => {
     const checkout = await temp(); await git(checkout, 'clone', '-q', '-b', 'main', canonical, '.');
     await writeFile(join(checkout, file), `${file}=parallel\n`);
@@ -339,4 +432,83 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     ...sameFile[1].args, '--review-evidence', sameFile[1].review],
   { cwd: root, env: sameFile[1].env, timeout: 155_000 }));
   expect(secondLanded.stdout).toContain('"state":"landed"');
-}, 240_000);
+}, 360_000);
+
+import type { DeltaCheckJob, DeltaResult, Digest, ModuleContext, ReviewManifest, TrustedPolicy, TrustedProfile, Verdict } from '../../src/contracts';
+import { dependencyScopeDigest, hashCanonical, manifestDigest } from '../../src/verdicts/manifest';
+import { verdicts } from '../../src/features/verdicts';
+
+const oid = (character: string) => character.repeat(40);
+const d = (value: string): Digest => hashCanonical(value);
+
+it('drops patch-id provenance when an approval is later carried by a delta check', async () => {
+  const policy: TrustedPolicy = { id: 'demo', version: 1, digest: d('policy'), checkerId: 'checker',
+    checkerDigest: d('checker'), acceptance: { kind: 'hard-gates', gates: [{ id: 'check', requiredOutcome: 'PASS' }] },
+    units: { 'file:a.txt': { canonicalKey: 'file:a.txt', file: 'a.txt', resources: [], dependencyKeys: [] } } };
+  const profile: TrustedProfile = { id: 'demo', digest: d('profile'), oracleDigest: d('oracle'),
+    toolchainDigest: d('toolchain'), environmentDigest: d('environment'), timeoutMs: 1000, maxOutputBytes: 1024 };
+  const manifest: ReviewManifest = { changedUnits: [{ unitKey: 'file:a.txt', beforePath: 'a.txt', afterPath: 'a.txt',
+    beforeMode: '100644', afterMode: '100644', beforeDigest: d('before'), afterDigest: d('after') }],
+    policyVersion: policy.version, policyDigest: policy.digest, checkerDigest: policy.checkerDigest,
+    oracleDigest: profile.oracleDigest, toolchainDigest: profile.toolchainDigest, coverage: 'complete', dependencyScope: [] };
+  const manifestHash = manifestDigest(manifest, policy, ['file:a.txt']);
+  const values = new Map<string, unknown>();
+  const jobs: DeltaCheckJob[] = [];
+  let version = 0;
+  let revision = 1;
+  let baseOid = oid('0');
+  let headOid = oid('a');
+  const candidate = () => ({ changeId: 'change', revision, baseOid, headOid, storageName: 'candidate', ref: 'refs/heads/work' });
+  const installInspection = () => values.set('inspection:change', { changeId: 'change', revision, candidate: candidate(),
+    canonicalStorageName: 'canonical', policyId: 'demo', profileId: 'demo', reviewManifest: manifest,
+    reviewManifestDigest: manifestHash, outcome: 'PASS' });
+  installInspection();
+  const context = { repoId: 'repo', tenantId: 'local',
+    principal: { tenantId: 'local', principalId: 'reviewer', roles: ['reviewer'], repoIds: '*', expiresAt: Infinity },
+    trusted: { policies: { demo: policy }, profiles: { demo: profile } }, now: () => 100,
+    storage: { resolveRef: async () => baseOid, info: async (name: string) => ({ name, remote: `https://example.test/${name}`, status: 'ready' }) },
+    state: { get: <T>(key: string) => (values.get(key) ?? null) as T | null,
+      put: <T>(key: string, value: T) => { values.set(key, value); }, delete: (key: string) => { values.delete(key); } },
+    version: () => version, nextVersion: () => ++version,
+    appendEvent: (_kind: string, _ids: string[], _payload: Record<string, unknown>, eventVersion: number) => ({ sequence: eventVersion }),
+    readChange: () => ({ status: 'eligible', version, evidenceIds: ['change'], value: {
+      authorId: 'author', headOid, revision, status: 'ready', unitKeys: ['file:a.txt'], frozen: false } }),
+    call: (name: string, ...args: unknown[]) => {
+      if (name === 'findings.gate') return { status: 'eligible', version, evidenceIds: [], value: {
+        findingSetVersion: 0, unresolvedIds: [], pendingRound: null } };
+      if (name === 'runners.schedule') { jobs.push(args[0] as DeltaCheckJob); return { status: 'eligible', version,
+        evidenceIds: [], value: { jobId: (args[0] as DeltaCheckJob).jobId } }; }
+      throw new Error(`unexpected hook ${name}`);
+    },
+  } as unknown as ModuleContext;
+  const post = async (path: 'verdicts' | 'carry', body: Record<string, unknown>) => {
+    const pathname = `/v1/repos/repo/changes/change/${path}`;
+    const route = verdicts.routes.find(item => item.method === 'POST' && item.pattern.test(pathname))!;
+    return route.handle(context, new Request(`https://concord.test${pathname}`, { method: 'POST' }),
+      pathname.match(route.pattern)!, body);
+  };
+  const provenance = { sourceOid: oid('c'), method: 'patch-id' };
+  const approval = await post('verdicts', { revision: 1, findingSetVersion: 0, reviewManifestDigest: manifestHash,
+    decision: 'approve', evidenceDigest: d('review'), carriedFrom: provenance });
+  expect(approval.status).toBe(201);
+  const parent = (await approval.json() as { data: Verdict }).data;
+  expect(parent.carriedFrom).toEqual(provenance);
+
+  revision = 2; baseOid = oid('1'); headOid = oid('b'); installInspection();
+  const scheduled = await post('carry', { parentVerdictId: parent.verdictId, revision, newBaseOid: baseOid });
+  expect(scheduled.status).toBe(202);
+  const job = jobs[0];
+  const preimage = { kind: 'delta-check' as const, jobId: job.jobId, attempt: 1, fence: 1,
+    inputDigest: job.inputDigest, sourceTreeOid: oid('e'), checkerDigest: job.checkerDigest,
+    toolchainDigest: job.toolchainDigest, oracleDigest: job.oracleDigest, environmentDigest: job.environmentDigest,
+    durationMs: 1, log: '', outcome: 'PASS' as const, reviewManifestDigest: manifestHash,
+    reviewManifest: manifest, dependencyScopeDigest: dependencyScopeDigest([]), dependencyScope: [] };
+  const result: DeltaResult = { ...preimage, resultDigest: hashCanonical(preimage) };
+  const carried = verdicts.hooks['verdicts.evaluateCarry']!(context, result);
+  expect(carried.status).toBe('eligible');
+  if (carried.status !== 'eligible') return;
+  const child = values.get(`verdict:${carried.value.verdictId}`) as Verdict;
+  expect(child).toMatchObject({ parentVerdictId: parent.verdictId, deltaResultId: job.jobId, revision: 2 });
+  expect(child).not.toHaveProperty('carriedFrom');
+  expect(values.get(`verdict:${parent.verdictId}`)).toEqual(parent);
+});

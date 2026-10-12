@@ -261,8 +261,32 @@ describe('persistent findings and atomic repair rounds', () => {
     const stillPending = await h.post('verdicts', verdictBody, 'verdict-pending', 'local-reviewer');
     expect(stillPending.status).toBe(409);
     expect((await h.review(1, 1, 'accept')).status).toBe(200);
-    const approved = await h.post('verdicts', { ...verdictBody, findingSetVersion: 2 }, 'verdict-clear', 'local-reviewer');
+    const readyBody = { ...verdictBody, findingSetVersion: 2 };
+    const carriedFrom = { sourceOid: head('b'), method: 'patch-id' };
+    for (const [name, invalid] of Object.entries({
+      oid: { sourceOid: 'bad', method: 'patch-id' },
+      arrayOid: { sourceOid: [head('b')], method: 'patch-id' },
+      numberOid: { sourceOid: 123, method: 'patch-id' },
+      objectOid: { sourceOid: { oid: head('b') }, method: 'patch-id' },
+      arrayMethod: { sourceOid: head('b'), method: ['patch-id'] },
+      numberMethod: { sourceOid: head('b'), method: 123 },
+      objectMethod: { sourceOid: head('b'), method: { value: 'patch-id' } },
+      method: { sourceOid: head('b'), method: 'tree' },
+      sameHead: { sourceOid: head('a'), method: 'patch-id' },
+    })) {
+      const rejected = await h.post('verdicts', { ...readyBody, carriedFrom: invalid }, `verdict-invalid-${name}`, 'local-reviewer');
+      expect(rejected.status).toBe(400);
+      expect(rejected.body.error.code).toBe('INVALID_CARRIED_FROM');
+    }
+    const rejectedCarry = await h.post('verdicts', { ...readyBody, decision: 'reject', carriedFrom }, 'verdict-reject-carry', 'local-reviewer');
+    expect(rejectedCarry.status).toBe(400);
+    const approved = await h.post('verdicts', { ...readyBody, carriedFrom }, 'verdict-clear', 'local-reviewer');
     expect(approved.status).toBe(201);
     expect(approved.body.data.findingSetVersion).toBe(2);
+    expect(approved.body.data.carriedFrom).toEqual(carriedFrom);
+    const full = await h.api(`${h.root}/verdicts`, 'local-owner');
+    expect(full.data.items[0].carriedFrom).toEqual(carriedFrom);
+    const reduced = await h.api(`${h.root}/verdicts`, 'local-agent-a');
+    expect(reduced.data.items[0]).not.toHaveProperty('carriedFrom');
   });
 });

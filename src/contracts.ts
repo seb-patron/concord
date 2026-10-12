@@ -59,6 +59,7 @@ export interface Verdict extends Versioned {
   oracleDigest: Digest; toolchainDigest: Digest; deltaResultId: Id | null;
   findingSetVersion: number; decision: 'approve' | 'reject';
   evidenceDigest: Digest; parentVerdictId: Id | null;
+  carriedFrom?: { sourceOid: Oid; method: 'patch-id' };
 }
 export interface QueueEntry extends Versioned {
   entryId: Id; changeId: Id; admittedRevision: number; baseOid: Oid | null;
@@ -169,6 +170,7 @@ export interface ReviewRepairBody extends MutationBody {
 export interface AddVerdictBody extends MutationBody {
   revision: number; reviewManifestDigest: Digest; findingSetVersion: number;
   decision: 'approve' | 'reject'; evidenceDigest: Digest;
+  carriedFrom?: { sourceOid: Oid; method: 'patch-id' };
 }
 export interface CarryBody extends MutationBody { parentVerdictId: Id; revision: number; newBaseOid: Oid }
 export interface CreateContestBody {

@@ -164,7 +164,8 @@ function evaluateCarry(context: ModuleContext, result: DeltaResult): Gate<{ verd
   if (freshDigest !== current.value.record.reviewManifestDigest) return fail('Current inspected content differs from delta evidence');
   const version = context.nextVersion();
   const verdictId = crypto.randomUUID();
-  const derived: Verdict = { ...parent, version, verdictId, revision: job.candidate.revision,
+  const { carriedFrom: _carriedFrom, ...parentWithoutPatchIdProvenance } = parent;
+  const derived: Verdict = { ...parentWithoutPatchIdProvenance, version, verdictId, revision: job.candidate.revision,
     reviewManifest: normalized, reviewManifestDigest: freshDigest, findingSetVersion: job.findingSetVersion,
     parentVerdictId: parent.verdictId, deltaResultId: result.jobId, evidenceDigest: resultDigest };
   save(context, derived, job.candidate.headOid, job.profileDigest, result.jobId);
@@ -207,6 +208,15 @@ export const verdicts: FeatureModule = {
       if (!Number.isSafeInteger(body?.revision) || body!.revision !== change.value.revision ||
         !Number.isSafeInteger(body?.findingSetVersion) || !['approve', 'reject'].includes(body?.decision as string) ||
         !isDigest(body?.reviewManifestDigest) || !isDigest(body?.evidenceDigest)) throw new HttpError(422, 'INVALID_VERDICT', 'Verdict fields must bind current revision and evidence');
+      const carriedFrom = body?.carriedFrom;
+      const sourceOid = (carriedFrom as Record<string, unknown> | null)?.sourceOid;
+      const method = (carriedFrom as Record<string, unknown> | null)?.method;
+      if (carriedFrom !== undefined && (!carriedFrom || typeof carriedFrom !== 'object' || Array.isArray(carriedFrom) ||
+        typeof sourceOid !== 'string' || !/^[a-fA-F0-9]{40}$/.test(sourceOid) ||
+        typeof method !== 'string' || method !== 'patch-id' || body.decision !== 'approve' ||
+        sourceOid.toLowerCase() === change.value.headOid?.toLowerCase())) {
+        throw new HttpError(400, 'INVALID_CARRIED_FROM', 'carriedFrom requires an approved, distinct 40-hex source OID and patch-id method');
+      }
       const current = inspection(context, changeId);
       if (current.status === 'blocked') throw new HttpError(409, current.code, current.reason);
       if (body!.reviewManifestDigest !== current.value.record.reviewManifestDigest) throw new HttpError(409, 'MANIFEST_MISMATCH', 'Verdict manifest does not match trusted inspection');
@@ -224,7 +234,8 @@ export const verdicts: FeatureModule = {
         policyDigest: current.value.policy.digest, checkerDigest: current.value.policy.checkerDigest,
         oracleDigest: current.value.profile.oracleDigest, toolchainDigest: current.value.profile.toolchainDigest,
         deltaResultId: null, findingSetVersion: body!.findingSetVersion as number,
-        decision: body!.decision as 'approve' | 'reject', evidenceDigest: body!.evidenceDigest as Digest, parentVerdictId: null };
+        decision: body!.decision as 'approve' | 'reject', evidenceDigest: body!.evidenceDigest as Digest, parentVerdictId: null,
+        ...(carriedFrom === undefined ? {} : { carriedFrom: carriedFrom as Verdict['carriedFrom'] }) };
       save(context, verdict, change.value.headOid!, current.value.profile.digest, changeId);
       const event = context.appendEvent('verdict.created', [verdictId, changeId], { decision: verdict.decision, revision: verdict.revision }, version);
       return json(verdict, version, event.sequence, 201);
