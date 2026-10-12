@@ -36,8 +36,11 @@ export function parseKeyedLines(text: string, policy: KeyedLinePolicy): ParsedLi
   const frame: string[] = [];
   const segments: string[][] = [[]];
   let inBlockComment = false;
+  let inDirective = false;
   for (const line of lines) {
     const wasInBlockComment = inBlockComment;
+    const directiveLine: boolean = inDirective || (!wasInBlockComment && /^\s*#/.test(line));
+    inDirective = directiveLine && /\\\s*$/.test(line);
     const markers = line.match(/\/\*|\*\//g) ?? [];
     for (const marker of markers) {
       if (marker === '/*') {
@@ -48,7 +51,7 @@ export function parseKeyedLines(text: string, policy: KeyedLinePolicy): ParsedLi
         inBlockComment = false;
       }
     }
-    if (!line.trim() || wasInBlockComment || markers.length || /\/\//.test(line) || /^\s*(?:\*|#)/.test(line)) {
+    if (directiveLine || !line.trim() || wasInBlockComment || markers.length || /\/\//.test(line) || /^\s*\*/.test(line)) {
       frame.push(line);
       segments.push([]);
       continue;

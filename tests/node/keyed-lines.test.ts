@@ -77,6 +77,19 @@ describe('keyed-line units', () => {
       .toEqual(['line:include/callees.h:live']);
   });
 
+  it('requires the file unit for changes inside a continued preprocessor directive', () => {
+    const linePolicy = policy('c-declaration').keyedLines![0];
+    const registry = unitRegistry(policy('c-declaration'));
+    const base = '#define DECLARE \\\nvoid old(void);\nvoid live(void);\n';
+    const directiveEdit = '#define DECLARE \\\nvoid old(int x);\nvoid live(void);\n';
+    expect(keyedLineChanges(base, directiveEdit, linePolicy)).toBeNull();
+    expect(changedUnitsForFile(registry, 'include/callees.h', base, directiveEdit).map(unit => unit.key))
+      .toEqual(['file:include/callees.h']);
+    expect(changedUnitsForFile(registry, 'include/callees.h', base,
+      '#define DECLARE \\\nvoid old(void);\nvoid live(int x);\n').map(unit => unit.key))
+      .toEqual(['line:include/callees.h:live']);
+  });
+
   it('falls back for frame edits, unkeyed declarations, and duplicate keys', () => {
     const registry = unitRegistry(policy('c-declaration'));
     const base = '#ifndef H\nvoid alpha(void);\n#endif\n';
@@ -120,6 +133,17 @@ describe('keyed-line units', () => {
       git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'comment edit');
       const commentHead = git('rev-parse', 'HEAD');
       expect((await inspectUnits(dir, commentBase, commentHead, job)).unitKeys).toEqual(['file:callees.h']);
+      writeFileSync(join(dir, 'callees.h'), '#define DECLARE \\\nvoid old(void);\nvoid alpha(void);\n');
+      git('add', 'callees.h');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'directive base');
+      const directiveBase = git('rev-parse', 'HEAD');
+      writeFileSync(join(dir, 'callees.h'), '#define DECLARE \\\nvoid old(int x);\nvoid alpha(void);\n');
+      git('add', 'callees.h');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'directive edit');
+      const directiveHead = git('rev-parse', 'HEAD');
+      const directiveInspection = await inspectUnits(dir, directiveBase, directiveHead, job);
+      expect(directiveInspection.unitKeys).toEqual(['file:callees.h']);
+      expect(directiveInspection.manifest.changedUnits.map(unit => unit.unitKey)).toEqual(['file:callees.h']);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -24,7 +24,7 @@ An owner may declare exact keyed-line files in the policy template. The generato
 "keyedLines": [{ "file": "include/callees.h", "keyRule": "c-declaration", "order": "append" }]
 ```
 
-The single-line declaration `void sub_2029668(int a);` has unit `line:include/callees.h:sub_2029668`. `c-declaration` accepts simple prototypes, extern variables, and typedef names, including multi-word types and pointers. Function-pointer declarations and other ambiguous syntax require a whole-file lease. Blank lines, comments (including every line inside a block comment), and preprocessor directives form the frame; edits to them also require `file:include/callees.h`. Duplicate keys in either version require the file unit. Agents can claim distinct line keys in the same file concurrently, while the file unit conflicts with all of them.
+The single-line declaration `void sub_2029668(int a);` has unit `line:include/callees.h:sub_2029668`. `c-declaration` accepts simple prototypes, extern variables, and typedef names, including multi-word types and pointers. Function-pointer declarations and other ambiguous syntax require a whole-file lease. Blank lines, comments (including every line inside a block comment), and preprocessor directives form the frame; edits to them also require `file:include/callees.h`. A directive includes every line continued with a trailing backslash. Duplicate keys in either version require the file unit. Agents can claim distinct line keys in the same file concurrently, while the file unit conflicts with all of them.
 
 For a sorted baseline list, use:
 
