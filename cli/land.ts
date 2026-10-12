@@ -148,13 +148,12 @@ async function prepareHead(source: string, commit: string, parent: string, base:
 }
 export function approvedHead(evidence: string, head: string): boolean {
   const lines = evidence.split(/\r?\n/);
-  const approval = /^APPROVED for merge: ([a-f0-9]{40}(?:[a-f0-9]{24})?)$/i;
-  const approvals = lines.filter(line => approval.test(line));
-  const named = [...new Set((evidence.match(/\b[a-f0-9]{40}(?:[a-f0-9]{24})?\b/gi) ?? []).map(found => found.toLowerCase()))];
-  return approvals.length === 1 && approval.exec(approvals[0])?.[1].toLowerCase() === head.toLowerCase() &&
-    named.length === 1 && named[0] === head.toLowerCase() &&
-    !/\b(?:NOT\s+APPROVED|REQUEST\s+CHANGES|REJECT(?:ED|ION)?)\b/i.test(evidence) &&
-    !lines.some(line => /APPROVED for merge/i.test(line) && !approval.test(line));
+  const report = lines.filter(line => line.trim() !== '');
+  const approval = /^# ✅ APPROVED FOR MERGE — head ([a-f0-9]{40})$/i;
+  const match = approval.exec(report[0] ?? '');
+  return !!match && match[1].toLowerCase() === head.toLowerCase() &&
+    report[report.length - 1] === 'APPROVED for merge' &&
+    !/CHANGES REQUIRED|REQUEST CHANGES|NOT APPROVED/i.test(evidence);
 }
 export async function land(input: LandOptions): Promise<Obj> {
   let options = input;

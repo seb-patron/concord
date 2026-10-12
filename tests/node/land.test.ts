@@ -44,18 +44,16 @@ describe('land input and evidence gates', () => {
   });
   it('requires one unambiguous approval line naming the published SHA', () => {
     const head = 'a'.repeat(40);
-    expect(approvedHead(`reviewed ${head}\nAPPROVED for merge: ${head}`, head)).toBe(true);
-    expect(approvedHead(`APPROVED for merge: ${'b'.repeat(40)}`, head)).toBe(false);
-    expect(approvedHead(`reviewed ${'b'.repeat(40)}\nAPPROVED for merge: ${head}`, head)).toBe(false);
-    expect(approvedHead(`reviewed ${head}`, head)).toBe(false);
-    expect(approvedHead(`APPROVED for merge: ${head}\nNOT APPROVED for merge`, head)).toBe(false);
-    expect(approvedHead(`APPROVED for merge: ${head}\nVERDICT: REQUEST CHANGES`, head)).toBe(false);
-    expect(approvedHead(`APPROVED for merge: ${head}\nVERDICT: REJECT`, head)).toBe(false);
-    expect(approvedHead(`VERDICT: REQUEST CHANGES\n> APPROVED for merge: ${head}`, head)).toBe(false);
-    expect(approvedHead(`> APPROVED for merge: ${head}`, head)).toBe(false);
-    expect(approvedHead(`APPROVED for merge: ${head}\n> APPROVED for merge: ${head}`, head)).toBe(false);
-    expect(approvedHead(`"APPROVED for merge: ${head}"`, head)).toBe(false);
-    expect(approvedHead(`APPROVED for merge: ${head}\nAPPROVED for merge: ${head}`, head)).toBe(false);
+    const report = `# ✅ APPROVED FOR MERGE — head ${head}\n\nReview details.\n\nAPPROVED for merge`;
+    expect(approvedHead(report, head)).toBe(true);
+    expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${'b'.repeat(40)}\nAPPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head}\nCHANGES REQUIRED\nAPPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`Review evidence:\n\`\`\`\n# ✅ APPROVED FOR MERGE — head ${head}\nAPPROVED for merge\n\`\`\``, head)).toBe(false);
+    expect(approvedHead(`> # ✅ APPROVED FOR MERGE — head ${head}\n> APPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head}\n\nAPPROVED for merge\nAdditional notes`, head)).toBe(false);
+    expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head}\nNOT APPROVED\nAPPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`# ✅ APPROVED FOR MERGE — head ${head}\nREQUEST CHANGES\nAPPROVED for merge`, head)).toBe(false);
+    expect(approvedHead(`\`\`\`markdown\n# ✅ APPROVED FOR MERGE — head ${head}\nAPPROVED for merge\n\`\`\``, head)).toBe(false);
   });
   it('rejects conflicting AW commit and allowed-file overrides before any API request', async () => {
     const { dir, commit } = await source();
@@ -250,7 +248,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'agent update');
   const commit = await git(sourceDir, 'rev-parse', 'HEAD');
   const allowed = join(dir, 'allowed.txt'); await writeFile(allowed, ['a.txt', ...bulkFiles].join('\n') + '\n');
-  const evidence = join(dir, 'review.txt'); await writeFile(evidence, `Review of ${commit}\nAPPROVED for merge: ${commit}\n`);
+  const evidence = join(dir, 'review.txt'); await writeFile(evidence, `# ✅ APPROVED FOR MERGE — head ${commit}\n\nReview of ${commit}\n\nAPPROVED for merge\n`);
   const baseArgs = ['--repo', 'landdemo', '--source', sourceDir, '--commit', commit, '--intent-key', 'generic-task',
     '--intent', 'Update a value', '--allowed-files', allowed, '--wait-seconds', '150', '--json'];
   const landEnv = { ...environment, CONCORD_TOKEN: 'local-agent-a', CONCORD_REVIEWER_TOKEN: 'local-reviewer' };
@@ -286,7 +284,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     await git(checkout, 'add', file); await git(checkout, 'commit', '-qm', `parallel ${file}`);
     const oid = await git(checkout, 'rev-parse', 'HEAD');
     const paths = join(dir, `allowed-parallel-${index}.txt`); await writeFile(paths, `${file}\n`);
-    const review = join(dir, `review-parallel-${index}.txt`); await writeFile(review, `APPROVED for merge: ${oid}\n`);
+    const review = join(dir, `review-parallel-${index}.txt`); await writeFile(review, `# ✅ APPROVED FOR MERGE — head ${oid}\nAPPROVED for merge\n`);
     return { args: ['--repo', 'landdemo', '--source', checkout, '--commit', oid, '--intent-key', `parallel-${index}`,
       '--intent', `Update ${file}`, '--allowed-files', paths, '--wait-seconds', '150', '--json'], review,
       env: { ...environment, CONCORD_TOKEN: index ? 'local-agent-c' : 'local-agent-b', CONCORD_REVIEWER_TOKEN: 'local-reviewer' } };
@@ -306,7 +304,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
     await git(checkout, 'add', 'shared.txt'); await git(checkout, 'commit', '-qm', `same file ${index}`);
     const oid = await git(checkout, 'rev-parse', 'HEAD');
     const paths = join(dir, `allowed-shared-${index}.txt`); await writeFile(paths, 'shared.txt\n');
-    const review = join(dir, `review-shared-${index}.txt`); await writeFile(review, `APPROVED for merge: ${oid}\n`);
+    const review = join(dir, `review-shared-${index}.txt`); await writeFile(review, `# ✅ APPROVED FOR MERGE — head ${oid}\nAPPROVED for merge\n`);
     return { args: ['--repo', 'landdemo', '--source', checkout, '--commit', oid, '--intent-key', `shared-${index}`,
       '--intent', `Edit shared line ${line}`, '--allowed-files', paths, '--wait-seconds', '150', '--json'], review,
       env: { ...environment, CONCORD_TOKEN: index ? 'local-agent-c' : 'local-agent-b', CONCORD_REVIEWER_TOKEN: 'local-reviewer' } };
@@ -324,7 +322,7 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const secondEvents = secondResult.stdout.trim().split('\n').map(line => JSON.parse(line));
   const approved = secondEvents.find(item => item.state === 'awaiting-review');
   expect(approved.headOid).toMatch(/^[a-f0-9]{40}$/);
-  await writeFile(sameFile[1].review, `APPROVED for merge: ${approved.headOid}\n`);
+  await writeFile(sameFile[1].review, `# ✅ APPROVED FOR MERGE — head ${approved.headOid}\nAPPROVED for merge\n`);
   const secondLanded = await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
     ...sameFile[1].args, '--review-evidence', sameFile[1].review],
   { cwd: root, env: sameFile[1].env, timeout: 155_000 }));
