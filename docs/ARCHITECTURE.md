@@ -117,7 +117,7 @@ An empty repo needs one explicit bootstrap path. Owner-only `POST /repos/:r/boot
 
 ## Semantic leases
 
-A semantic unit is an exact registered key: `symbol:sub_02000100`, `declaration:callee_alpha`, `row:families:alpha`, or conservative `file:src/unknown.ts`. The demo uses explicit unit metadata and a tiny TSV row extractor; there is no general C/TypeScript semantic parser. A trusted policy maps aliases to canonical keys and declares resource footprints. A file claim overlaps every row/symbol footprint in that file. Distinct rows can coexist. Declaration aliases share one resource identity.
+A semantic unit is an exact registered key or a row key matching an owner-declared table pattern: `symbol:sub_02000100`, `declaration:callee_alpha`, `row:families:alpha`, or conservative `file:src/unknown.ts`. The demo uses explicit unit metadata and owner-declared TSV table schemas, including pattern row keys absent from the base table; there is no general C/TypeScript semantic parser. A trusted policy maps aliases to canonical keys and declares resource footprints. A file claim overlaps every row/symbol footprint in that file. Distinct rows can coexist. Declaration aliases share one resource identity.
 
 Claim is all-or-nothing over a sorted, deduplicated set of at most 16 keys. The DO checks active overlaps in one transaction and either grants every key with increasing fencing tokens or returns `409 LEASE_CONFLICT` containing holder, intent, expiry, and conflicting keys. Unknown units return `422`; they cannot bypass the registry. TTL defaults to 120 seconds, renew every 40 seconds, maximum 300 seconds. Renew/release require holder and current fence. Expiry/reacquisition invalidates the old fence even if an old agent wakes up later.
 
@@ -247,6 +247,8 @@ The UI shows a repo switcher, agents with lease intents/countdowns, change detai
 ## Auth and trust
 
 Prototype identity is an owner-provisioned bearer token mapping to tenant, principal, repo allowlist, roles, and expiry. Store token digests/server mappings in Worker secrets; local dev has explicitly named fixture identities. Reject fixture credentials in deployed mode. Roles are `owner`, `agent`, `reviewer`, `checker`, `promoter`, and `viewer`. A principal cannot approve its own change or resolve its own repair merely by also holding reviewer scope. All DO names are constructed from the authenticated tenant; never trust a tenant supplied in JSON.
+
+The authenticated `GET /v1/me` response projects identity, tenant, roles, repository scope, expiry, and an optional model label without exposing credentials. Token mappings validate model labels when loaded, and change creation captures the current label as `authorModel` for later display. Any principal permitted to read a repository can read its approval history; owners and reviewers see full verdicts, while other readers receive only event-visible verdict identity and decision fields. Verdict creation and carry still require reviewer authority.
 
 Workers secrets hold service configuration, not repository content. [Secrets documentation](https://developers.cloudflare.com/workers/configuration/secrets/) describes secret bindings; Concord's role rules are our application policy. Artifacts binding access is server-side and Git tokens are repo-scoped; neither replaces Concord authentication. [Artifacts auth](https://developers.cloudflare.com/artifacts/guides/authentication/).
 

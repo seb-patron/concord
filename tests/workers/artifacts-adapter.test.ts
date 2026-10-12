@@ -29,7 +29,10 @@ function provider() {
         revokeToken: vi.fn(async (token: string) => { revoked.push([name, token]); if (token === repo.token || token === `id-${name}`) delete repo.token; return true; }),
         listTokens: vi.fn(async () => ({ total: repo.token ? 1 : 0, tokens: repo.token ? [{ id: `id-${name}`, state: 'active' }] : [] })),
         createToken: vi.fn(async (scope: string, ttl: number) => ({ plaintext: `${name}-${scope}-${ttl}`, expiresAt: '2026-10-11T08:00:00Z' })),
-        log: vi.fn(async ({ ref }: { ref: string }) => repo.refs[ref] ? [{ hash: repo.refs[ref] }] : []),
+        log: vi.fn(async ({ ref }: { ref: string }) => {
+          const oid = ref.startsWith('refs/') ? undefined : repo.refs[`refs/heads/${ref}`];
+          return oid ? [{ hash: oid }] : [];
+        }),
         readCommit: vi.fn(async (oid: string) => oid === 'a'.repeat(40) ? { hash: oid, treeHash: 'b'.repeat(40), parents: [] } : null),
         readFile: vi.fn(async ({ ref, path }: { ref: string; path: string }) => ref === 'a'.repeat(40) && path === 'README.md' ? new Blob(['seed']) : null),
       };
@@ -185,6 +188,18 @@ describe('Artifacts binding adapter', () => {
     expect(await storage.revokeToken('candidate', 'another')).toBe(true);
     expect(fixture.disposed.length).toBeGreaterThanOrEqual(8);
     expect(fixture.binding.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves a candidate branch by its short name on the binding', async () => {
+    const fixture = provider();
+    const storage = artifactsStorage(fixture.binding as unknown as Artifacts);
+    await storage.ensureRepo('canonical');
+    const candidate = await storage.fork('canonical', 'candidate');
+    expect(candidate.status).toBe('ready');
+    fixture.repos.get('candidate')!.refs['refs/heads/demo/topic'] = 'c'.repeat(40);
+    expect(await storage.resolveRef('candidate', 'refs/heads/demo/topic')).toBe('c'.repeat(40));
+    expect(await storage.resolveRef('candidate', 'refs/heads/absent')).toBeNull();
+    await expect(storage.resolveRef('candidate', 'refs/tags/demo')).rejects.toThrow('INVALID_REF');
   });
 
   it('reconciles a lost create response by exact name and reports a delayed fork as provisioning', async () => {

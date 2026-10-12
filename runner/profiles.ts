@@ -53,6 +53,9 @@ const deltaE = { retry_limit: 4, timeout_ms: 1500, output: 6000 };
 const epsilon1 = { retry_limit: 1, timeout_ms: 500, output: 500 };
 const epsilonLow = { retry_limit: 2, timeout_ms: 500, output: 1000 };
 const epsilonHigh = { retry_limit: 2, timeout_ms: 1000, output: 2000 };
+const zetaRow = { retry_limit: 2, timeout_ms: 750, output: 1500 };
+const etaRow = { retry_limit: 3, timeout_ms: 750, output: 2250 };
+const afterAw = { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE, epsilon: epsilonHigh };
 const requiredDispatchCases: NonNullable<LocalProfile['cases']> = {
   seed: { rows: { alpha: alpha1, beta: beta2, gamma: gamma3, delta: delta4, epsilon: epsilon1 } },
   'a-only': { rows: { alpha: alpha2, beta: beta2, gamma: gamma3, delta: delta4, epsilon: epsilon1 } },
@@ -71,6 +74,13 @@ const requiredDispatchCases: NonNullable<LocalProfile['cases']> = {
   'j-common': { rows: { alpha: alpha3, beta: beta3, gamma: gamma4, delta: deltaE, epsilon: epsilonLow },
     epsilonChoices: [epsilonLow, epsilonHigh] },
   'aw-only': { rows: { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE, epsilon: epsilonHigh } },
+  'rows-zeta': { rows: { ...afterAw, zeta: zetaRow } },
+  'rows-eta': { rows: { ...afterAw, eta: etaRow } },
+  'rows-retire': { rows: { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE } },
+  'rows-zeta-eta': { rows: { ...afterAw, zeta: zetaRow, eta: etaRow } },
+  'rows-zeta-retire': { rows: { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE, zeta: zetaRow } },
+  'rows-eta-retire': { rows: { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE, eta: etaRow } },
+  'rows-all': { rows: { alpha: alpha3, beta: beta3, gamma: gamma5, delta: deltaE, zeta: zetaRow, eta: etaRow } },
 };
 
 export async function loadProfile(filename: string): Promise<LocalProfile> {
@@ -116,7 +126,7 @@ export async function loadProfile(filename: string): Promise<LocalProfile> {
     const allowedChoices = ['2:500:1000', '2:1000:2000'];
     for (const [caseId, config] of Object.entries(profile.cases)) {
       if (!/^[a-z0-9-]{1,64}$/.test(caseId) || !config || !config.rows ||
-        Object.keys(config.rows).sort().join(',') !== 'alpha,beta,delta,epsilon,gamma' ||
+        Object.keys(config.rows).sort().join(',') !== Object.keys(requiredDispatchCases[caseId].rows).sort().join(',') ||
         !Object.values(config.rows).every(validRow)) throw new Error('INVALID_PROFILE_CASE');
       if ((caseId === 'j-common') !== !!config.epsilonChoices) throw new Error('INVALID_PROFILE_CASE');
       if (config.epsilonChoices && (config.epsilonChoices.length !== 2 ||
@@ -178,7 +188,7 @@ const candidateCode = `import { pathToFileURL } from 'node:url';
 const mod = await import(pathToFileURL(process.argv[1]).href);
 if (typeof mod.attemptBudget !== 'function') throw new Error('missing attemptBudget');
 const values = {};
-for (const family of ['alpha','beta','gamma','delta','epsilon']) values[family] = await mod.attemptBudget(family);
+for (const family of {families}) values[family] = await mod.attemptBudget(family);
 process.stdout.write(JSON.stringify(values));`;
 /** Exported so the owner fixture can pin the exact child argv in its profile. */
 export const dispatchArgv = ['--input-type=module', '-e', candidateCode, '{repo}/dispatch.mjs'];
@@ -203,8 +213,8 @@ export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string,
   if (profile.checkerId === 'dispatch-lab') {
     const caseId = (job as Job & { caseId?: string }).caseId;
     const expected = caseId && profile.cases?.[caseId];
-    if (!expected || families.some(family => !expected.rows[family]) ||
-      Object.keys(expected.rows).length !== families.length) throw new Error('UNKNOWN_CASE_ID');
+    if (!expected) throw new Error('UNKNOWN_CASE_ID');
+    const expectedFamilies = Object.keys(expected.rows);
     if (profile.checkerFile) {
       if (resolve(profile.checkerFile).startsWith(resolve(repo) + sep)) throw new Error('CHECKER_IN_CANDIDATE');
       const result = await command(process.execPath, [profile.checkerFile, '--repo', repo, '--unit', unit, '--case', caseId!],
@@ -224,8 +234,9 @@ export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string,
     let rows: Record<string, ExpectedRow>;
     try { rows = rowValues(await readFile(resolve(repo, 'families.tsv'), 'utf8')); }
     catch { return { outcome: 'FAIL', log: 'Invalid or missing families.tsv', score: null }; }
-    if (Object.keys(rows).length !== families.length || families.some(family => !rows[family])) return { outcome: 'FAIL', log: 'Missing required family', score: null };
-    const argv = dispatchArgv.map(arg => arg === '{repo}/dispatch.mjs' ? resolve(repo, 'dispatch.mjs') : arg);
+    if (Object.keys(rows).sort().join(',') !== expectedFamilies.sort().join(',')) return { outcome: 'FAIL', log: 'Missing or unexpected family', score: null };
+    const argv = dispatchArgv.map(arg => arg === '{repo}/dispatch.mjs' ? resolve(repo, 'dispatch.mjs') :
+      arg.replace('{families}', JSON.stringify(expectedFamilies)));
     const result = await command(process.execPath, argv,
       repo, profile.timeoutMs, childEnvironment());
     if (result.timedOut) return { outcome: 'TIMEOUT', log: result.stderr, score: null };
@@ -233,7 +244,7 @@ export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string,
     let outputs: Record<string, unknown>;
     try { outputs = JSON.parse(result.stdout) as Record<string, unknown>; }
     catch { return { outcome: 'FAIL', log: 'Candidate output was not JSON', score: null }; }
-    for (const family of families) {
+    for (const family of expectedFamilies) {
       const actual = { ...rows[family], output: outputs[family] } as ExpectedRow;
       if (!Number.isSafeInteger(outputs[family])) return { outcome: 'FAIL', log: 'Noninteger output: ' + family, score: null };
       if (family === 'epsilon' && expected.epsilonChoices?.length) {

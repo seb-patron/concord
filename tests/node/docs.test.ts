@@ -350,7 +350,7 @@ describe('documented demo commands', () => {
         }
       }
     }
-    expect([workers, bridges, demos]).toEqual([1, 1, 18]);
+    expect([workers, bridges, demos]).toEqual([1, 1, 19]);
 
     const manual = /To run them manually,[\s\S]*?```sh\n([\s\S]*?)\n```/.exec(await readFile(join(cwd, 'docs/DEMO.md'), 'utf8'))?.[1]
       ?.replaceAll('8787', String(workerPort));
@@ -405,6 +405,7 @@ describe('documented demo commands', () => {
     expect(demo).toHaveLength(1);
     expect(deploy).toHaveLength(1);
     expect(demo[0]).toContain('scene aw');
+    expect(demo[0]).toContain('scene rows');
 
     const implemented = [...(await readFile(join(cwd, 'demo/scenarios.ts'), 'utf8'))
       .matchAll(/\bname === '([^']+)'/g)].map(match => match[1]);
@@ -466,8 +467,9 @@ describe('documented demo commands', () => {
     expect(later[6].evidence.attempts).toBe(7);
     expect(later[7].evidence).toMatchObject({ attempts: 7, taskId: 'task-17', checkerOutcome: 'PASS', queueState: 'landed' });
     expect(new Set(later[7].evidence.changeIds).size).toBe(1);
+    expect(later[8].evidence).toMatchObject({ checkerCaseId: 'rows-all', checkerOutcome: 'PASS' });
     const deployed = await execute(deploy[0]);
-    expect(deployed[0].canonicalOid).toBe(later[7].canonicalOid);
+    expect(deployed[0].canonicalOid).toBe(later[8].canonicalOid);
     expect(deployed[3].evidence['wrong-exec'].checkerOutcomes).toContain('FAIL');
     expect(deployed[3].queue.finalCanonicalOid).toMatch(/^[a-f0-9]{40}$/);
   }, 600_000);
