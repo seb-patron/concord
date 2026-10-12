@@ -264,6 +264,24 @@ describe('pinned command checker', () => {
     });
   });
 
+  it('redacts a split value when the other stream writes between its chunks', async () => {
+    for (const stream of ['stdout', 'stderr'] as const) await temporaryWork(async dir => {
+      const other = stream === 'stdout' ? 'stderr' : 'stdout';
+      const secret = 'cache-' + 'Q'.repeat(88) + '-value'; // 100 bytes
+      const script = `process.${stream}.write(${JSON.stringify(secret.repeat(100))});\n` +
+        `setTimeout(() => process.${stream}.write(${JSON.stringify(secret.slice(0, 50))}), 30);\n` +
+        `setTimeout(() => process.${other}.write('!'), 60);\n` +
+        `setTimeout(() => process.${stream}.write(${JSON.stringify(secret.slice(50))}), 90);`;
+      const result = await command(process.execPath, ['-e', script], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(result.code).toBe(0);
+      expect(result.outputTail?.match(/\[redacted\]/g)).toHaveLength(101);
+      expect(result.outputTail).toContain('!');
+      for (let start = 0; start <= secret.length - 4; start++)
+        expect(result.outputTail).not.toContain(secret.slice(start, start + 4));
+    });
+  });
+
   it('rejects relative or unpinned executables, job placeholders, and unsafe environment names', async () => {
     await temporaryWork(async dir => {
       for (const changes of [

@@ -38,38 +38,38 @@ export async function command(file: string, args: string[], cwd: string, timeout
       .sort((a, b) => b.length - a.length);
     const maxRedactionBytes = redactions[0]?.length ?? 0;
     const marker = Buffer.from('[redacted]');
-    let pending = Buffer.alloc(0);
+    const pending = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     const collectTail = (chunk: Buffer) => {
       if (!capture) return;
       const next = Buffer.concat([outputTail, chunk]);
       if (next.length > capture.outputCap) truncated = true;
       outputTail = next.subarray(Math.max(0, next.length - capture.outputCap));
     };
-    const collectRedactedTail = (chunk: Buffer, final = false) => {
+    const collectRedactedTail = (stream: 'stdout' | 'stderr', chunk: Buffer, final = false) => {
       if (!capture) return;
       if (!redactions.length) { collectTail(chunk); return; }
-      pending = Buffer.concat([pending, chunk]);
+      const buffered = Buffer.concat([pending[stream], chunk]);
       // A match may begin in the final max(value length)-1 bytes and finish in
       // the next chunk. Keep that window until it can be classified safely.
-      const safeEnd = final ? pending.length : Math.max(0, pending.length - maxRedactionBytes + 1);
+      const safeEnd = final ? buffered.length : Math.max(0, buffered.length - maxRedactionBytes + 1);
       let cursor = 0;
       while (cursor < safeEnd) {
-        let first = pending.length;
+        let first = buffered.length;
         let match: Buffer | undefined;
         for (const value of redactions) {
-          const at = pending.indexOf(value, cursor);
+          const at = buffered.indexOf(value, cursor);
           if (at >= 0 && at < first) { first = at; match = value; }
         }
         if (!match || first >= safeEnd) {
-          collectTail(pending.subarray(cursor, safeEnd));
+          collectTail(buffered.subarray(cursor, safeEnd));
           cursor = safeEnd;
           break;
         }
-        collectTail(pending.subarray(cursor, first));
+        collectTail(buffered.subarray(cursor, first));
         collectTail(marker);
         cursor = first + match.length;
       }
-      pending = pending.subarray(cursor);
+      pending[stream] = buffered.subarray(cursor);
     };
     const collect = (previous: Buffer, chunk: Buffer) => {
       if (previous.length >= OUTPUT_CAP) { truncated = true; return previous; }
@@ -77,8 +77,8 @@ export async function command(file: string, args: string[], cwd: string, timeout
       if (next.length > OUTPUT_CAP) truncated = true;
       return next.subarray(0, OUTPUT_CAP);
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); collectRedactedTail(chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); collectRedactedTail(chunk); });
+    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); collectRedactedTail('stdout', chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); collectRedactedTail('stderr', chunk); });
     const timer = setTimeout(() => {
       timedOut = true;
       if (process.platform !== 'win32' && child.pid) {
@@ -95,7 +95,8 @@ export async function command(file: string, args: string[], cwd: string, timeout
     child.once('close', async code => {
       clearTimeout(timer);
       if (killer) await killer;
-      collectRedactedTail(Buffer.alloc(0), true);
+      collectRedactedTail('stdout', Buffer.alloc(0), true);
+      collectRedactedTail('stderr', Buffer.alloc(0), true);
       resolveResult({ code: code ?? -1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), stdoutBytes: stdout,
         timedOut, truncated, outputTail: capture ? outputTail.toString('utf8') : undefined });
     });
