@@ -104,7 +104,9 @@ export function mechanicallyMergeableRows(policy: TrustedPolicy, oldManifest: Re
   nextManifest: ReviewManifest): boolean {
   const old = oldManifest.changedUnits;
   const next = nextManifest.changedUnits;
-  return old.length > 0 && old.length === next.length && old.every((unit, index) => {
+  return oldManifest.coverage === 'complete' && nextManifest.coverage === 'complete' &&
+    dependencyScopeDigest(oldManifest.dependencyScope) === dependencyScopeDigest(nextManifest.dependencyScope) &&
+    old.length > 0 && old.length === next.length && old.every((unit, index) => {
     const rebased = next[index];
     return rebased && unit.unitKey === rebased.unitKey && unit.unitKey.startsWith('row:') &&
       policy.tables?.some(table => unit.unitKey.startsWith(`row:${table.name}:`)) &&
@@ -222,6 +224,9 @@ function carryRebase(context: ModuleContext, job: RebaseCandidateJob, result: Re
   catch { return reject(context, 'REVIEW_REQUIRED', 'Rebased manifest lacks trusted unit coverage'); }
   if (normalized.coverage !== 'complete' || manifestDigest(normalized, inspected.value.policy, result.unitKeys) !== result.reviewManifestDigest)
     return reject(context, 'REVIEW_REQUIRED', 'Rebased manifest differs from inspected evidence');
+  if (parent.reviewManifest.coverage !== 'complete' ||
+    dependencyScopeDigest(parent.reviewManifest.dependencyScope) !== dependencyScopeDigest(normalized.dependencyScope))
+    return reject(context, 'REVIEW_REQUIRED', contentDifference(parent.reviewManifest, normalized));
   if (result.patchIdBefore !== result.patchIdAfter) {
     const old = parent.reviewManifest.changedUnits;
     const next = normalized.changedUnits;

@@ -109,6 +109,11 @@ describe('content-bound verdicts', () => {
     const rebased = structuredClone(old);
     expect(mechanicallyMergeableRows(trusted, old, rebased)).toBe(true);
     expect(mechanicallyMergeableRows(policy, old, rebased)).toBe(false);
+    const dependent = { ...old, dependencyScope: [{ kind: 'unit' as const, unitKey: 'row:families:beta',
+      path: 'families.tsv', mode: '100644', contentDigest: d('beta:before') }] } as ReviewManifest;
+    const changedDependency = { ...dependent, dependencyScope: [{ ...dependent.dependencyScope[0],
+      contentDigest: d('beta:after') }] } as ReviewManifest;
+    expect(mechanicallyMergeableRows(trusted, dependent, changedDependency)).toBe(false);
     (rebased.changedUnits[0] as { afterDigest: Digest }).afterDigest = d('new row bytes');
     expect(mechanicallyMergeableRows(trusted, old, rebased)).toBe(false);
   });

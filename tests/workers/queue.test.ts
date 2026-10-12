@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
-import type { BootstrapHandoff, ChangeView, Gate, Job, ModuleContext, Principal, PromotionResult, RebaseResult, ReviewManifest, StackResult } from '../../src/contracts';
+import type { BootstrapHandoff, ChangeView, Gate, Job, ModuleContext, Principal, PromotionResult, RebaseResult, ReviewManifest, StackResult, Verdict } from '../../src/contracts';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { repos } from '../../src/features/repos';
 import { queue } from '../../src/features/queue';
@@ -11,7 +11,7 @@ import { jobInput, runners } from '../../src/features/runners';
 import { findings } from '../../src/features/findings';
 import { verdicts } from '../../src/features/verdicts';
 import { digest } from '../../src/http';
-import { manifestDigest } from '../../src/verdicts/manifest';
+import { hashCanonical, manifestDigest } from '../../src/verdicts/manifest';
 import { localFixtureConfig, sqlState } from '../../src/state';
 import { FakeStorage } from '../../src/storage/fake';
 import { arbitrate, accepted } from '../../src/queue/arbitrate';
@@ -222,21 +222,22 @@ async function addChange(h: Harness, id: string, deps: string[] = [], profileId 
 }
 
 async function sendRebase(h: Harness, job: Extract<Job, { kind: 'rebase-candidate' }>,
-  outcome: RebaseResult['outcome'], patchChanged = false): Promise<void> {
+  outcome: RebaseResult['outcome'], patchChanged = false, evidence?: ReviewManifest): Promise<void> {
   const headOid = outcome === 'PASS' ? oid('f') : null;
   const manifest: ReviewManifest = { coverage: 'complete', changedUnits: [{ unitKey: 'row:A',
     beforePath: 'rows.tsv', afterPath: 'rows.tsv', beforeMode: '100644', afterMode: '100644',
     beforeDigest: `sha256:${'1'.repeat(64)}`, afterDigest: `sha256:${'2'.repeat(64)}` }],
     dependencyScope: [], policyVersion: job.unitPolicy.version, policyDigest: job.policyDigest,
     checkerDigest: job.checkerDigest, oracleDigest: job.oracleDigest, toolchainDigest: job.toolchainDigest };
+  const reviewed = evidence ?? manifest;
   const preimage = { kind: 'rebase-candidate' as const, jobId: job.jobId, attempt: 1,
     inputDigest: job.inputDigest, fence: 1, sourceTreeOid: headOid ? oid('3') : null,
     checkerDigest: job.checkerDigest, toolchainDigest: job.toolchainDigest,
     oracleDigest: job.oracleDigest, environmentDigest: job.environmentDigest, durationMs: 1,
     log: outcome === 'FAIL' ? 'combined check failed' : '', outcome, baseOid: job.newBaseOid,
     headOid, patchIdBefore: 'a'.repeat(40), patchIdAfter: headOid ? (patchChanged ? 'b' : 'a').repeat(40) : null,
-    reviewManifest: headOid ? manifest : null,
-    reviewManifestDigest: headOid ? await digest(manifest) : null, unitKeys: headOid ? ['row:A'] : [],
+    reviewManifest: headOid ? reviewed : null,
+    reviewManifestDigest: headOid ? await digest(reviewed) : null, unitKeys: headOid ? ['row:A'] : [],
     conflictPaths: outcome === 'MERGE_CONFLICT' ? ['rows.tsv'] : [],
     conflictUnits: outcome === 'MERGE_CONFLICT' ? ['row:A'] : [] };
   const result = { ...preimage, resultDigest: await digest(preimage) } as RebaseResult;
@@ -1094,6 +1095,94 @@ describe('queue state machine', () => {
     await h.tick();
     expect((await h.state()).promotion).toMatchObject({ state: 'pending', expectedOldOid: nextMain });
     expect(await h.put('canonical-' + h.repoId, 'refs/heads/main', oid('e'), nextMain)).toBe(true);
+    await h.tick();
+    expect((await h.state()).entries[0].state).toBe('landed');
+  });
+
+  it.each([false, true])('uses real rebase and verdict hooks when a declared dependency changes: %s', async changedDependency => {
+    const config = localFixtureConfig('local');
+    config.policies['local-demo'].units = {
+      'row:A': { canonicalKey: 'row:A', file: 'rows.tsv', resources: [], dependencyKeys: ['row:B'] },
+      'row:B': { canonicalKey: 'row:B', file: 'rows.tsv', resources: [], dependencyKeys: [] },
+    };
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const h = await setup('A');
+    const policy = config.policies['local-demo'];
+    const profile = config.profiles['local-demo'];
+    const originalDependency = { kind: 'unit' as const, unitKey: 'row:B', path: 'rows.tsv', mode: '100644',
+      contentDigest: hashCanonical('b-before') };
+    const approved: ReviewManifest = { coverage: 'complete', changedUnits: [{ unitKey: 'row:A',
+      beforePath: 'rows.tsv', afterPath: 'rows.tsv', beforeMode: '100644', afterMode: '100644',
+      beforeDigest: `sha256:${'1'.repeat(64)}`, afterDigest: `sha256:${'2'.repeat(64)}` }],
+      dependencyScope: [originalDependency], policyVersion: policy.version, policyDigest: policy.digest,
+      checkerDigest: policy.checkerDigest, oracleDigest: profile.oracleDigest, toolchainDigest: profile.toolchainDigest };
+    const approvalDigest = manifestDigest(approved, policy, ['row:A']);
+    const view = h.views.get('A')!;
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'repos' | 'verdicts', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('repos', principal, h.repoId);
+      const verdictContext = internal.context('verdicts', principal, h.repoId);
+      context.state.put('repo', { repoId: h.repoId, tenantId: 'local', displayName: h.repoId,
+        canonicalStorageName: view.canonicalStorageName, defaultBranch: 'main', observedCanonicalOid: main,
+        policyId: 'local-demo', policyDigest: policy.digest, profileId: 'local-demo', status: 'ready', version: 1 });
+      const change = { changeId: 'A', repoId: h.repoId, authorId: view.authorId, intentKey: 'shared-intent',
+        intentText: 'A', candidateStorageName: view.candidateStorageName, branch: view.branch,
+        baseOid: main, headOid: view.headOid, revision: 1, unitKeys: ['row:A'],
+        dependencyChangeIds: [], status: 'ready', version: 1 };
+      context.state.put('changes', [change]);
+      context.state.put('change:A', change);
+      const parent: Verdict = { verdictId: 'v-A', version: 1, changeId: 'A', reviewerId: 'reviewer',
+        revision: 1, reviewManifest: approved, reviewManifestDigest: approvalDigest,
+        policyDigest: policy.digest, checkerDigest: policy.checkerDigest,
+        oracleDigest: profile.oracleDigest, toolchainDigest: profile.toolchainDigest,
+        deltaResultId: null, findingSetVersion: 1, decision: 'approve',
+        evidenceDigest: hashCanonical('review'), parentVerdictId: null };
+      verdictContext.state.put('verdict:v-A', parent);
+      verdictContext.state.put('list:A', ['v-A']);
+      verdictContext.state.put('active:A', parent.verdictId);
+      verdictContext.state.put('active-evidence:v-A', { revision: 1, headOid: view.headOid,
+        manifestDigest: approvalDigest, profileDigest: profile.digest, sourceId: 'A' });
+      verdictContext.state.put('inspection:A', { changeId: 'A', revision: 1,
+        candidate: { changeId: 'A', revision: 1, baseOid: main, headOid: view.headOid,
+          storageName: view.candidateStorageName, ref: view.branch },
+        canonicalStorageName: view.canonicalStorageName, policyId: 'local-demo', profileId: 'local-demo',
+        reviewManifest: approved, reviewManifestDigest: approvalDigest, outcome: 'PASS' });
+    });
+    repos.changeView = (context, id) => {
+      const current = original.changeView!(context, id);
+      return current.status === 'eligible' ? { ...current, value: { ...current.value,
+        scratchStorageName: `scratch-${h.repoId}` } } : current;
+    };
+    repos.hooks['repos.applyRebase'] = original.applyRebase;
+    verdicts.hooks['verdicts.gate'] = original.verdict;
+    verdicts.hooks['verdicts.carryRebase'] = original.carryRebase;
+    const nextMain = oid('4');
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    await h.tick();
+    const job = h.jobs.find(item => item.kind === 'rebase-candidate');
+    if (!job || job.kind !== 'rebase-candidate') throw new Error('rebase job missing');
+    const rebased: ReviewManifest = { ...approved, dependencyScope: [{ ...originalDependency,
+      contentDigest: changedDependency ? hashCanonical('b-after') : originalDependency.contentDigest }] };
+    await sendRebase(h, job, 'PASS', false, rebased);
+    await h.tick();
+    const entry = (await h.state()).entries[0];
+    if (changedDependency) {
+      expect(entry).toMatchObject({ revision: 2, state: 'blocked', blockedReason: 'REVIEW_REQUIRED' });
+      expect(entry.verdictId).toBe('v-A');
+      expect((await h.fetch('/changes/A/verdicts')).body.data.items).toHaveLength(1);
+      return;
+    }
+    expect(entry).toMatchObject({ revision: 2, state: 'reserved' });
+    expect(entry.verdictId).not.toBe('v-A');
+    await h.tick();
+    const checked = h.jobs.find(item => item.kind === 'validate-stack' && !item.bootstrap &&
+      item.candidates.some(candidate => candidate.changeId === 'A' && candidate.revision === 2));
+    expect(checked).toBeDefined();
+    expect((await h.deliver(checked!, 'PASS')).status).toBe('eligible');
+    await h.tick();
+    expect((await h.state()).promotion).toMatchObject({ state: 'pending', expectedOldOid: nextMain });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), nextMain)).toBe(true);
     await h.tick();
     expect((await h.state()).entries[0].state).toBe('landed');
   });
