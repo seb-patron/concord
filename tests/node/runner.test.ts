@@ -225,6 +225,29 @@ export function attemptBudget(family) {
     });
   });
 
+  it('inspects new files under approved prefixes with complete coverage and refuses unknown paths', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await mkdir(join(repo, 'tests'));
+      await mkdir(join(repo, 'other'));
+      await writeFile(join(repo, 'tests/new.test.ts'), 'approved\n');
+      await git(repo, ['add', 'tests/new.test.ts']);
+      await git(repo, ['commit', '--quiet', '-m', 'approved new file'], 30_000, commitEnv);
+      const approvedHead = await git(repo, ['rev-parse', 'HEAD']);
+      const scoped: TrustedPolicy = { ...policy, units: {}, newFilePrefixes: ['tests/'] };
+      const approved = await inspectUnits(repo, base, approvedHead, { ...jobBase({}), unitPolicy: scoped } as Job);
+      expect(approved.unitKeys).toEqual(['file:tests/new.test.ts']);
+      expect(approved.manifest.coverage).toBe('complete');
+      expect(normalizeManifest(approved.manifest, scoped, approved.unitKeys)).toEqual(approved.manifest);
+      await writeFile(join(repo, 'other/new.ts'), 'unapproved\n');
+      await git(repo, ['add', 'other/new.ts']);
+      await git(repo, ['commit', '--quiet', '-m', 'unapproved new file'], 30_000, commitEnv);
+      const outsideHead = await git(repo, ['rev-parse', 'HEAD']);
+      const outside = await inspectUnits(repo, approvedHead, outsideHead, { ...jobBase({}), unitPolicy: scoped } as Job);
+      expect(outside.manifest.coverage).toBe('unknown');
+      expect(() => normalizeManifest(outside.manifest, scoped, outside.unitKeys)).toThrow('UNKNOWN_UNIT_SCOPE');
+    });
+  });
+
   it.each([
     { name: 'period and underscore', paths: ['pkg/a_b.py', 'pkg/a.py'], expected: ['file:pkg/a.py', 'file:pkg/a_b.py'] },
     { name: 'hyphen, period and underscore', paths: ['pkg/a_b.py', 'pkg/a.b.py', 'pkg/a-b.py'],

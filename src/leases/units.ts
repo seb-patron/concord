@@ -11,6 +11,7 @@ export interface UnitIdentity {
 
 export type TsvTable = NonNullable<TrustedPolicy['tables']>[number];
 const tableMetadata = new WeakMap<Map<string, UnitIdentity>, TsvTable[]>();
+const prefixMetadata = new WeakMap<Map<string, UnitIdentity>, string[]>();
 
 export function matchesTableKey(table: TsvTable, key: string): boolean {
   const spec = table.keySpec;
@@ -71,10 +72,29 @@ export function tableForFile(policy: TrustedPolicy, file: string): TsvTable | un
   return declaredTables(policy).find(table => table.file === file);
 }
 
-function validPath(path: string): boolean {
-  return path.length > 0 && path.length <= 512 && !path.startsWith('/') &&
+function validPath(path: string, keyLimit = true): boolean {
+  return path.length > 0 && path.length <= 512 && (!keyLimit || `file:${path}`.length <= 512) && !path.startsWith('/') &&
     !path.includes('\\') && !/[\s\0]/.test(path) &&
-    path.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+    path.normalize('NFC') === path &&
+    path.split('/').every(part => part !== '' && part !== '.' && part !== '..' && part !== '.git');
+}
+
+export function declaredNewFilePrefixes(policy: TrustedPolicy): string[] {
+  if (policy.newFilePrefixes === undefined) return [];
+  if (!Array.isArray(policy.newFilePrefixes) || policy.newFilePrefixes.length > 256 ||
+    policy.newFilePrefixes.some(prefix => typeof prefix !== 'string' || !prefix.endsWith('/') ||
+      prefix.length > 512 || !validPath(prefix.slice(0, -1), false)) ||
+    new Set(policy.newFilePrefixes).size !== policy.newFilePrefixes.length) {
+    throw new Error('NEW_FILE_PREFIX_POLICY_INVALID');
+  }
+  return policy.newFilePrefixes;
+}
+
+export function prefixFileUnit(policy: TrustedPolicy, raw: string): UnitIdentity | null {
+  if (!raw.startsWith('file:')) return null;
+  const file = raw.slice(5);
+  return validPath(file) && declaredNewFilePrefixes(policy).some(prefix => file.startsWith(prefix))
+    ? { key: raw, file, resources: [], wholeFile: true } : null;
 }
 
 function validKey(key: string): boolean {
@@ -85,6 +105,7 @@ function validKey(key: string): boolean {
 export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
   const registry = new Map<string, UnitIdentity>();
   const tables = declaredTables(policy);
+  const prefixes = declaredNewFilePrefixes(policy);
   const canonical = new Map<string, UnitIdentity>();
   const signatures = new Map<string, string>();
   const rows = new Map<string, string>();
@@ -153,6 +174,7 @@ export function unitRegistry(policy: TrustedPolicy): Map<string, UnitIdentity> {
     if (!registry.has(fileKey)) registry.set(fileKey, { key: fileKey, file: table.file, resources: [], wholeFile: true });
   }
   tableMetadata.set(registry, tables);
+  prefixMetadata.set(registry, prefixes);
   return registry;
 }
 
@@ -160,6 +182,11 @@ export function resolveUnit(registry: Map<string, UnitIdentity>, raw: unknown): 
   if (typeof raw !== 'string' || !validKey(raw)) throw new HttpError(422, 'UNKNOWN_UNIT', 'Unit key is not registered');
   let identity = registry.get(raw);
   if (!identity) {
+    if (raw.startsWith('file:')) {
+      const file = raw.slice(5);
+      if (validPath(file) && (prefixMetadata.get(registry) ?? []).some(prefix => file.startsWith(prefix)))
+        identity = { key: raw, file, resources: [], wholeFile: true };
+    }
     const tables = tableMetadata.get(registry) ?? [];
     for (const table of tables) {
       const prefix = `row:${table.name}:`;

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, UnitDependencyScopeEntry } from '../src/contracts';
 import { stableJson } from '../src/http';
 import { compareKeys, trustedDependencyKeys } from '../src/verdicts/manifest';
-import { matchesTableKey, patternRow, tableForFile, type TsvTable } from '../src/leases/units';
+import { matchesTableKey, patternRow, prefixFileUnit, tableForFile, type TsvTable } from '../src/leases/units';
 import { command, git, MAX_INSPECTED_BLOB_BYTES, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
@@ -105,7 +105,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
       }
     }
     const fileUnit = units.find(([key]) => key === 'file:' + path);
-    if (!fileUnit && !table) coverage = 'unknown';
+    if (!fileUnit && !table && !prefixFileUnit(policy, `file:${path}`)) coverage = 'unknown';
     evidence.push({ unitKey: fileUnit?.[1].canonicalKey ?? 'file:' + path,
       beforePath: before === null ? null : path, afterPath: after === null ? null : path,
       beforeMode, afterMode, beforeDigest: before === null ? null : hash(before), afterDigest: after === null ? null : hash(after) });

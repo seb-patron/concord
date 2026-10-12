@@ -105,6 +105,32 @@ describe('owner file-unit generator', () => {
     ]);
   });
 
+  it('includes sorted owner-approved prefixes in the digest without materializing future file units', () => {
+    const a = generated(['--oid', oid, '--allow-new-under', 'tests/', '--allow-new-under', 'src/mother_base/']);
+    const b = generated(['--oid', oid, '--allow-new-under', 'src/mother_base/', '--allow-new-under', 'tests/',
+      '--allow-new-under', 'tests/']);
+    expect(b.policyDigest).toBe(a.policyDigest);
+    expect(a.policy.newFilePrefixes).toEqual(['src/mother_base/', 'tests/']);
+    expect(a.policy.units['file:tests/new.test.ts']).toBeUndefined();
+    const { digest, ...preimage } = a.policy;
+    expect(digest).toBe(`sha256:${createHash('sha256').update(canonicalJson(preimage)).digest('hex')}`);
+    const unchanged = generated(['--oid', oid]);
+    expect(unchanged.policy).not.toHaveProperty('newFilePrefixes');
+    writeFileSync(template, JSON.stringify({ ...baseTemplate, newFilePrefixes: ['tests/'] }));
+    expect(generated(['--oid', oid, '--allow-new-under', 'src/mother_base/']).policyDigest).toBe(a.policyDigest);
+  });
+
+  it('rejects unsafe prefixes from flags and templates', () => {
+    for (const prefix of ['tests', '/', '../tests/', '.git/hooks/', 'src//nested/', 'white space/',
+      'e\u0301/', 'x'.repeat(512) + '/']) {
+      const result = run(['--oid', oid, '--allow-new-under', prefix]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(JSON.stringify(prefix));
+    }
+    writeFileSync(template, JSON.stringify({ ...baseTemplate, newFilePrefixes: ['tests'] }));
+    expect(run(['--oid', oid]).stderr).toContain('NEW_FILE_PREFIX_POLICY_INVALID');
+  });
+
   it('rejects malformed UTF-8 in a path list with its line number and rejects replacement in arguments', () => {
     const list = join(directory, 'paths.txt');
     writeFileSync(list, Buffer.concat([Buffer.from('future/ok.txt\nfo'), Buffer.from([0x80]), Buffer.from('.txt\n')]));
