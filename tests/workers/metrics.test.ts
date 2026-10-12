@@ -3,7 +3,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
 import type { Event, ModuleContext, Principal, StackResult } from '../../src/contracts';
-import { measureEvents, metricsWindow } from '../../src/features/metrics';
+import { measureEvents, metricLandingIds, metricPriorEvents, metricPriorRedStart, metricWindowEvents, metricsWindow } from '../../src/features/metrics';
 import { queue } from '../../src/features/queue';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { FakeStorage } from '../../src/storage/fake';
@@ -208,5 +208,70 @@ describe('repository event metrics', () => {
     });
     expect((await responseBody(await worker.fetch(apiRequest(path, 'local-viewer'), env))).data.changesLanded.value).toBe(1);
     expect((await worker.fetch(apiRequest(`/v1/repos/${repo}/metrics?since=bad&until=bad`, 'local-viewer'), env)).status).toBe(400);
+  });
+
+  it('pages a window without reading unrelated prior events and bounds cached windows', async () => {
+    const repo = 'metrics_paged';
+    const created = await worker.fetch(apiRequest('/v1/repos', 'local-owner', {
+      method: 'POST', headers: { 'idempotency-key': 'metrics-paged-repo' },
+      body: JSON.stringify({ name: repo, policyId: 'local-demo', profileId: 'local-demo' }),
+    }), env);
+    expect(created.status).toBe(201);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${repo}`));
+    await runInDurableObject(stub, (_instance, durable) => {
+      const sql = durable.storage.sql;
+      const insert = (kind: string, timestamp: number, relatedIds: string[], payload: Record<string, unknown> = {}) =>
+        sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)',
+          kind, 'fixture', timestamp, 1, JSON.stringify(relatedIds), JSON.stringify(payload));
+      for (let i = 0; i < 260; i++) insert('unrelated', base - 100_000 + i, ['other']);
+      insert('lease.claimed', base - 9000, ['lease', 'landed'], { changeId: 'landed' });
+      insert('change.published', base - 8000, ['landed'], { revision: 1 });
+      insert('verdict.created', base - 7000, ['verdict', 'landed'], { decision: 'approve' });
+      insert('queue.enqueued', base - 6000, ['landed']);
+      insert('queue.diagnosis', base - 5000, [], { reason: 'BASE_RED' });
+      for (let i = 0; i < 260; i++) insert('unrelated', base + 1000, ['other']);
+      insert('queue.main_green', base + 5000, []);
+      insert('queue.promotion_applied', base + 10_000, ['landed']);
+      insert('queue.promotion_applied', base + 21_000, ['late']);
+      let pages = 0;
+      const boundedSql = { exec: (query: string, ...args: (string | number)[]) => {
+        pages++;
+        expect(query).toContain('timestamp >= ? AND timestamp < ?');
+        expect(query).toContain('LIMIT ?');
+        expect(args.at(-1)).toBeLessThanOrEqual(128);
+        return sql.exec(query, ...args);
+      } } as unknown as SqlStorage;
+      const window = Array.from(metricWindowEvents(boundedSql, base, base + 20_000));
+      expect(window).toHaveLength(262);
+      expect(window.every(item => item.timestamp >= base && item.timestamp < base + 20_000)).toBe(true);
+      expect(pages).toBe(3);
+      expect(Array.from(metricLandingIds(sql, base, base + 20_000))).toEqual(['landed']);
+      let priorQuery = ''; let priorArgs: (string | number)[] = [];
+      const priorSql = { exec: (query: string, ...args: (string | number)[]) => {
+        priorQuery = query; priorArgs = args;
+        return sql.exec(query, ...args);
+      } } as unknown as SqlStorage;
+      expect(Array.from(metricPriorEvents(priorSql, 'landed', base)).map(item => item.kind)).toEqual([
+        'lease.claimed', 'change.published', 'verdict.created', 'queue.enqueued',
+      ]);
+      expect(metricPriorRedStart(sql, base)).toBe(base - 5000);
+      const plan = sql.exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${priorQuery}`, ...priorArgs).toArray().map(row => row.detail);
+      expect(plan.join(' ')).toMatch(/concord_events_metric_first/);
+    });
+    const path = (since: number) => `/v1/repos/${repo}/metrics?since=${encodeURIComponent(new Date(since).toISOString())}&until=${encodeURIComponent(new Date(base + 20_000).toISOString())}`;
+    const response = await worker.fetch(apiRequest(path(base), 'local-viewer'), env);
+    expect(response.status).toBe(200);
+    expect((await responseBody(response)).data).toMatchObject({
+      changesLanded: { value: 1 }, publishToLand: { medianMs: 18_000 }, claimToLand: { medianMs: 19_000 },
+      reviewWait: { medianMs: 1000 }, queueWait: { medianMs: 16_000 }, mainRedTime: { totalMs: 5000, unresolved: false },
+    });
+    for (let i = 1; i <= 18; i++) {
+      expect((await worker.fetch(apiRequest(path(base + i), 'local-viewer'), env)).status).toBe(200);
+    }
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const cache = (instance as unknown as { metricsCache: Map<string, unknown> }).metricsCache;
+      expect(cache.size).toBe(16);
+      expect(cache.has(`${new Date(base).toISOString()}/${new Date(base + 20_000).toISOString()}`)).toBe(false);
+    });
   });
 });

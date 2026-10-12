@@ -14,6 +14,12 @@ export function initialize(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS concord_migrations (namespace TEXT PRIMARY KEY, version INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS concord_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS concord_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, actor_id TEXT NOT NULL, timestamp INTEGER NOT NULL, version INTEGER NOT NULL, related_ids TEXT NOT NULL, payload TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS concord_events_by_time ON concord_events(timestamp, sequence);
+    CREATE INDEX IF NOT EXISTS concord_events_by_kind_time ON concord_events(kind, timestamp, sequence);
+    CREATE INDEX IF NOT EXISTS concord_events_metric_first ON concord_events(json_extract(related_ids, '$[0]'), timestamp, sequence);
+    CREATE INDEX IF NOT EXISTS concord_events_metric_second ON concord_events(json_extract(related_ids, '$[1]'), timestamp, sequence);
+    CREATE INDEX IF NOT EXISTS concord_events_metric_claim ON concord_events(json_extract(payload, '$.changeId'), timestamp, sequence) WHERE kind = 'lease.claimed';
+    CREATE INDEX IF NOT EXISTS concord_events_metric_red ON concord_events(timestamp, sequence) WHERE kind = 'queue.diagnosis' AND json_extract(payload, '$.reason') = 'BASE_RED';
     CREATE TABLE IF NOT EXISTS concord_requests (principal_id TEXT NOT NULL, route TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(principal_id, route, idempotency_key));`);
 }
 

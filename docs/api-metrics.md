@@ -1,6 +1,6 @@
 # Repository flow metrics
 
-`GET /v1/repos/:repoId/metrics?since=<ISO>&until=<ISO>` returns measured flow from the repository event log. A repository-scoped reader token, including owner and viewer tokens, can read it. Both bounds are required UTC timestamps such as `2026-10-12T00:00:00.000Z`. The interval is `[since, until)` and must be positive and at most 31 days; invalid bounds return `400 INVALID_METRICS_WINDOW`. Results for the same normalized window are cached for 60 seconds per repository coordinator.
+`GET /v1/repos/:repoId/metrics?since=<ISO>&until=<ISO>` returns measured flow from the repository event log. A repository-scoped reader token, including owner and viewer tokens, can read it. Both bounds are required UTC timestamps such as `2026-10-12T00:00:00.000Z`. The interval is `[since, until)` and must be positive and at most 31 days; invalid bounds return `400 INVALID_METRICS_WINDOW`. The coordinator reads the indexed window in 128-event pages and reads earlier origins only for changes that land in the window. Results for the same normalized window are cached for 60 seconds; each repository coordinator keeps at most 16 windows cached.
 
 The standard API envelope contains `data`, `version`, and `eventSeq`. Each number in `data` has `n` and `eventKinds`. Count fields have `value`; durations have `medianMs`, `p90Ms`, and `totalMs`; `revisionsPerLandedChange` has `median` and `mean`; `mainRedTime` has `totalMs`. Medians and p90 values use linear interpolation between ordered samples. Empty samples have zero values and `n: 0`.
 
