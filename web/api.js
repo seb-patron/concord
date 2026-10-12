@@ -204,6 +204,17 @@ export function submitVerdict(repoId, changeId, body, idempotencyKey, fetchImpl)
   );
 }
 
+/** POST /v1/repos/:r/milestones — owner role; creation carries no expectedVersion. */
+export function createMilestone(repoId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/milestones`, { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
+/** PATCH /v1/repos/:r/milestones/:id — owner role; sends the milestone's own expectedVersion. */
+export function updateMilestone(repoId, milestoneId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/milestones/${encodeURIComponent(milestoneId)}`,
+    { method: 'PATCH', body, idempotencyKey }, fetchImpl);
+}
+
 /**
  * Which minimal actions the server would permit for a set of roles.
  * Mirrors requireRouteRole in src/auth.ts; the server still enforces, so a

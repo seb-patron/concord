@@ -8,6 +8,7 @@ const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
+const { milestoneModel, createMilestones } = require('../../web/milestones.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -103,6 +104,121 @@ describe('Fleet desk derivation', () => {
     expect(repairStatus(findings, []).status).toBe('unresolved');
     expect(repairStatus(findings, [{ roundId: 'r1', status: 'pending' }]).status).toBe('pending-review');
     expect(repairStatus([], []).status).toBe('resolved');
+  });
+});
+
+describe('Milestones screen', () => {
+  const now = Date.now();
+  const mdata = { data: { projections: {
+    issues: { items: [
+      { number: 1, title: 'Free <task>', state: 'open', milestoneId: 'm1', labels: [], changes: [] },
+      { number: 2, title: 'Held work', state: 'open', milestoneId: 'm1', labels: [], changes: [{ changeId: 'c2', status: 'draft' }] },
+      { number: 3, title: 'Review work', state: 'open', milestoneId: 'm1', labels: [], changes: [{ changeId: 'c3', status: 'ready' }] },
+      { number: 4, title: 'Landed work', state: 'closed', milestoneId: 'm1', labels: [], changes: [{ changeId: 'c4', status: 'merged' }] },
+      { number: 5, title: 'Other open', state: 'open', milestoneId: 'm2', labels: [], changes: [] },
+      { number: 6, title: 'Second open', state: 'open', milestoneId: 'm2', labels: [], changes: [] },
+    ], milestones: [
+      { milestoneId: 'm1', title: 'V1 <build>', description: 'Ship it', dueDate: '2026-10-16', state: 'open', version: 3, progress: { openIssues: 3, closedIssues: 1, landedChanges: 1 } },
+      { milestoneId: 'm2', title: 'Idle', description: '', dueDate: null, state: 'open', version: 1, progress: { openIssues: 2, closedIssues: 0, landedChanges: 0 } },
+    ] },
+    leases: { heldItems: [{ changeId: 'c2', issueNumber: 2, holderId: 'agent-a', unitKey: 'fn:held', state: 'active', expiresAt: now + 120000 }] },
+    queue: { entries: [] },
+  } } };
+  const mevents = [{ sequence: 1, kind: 'queue.promotion_applied', timestamp: now, relatedIds: ['c4'], actorId: 'concord' }];
+  it('splits progress into landed, in review or queued, claimed, and open with due and pace', () => {
+    const model = milestoneModel(mdata, mevents, now);
+    expect(model.state).toBe('ready');
+    expect(model.rows[0]).toMatchObject({ landed: 1, review: 1, claimed: 1, open: 1, total: 4, due: 'Due Fri Oct 16' });
+    expect(model.rows[0].barLabel).toBe('1 landed, 1 in review, 1 claimed, 1 open');
+    expect(model.rows[0].pace).toBe('On pace: about 1 landing a day');
+    expect(model.rows[1]).toMatchObject({ open: 2, total: 2, due: 'No due date' });
+    expect(model.rows[1].pace).toBe('Not started: 2 issues claimable now');
+    expect(milestoneModel({ data: { projections: { issues: { status: 'unavailable', items: [] } } } }).state).toBe('unavailable');
+    expect(milestoneModel(null).state).toBe('loading');
+    expect(milestoneModel({ data: { projections: {} } }).state).toBe('unknown');
+    expect(milestoneModel({ data: { projections: { issues: { items: [], milestones: [] } } } }).state).toBe('empty');
+  });
+  it('renders cards, routes tracker clicks, and covers create, edit, error, and read-only paths', async () => {
+    const dom = new JSDOM('<main id="ms"></main>', { url: 'http://localhost/' });
+    const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+    Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+    const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+    const calls: any[] = [];
+    let failNext = false;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if (failNext) {
+        failNext = false;
+        return new Response(JSON.stringify({ error: { code: 'STALE_VERSION', message: 'stale', details: { currentVersion: 9 } } }), { status: 409 });
+      }
+      return new Response(JSON.stringify({ data: {}, version: 4 }), { status: 200 });
+    }) as any;
+    setSessionToken('test-token');
+    const root = dom.window.document.getElementById('ms')!;
+    let refreshed = 0; let opened = '';
+    const screen = createMilestones(root, { refresh: async () => { refreshed++; }, openTracker: (id: string) => { opened = id; } });
+    const snapshot = structuredClone(mdata) as any;
+    snapshot.data.projections.leases.heldItems[0].expiresAt = Date.now() + 120000;
+    const context = { repoId: 'repo', snapshot, events: mevents, identity: { principalId: 'owner', roles: ['owner'] }, message: null };
+    try {
+      screen.render(context);
+      const cards = root.querySelectorAll('.milestone-card');
+      expect(cards).toHaveLength(2);
+      expect(cards[0].textContent).toContain('V1 <build>');
+      expect(cards[0].textContent).toContain('Due Fri Oct 16');
+      expect(cards[0].textContent).toContain('1 / 4 landed');
+      expect(cards[0].querySelector('.milestone-bar')?.getAttribute('aria-label')).toBe('1 landed, 1 in review, 1 claimed, 1 open');
+      expect(cards[0].textContent).toContain('On pace: about 1 landing a day');
+      expect(cards[0].querySelector('build')).toBeNull();
+      expect(cards[1].textContent).toContain('Not started: 2 issues claimable now');
+      expect(cards[1].textContent).toContain('No due date');
+      (cards[0].querySelector('h2 a') as HTMLAnchorElement).click();
+      expect(opened).toBe('m1');
+      const desc = cards[0].querySelector('.milestone-desc') as HTMLTextAreaElement;
+      expect(desc.id).toBe('desc-m1');
+      desc.value = 'edited copy';
+      screen.render(context);
+      expect((root.querySelector('.milestone-card .milestone-desc') as HTMLTextAreaElement).value).toBe('edited copy');
+      (root.querySelector('.milestone-save') as HTMLButtonElement).click();
+      await flush();
+      expect(calls[0].url).toBe('/v1/repos/repo/milestones/m1');
+      expect(calls[0].init.method).toBe('PATCH');
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ expectedVersion: 3, description: 'edited copy' });
+      expect(new Headers(calls[0].init.headers).get('idempotency-key')).toBeTruthy();
+      expect(refreshed).toBe(1);
+      (root.querySelector('.milestone-edit') as HTMLButtonElement).click();
+      const editForm = root.querySelector('.milestone-card form') as HTMLFormElement;
+      (editForm.elements.namedItem('title') as HTMLInputElement).value = 'V1 renamed';
+      editForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ expectedVersion: 3, title: 'V1 renamed', dueDate: '2026-10-16' });
+      (root.querySelector('.milestone-new') as HTMLButtonElement).click();
+      const form = root.querySelector('.milestone-form') as HTMLFormElement;
+      (form.elements.namedItem('title') as HTMLInputElement).value = 'V2';
+      (form.elements.namedItem('description') as HTMLTextAreaElement).value = 'Second wave';
+      form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      expect(calls[2].url).toBe('/v1/repos/repo/milestones');
+      expect(calls[2].init.method).toBe('POST');
+      expect(JSON.parse(String(calls[2].init.body))).toEqual({ title: 'V2', description: 'Second wave' });
+      expect(refreshed).toBe(3);
+      failNext = true;
+      (root.querySelector('.milestone-save') as HTMLButtonElement).click();
+      await flush();
+      expect(root.textContent).toContain('Could not save milestone (STALE_VERSION)');
+      expect(refreshed).toBe(4);
+      screen.render({ ...context, identity: { principalId: 'viewer', roles: ['viewer'] } });
+      expect(root.querySelector('.milestone-new')).toBeNull();
+      expect((root.querySelector('.milestone-card .milestone-desc') as HTMLTextAreaElement).readOnly).toBe(true);
+      screen.render({ ...context, message: 'Snapshot unavailable' });
+      expect(root.textContent).toContain('Snapshot unavailable');
+      screen.render({ ...context, message: null, snapshot: { data: { projections: { issues: { items: [], milestones: [] } } } } });
+      expect(root.textContent).toContain('No milestones yet');
+      screen.render({ ...context, snapshot: { data: { projections: { issues: { status: 'unavailable', items: [] } } } } });
+      expect(root.textContent).toContain('Unavailable');
+      screen.render({ ...context, repoId: null, snapshot: null });
+      expect(root.textContent).toContain('Choose a repository');
+    } finally { clearSessionToken(); Object.assign(globalThis, previous); dom.window.close(); }
   });
 });
 
