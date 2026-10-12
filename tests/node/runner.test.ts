@@ -438,7 +438,8 @@ export function attemptBudget(family) {
         expectedRefs: { canonical: base, scratch: null } };
       const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
-        executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
+        executable: process.execPath, argv: ['-e', "if (require('node:fs').readFileSync('example.txt', 'utf8') !== 'candidate\\n') process.exit(1)"] };
+      expect(job.caseId).toBeUndefined();
       const result = await executeJob(job, profile, credentials(remotes));
       expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
       if (result.kind !== 'validate-stack') throw new Error('wrong result');
@@ -485,7 +486,7 @@ export function attemptBudget(family) {
     });
   });
 
-  it('composes disjoint TSV candidates and blocks a divergent same-row candidate', async () => {
+  it('merges adjacent generic TSV edits only when the policy declares the table', async () => {
     await temporaryWork(async dir => {
       const canonical = join(dir, 'canonical.git');
       const first = join(dir, 'first.git');
@@ -522,11 +523,12 @@ export function attemptBudget(family) {
       const profile: LocalProfile = { id: 'local-demo', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16 * 1024,
         executable: process.execPath, argv: ['-e', 'process.exit(0)'] };
-      const run = async (otherName: string, otherRemote: string, otherHead: string, scratchPath: string) => {
+      const table = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'],
+        keyColumn: 'family', keySpec: { charset: 'lower' as const, minLength: 1, maxLength: 256 } };
+      const run = async (otherName: string, otherRemote: string, otherHead: string, scratchPath: string, declared: boolean) => {
         const remotes = Object.fromEntries(Object.entries({ canonical, first, [otherName]: otherRemote, scratch: scratchPath })
           .map(([name, path]) => [name, pathToFileURL(path).href]));
-        const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, tables: [{ name: 'families', file: 'families.tsv',
-          header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }] },
+        const job: Job = { ...jobBase(remotes), unitPolicy: { ...policy, tables: declared ? [table] : [] },
           kind: 'validate-stack', canonicalBaseOid: base,
           candidates: [
             { changeId: 'alpha', revision: 1, baseOid: base, headOid: firstHead, storageName: 'first', ref: 'refs/heads/main' },
@@ -535,16 +537,22 @@ export function attemptBudget(family) {
           expectedRefs: { canonical: base, scratch: null } };
         return executeJob(job, profile, credentials(remotes));
       };
-      const composed = await run('second', second, secondHead, scratch);
+      const undeclared = await run('second', second, secondHead, scratch, false);
+      expect(undeclared).toMatchObject({ outcome: 'MERGE_CONFLICT', composedOid: null });
+      expect(undeclared.log).toContain('MERGE_CONFLICT');
+      expect(await refOid(seed, pathToFileURL(scratch).href, 'refs/heads/check')).toBeNull();
+      const composed = await run('second', second, secondHead, scratch, true);
       expect(composed).toMatchObject({ outcome: 'PASS' });
-      if (composed.kind !== 'validate-stack' || !composed.composedOid) throw new Error('no composed commit');
-      const table = await git(seed, ['--git-dir=' + scratch, 'show', composed.composedOid + ':families.tsv']);
-      expect(table).toContain('alpha\t2\t1000\nbeta\t3\t1000');
-      const rejected = await run('collision', collision, collisionHead, scratchCollision);
+      if (composed.kind !== 'validate-stack' || !composed.composedOid) throw new Error('Missing composed commit');
+      expect(await refOid(seed, pathToFileURL(scratch).href, 'refs/heads/check')).toBe(composed.composedOid);
+      await git(seed, ['fetch', '--quiet', scratch, composed.composedOid]);
+      expect(await git(seed, ['show', `${composed.composedOid}:families.tsv`])).toBe(
+        baseTable.replace('alpha\t1', 'alpha\t2').replace('beta\t2', 'beta\t3').trim());
+      const rejected = await run('collision', collision, collisionHead, scratchCollision, true);
       expect(rejected).toMatchObject({ outcome: 'MERGE_CONFLICT' });
       expect(await refOid(seed, pathToFileURL(scratchCollision).href, 'refs/heads/check')).toBeNull();
     });
-  }, 15_000); // Six bare repos, three native commits, two composed checks and a collision check.
+  }, 20_000); // Six bare repos, three native commits and three composed checks.
 
   it('delta-check reruns the affected unit with the pinned profile', async () => {
     await gitFixture(async ({ repo, canonical, candidate, base }) => {
