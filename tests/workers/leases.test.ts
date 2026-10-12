@@ -537,4 +537,19 @@ describe('RepoCoordinator lease routes', () => {
       expect(leases.hooks['leases.reservationLive']!(context, 'child-a', { [item.unitKey]: item.fence })).toMatchObject({ status: 'blocked', code: 'LEASE_STALE' });
     });
   });
+  it('shows the holder issue on lease lists and conflicts', async () => {
+    setupPolicy();
+    const repo = 'lease_issue_links';
+    expect((await claim(repo, 'local-agent-a', 'issue-holder', ['row:families:alpha'], 'issue-claim')).status).toBe(201);
+    await runInDurableObject(stubFor(repo), (_instance, durable) => {
+      const state = sqlState(durable.storage.sql);
+      const change = state.get<Change>('module:repos:change:issue-holder')!;
+      state.put('module:repos:change:issue-holder', { ...change, issueNumber: 1 });
+      state.put('module:issues:items', [{ number: 1, title: 'Protect alpha' }]);
+    });
+    expect((await listing(repo)).items[0]).toMatchObject({ issueNumber: 1, issueTitle: 'Protect alpha' });
+    const conflict = await claim(repo, 'local-agent-b', 'waiting-change', ['row:families:alpha'], 'waiting-claim');
+    expect(conflict.status).toBe(409);
+    expect((await responseBody(conflict)).error.details).toMatchObject({ issueNumber: 1, issueTitle: 'Protect alpha' });
+  });
 });

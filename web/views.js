@@ -37,6 +37,20 @@ export function projectionItems(projection) {
   return { state: 'unknown', items: [] };
 }
 
+/** Read-only issue cards from one coordinator snapshot. */
+export function openIssueRows(snapshot) {
+  const p = snapshot?.data?.projections ?? {};
+  const issues = Array.isArray(p.issues?.items) ? p.issues.items : [];
+  const milestones = Array.isArray(p.issues?.milestones) ? p.issues.milestones : [];
+  const leases = Array.isArray(p.leases?.items) ? p.leases.items : [];
+  return issues.filter(issue => issue?.state === 'open').map(issue => ({
+    number: issue.number, title: issue.title,
+    milestone: milestones.find(item => item.milestoneId === issue.milestoneId)?.title ?? null,
+    changes: Array.isArray(issue.changes) ? issue.changes : [],
+    leases: leases.filter(lease => lease.issueNumber === issue.number && ['active', 'reserved'].includes(lease.state) && lease.expiresAt > Date.now()),
+  }));
+}
+
 /** Snapshot ownership is fixed by the six registered coordinator modules. */
 export function snapshotCollections(envelope) {
   const p = envelope?.data?.projections ?? {};

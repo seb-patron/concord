@@ -12,6 +12,25 @@ import { prepareLocal, wranglerStateDir, type Manifest } from '../../demo/scenar
 import type { ConcordClient } from '../../cli/client.ts';
 import { callTool } from '../../mcp/tools.ts';
 
+it('dispatches issue and milestone MCP tools with issue links', async () => {
+  const calls: Array<{ method: string; path: string; options: unknown }> = [];
+  const client = { request: async (method: string, path: string, options?: unknown) => {
+    calls.push({ method, path, options }); return { data: { items: [] }, version: 2 };
+  } } as unknown as ConcordClient;
+  await callTool(client, 'issue_create', { repoId: 'repo', title: 'Task', body: 'Spec', labels: ['inbox'] });
+  await callTool(client, 'issue_get', { repoId: 'repo', issueNumber: 3 });
+  await callTool(client, 'issue_list', { repoId: 'repo', state: 'open' });
+  await callTool(client, 'issue_close', { repoId: 'repo', issueNumber: 3, reason: 'Done', expectedVersion: 7 });
+  await callTool(client, 'milestone_list', { repoId: 'repo' });
+  await callTool(client, 'change_create', { repoId: 'repo', intentKey: 'task', intentText: 'Task', baseOid: 'a', branch: 'task', unitKeys: [], issueNumber: 3 });
+  expect(calls.map(call => `${call.method} ${call.path}`)).toEqual([
+    'POST /repos/repo/issues', 'GET /repos/repo/issues/3', 'GET /repos/repo/issues?state=open',
+    'POST /repos/repo/issues/3/close', 'GET /repos/repo/milestones', 'POST /repos/repo/changes',
+  ]);
+  expect((calls[3].options as { body: object; expectedVersion: number }).expectedVersion).toBe(7);
+  expect((calls[5].options as { body: { issueNumber: number } }).body.issueNumber).toBe(3);
+});
+
 const execFile = promisify(execFileCallback);
 const cwd = resolve('.');
 const children: ChildProcess[] = [];

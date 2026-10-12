@@ -5,7 +5,7 @@ import {
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
-  normalizeDiagnosis, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
+  normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
 
 const $ = id => document.getElementById(id);
@@ -371,6 +371,19 @@ function renderEvents(changeId) {
     item.id = `event-${event.sequence}`; archive.append(item);
   }
 }
+function renderIssues() {
+  const target = $('issue-list'); target.replaceChildren();
+  const rows = openIssueRows(state.snapshot);
+  if (!rows.length) { target.append(node('p', 'No open issues.', 'muted')); return; }
+  for (const issue of rows) {
+    const card = node('article', null, 'issue-card');
+    card.append(node('strong', `#${issue.number} ${issue.title}`));
+    if (issue.milestone) card.append(node('p', `Milestone: ${issue.milestone}`, 'muted'));
+    for (const change of issue.changes) card.append(node('p', `Change ${change.changeId}: ${change.status}`, 'muted'));
+    for (const lease of issue.leases) card.append(node('p', `Held: ${lease.unitKey} by ${lease.holderId}`, 'muted'));
+    target.append(card);
+  }
+}
 function renderLeases() {
   const box=$('lease-list'); box.replaceChildren();
   const active=leases().filter(l => ['active','reserved'].includes(l.state) && l.expiresAt > Date.now());
@@ -591,11 +604,11 @@ function render() {
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
     if (!state.snapshot) {
       if (!state.repoId) {
-        renderStats();renderBoard();renderFleet();renderRunners();renderLeases();renderQueue();renderInbox();renderTabs();
+        renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderInbox();renderTabs();
       }
       return;
     }
-    renderStats();renderBoard();renderFleet();renderRunners();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
+    renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
   });
 }
 function selectChange(id) {

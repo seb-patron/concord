@@ -14,6 +14,7 @@ import {
 
 type EntryState = 'admitted' | 'reserved' | 'checking' | 'landed' | 'blocked' | 'withdrawn' | 'failed';
 interface Entry extends PlannedEntry {
+  issueNumber?: number | null;
   entryId: Id; revision: number; baseOid: string; headOid: string; storageName: string; ref: string;
   canonicalStorageName: string; scratchStorageName: string; policyId: Id; profileId: Id;
   policyDigest: Digest; profileDigest: Digest;
@@ -384,7 +385,8 @@ async function enqueue(context: ModuleContext, body: Record<string, unknown>): P
     }
     const sequence = emit(context, 'queue.enqueued', [changeId], { revision: checked.revision, headOid: checked.headOid,
       verdictId: checked.verdictId, findingSetVersion: checked.findingSetVersion });
-    const entry: Entry = { ...checked, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
+    const view = context.readChange?.(changeId);
+    const entry: Entry = { ...checked, issueNumber: view?.status === 'eligible' ? view.value.issueNumber : null, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
     transition(context, state, entry, 'reserved');
     state.entries.push(entry);
     bump(context, state, 'ADMITTED', [changeId]);
@@ -505,7 +507,8 @@ async function createContest(context: ModuleContext, body: Record<string, unknow
     prepared.forEach((candidate, i) => {
       const sequence = emit(context, 'queue.contest_child', [candidate.changeId, contestId], { headOid: candidate.headOid });
       creationSequences[i] = sequence;
-      const entry: Entry = { ...candidate, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
+      const view = context.readChange?.(candidate.changeId);
+      const entry: Entry = { ...candidate, issueNumber: view?.status === 'eligible' ? view.value.issueNumber : null, entryId: crypto.randomUUID(), sequence, admittedAt: context.now() };
       transition(context, state, entry, 'reserved');
       admissionIds[i] = entry.entryId;
       state.entries.push(entry);
@@ -847,6 +850,7 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
         const entry = admitted(state, id);
         if (entry && active(entry)) transition(context, state, entry, 'landed');
       }
+      for (const changeId of ticket.memberIds) requireGate(context.call('issues.land', changeId, observed));
       if (ticket.bootstrap) state.bootstrap!.state = 'merged';
       observeMain(context, state, observed, ticket.memberIds);
       emit(context, 'queue.promotion_applied', ticket.memberIds, { promotionId: ticket.promotionId,

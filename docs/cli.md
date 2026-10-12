@@ -109,3 +109,8 @@ npm run concord -- api GET /repos/REPO_ID/snapshot
 ```
 
 The generic command preserves API success and failure envelopes. It does not grant authorization beyond the configured Concord token.
+# Issues and milestones
+
+Use `concord issue create --repo ID --title TITLE --body MARKDOWN` to record a task. `issue list`, `issue get --id NUMBER`, `issue edit --id NUMBER --expected-version N`, `issue close --id NUMBER --reason TEXT --expected-version N`, and `issue reopen` cover the issue lifecycle. `--labels` and `--allowed-files` accept JSON arrays. Link a change with `concord change create ... --issue N`.
+
+Use `concord milestone create --repo ID --title TITLE [--description TEXT] [--due-date YYYY-MM-DD]`, `milestone list`, `milestone get --id ID`, and `milestone close --id ID --expected-version N`. See the [issues API](api-issues.md).

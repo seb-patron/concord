@@ -241,8 +241,9 @@ function changeInput(body: CreateChangeBody) {
   const unitKeys = ids(body.unitKeys, 'unitKeys');
   const dependencyChangeIds = ids(body.dependencyChangeIds, 'dependencyChangeIds');
   const attempt = body.attempt === undefined ? 1 : body.attempt;
+  if (body.issueNumber !== undefined && (!Number.isSafeInteger(body.issueNumber) || body.issueNumber < 1)) fail(400, 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer');
   if (!Number.isSafeInteger(attempt) || attempt < 1) fail(400, 'INVALID_ATTEMPT', 'attempt must be a positive integer');
-  return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt };
+  return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt, issueNumber: body.issueNumber ?? null };
 }
 
 async function authorizeIntentContest(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
@@ -272,6 +273,10 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const repo = await catalogRepo(context);
   requireReady(repo);
   const input = changeInput(body);
+  if (input.issueNumber !== null) {
+    const linked = context.call('issues.validate', input.issueNumber);
+    if (linked.status === 'blocked') fail(409, linked.code, linked.reason);
+  }
   const all = list<Change>(context, 'changes');
   const matchingIntents = list<Intent>(context, 'intents').filter(item => item.intentKey === input.intentKey);
   const ownIntent = matchingIntents.find(item => all.some(change =>
@@ -292,6 +297,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const priorIntent = ownIntent;
   if (priorIntent) {
     const prior = getChange(context, priorIntent.changeId);
+    if ((prior.issueNumber ?? null) !== input.issueNumber) fail(409, 'INTENT_CONFLICT', 'Intent key was used with another issue');
     if (!sameTask(prior, input)) fail(409, 'INTENT_CONFLICT', 'Intent key was used with different task content');
     if (!terminal(prior)) {
       if (body.attempt !== undefined && input.attempt !== priorIntent.attempt) fail(409, 'ATTEMPT_CONFLICT', 'Active intent attempt differs');
@@ -321,7 +327,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
     changeId, repoId: repo.repoId, authorId: context.principal.principalId, authorModel: context.principal.model ?? null, intentKey: input.intentKey,
     intentText: input.intentText, candidateStorageName, branch: input.branch, baseOid: input.baseOid,
     headOid: null, revision: 0, unitKeys: input.unitKeys, dependencyChangeIds: input.dependencyChangeIds,
-    status: 'draft', version: 0,
+    status: 'draft', version: 0, issueNumber: input.issueNumber,
   };
   context.transaction(() => {
     change.version = versioned(context, 'change.draft', [changeId], { candidateStorageName });
@@ -699,7 +705,7 @@ export const repos: FeatureModule = {
       dependencyChangeIds: change.dependencyChangeIds, canonicalStorageName: repo.canonicalStorageName,
       scratchStorageName: context.state.get<BootstrapPending>('bootstrap')?.scratchStorageName ?? `concord-s-${repo.repoId}`,
       policyId: repo.policyId, profileId: repo.profileId,
-      intentKey: change.intentKey,
+      intentKey: change.intentKey, ...(change.issueNumber != null ? { issueNumber: change.issueNumber } : {}),
     } };
   },
 };

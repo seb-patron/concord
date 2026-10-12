@@ -32,6 +32,7 @@ export interface Branch extends Versioned {
 }
 export interface Change extends Versioned {
   changeId: Id; repoId: Id; authorId: Id; intentKey: string; intentText: string;
+  issueNumber?: number | null;
   authorModel?: string | null;
   candidateStorageName: string; branch: string; baseOid: Oid | null;
   headOid: Oid | null; revision: number; unitKeys: string[];
@@ -43,6 +44,7 @@ export interface Intent extends Versioned {
 }
 export interface Lease extends Versioned {
   leaseId: Id; unitKey: string; holderId: Id; changeId: Id; intentText: string;
+  issueNumber?: number | null; issueTitle?: string | null;
   fence: number; expiresAt: number; state: 'active' | 'released' | 'expired' | 'reserved';
 }
 export interface Finding extends Versioned {
@@ -63,6 +65,7 @@ export interface Verdict extends Versioned {
 }
 export interface QueueEntry extends Versioned {
   entryId: Id; changeId: Id; admittedRevision: number; baseOid: Oid | null;
+  issueNumber?: number | null;
   sequence: number; generation: number; dependencyChangeIds: Id[];
   state: 'waiting' | 'checking' | 'blocked' | 'merged' | 'withdrawn';
   blockedReason: string | null;
@@ -147,6 +150,7 @@ export interface BootstrapBody extends MutationBody {
 export interface CreateChangeBody {
   intentKey: string; intentText: string; baseOid: Oid | null; branch: string;
   unitKeys: string[]; dependencyChangeIds: Id[]; attempt?: number;
+  issueNumber?: number;
 }
 export interface ClaimBody extends MutationBody { changeId: Id; unitKeys: string[]; intentText: string; ttlSeconds?: number }
 export interface PublishBody extends MutationBody {
@@ -322,6 +326,8 @@ export type Gate<T = void> =
   | { status: 'eligible'; version: number; evidenceIds: Id[]; value: T }
   | { status: 'blocked'; version: number; code: string; reason: string; evidenceIds: Id[] };
 export interface ServiceHooks {
+  'issues.validate': (context: ModuleContext, issueNumber: number) => Gate<{ number: number; title: string }>;
+  'issues.land': (context: ModuleContext, changeId: Id, canonicalOid: Oid) => Gate;
   'repos.inspectRevision': (context: ModuleContext, result: InspectionResult) => Gate<{ changeId: Id; revision: number; reviewManifestDigest: Digest }>;
   'verdicts.recordInspection': (context: ModuleContext, record: InspectedRevision) => Gate;
   'leases.reserve': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate<{ reservationFences: Record<string, number> }>;
@@ -334,13 +340,14 @@ export interface ServiceHooks {
   'runners.schedule': (context: ModuleContext, job: Job) => Gate<{ jobId: Id }>;
 }
 export type HookName = keyof ServiceHooks;
-export type ModuleName = 'repos' | 'leases' | 'queue' | 'runners' | 'findings' | 'verdicts';
+export type ModuleName = 'repos' | 'leases' | 'queue' | 'runners' | 'findings' | 'verdicts' | 'issues';
 /** A queue-owned decision made immediately before a module mutation is dispatched. */
 export interface PromotionFreezeDecision { frozen: boolean; exempt?: boolean }
 export type PromotionFreezeProvider = (context: ModuleContext, request: Request) => PromotionFreezeDecision;
 /** Repos owns the record; callers receive a detached, immutable projection. */
 export interface ChangeView {
   readonly authorId: Id; readonly headOid: Oid | null; readonly revision: number;
+  readonly issueNumber?: number | null;
   readonly status: Change['status']; readonly unitKeys: readonly string[]; readonly frozen: boolean;
   /** Optional until repos publishes immutable queue inputs; queue fails closed when required fields are absent. */
   readonly baseOid?: Oid | null; readonly candidateStorageName?: string; readonly branch?: string;
