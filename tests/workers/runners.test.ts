@@ -4,6 +4,7 @@ import { runners } from '../../src/features/runners';
 import { artifactsStorage } from '../../src/storage/artifacts';
 import { digest, failure, HttpError } from '../../src/http';
 import { localFixtureConfig } from '../../src/state';
+import { pendingResultFailure } from '../../src/repos/model';
 
 const oid = 'a'.repeat(40);
 const tree = 'b'.repeat(40);
@@ -272,6 +273,62 @@ describe('durable runner protocol', () => {
     expect(response.status).toBe(409);
     expect((await response.json() as { error: { code: string } }).error.code).toBe('TOKEN_LIFETIME');
     expect(revoked).toEqual(['held-token']);
+  });
+
+  it('rejects a malformed Artifacts expiry, keeps failed cleanup for retry, and never returns the secret', async () => {
+    const f = await fixture();
+    Object.defineProperty(f.context, 'env', { value: { STORAGE_BACKEND: 'artifacts' } as Env });
+    const createToken = vi.fn()
+      .mockResolvedValueOnce({ plaintext: 'held-token', expiresAt: 'invalid' })
+      .mockImplementation(async () => ({ plaintext: 'valid-token', expiresAt: new Date(f.now() + 60_000).toISOString() }));
+    const revokeToken = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    Object.defineProperty(f.context, 'storage', { value: artifactsStorage({
+      create: vi.fn(),
+      get: vi.fn(async () => ({ [Symbol.dispose]: () => undefined, createToken, revokeToken })),
+    } as unknown as Artifacts) });
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(response.status).toBe(502);
+      expect(await response.clone().text()).not.toContain('held-token');
+      expect(await response.json()).toMatchObject({ error: { code: 'TOKEN_RESULT_INVALID' } });
+      expect(errorLog).toHaveBeenCalledExactlyOnceWith('TOKEN_RESULT_INVALID', 'job1');
+      expect(f.context.state.get('mint-token:candidate')).toBe('held-token');
+      expect(revokeToken).toHaveBeenCalledWith('held-token');
+      const pending = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(pending.status).toBe(503);
+      expect(await pending.json()).toMatchObject({ error: { code: 'TOKEN_REVOCATION_FAILED' } });
+      expect(createToken).toHaveBeenCalledTimes(1);
+      expect(f.context.state.get('mint-token:candidate')).toBe('held-token');
+      const retry = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(retry.status).toBe(200);
+      expect((await retry.json() as { data: { credentials: Array<{ secret: string }> } }).data.credentials[0].secret).toBe('valid-token');
+      expect(f.context.state.get('mint-token:candidate')).toBeNull();
+      expect(revokeToken).toHaveBeenCalledTimes(3);
+      expect(errorLog).toHaveBeenLastCalledWith('TOKEN_REVOCATION_FAILED', 'job1');
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it.each([
+    ['non-finite expiry', { secret: 'held-token', expiresAt: NaN }],
+    ['failure marker', { secret: 'held-token', expiresAt: 61_000, [pendingResultFailure]: 'ARTIFACTS_DISPOSE_FAILED' }],
+  ])('rejects a credential with %s', async (_case, issued) => {
+    const f = await fixture();
+    const revoked: string[] = [];
+    f.context.storage.mintToken = async () => issued;
+    f.context.storage.revokeToken = async (_name, secret) => { revoked.push(secret); return true; };
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await f.route('jobs/job1/credentials', { attempt: 1, fence: 1, operation: 'fetch' });
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({ error: { code: 'TOKEN_RESULT_INVALID' } });
+      expect(revoked).toEqual(['held-token']);
+      expect(errorLog).toHaveBeenCalledExactlyOnceWith('TOKEN_RESULT_INVALID', 'job1');
+    } finally { errorLog.mockRestore(); }
   });
 
   it('logs only a fixed code and job id for unexpected credential errors', async () => {

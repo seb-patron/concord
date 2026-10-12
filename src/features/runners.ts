@@ -1,4 +1,4 @@
-import type { FeatureModule, Gate, Job, JobResult, ModuleContext, RepoStorage, ReviewManifest, RunnerPollBody, JobHeartbeatBody, JobCredentialsBody, JobResultBody } from '../contracts';
+import { pendingResultFailure, type FeatureModule, type Gate, type Job, type JobResult, type ModuleContext, type RepoStorage, type ReviewManifest, type RunnerPollBody, type JobHeartbeatBody, type JobCredentialsBody, type JobResultBody } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, HttpError, json, stableJson } from '../http';
 import { reserveTokenMint } from './repos';
@@ -230,9 +230,23 @@ async function credentials(c: ModuleContext, id: string, body: JobCredentialsBod
       [Object.keys(job.expectedRefs).find(name => name !== (job.kind === 'promote' ? job.scratchStorageName : '')) ?? ''];
   if (names.some(name => !name || !job.storageRemotes[name])) conflict('MISSING_REMOTE');
   const tokens: Array<{ storageName: string; remote: string; secret: string; expiresAt: number }> = [];
+  // Share the pending-token key with the repo token route so either route can retry cleanup.
+  const revoke = async (name: string, secret: string): Promise<boolean> => {
+    const key = `mint-token:${name}`;
+    c.state.put(key, secret);
+    try {
+      if (await c.storage.revokeToken(name, secret)) {
+        c.state.delete(key);
+        return true;
+      }
+    } catch { /* Keep the credential for the next request. */ }
+    return false;
+  };
   try {
     for (const name of names) {
       const live = current(c, id, fence);
+      const prior = c.state.get<string>(`mint-token:${name}`);
+      if (prior && !await revoke(name, prior)) throw new HttpError(503, 'TOKEN_REVOCATION_FAILED', 'Token cleanup is pending');
       const minimum = providerMinimum(c);
       if (minimum && live.job.expiresAt! - c.now() <= 61_000) renewClaim();
       const ttlSeconds = minimum ? 60 : Math.min(59, Math.floor((live.job.expiresAt! - c.now() - 1000) / 1000));
@@ -240,15 +254,19 @@ async function credentials(c: ModuleContext, id: string, body: JobCredentialsBod
       await reserveTokenMint(c);
       if (minimum && current(c, id, fence).job.expiresAt! - c.now() <= 61_000) renewClaim();
       const issued = await c.storage.mintToken(name, body.operation === 'fetch' ? 'read' : 'write', ttlSeconds);
+      if (issued[pendingResultFailure] || !Number.isFinite(issued.expiresAt)) {
+        await revoke(name, issued.secret);
+        throw new HttpError(502, 'TOKEN_RESULT_INVALID', 'Token provider response was invalid');
+      }
       if (issued.expiresAt > live.job.expiresAt! || minimum && issued.expiresAt === live.job.expiresAt!) {
-        await c.storage.revokeToken(name, issued.secret);
+        await revoke(name, issued.secret);
         conflict('TOKEN_LIFETIME');
       }
       tokens.push({ storageName: name, remote: job.storageRemotes[name], ...issued });
     }
     current(c, id, fence);
   } catch (error) {
-    await Promise.all(tokens.map(token => c.storage.revokeToken(token.storageName, token.secret)));
+    await Promise.all(tokens.map(token => revoke(token.storageName, token.secret)));
     throw error;
   }
   return json({ credentials: tokens }, job.version);
@@ -383,7 +401,7 @@ export const runners: FeatureModule = {
       try { return await credentials(c, m[1], b as unknown as JobCredentialsBody & JobHeartbeatBody); }
       catch (error) {
         if (error instanceof HttpError) {
-          if (error.status >= 500) console.error(error.code === 'CATALOG_UNAVAILABLE' ? 'CATALOG_UNAVAILABLE' : 'RUNNER_CREDENTIALS_HTTP_ERROR', m[1]);
+          if (error.status >= 500) console.error(['CATALOG_UNAVAILABLE', 'TOKEN_RESULT_INVALID', 'TOKEN_REVOCATION_FAILED'].includes(error.code) ? error.code : 'RUNNER_CREDENTIALS_HTTP_ERROR', m[1]);
         } else console.error('RUNNER_CREDENTIALS_UNEXPECTED', m[1]);
         throw error;
       }
