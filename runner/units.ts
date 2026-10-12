@@ -3,7 +3,7 @@ import type { ChangedUnitEvidence, Digest, Job, ReviewManifest, TrustedPolicy, U
 import { stableJson } from '../src/http';
 import { trustedDependencyKeys } from '../src/verdicts/manifest';
 import { matchesTableKey, patternRow, tableForFile, type TsvTable } from '../src/leases/units';
-import { command, git, treeOid } from './git';
+import { command, git, MAX_INSPECTED_BLOB_BYTES, treeOid } from './git';
 
 const hash = (value: string | Buffer): Digest => ('sha256:' + createHash('sha256').update(value).digest('hex')) as Digest;
 const legacyTable: TsvTable = { name: 'families', file: 'families.tsv', header: ['family', 'retry_limit', 'timeout_ms'], keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } };
@@ -45,11 +45,11 @@ export function mergeTsv(base: string, ours: string, theirs: string, table: TsvT
   return output.join('\n') + '\n';
 }
 
-async function content(repo: string, oid: string | null, path: string): Promise<Buffer | null> {
+async function content(repo: string, oid: string | null, path: string, maxBytes: number): Promise<Buffer | null> {
   if (!oid) return null;
-  const result = await command('git', ['show', oid + ':' + path], repo, 30_000);
-  if (result.code !== 0) return null;
+  const result = await command('git', ['show', oid + ':' + path], repo, 30_000, undefined, undefined, maxBytes);
   if (result.truncated) throw new Error('EVIDENCE_TOO_LARGE');
+  if (result.code !== 0) return null;
   return result.stdoutBytes;
 }
 
@@ -66,14 +66,17 @@ async function changedPaths(repo: string, base: string | null, head: string): Pr
   return result.stdout.trim().split('\n').filter(Boolean).sort();
 }
 
-export async function inspectUnits(repo: string, base: string | null, head: string, job: Job): Promise<{ unitKeys: string[]; manifest: ReviewManifest; digest: Digest }> {
+export async function inspectUnits(repo: string, base: string | null, head: string, job: Job,
+  maxInspectedBlobBytes = MAX_INSPECTED_BLOB_BYTES): Promise<{ unitKeys: string[]; manifest: ReviewManifest; digest: Digest }> {
+  if (!Number.isSafeInteger(maxInspectedBlobBytes) || maxInspectedBlobBytes < 1 || maxInspectedBlobBytes > MAX_INSPECTED_BLOB_BYTES)
+    throw new Error('INVALID_INSPECTION_LIMIT');
   const policy: TrustedPolicy = job.unitPolicy;
   const evidence: ChangedUnitEvidence[] = [];
   let coverage: 'complete' | 'unknown' = 'complete';
   const paths = await changedPaths(repo, base, head);
   for (const path of paths) {
-    const before = await content(repo, base, path);
-    const after = await content(repo, head, path);
+    const before = await content(repo, base, path, maxInspectedBlobBytes);
+    const after = await content(repo, head, path, maxInspectedBlobBytes);
     const beforeMode = await mode(repo, base, path);
     const afterMode = await mode(repo, head, path);
     const units = Object.entries(policy.units).filter(([, value]) => value.file === path);
@@ -116,7 +119,7 @@ export async function inspectUnits(repo: string, base: string | null, head: stri
     for (const key of dependencies) {
       const unit = policy.units[key] ?? patternRow(policy, key);
       if (!unit) { coverage = 'unknown'; break; }
-      const bytes = await content(repo, head, unit.file);
+      const bytes = await content(repo, head, unit.file, maxInspectedBlobBytes);
       const fileMode = await mode(repo, head, unit.file);
       if (bytes === null || fileMode === null) { coverage = 'unknown'; break; }
       const dependencyTable = tableForFile(policy, unit.file) ?? (unit.file === 'families.tsv' ? legacyTable : undefined);

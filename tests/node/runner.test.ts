@@ -207,6 +207,34 @@ export function attemptBudget(family) {
     expect(() => mergeTsv(base, ours + 'again\tzeta\n', theirs, table)).toThrow('INVALID_TSV_ROW');
   });
 
+  it('inspects a 100 KiB changed file and hashes its complete bytes', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      const bytes = 'x'.repeat(100 * 1024 - 5) + 'tail\n';
+      await writeFile(join(repo, 'example.txt'), bytes);
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'large file'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const filePolicy: TrustedPolicy = { ...policy, units: { 'file:example.txt': {
+        canonicalKey: 'file:example.txt', file: 'example.txt', resources: [], dependencyKeys: [],
+      } } };
+      const inspected = await inspectUnits(repo, base, head, { ...jobBase({}), unitPolicy: filePolicy } as Job);
+      expect(inspected.unitKeys).toEqual(['file:example.txt']);
+      expect(inspected.manifest.coverage).toBe('complete');
+      expect(inspected.manifest.changedUnits[0].afterDigest).toBe('sha256:' + createHash('sha256').update(bytes).digest('hex'));
+      expect(inspected.digest).toBe(await digest(inspected.manifest));
+    });
+  });
+
+  it('fails closed above an injected inspection blob limit', async () => {
+    await gitFixture(async ({ repo, base }) => {
+      await writeFile(join(repo, 'example.txt'), 'x'.repeat(1025));
+      await git(repo, ['add', 'example.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'over inspection limit'], 30_000, commitEnv);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await expect(inspectUnits(repo, base, head, jobBase({}) as Job, 1024)).rejects.toThrow(/^EVIDENCE_TOO_LARGE$/);
+    });
+  });
+
   it('inspects an appended pattern row from a declared non-demo table', async () => {
     await gitFixture(async ({ repo }) => {
       const baseText = 'value\tjob\nold\talpha\n';

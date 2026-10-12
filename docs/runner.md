@@ -70,6 +70,7 @@ On Windows PowerShell, set `$env:CONCORD_URL` and the role-specific `$env:CONCOR
 `--once` polls once and executes at most one job. For a bounded worker, use `--max-jobs N` and optionally `--idle-timeout-seconds N`. An idle timeout alone caps a process at 1,000 jobs; a zero idle timeout exits on an empty poll. `--runner-id` selects a stable opaque ID if required. Keep one process per runner ID.
 
 The checker fetches exact input OIDs into a disposable Git directory. It inspects actual writes and review dependencies, composes ordered candidates, runs the pinned checker without a shell, and conditionally pushes only a green composed commit to its assigned scratch fork. Ordinary unresolved conflicts fail. The trusted TSV helper combines disjoint rows in any owner-declared table, preserves deletions, and rejects divergent changes to the same row. Delta checks recompute manifests and dependencies and report facts; only the verdict service may decide whether review carries.
+Unit inspection reads at most 8 MiB per repository file; larger blobs fail with `EVIDENCE_TOO_LARGE`.
 
 At scheduling, `inputDigest` must equal the SHA-256 of canonical sorted JSON of the job with `inputDigest`, `state`, `attempt`, `fence`, `runnerId`, `expiresAt`, and `version` omitted. This binds results to the immutable job input across claims. A null-base inspection is accepted only for an owner-scheduled `SeedInput` whose seed fork's expected ref is pinned to its head OID.
 

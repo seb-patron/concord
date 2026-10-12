@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export const OUTPUT_CAP = 16 * 1024;
+/** Maximum bytes captured from one repository blob during unit inspection. */
+export const MAX_INSPECTED_BLOB_BYTES = 8 * 1024 * 1024;
 const jobDeadline = new AsyncLocalStorage<number>();
 export function withJobDeadline<T>(deadline: number, run: () => Promise<T>): Promise<T> {
   return jobDeadline.run(deadline, run);
@@ -23,7 +25,7 @@ export function childEnvironment(extra: Record<string, string> = {}): NodeJS.Pro
 
 /** No shell interpolation, and output is capped while it is collected. */
 export async function command(file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv = childEnvironment(),
-  capture?: { outputCap: number; tail: true; redact?: string[] }): Promise<CommandResult> {
+  capture?: { outputCap: number; tail: true; redact?: string[] }, stdoutCap = OUTPUT_CAP): Promise<CommandResult> {
   const deadline = jobDeadline.getStore();
   const deadlineRemaining = deadline === undefined ? undefined : deadline - Date.now();
   const remaining = deadlineRemaining === undefined ? timeoutMs : Math.min(timeoutMs, deadlineRemaining);
@@ -103,14 +105,14 @@ export async function command(file: string, args: string[], cwd: string, timeout
       state.origins = origins.filter(origin => origin.end > cursor)
         .map(origin => ({ end: origin.end - cursor, order: origin.order }));
     };
-    const collect = (previous: Buffer, chunk: Buffer) => {
-      if (previous.length >= OUTPUT_CAP) { truncated = true; return previous; }
+    const collect = (previous: Buffer, chunk: Buffer, cap: number) => {
+      if (previous.length >= cap) { truncated = true; return previous; }
       const next = Buffer.concat([previous, chunk]);
-      if (next.length > OUTPUT_CAP) truncated = true;
-      return next.subarray(0, OUTPUT_CAP);
+      if (next.length > cap) truncated = true;
+      return next.subarray(0, cap);
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk); collectRedactedTail('stdout', chunk, ++eventOrder); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); collectRedactedTail('stderr', chunk, ++eventOrder); });
+    child.stdout.on('data', (chunk: Buffer) => { stdout = collect(stdout, chunk, stdoutCap); collectRedactedTail('stdout', chunk, ++eventOrder); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk, OUTPUT_CAP); collectRedactedTail('stderr', chunk, ++eventOrder); });
     const timer = setTimeout(() => {
       timedOut = true;
       if (process.platform !== 'win32' && child.pid) {
