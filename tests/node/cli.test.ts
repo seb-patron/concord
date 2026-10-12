@@ -159,6 +159,34 @@ describe('Concord agent CLI client', () => {
       .toMatchObject({ changeId: 'agent-a-change', leases: [{ fence: 1 }] });
     expect(calls.filter(call => call.endsWith('POST /repos/demo/changes'))).toHaveLength(2);
   });
+  it('checks ownership before releasing a change whose lease has expired', async () => {
+    const change = { changeId: 'agent-a-change', intentKey: 'task', intentText: 'work',
+      baseOid: 'a'.repeat(40), branch: 'refs/heads/land/task', unitKeys: ['row:families:alpha'],
+      dependencyChangeIds: [], headOid: 'b'.repeat(40), status: 'ready' };
+    const expiredLease = { changeId: change.changeId, leaseId: 'lease', unitKey: 'row:families:alpha',
+      fence: 1, expiresAt: Date.now() - 1000, state: 'active' };
+    const calls: string[] = [];
+    const requestFor = (agent: 'A' | 'B') => vi.fn(async (method: string, path: string,
+      options?: { body?: Record<string, unknown> }) => {
+      calls.push(`${agent} ${method} ${path}`);
+      if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
+      if (method === 'POST' && path === '/repos/demo/changes') {
+        expect(options?.body).toMatchObject({ intentKey: 'task', intentText: 'work', baseOid: change.baseOid,
+          branch: change.branch, unitKeys: change.unitKeys, dependencyChangeIds: [] });
+        if (agent === 'B') throw new ConcordError('INTENT_OWNED', 'conflict', 409,
+          { error: { code: 'INTENT_OWNED' } });
+        return { data: change };
+      }
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [expiredLease], nextCursor: null } };
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    await expect(releaseByIntent('demo', 'task', { request: requestFor('B') } as never))
+      .rejects.toMatchObject({ kind: 'conflict', status: 409 });
+    expect(calls).toEqual(['B GET /repos/demo/changes', 'B POST /repos/demo/changes']);
+    expect(await releaseByIntent('demo', 'task', { request: requestFor('A') } as never))
+      .toEqual({ changeId: change.changeId, released: [] });
+    expect(calls.slice(2)).toEqual(['A GET /repos/demo/changes', 'A POST /repos/demo/changes', 'A GET /repos/demo/leases']);
+  });
   it('renews a short hold when less than half its duration remains', async () => {
     const dir = await tempDir('start-short-hold'); const allowedFiles = join(dir, 'allowed.txt');
     await writeFile(allowedFiles, 'file.txt\n');

@@ -106,6 +106,13 @@ export async function releaseByIntent(repo: string, intentKey: string, clientInp
   const client = clientFor(clientInput); const root = `/repos/${encodeURIComponent(repo)}`;
   const change = await changeByIntent(client, root, intentKey);
   if (!change) throw new ConcordError('change for intent key was not found', 'usage');
+  const reused = (await post(client, `${root}/changes`, {
+    intentKey: change.intentKey, intentText: change.intentText, baseOid: change.baseOid,
+    branch: change.branch, unitKeys: change.unitKeys,
+    dependencyChangeIds: change.dependencyChangeIds ?? [],
+  })).data;
+  if (reused.changeId !== change.changeId)
+    throw new ConcordError('INTENT_CONFLICT: change changed during release', 'conflict');
   const held = await liveLeases(client, root, change.changeId);
   for (const item of held) {
     const version = (await get(client, `${root}/snapshot`)).version;
