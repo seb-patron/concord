@@ -66,6 +66,20 @@ describe('Fleet desk derivation', () => {
     snapshot.data.projections.leases.items[0].issueNumber = 1;
     expect(openIssueRows(snapshot)[0]).toMatchObject({ number: 1, title: '<task>', milestone: 'Release', changes: [{ status: 'ready' }], leases: [{ leaseId: 'l1' }] });
   });
+  it('uses the complete held lease projection for issue cards beyond the first page', () => {
+    for (const count of [100, 101, 128]) {
+      const snapshot = structuredClone(fixture) as any;
+      const held = Array.from({ length: count }, (_, index) => ({
+        leaseId: `held-${index}`, issueNumber: 1, unitKey: `unit:${index}`,
+        holderId: 'agent-a', state: 'active', expiresAt: Date.now() + 120_000,
+      }));
+      snapshot.data.projections.leases.items = held.slice(0, 100);
+      snapshot.data.projections.leases.heldItems = held;
+      const card = openIssueRows(snapshot)[0];
+      expect(card.leases).toHaveLength(count);
+      expect(card.leases.at(-1).leaseId).toBe(`held-${count - 1}`);
+    }
+  });
   it('requires live fences and current finding versions for enqueue evidence', () => {
     const change = fixture.data.projections.repos.changes[0];
     expect(mutationEvidence(change, fixture.data.projections.leases.items, 0).leaseFences).toEqual({ 'fn:retry': 3 });

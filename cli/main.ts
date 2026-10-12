@@ -180,7 +180,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     if (!Number.isSafeInteger(number) || number < 1) throw new ConcordError('--id must be a positive issue number', 'usage');
     if (verb === 'get') return print(await send('GET', `${path}/${number}`));
     if (verb === 'edit') {
-      const payload = body ?? { ...(flags.title !== undefined ? { title: flags.title } : {}), ...(flags.body !== undefined ? { body: flags.body } : {}), ...(flags.labels !== undefined ? { labels: parseJson(String(flags.labels)) } : {}), ...(flags['milestone-id'] !== undefined ? { milestoneId: flags['milestone-id'] } : {}) };
+      const payload = body ?? { ...(flags.title !== undefined ? { title: flags.title } : {}), ...(flags.body !== undefined ? { body: flags.body } : {}), ...(flags.labels !== undefined ? { labels: parseJson(String(flags.labels)) } : {}), ...(flags['milestone-id'] !== undefined ? { milestoneId: flags['milestone-id'] } : {}), ...(flags['allowed-files'] !== undefined ? { allowedFiles: parseJson(String(flags['allowed-files'])) } : {}) };
       if (flags['expected-version'] === undefined) throw new ConcordError('--expected-version is required', 'usage');
       return print(await send('PATCH', `${path}/${number}`, payload));
     }

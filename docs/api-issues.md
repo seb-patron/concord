@@ -15,6 +15,8 @@ Issues are repository scoped task specs. All routes below begin with `/v1/repos/
 
 Owners and agents scoped to the repository may create issues. The creating author or an owner may edit, close, and reopen. Reviewers and viewers can read. A `change create` request may include `issueNumber`; the issue must be open. Change, lease, and queue views expose that number. Lease conflicts also include the holder issue title. An issue's `changes` field lists linked changes and their current status.
 
+The repository snapshot includes `leases.heldItems`, the complete set of live active and reserved leases, with issue links. The paged `leases.items` field and lease list route retain their existing cursor behavior.
+
 When promotion lands a linked change, Concord closes its issue with `closedBy: { changeId, canonicalOid }`. Closing or superseding a change does not close the issue. Issue changes emit `issue.created`, `issue.updated`, `issue.closed`, or `issue.reopened` events through the repository event log.
 
 ## Milestones

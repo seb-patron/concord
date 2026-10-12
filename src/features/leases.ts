@@ -445,7 +445,7 @@ export const leases: FeatureModule = {
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
   ],
-  snapshot: context => projection(context),
+  snapshot: context => ({ ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row)) }),
   nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,
   onAlarm: context => context.transaction(() => expireDue(context, context.now())),
   hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation },

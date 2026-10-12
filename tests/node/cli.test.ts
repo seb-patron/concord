@@ -69,11 +69,11 @@ describe('Concord agent CLI client', () => {
     try {
       await cli('issue', 'create', '--repo', 'r', '--title', 'Task', '--body', 'Spec');
       await cli('issue', 'list', '--repo', 'r', '--state', 'open');
-      await cli('issue', 'edit', '--repo', 'r', '--id', '1', '--title', 'Revised', '--expected-version', '2');
+      await cli('issue', 'edit', '--repo', 'r', '--id', '1', '--title', 'Revised', '--allowed-files', '["a.ts"]', '--expected-version', '2');
       await cli('milestone', 'create', '--repo', 'r', '--title', 'Release');
       await cli('change', 'create', '--repo', 'r', '--intent-key', 'task', '--intent-text', 'Task', '--base-oid', 'null', '--branch', 'task', '--unit-keys', '[]', '--issue', '1');
       expect(calls.map(call => `${call.method} ${call.path}`)).toEqual(['POST /v1/repos/r/issues', 'GET /v1/repos/r/issues?state=open', 'PATCH /v1/repos/r/issues/1', 'POST /v1/repos/r/milestones', 'POST /v1/repos/r/changes']);
-      expect(calls[2].body).toMatchObject({ title: 'Revised', expectedVersion: 2 });
+      expect(calls[2].body).toEqual({ title: 'Revised', allowedFiles: ['a.ts'], expectedVersion: 2 });
       expect(calls[4].body.issueNumber).toBe(1);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });

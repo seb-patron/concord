@@ -42,7 +42,7 @@ export function openIssueRows(snapshot) {
   const p = snapshot?.data?.projections ?? {};
   const issues = Array.isArray(p.issues?.items) ? p.issues.items : [];
   const milestones = Array.isArray(p.issues?.milestones) ? p.issues.milestones : [];
-  const leases = Array.isArray(p.leases?.items) ? p.leases.items : [];
+  const leases = Array.isArray(p.leases?.heldItems) ? p.leases.heldItems : Array.isArray(p.leases?.items) ? p.leases.items : [];
   return issues.filter(issue => issue?.state === 'open').map(issue => ({
     number: issue.number, title: issue.title,
     milestone: milestones.find(item => item.milestoneId === issue.milestoneId)?.title ?? null,
