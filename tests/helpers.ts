@@ -12,3 +12,10 @@ export function mutation(path: string, body: Record<string, unknown>, key: strin
 export async function responseBody(response: Response): Promise<{ data: any; error: any; version: number; eventSeq: number }> {
   return await response.json() as { data: any; error: any; version: number; eventSeq: number };
 }
+
+export function withoutNodeDeprecationWarnings(output: string): string {
+  return output.split(/\r?\n/).filter(line =>
+    !/^\(node:\d+\) \[DEP\d+\] DeprecationWarning:/.test(line) &&
+    !/^\(Use node --trace-deprecation/.test(line))
+    .join('\n');
+}

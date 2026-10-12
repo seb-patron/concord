@@ -8,6 +8,7 @@ import { approvedHead, filesChanged, land, parseAllowed, unitKeys, waitChange } 
 import { ConcordError } from '../../cli/client.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
+import { withoutNodeDeprecationWarnings } from '../helpers.ts';
 
 const execFile = promisify(callback);
 const dirs: string[] = [];
@@ -703,11 +704,14 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const attempts = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
     ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args, '--review-evidence', item.review],
     { cwd: root, env: item.env, timeout: 155_000 })
-    .then(result => ({ result }), error => ({ error: error as Error & { stderr?: string } })))));
+    .then(result => ({ result }), error => ({ error: error as Error & { stdout?: string; stderr?: string } })))));
   const merged = [];
   for (const [index, attempt] of attempts.entries()) {
     if ('result' in attempt) { merged.push(attempt.result); continue; }
-    expect(attempt.error.stderr).toContain('QUEUE_BLOCKED: STALE_MAIN');
+    // execFile settles only after the child exits (or its 155s timeout); inspect both streams
+    // because the CLI diagnostic and Node warnings may be written to different streams.
+    const output = withoutNodeDeprecationWarnings([attempt.error.stdout, attempt.error.stderr].filter(Boolean).join('\n'));
+    expect(output, attempt.error.message).toContain('QUEUE_BLOCKED: STALE_MAIN');
     const item = parallel[index];
     const retryArgs = [...item.args]; retryArgs[retryArgs.indexOf('--intent-key') + 1] += '-retry';
     merged.push(await drive(execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land',
