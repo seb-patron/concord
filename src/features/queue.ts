@@ -534,7 +534,8 @@ function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate
   }
   return context.transaction(() => {
     const state = read(context);
-    if (state.observedMain !== null || state.finalCanonicalOid !== null || state.ticket
+    const failedBootstrapTicket = state.ticket?.bootstrap && state.ticket.state === 'failed' && input.repin;
+    if (state.observedMain !== null || state.finalCanonicalOid !== null || state.ticket && !failedBootstrapTicket
       || state.entries.some(active)) return blocked(context, 'BOOTSTRAP_CONFLICT', 'Canonical repository is already initialized or initialization is pending');
     if (state.bootstrap) {
       const old = state.bootstrap;
@@ -547,8 +548,12 @@ function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate
         || old.input.profileId !== input.profileId || old.state === 'merged'
         || old.policyDigest === policy.digest && old.profileDigest === profile.digest && old.blockedReason !== 'INVALID_JOB')
         return blocked(context, 'BOOTSTRAP_CONFLICT', 'Bootstrap cannot be replaced');
-      const cancelled = context.call('runners.cancelBootstrap', old.jobId);
-      if (cancelled.status === 'blocked') return cancelled;
+      if (failedBootstrapTicket) {
+        for (const jobId of state.ticket!.jobIds) requireGate(context.call('runners.cancelBootstrap', jobId));
+        for (const record of state.jobs) if (state.ticket!.jobIds.includes(record.job.jobId)) record.consumed = true;
+        state.ticket = null;
+      }
+      requireGate(context.call('runners.cancelBootstrap', old.jobId));
       for (const record of state.jobs) if (record.job.jobId === old.jobId) record.consumed = true;
       const previous = { policyDigest: old.policyDigest, profileDigest: old.profileDigest };
       const stackId = crypto.randomUUID();

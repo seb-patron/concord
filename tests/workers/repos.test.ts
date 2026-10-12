@@ -459,6 +459,88 @@ describe('repository and change lifecycle', () => {
     expect((await responseBody(refused)).error.code).toBe('ALREADY_INITIALIZED');
   });
 
+  it('re-pins the same seed after a failed bootstrap promotion and a profile change', async () => {
+    const name = 'bootstrap_failed_promotion_repin';
+    const { repo, body, requested, coordinator } = await bootstrapSeed(name);
+    const originalInfo = FakeStorage.prototype.info;
+    const remote = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, storageName) {
+      const info = await originalInfo.call(this, storageName);
+      return info ? { ...info, remote: `file:///${storageName}` } : null;
+    });
+    try { await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm()); }
+    finally { remote.mockRestore(); }
+    const scheduled = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    const checkJob = scheduled.runners.jobs.find((job: { jobId: string }) => job.jobId === requested.jobId);
+    const checker = await fetchApi(mutation(`/v1/repos/${name}/runner/poll`, {
+      runnerId: 'failed-bootstrap-checker', role: 'checker', supportedProfileDigests: [checkJob.profileDigest],
+    }, `${name}-checker`, 'local-checker'));
+    expect(checker.status).toBe(200);
+    const claimedCheck = (await responseBody(checker)).data.job;
+    await fake(name, provider => {
+      provider.putCommit(claimedCheck.scratchStorageName, { oid: a, treeOid: b, parents: [] });
+      provider.conditionalUpdateRef(claimedCheck.scratchStorageName, claimedCheck.scratchRef, null, a);
+    });
+    const checked = { kind: 'validate-stack', jobId: claimedCheck.jobId, attempt: claimedCheck.attempt, fence: claimedCheck.fence,
+      inputDigest: claimedCheck.inputDigest, sourceTreeOid: b, checkerDigest: claimedCheck.checkerDigest,
+      toolchainDigest: claimedCheck.toolchainDigest, oracleDigest: claimedCheck.oracleDigest,
+      environmentDigest: claimedCheck.environmentDigest, durationMs: 1, log: '', outcome: 'PASS',
+      composedOid: a, composedTreeOid: b,
+      gateResults: claimedCheck.unitPolicy.acceptance.gates.map((gate: { id: string; requiredOutcome: string }) => ({
+        gateId: gate.id, outcome: gate.requiredOutcome,
+      })), score: null, bootstrap: true, canonicalBaseOid: null };
+    const checkedDigest = await canonicalDigest(checked);
+    expect((await fetchApi(mutation(`/v1/repos/${name}/jobs/${claimedCheck.jobId}/result`, {
+      attempt: claimedCheck.attempt, fence: claimedCheck.fence, inputDigest: claimedCheck.inputDigest,
+      resultDigest: checkedDigest, result: { ...checked, resultDigest: checkedDigest },
+    }, `${name}-check-result`, 'local-checker'))).status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const ticketed = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(ticketed.queue.promotion).toMatchObject({ state: 'pending', bootstrap: true, expectedOldOid: null });
+    const promotion = ticketed.runners.jobs.find((job: { kind: string }) => job.kind === 'promote');
+    const promoter = await fetchApi(mutation(`/v1/repos/${name}/runner/poll`, {
+      runnerId: 'failed-bootstrap-promoter', role: 'promoter', supportedProfileDigests: [promotion.profileDigest],
+    }, `${name}-promoter`, 'local-promoter'));
+    expect(promoter.status).toBe(200);
+    const claimedPromotion = (await responseBody(promoter)).data.job;
+    const oldRef = { kind: 'promote', jobId: claimedPromotion.jobId, attempt: claimedPromotion.attempt, fence: claimedPromotion.fence,
+      inputDigest: claimedPromotion.inputDigest, sourceTreeOid: null, checkerDigest: claimedPromotion.checkerDigest,
+      toolchainDigest: claimedPromotion.toolchainDigest, oracleDigest: claimedPromotion.oracleDigest,
+      environmentDigest: claimedPromotion.environmentDigest, durationMs: 1, log: '', outcome: 'OLD_REF', observedCanonicalOid: null };
+    const oldRefDigest = await canonicalDigest(oldRef);
+    expect((await fetchApi(mutation(`/v1/repos/${name}/jobs/${claimedPromotion.jobId}/result`, {
+      attempt: claimedPromotion.attempt, fence: claimedPromotion.fence, inputDigest: claimedPromotion.inputDigest,
+      resultDigest: oldRefDigest, result: { ...oldRef, resultDigest: oldRefDigest },
+    }, `${name}-promotion-result`, 'local-promoter'))).status).toBe(200);
+    await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm());
+    const failed = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(failed.queue.promotion).toMatchObject({ state: 'failed', bootstrap: true, reconciliation: 'CONFIRMED_OLD_REF' });
+    expect(failed.queue.bootstrap).toMatchObject({ state: 'waiting', jobId: requested.jobId });
+    const mainRef = await runInDurableObject(coordinator, (_instance, state) =>
+      new FakeStorage(sqlState(state.storage.sql)).resolveRef(repo.canonicalStorageName, 'refs/heads/main'));
+    expect(mainRef).toBeNull();
+    const config = localFixtureConfig('local');
+    config.profiles['local-demo'].digest = `sha256:${'b'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const detail = await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)));
+    const repinned = await fetchApi(mutation(`/v1/repos/${name}/bootstrap`, { ...body, expectedVersion: detail.version }, `${name}-repin`));
+    expect(repinned.status).toBe(202);
+    const replacementId = (await responseBody(repinned)).data.jobId;
+    expect(replacementId).not.toBe(requested.jobId);
+    const after = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(after.queue.promotion).toBeNull();
+    expect(after.queue.bootstrap).toMatchObject({ state: 'waiting', jobId: replacementId, profileDigest: config.profiles['local-demo'].digest });
+    expect(after.runners.jobs.find((job: { jobId: string }) => job.jobId === claimedPromotion.jobId)).toMatchObject({ state: 'blocked' });
+    const replacementInfo = FakeStorage.prototype.info;
+    const replacementRemote = vi.spyOn(FakeStorage.prototype, 'info').mockImplementation(async function (this: FakeStorage, storageName) {
+      const info = await replacementInfo.call(this, storageName);
+      return info ? { ...info, remote: `file:///${storageName}` } : null;
+    });
+    try { await runInDurableObject<RepoCoordinator, void>(coordinator, instance => instance.alarm()); }
+    finally { replacementRemote.mockRestore(); }
+    const rescheduled = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}/snapshot`)))).data.projections;
+    expect(rescheduled.runners.jobs.find((job: { jobId: string }) => job.jobId === replacementId)).toMatchObject({ kind: 'validate-stack', state: 'pending' });
+  });
+
   it('recovers INVALID_JOB and fences a scheduled stale bootstrap job', async () => {
     const name = 'bootstrap_invalid_repin_case';
     const invalid = localFixtureConfig('local');

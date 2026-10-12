@@ -208,7 +208,7 @@ function cancelBootstrap(c: ModuleContext, jobId: string): Gate {
   return c.transaction(() => {
     const row = load(c, jobId);
     if (!row) return { status: 'eligible', version: c.version(), evidenceIds: [jobId], value: undefined };
-    if (row.job.kind !== 'validate-stack' || !row.job.bootstrap)
+    if ((row.job.kind !== 'validate-stack' && row.job.kind !== 'promote') || !row.job.bootstrap)
       return { status: 'blocked', version: c.version(), code: 'BOOTSTRAP_BUSY', reason: 'Bootstrap job cannot be replaced', evidenceIds: [jobId] };
     if (row.job.state === 'claimed' && row.job.expiresAt !== null && row.job.expiresAt > c.now())
       return { status: 'blocked', version: c.version(), code: 'BOOTSTRAP_BUSY', reason: 'Bootstrap job has a live runner claim', evidenceIds: [jobId] };
