@@ -17,6 +17,25 @@ const save = (c: ModuleContext, row: Stored) => c.state.put('job:' + row.job.job
 const runner = (c: ModuleContext, id: string) => c.state.get<RunnerState>('runner:' + id);
 const saveRunner = (c: ModuleContext, id: string, value: RunnerState) => c.state.put('runner:' + id, value);
 const conflict = (code: string): never => { throw new HttpError(409, code, code); };
+const visibilityRetryDelays = [200, 500, 1000];
+async function rereadUntil<T>(read: () => Promise<T>, matches: (value: T) => boolean): Promise<T> {
+  let value = await read();
+  for (const delay of visibilityRetryDelays) {
+    if (matches(value)) break;
+    await new Promise(resolve => setTimeout(resolve, delay));
+    value = await read();
+  }
+  return value;
+}
+const visibleCommit = (storage: RepoStorage, name: string, oid: string) =>
+  rereadUntil(() => storage.readCommit(name, oid), commit => commit !== null);
+const visibleRef = (storage: RepoStorage, name: string, ref: string, oid: string | null) =>
+  rereadUntil(() => storage.resolveRef(name, ref), actual => actual === oid);
+function identityConflict(job: Job, reason: string, observed: 'null' | 'different-oid' | 'different-value'): never {
+  console.error('RESULT_IDENTITY', reason, job.jobId, job.attempt, observed);
+  return conflict('RESULT_IDENTITY');
+}
+const oidVisibility = (actual: string | null) => actual === null ? 'null' : 'different-oid';
 const renewClaim = (): never => { throw new HttpError(409, 'STALE_JOB', 'Renew the job claim before requesting credentials'); };
 const validId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const validDigest = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
@@ -59,19 +78,20 @@ function inputHash(value: string): string {
   }
   return 'sha256:' + state.map(word => word.toString(16).padStart(8, '0')).join('');
 }
-async function ancestor(storage: RepoStorage, name: string, oldOid: string, newOid: string): Promise<boolean> {
+async function ancestor(storage: RepoStorage, name: string, oldOid: string, newOid: string): Promise<'found' | 'null' | 'different-oid'> {
   const pending = [newOid];
   const seen = new Set<string>();
+  let missing = false;
   while (pending.length) {
     const oid = pending.pop()!;
-    if (oid === oldOid) return true;
+    if (oid === oldOid) return 'found';
     if (seen.has(oid)) continue;
     seen.add(oid);
-    const commit = await storage.readCommit(name, oid);
-    if (!commit) continue;
+    const commit = oid === newOid ? await visibleCommit(storage, name, oid) : await storage.readCommit(name, oid);
+    if (!commit) { missing = true; continue; }
     pending.push(...commit.parents);
   }
-  return false;
+  return missing ? 'null' : 'different-oid';
 }
 function immutableJob(job: Job): string {
   const { state: _state, attempt: _attempt, fence: _fence, runnerId: _runnerId, expiresAt: _expiresAt, version: _version, ...input } = job;
@@ -328,47 +348,67 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
       job.unitPolicy.acceptance.kind === 'score' && job.kind === 'validate-stack' && job.contest !== true && value.score !== null) conflict('RESULT_EVIDENCE');
   }
   if (value.kind === 'inspect-candidate' && value.outcome === 'PASS') {
-    if (job.kind !== 'inspect-candidate') throw new HttpError(409, 'RESULT_IDENTITY', 'Kind mismatch');
+    if (job.kind !== 'inspect-candidate') identityConflict(job, 'candidate-kind', 'different-value');
     const candidate = job.candidate;
     const name = 'seedStorageName' in candidate ? candidate.seedStorageName : candidate.storageName;
-    if (value.observedHeadOid !== candidate.headOid ||
-      (await c.storage.readCommit(name, candidate.headOid))?.treeOid !== value.sourceTreeOid) conflict('RESULT_IDENTITY');
-    if (candidate.baseOid && !await ancestor(c.storage, name, candidate.baseOid, candidate.headOid)) conflict('RESULT_IDENTITY');
+    if (value.observedHeadOid !== candidate.headOid) identityConflict(job, 'candidate-head', oidVisibility(value.observedHeadOid));
+    const head = await visibleCommit(c.storage, name, candidate.headOid);
+    if (head?.treeOid !== value.sourceTreeOid) identityConflict(job, 'candidate-tree', head ? 'different-oid' : 'null');
+    if (candidate.baseOid) {
+      const ancestry = await ancestor(c.storage, name, candidate.baseOid, candidate.headOid);
+      if (ancestry !== 'found') identityConflict(job, 'candidate-ancestry', ancestry);
+    }
   }
   if (value.kind === 'validate-stack' && job.kind === 'validate-stack' && !job.bootstrap && job.baseCheck &&
     (value.composedOid !== null || !['ENV_ERROR', 'MERGE_CONFLICT', 'TIMEOUT'].includes(value.outcome))) {
     const canonicalName = Object.keys(job.expectedRefs).find(name => name !== job.scratchStorageName);
-    if (value.composedOid !== job.canonicalBaseOid || value.composedTreeOid !== value.sourceTreeOid ||
-      !canonicalName || (await c.storage.readCommit(canonicalName, job.canonicalBaseOid))?.treeOid !== value.composedTreeOid)
-      conflict('RESULT_IDENTITY');
+    if (value.composedOid !== job.canonicalBaseOid || value.composedTreeOid !== value.sourceTreeOid || !canonicalName)
+      identityConflict(job, 'stack-base', 'different-value');
+    const base = await visibleCommit(c.storage, canonicalName, job.canonicalBaseOid);
+    if (base?.treeOid !== value.composedTreeOid) identityConflict(job, 'stack-base-tree', base ? 'different-oid' : 'null');
   }
   if (value.kind === 'validate-stack' && value.outcome === 'PASS') {
-    if (job.kind !== 'validate-stack' || !value.composedOid) throw new HttpError(409, 'RESULT_IDENTITY', 'Stack missing');
+    if (job.kind !== 'validate-stack' || !value.composedOid)
+      identityConflict(job, 'stack-kind', value.composedOid ? 'different-value' : 'null');
     const stack = job;
     const composedOid = value.composedOid;
     if (value.bootstrap !== stack.bootstrap || value.canonicalBaseOid !== stack.canonicalBaseOid ||
-      value.composedTreeOid !== value.sourceTreeOid ||
-      (await c.storage.readCommit(stack.scratchStorageName, composedOid))?.treeOid !== value.composedTreeOid ||
-      await c.storage.resolveRef(stack.scratchStorageName, stack.scratchRef) !== composedOid) conflict('RESULT_IDENTITY');
+      value.composedTreeOid !== value.sourceTreeOid) identityConflict(job, 'stack-evidence', 'different-value');
+    const composed = await visibleCommit(c.storage, stack.scratchStorageName, composedOid);
+    if (composed?.treeOid !== value.composedTreeOid) identityConflict(job, 'stack-tree', composed ? 'different-oid' : 'null');
+    const scratchRef = await visibleRef(c.storage, stack.scratchStorageName, stack.scratchRef, composedOid);
+    if (scratchRef !== composedOid) identityConflict(job, 'stack-scratch-ref', oidVisibility(scratchRef));
     if (stack.bootstrap) {
-      if (composedOid !== stack.candidates[0].headOid) conflict('RESULT_IDENTITY');
+      if (composedOid !== stack.candidates[0].headOid) identityConflict(job, 'stack-bootstrap-head', 'different-oid');
     } else if (!stack.baseCheck) {
-      if (!await ancestor(c.storage, stack.scratchStorageName, stack.canonicalBaseOid, composedOid) ||
-        (await Promise.all(stack.candidates.map(candidate => ancestor(c.storage, stack.scratchStorageName, candidate.headOid, composedOid)))).some(found => !found)) conflict('RESULT_IDENTITY');
+      const baseAncestry = await ancestor(c.storage, stack.scratchStorageName, stack.canonicalBaseOid, composedOid);
+      if (baseAncestry !== 'found') identityConflict(job, 'stack-ancestry', baseAncestry);
+      const candidateAncestry = await Promise.all(stack.candidates.map(candidate =>
+        ancestor(c.storage, stack.scratchStorageName, candidate.headOid, composedOid)));
+      const mismatch = candidateAncestry.find(found => found !== 'found');
+      if (mismatch) identityConflict(job, 'stack-ancestry', mismatch);
     }
   }
   if (value.kind === 'promote' && value.outcome === 'APPLIED') {
-    if (job.kind !== 'promote') throw new HttpError(409, 'RESULT_IDENTITY', 'Promotion missing');
+    if (job.kind !== 'promote') identityConflict(job, 'promote-kind', 'different-value');
     const promotion = job;
     const canonicalName = Object.keys(promotion.expectedRefs).find(name => name !== promotion.scratchStorageName);
-    if (!canonicalName || value.observedCanonicalOid !== promotion.checkedNewOid ||
-      await c.storage.resolveRef(canonicalName, 'refs/heads/main') !== promotion.checkedNewOid) conflict('RESULT_IDENTITY');
-    if (promotion.expectedOldOid && !await ancestor(c.storage, promotion.scratchStorageName, promotion.expectedOldOid, promotion.checkedNewOid)) conflict('RESULT_IDENTITY');
+    if (!canonicalName) identityConflict(job, 'promote-canonical-name', 'different-value');
+    if (value.observedCanonicalOid !== promotion.checkedNewOid)
+      identityConflict(job, 'promote-evidence', oidVisibility(value.observedCanonicalOid));
+    const canonicalRef = await visibleRef(c.storage, canonicalName, 'refs/heads/main', promotion.checkedNewOid);
+    if (canonicalRef !== promotion.checkedNewOid) identityConflict(job, 'promote-canonical-ref', oidVisibility(canonicalRef));
+    if (promotion.expectedOldOid) {
+      const ancestry = await ancestor(c.storage, promotion.scratchStorageName, promotion.expectedOldOid, promotion.checkedNewOid);
+      if (ancestry !== 'found') identityConflict(job, 'promote-ancestry', ancestry);
+    }
   }
   if (value.kind === 'promote') {
     const promotion = job.kind === 'promote' ? job : null;
     const canonicalName = promotion && Object.keys(promotion.expectedRefs).find(name => name !== promotion.scratchStorageName);
-    if (!canonicalName || await c.storage.resolveRef(canonicalName, 'refs/heads/main') !== value.observedCanonicalOid) conflict('RESULT_IDENTITY');
+    if (!canonicalName) identityConflict(job, 'promote-canonical-name', 'different-value');
+    const canonicalRef = await visibleRef(c.storage, canonicalName, 'refs/heads/main', value.observedCanonicalOid);
+    if (canonicalRef !== value.observedCanonicalOid) identityConflict(job, 'promote-observed-ref', oidVisibility(canonicalRef));
   }
   return c.transaction(() => {
     current(c, id, body);

@@ -71,6 +71,8 @@ The checker fetches exact input OIDs into a disposable Git directory. It inspect
 
 At scheduling, `inputDigest` must equal the SHA-256 of canonical sorted JSON of the job with `inputDigest`, `state`, `attempt`, `fence`, `runnerId`, `expiresAt`, and `version` omitted. This binds results to the immutable job input across claims. A null-base inspection is accepted only for an owner-scheduled `SeedInput` whose seed fork's expected ref is pinned to its head OID.
 
+When checking a result's identity, the Worker briefly re-reads missing just-pushed commits and mismatching scratch or canonical refs (up to three reads over 1.7 seconds) to allow Artifacts ref visibility to catch up; a remaining mismatch returns 409 `RESULT_IDENTITY`.
+
 The promoter fetches the checked scratch commit, confirms the scratch ref and ancestry, then uses Git `--force-with-lease` with an explicit expected old main OID. The bootstrap ticket is the sole exception: its expected old value is absent main. A lost push response is reconciled by reading main; an unrelated new value is reported as `OLD_REF` or `THIRD_REF`. No checker runs in promoter mode, and checker mode cannot request canonical write credentials.
 
 Git runs with ambient global/system config and hooks disabled. The supervisor holds short-lived Git credentials; checker subprocesses receive a filtered environment with no Concord token. Published logs are capped at 16 KB and known credentials are redacted. A timeout kills the process group and the temporary work directory is removed when execution ends.

@@ -68,6 +68,17 @@ async function acceptedResult(job: Job): Promise<{ result: JobResult; resultDige
   return { result: { ...unsigned, resultDigest }, resultDigest, attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest };
 }
 
+async function promotionResult(job: Job) {
+  if (job.kind !== 'promote') throw new Error('bad fixture');
+  const unsigned = { jobId: job.jobId, attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest,
+    kind: 'promote' as const, outcome: 'APPLIED' as const, observedCanonicalOid: job.checkedNewOid, sourceTreeOid: tree,
+    checkerDigest: job.checkerDigest, toolchainDigest: job.toolchainDigest, oracleDigest: job.oracleDigest,
+    environmentDigest: job.environmentDigest, durationMs: 1, log: '' };
+  const resultDigest = await digest(unsigned);
+  return { attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest, resultDigest,
+    result: { ...unsigned, resultDigest } };
+}
+
 describe('durable runner protocol', () => {
   it('checks the canonical immutable input digest before scheduling', async () => {
     const f = await fixture();
@@ -130,6 +141,85 @@ describe('durable runner protocol', () => {
     const resultDigest = await digest(unsigned);
     expect((await f.route('jobs/job1/result', { attempt: current.attempt, fence: current.fence,
       inputDigest: current.inputDigest, resultDigest, result: { ...unsigned, resultDigest } })).status).toBe(200);
+    expect(f.calls).toEqual(['queue.onResult']);
+  });
+
+  it('accepts APPLIED after a just-pushed canonical ref becomes visible', async () => {
+    const f = await fixture();
+    f.principal.roles = ['promoter'];
+    const oldOid = 'c'.repeat(40);
+    const reads: Array<string | null> = [oldOid, oid, oid];
+    f.context.storage.resolveRef = async () => reads.shift() ?? oid;
+    f.context.storage.readCommit = async () => ({ oid, treeOid: tree, parents: [oldOid] });
+    const job = await seal({ ...f.job, kind: 'promote', promotionId: 'promotion1', bootstrap: false,
+      expectedOldOid: oldOid, checkedNewOid: oid, scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+      expectedRefs: { canonical: oldOid, scratch: oid }, storageRemotes: { canonical: 'file:///canonical', scratch: 'file:///scratch' } } as Job);
+    expect(runners.hooks['runners.schedule']!(f.context, job).status).toBe('eligible');
+    const claimed = await f.route('runner/poll', { runnerId: 'one', role: 'promoter', supportedProfileDigests: [pin] });
+    const current = (await claimed.json() as { data: { job: Job } }).data.job;
+    expect((await f.route('jobs/job1/result', await promotionResult(current))).status).toBe(200);
+    expect(reads).toEqual([]);
+    expect(f.calls).toEqual(['queue.onResult']);
+  });
+
+  it('rejects APPLIED after four wrong canonical ref reads and logs one safe identity line', async () => {
+    const f = await fixture();
+    f.principal.roles = ['promoter'];
+    const wrongOid = 'c'.repeat(40);
+    const resolveRef = vi.fn(async () => wrongOid);
+    f.context.storage.resolveRef = resolveRef;
+    f.context.storage.readCommit = async () => ({ oid, treeOid: tree, parents: [wrongOid] });
+    const job = await seal({ ...f.job, kind: 'promote', promotionId: 'promotion1', bootstrap: false,
+      expectedOldOid: wrongOid, checkedNewOid: oid, scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+      expectedRefs: { canonical: wrongOid, scratch: oid }, storageRemotes: { canonical: 'file:///canonical', scratch: 'file:///scratch' } } as Job);
+    expect(runners.hooks['runners.schedule']!(f.context, job).status).toBe('eligible');
+    const claimed = await f.route('runner/poll', { runnerId: 'one', role: 'promoter', supportedProfileDigests: [pin] });
+    const current = (await claimed.json() as { data: { job: Job } }).data.job;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await f.route('jobs/job1/result', await promotionResult(current));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: 'RESULT_IDENTITY' } });
+      expect(resolveRef).toHaveBeenCalledTimes(4);
+      expect(errorLog).toHaveBeenCalledExactlyOnceWith('RESULT_IDENTITY', 'promote-canonical-ref', 'job1', 1, 'different-oid');
+      expect(f.calls).toEqual([]);
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it('accepts a candidate whose just-pushed commit is initially absent', async () => {
+    const f = await fixture();
+    const readCommit = vi.fn().mockResolvedValueOnce(null).mockResolvedValue({ oid, treeOid: tree, parents: [] });
+    f.context.storage.readCommit = readCommit;
+    expect(runners.hooks['runners.schedule']!(f.context, f.job).status).toBe('eligible');
+    const claimed = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const current = (await claimed.json() as { data: { job: Job } }).data.job;
+    expect((await f.route('jobs/job1/result', await acceptedResult(current))).status).toBe(200);
+    expect(readCommit).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts a stack result after its scratch ref becomes visible', async () => {
+    const f = await fixture();
+    const resolveRef = vi.fn().mockResolvedValueOnce(null).mockResolvedValue(oid);
+    f.context.storage.resolveRef = resolveRef;
+    const stack = await seal({ ...f.job, kind: 'validate-stack', stackId: 'stack1', canonicalBaseOid: oid,
+      candidates: [], baseCheck: true, bootstrap: false, scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+      expectedRefs: { canonical: oid, scratch: null },
+      storageRemotes: { canonical: 'file:///canonical', scratch: 'file:///scratch' } } as Job);
+    expect(runners.hooks['runners.schedule']!(f.context, stack).status).toBe('eligible');
+    const claimed = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    const current = (await claimed.json() as { data: { job: Job } }).data.job;
+    if (current.kind !== 'validate-stack') throw new Error('bad fixture');
+    const unsigned = { jobId: current.jobId, attempt: current.attempt, fence: current.fence, inputDigest: current.inputDigest,
+      kind: 'validate-stack' as const, outcome: 'PASS' as const, composedOid: oid, composedTreeOid: tree,
+      bootstrap: false as const, canonicalBaseOid: oid, sourceTreeOid: tree,
+      gateResults: [{ gateId: 'default', outcome: 'PASS' as const }], score: null,
+      checkerDigest: current.checkerDigest, toolchainDigest: current.toolchainDigest, oracleDigest: current.oracleDigest,
+      environmentDigest: current.environmentDigest, durationMs: 1, log: '' };
+    const resultDigest = await digest(unsigned);
+    const response = await f.route('jobs/job1/result', { attempt: current.attempt, fence: current.fence,
+      inputDigest: current.inputDigest, resultDigest, result: { ...unsigned, resultDigest } });
+    expect(response.status).toBe(200);
+    expect(resolveRef).toHaveBeenCalledTimes(2);
     expect(f.calls).toEqual(['queue.onResult']);
   });
 
