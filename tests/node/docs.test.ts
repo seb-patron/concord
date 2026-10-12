@@ -542,3 +542,53 @@ describe('documented demo commands', () => {
     shell.assertComplete();
   }, liveBudget.timeout);
 });
+
+describe('glossary', () => {
+  function slugify(heading: string): string {
+    return heading.trim().toLowerCase().replace(/[^a-z0-9 _-]/g, '').replace(/ /g, '-');
+  }
+
+  async function headingSlugs(file: string): Promise<Set<string>> {
+    const text = await readFile(join(cwd, file), 'utf8');
+    const slugs = new Set<string>();
+    for (const line of text.split('\n')) {
+      const match = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (match) slugs.add(slugify(match[2].replace(/\[(.*?)\]\(.*?\)/g, '$1')));
+    }
+    return slugs;
+  }
+
+  it('resolves every glossary link and covers the required terms', async () => {
+    const document = await readFile(join(cwd, 'docs/GLOSSARY.md'), 'utf8');
+    for (const term of ['canonical main', 'intent key', 'patch-id', 'backup mirror',
+      'delegated principal', 'protected path', '(in progress)', '## Branches']) {
+      expect(document, `glossary covers ${term}`).toContain(term);
+    }
+    const slugsByFile = new Map<string, Set<string>>();
+    async function slugsFor(file: string): Promise<Set<string>> {
+      let slugs = slugsByFile.get(file);
+      if (!slugs) {
+        slugs = await headingSlugs(file);
+        slugsByFile.set(file, slugs);
+      }
+      return slugs;
+    }
+    const targets = [...document.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)].map(match => match[1]);
+    expect(targets.length).toBeGreaterThan(10);
+    for (const target of targets) {
+      if (/^(https?|mailto):/.test(target)) continue;
+      const hash = target.indexOf('#');
+      const path = hash < 0 ? target : target.slice(0, hash);
+      const anchor = hash < 0 ? null : target.slice(hash + 1);
+      const file = path ? join('docs', path) : 'docs/GLOSSARY.md';
+      await expect(access(join(cwd, file)).then(() => true),
+        `${target} resolves to ${file}`).resolves.toBe(true);
+      if (anchor) {
+        expect(await slugsFor(file), `${target} anchors to a heading in ${file}`).toContain(anchor);
+      }
+    }
+    for (const file of ['README.md', 'docs/ARCHITECTURE.md']) {
+      expect(await readFile(join(cwd, file), 'utf8'), `${file} links the glossary`).toContain('GLOSSARY.md');
+    }
+  });
+});
