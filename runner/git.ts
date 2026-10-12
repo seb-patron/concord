@@ -151,10 +151,25 @@ export async function initWorktree(directory: string): Promise<void> {
 }
 
 /** The runner never resolves a moving branch name for an input. */
-export async function fetchOid(directory: string, remote: string, oid: string, env?: NodeJS.ProcessEnv): Promise<void> {
+export async function fetchOid(directory: string, remote: string, oid: string, env?: NodeJS.ProcessEnv,
+  retry: { runGit?: typeof git; sleep?: (ms: number) => Promise<void>; random?: () => number } = {}): Promise<void> {
   if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(oid)) throw new Error('INVALID_OID');
-  await git(directory, ['fetch', '--no-tags', remote, oid], 60_000, env);
-  const readback = await git(directory, ['rev-parse', 'FETCH_HEAD^{commit}']);
+  const runGit = retry.runGit ?? git;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await runGit(directory, ['fetch', '--no-tags', remote, oid], 60_000, env);
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (attempt === 2 || /(?:401|403|authentication failed|access denied|not authorized|could not read username)/i.test(message) ||
+        !/(?:Could not resolve host|Connection reset|early EOF|RPC failed|the remote end hung up unexpectedly|Operation timed out|HTTP 5\d\d|returned error: 50[234])/i.test(message)) throw error;
+      const delay = (attempt === 0 ? 250 : 1000) * (0.5 + (retry.random ?? Math.random)());
+      const deadline = jobDeadline.getStore();
+      if (deadline !== undefined && Date.now() + delay >= deadline) throw new Error('JOB_TIMEOUT');
+      await (retry.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms))))(delay);
+    }
+  }
+  const readback = await runGit(directory, ['rev-parse', 'FETCH_HEAD^{commit}']);
   if (readback !== oid) throw new Error('FETCH_OID_MISMATCH');
 }
 

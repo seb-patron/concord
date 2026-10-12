@@ -2,6 +2,8 @@
 
 The runner is an outbound client for one repository. Run separate processes and credentials for checker and promoter roles. It handles one claimed job at a time. The coordinator issues a 90-second claim for Artifacts and bridge (whose Git token provider minimum is 60 seconds), or a 60-second claim for fake storage; the client renews it every 20 seconds. A crash leaves the job recoverable: the coordinator expires the claim, increases its attempt and fence, and stops after three attempts. Results from an expired fence return 409; retry a lost result response with the identical body and idempotency key.
 
+Poll, heartbeat, credentials, and result POSTs retry transient network errors and HTTP 429/502/503/504 up to three total attempts with the same idempotency key and body. Git input fetches also retry transient transport failures up to three attempts within the job deadline; conditional pushes do not retry.
+
 The command checker executes code from the composed repository. Run checker workers only on a trusted, isolated machine or container with no valuable host files or credentials accessible to that code. The environment allowlist and credential filtering reduce accidental exposure; they are not an OS sandbox and do not make an untrusted checkout safe on an ordinary workstation.
 
 ## Configuration

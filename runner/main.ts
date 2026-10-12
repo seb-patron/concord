@@ -34,21 +34,62 @@ export function parseArgs(args: string[]): Options {
     once, maxJobs, idleTimeoutSeconds, runnerId };
 }
 
-export type Transport = (path: string, body: unknown, key: string) => Promise<{ status: number; data?: any; error?: { code: string } }>;
+export type Transport = (path: string, body: unknown, key: string) => Promise<{ status: number; data?: any; error?: { code: string }; retryAfterMs?: number }>;
 
-export function apiTransport(base: string, token: string, repo: string): Transport {
-  const endpoint = new URL('/v1/repos/' + repo + '/', base).toString();
+type RetryOptions = { sleep?: (ms: number) => Promise<void>; random?: () => number };
+const defaultSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+function networkFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: string }).code;
+  return (error instanceof TypeError && /(?:fetch failed|failed to fetch|network|terminated|socket closed)/i.test(error.message)) ||
+    error.name === 'TimeoutError' || error.name === 'AbortError' ||
+    (!!code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|UND_ERR_\w+)$/.test(code)) ||
+    /(?:fetch failed|socket closed|timed out)/i.test(error.message) ||
+    ('cause' in error && networkFailure(error.cause));
+}
+
+export function retryTransport(transport: Transport, { sleep = defaultSleep, random = Math.random }: RetryOptions = {}): Transport {
   return async (path, body, key) => {
-    const response = await fetch(new URL(path, endpoint), { method: 'POST', headers: {
-      authorization: 'Bearer ' + token, 'content-type': 'application/json', 'idempotency-key': key },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    if (response.status === 204) return { status: 204 };
-    const parsed = await response.json() as { data?: unknown; error?: { code: string } };
-    return { status: response.status, data: parsed.data, error: parsed.error };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let response: Awaited<ReturnType<Transport>>;
+      try { response = await transport(path, body, key); }
+      catch (error) {
+        if (attempt === 2 || !networkFailure(error)) throw error;
+        await sleep((attempt === 0 ? 250 : 1000) * (0.5 + random()));
+        continue;
+      }
+      if (attempt === 2 || ![429, 502, 503, 504].includes(response.status)) return response;
+      const backoff = (attempt === 0 ? 250 : 1000) * (0.5 + random());
+      await sleep(response.status === 429 && response.retryAfterMs !== undefined
+        ? Math.min(5000, Math.max(0, response.retryAfterMs)) : backoff);
+    }
+    throw new Error('RETRY_EXHAUSTED');
   };
 }
 
-export async function runLoop(options: Options, transport: Transport, profile: LocalProfile | null): Promise<number> {
+export function apiTransport(base: string, token: string, repo: string, fetcher: typeof fetch = fetch): Transport {
+  const endpoint = new URL('/v1/repos/' + repo + '/', base).toString();
+  return async (path, body, key) => {
+    const response = await fetcher(new URL(path, endpoint), { method: 'POST', headers: {
+      authorization: 'Bearer ' + token, 'content-type': 'application/json', 'idempotency-key': key },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    if (response.status === 204) return { status: 204 };
+    const retryAfter = response.headers.get('retry-after');
+    const seconds = retryAfter === null ? NaN : Number(retryAfter);
+    const retryAfterMs = retryAfter === null ? undefined : Number.isFinite(seconds) && seconds >= 0
+      ? seconds * 1000 : Math.max(0, Date.parse(retryAfter) - Date.now());
+    const parsed = await response.json().catch(error => {
+      if (response.status >= 400) return {};
+      throw error;
+    }) as { data?: unknown; error?: { code: string } };
+    return { status: response.status, data: parsed.data, error: parsed.error,
+      retryAfterMs: Number.isFinite(retryAfterMs) ? retryAfterMs : undefined };
+  };
+}
+
+export async function runLoop(options: Options, transport: Transport, profile: LocalProfile | null, retryOptions?: RetryOptions): Promise<number> {
+  transport = retryTransport(transport, retryOptions);
   const profileDigest = profile?.digest ?? options.profileDigest;
   if (!profileDigest || !/^sha256:[a-f0-9]{64}$/.test(profileDigest)) throw new Error('PROFILE_DIGEST_REQUIRED');
   const started = Date.now();
@@ -91,17 +132,9 @@ export async function runLoop(options: Options, transport: Transport, profile: L
     if (heartbeatFailure) throw heartbeatFailure;
     const body = { ...fence, resultDigest: result.resultDigest, result };
     const key = 'result-' + job.jobId + '-' + job.attempt + '-' + result.resultDigest.slice(7, 39);
-    let posted = false;
-    for (let attempt = 0; attempt < 3 && !posted; attempt++) {
-      try {
-        const response = await transport('jobs/' + job.jobId + '/result', body, key);
-        if (response.status === 200) posted = true;
-        else if (response.status === 409) throw new Error('STALE_RESULT:' + (response.error?.code ?? 'CONFLICT'));
-        else throw new Error('RESULT_FAILED:' + (response.error?.code ?? response.status));
-      } catch (error) {
-        if (attempt === 2 || String(error).includes('STALE_RESULT')) throw error;
-      }
-    }
+    const response = await transport('jobs/' + job.jobId + '/result', body, key);
+    if (response.status === 409) throw new Error('STALE_RESULT:' + (response.error?.code ?? 'CONFLICT'));
+    if (response.status !== 200) throw new Error('RESULT_FAILED:' + (response.error?.code ?? response.status));
     count++;
     if (options.once) break;
     if (options.idleTimeoutSeconds > 0 && Date.now() - started > 86_400_000) break;
