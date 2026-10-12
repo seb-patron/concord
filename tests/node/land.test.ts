@@ -701,10 +701,77 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const inspected = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
     ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args], { cwd: root, env: item.env, timeout: 155_000 }))));
   for (const item of inspected) expect(item.stdout).toContain('"state":"awaiting-review"');
-  const attempts = await drive(Promise.all(parallel.map(item => execFile(process.execPath,
-    ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args, '--review-evidence', item.review],
-    { cwd: root, env: item.env, timeout: 155_000 })
-    .then(result => ({ result }), error => ({ error: error as Error & { stdout?: string; stderr?: string } })))));
+  const attemptOutcomes: Array<{ result: Awaited<ReturnType<typeof execFile>> } | { error: Error & { stdout?: string; stderr?: string } } | undefined> = [];
+  const stderrTails = parallel.map(() => '');
+  const startAttempt = (index: number) => new Promise<NonNullable<typeof attemptOutcomes[number]>>(resolveAttempt => {
+    const item = parallel[index];
+    callback(process.execPath, ['--import', 'tsx', 'cli/main.ts', 'land', ...item.args, '--review-evidence', item.review],
+      { cwd: root, env: item.env, timeout: 155_000 }, (error, stdout, stderr) => {
+        const outcome = error
+          ? { error: Object.assign(error, { stdout, stderr }) as Error & { stdout?: string; stderr?: string } }
+          : { result: { stdout, stderr } as Awaited<ReturnType<typeof execFile>> };
+        attemptOutcomes[index] = outcome;
+        resolveAttempt(outcome);
+      }).stderr?.on('data', part => { stderrTails[index] = (stderrTails[index] + part.toString()).slice(-6000); });
+  });
+  const firstAttempt = startAttempt(0);
+  const firstQueueDeadline = Date.now() + 45_000;
+  let firstSelected = false;
+  while (Date.now() < firstQueueDeadline) {
+    const snapshot = await api('/snapshot').catch(() => null);
+    const changeId = snapshot?.data?.projections?.repos?.changes?.find((change: any) => change.intentKey === 'parallel-0')?.changeId;
+    const queue = await api('/queue').catch(() => null);
+    if (changeId && queue?.data?.activeStackJobId && queue.data.entries?.some((entry: any) =>
+      entry.changeId === changeId && entry.state === 'checking')) {
+      firstSelected = true;
+      break;
+    }
+    const earlyExit = attemptOutcomes[0];
+    if (earlyExit && 'error' in earlyExit) {
+      throw new Error(`first land child exited before queue selection: ${earlyExit.error.message}\nstderr tail:\n${stderrTails[0]}`);
+    }
+    await new Promise(done => setTimeout(done, 150));
+  }
+  expect(firstSelected, `first queue entry was not selected within 45s\nstderr tail:\n${stderrTails[0]}`).toBe(true);
+  const secondAttempt = startAttempt(1);
+  const secondQueueDeadline = Date.now() + 45_000;
+  let secondAdmitted = false;
+  while (Date.now() < secondQueueDeadline) {
+    const snapshot = await api('/snapshot').catch(() => null);
+    const changeId = snapshot?.data?.projections?.repos?.changes?.find((change: any) => change.intentKey === 'parallel-1')?.changeId;
+    const queue = await api('/queue').catch(() => null);
+    if (changeId && queue?.data?.entries?.some((entry: any) => entry.changeId === changeId && entry.state === 'reserved')) {
+      secondAdmitted = true;
+      break;
+    }
+    const earlyExit = attemptOutcomes[1];
+    if (earlyExit && 'error' in earlyExit) {
+      throw new Error(`second land child exited before enqueue: ${earlyExit.error.message}\nstderr tail:\n${stderrTails[1]}`);
+    }
+    await new Promise(done => setTimeout(done, 150));
+  }
+  expect(secondAdmitted, `second queue entry was not admitted within 45s\nstderr tail:\n${stderrTails[1]}`).toBe(true);
+  const attemptsWork = drive(Promise.all([firstAttempt, secondAttempt]));
+  void attemptsWork.catch(() => {});
+  let staleMainBlocked = false;
+  const blockedDeadline = Date.now() + 150_000;
+  while (Date.now() < blockedDeadline) {
+    const queue = await api('/queue').catch(() => null);
+    if (queue?.data?.entries?.some((entry: any) => entry.state === 'blocked' && entry.blockedReason === 'STALE_MAIN') ||
+      stderrTails.some(output => output.includes('QUEUE_BLOCKED: STALE_MAIN'))) {
+      staleMainBlocked = true;
+      break;
+    }
+    const earlyExit = attemptOutcomes.find((attempt): attempt is { error: Error & { stdout?: string; stderr?: string } } =>
+      attempt !== undefined && 'error' in attempt);
+    if (earlyExit) {
+      const stderrTail = stderrTails[attemptOutcomes.indexOf(earlyExit)] || (earlyExit.error.stderr ?? '').slice(-6000);
+      throw new Error(`land child exited before queue showed STALE_MAIN: ${earlyExit.error.message}\nstderr tail:\n${stderrTail}`);
+    }
+    await new Promise(done => setTimeout(done, 150));
+  }
+  expect(staleMainBlocked, `queue did not become observably blocked with STALE_MAIN within 150s\nstderr tails:\n${stderrTails.join('\n--- child ---\n')}`).toBe(true);
+  const attempts = await attemptsWork;
   const merged = [];
   for (const [index, attempt] of attempts.entries()) {
     if ('result' in attempt) { merged.push(attempt.result); continue; }
