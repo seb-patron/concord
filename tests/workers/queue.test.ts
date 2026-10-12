@@ -900,6 +900,15 @@ describe('queue state machine', () => {
       expect((await h.state()).entries[0]).toMatchObject({ state: 'blocked', blockedReason: outcome });
       expect((await h.state()).diagnosis).toBeNull();
       expect(h.releases).toEqual(['A']);
+      const persisted = await h.fetch('/changes/A/findings');
+      expect(persisted.response.status).toBe(200);
+      expect(persisted.body.data.items).toMatchObject([{
+        changeId: 'A', originRevision: 1, unitKey: 'generator', status: 'open',
+        semanticAnchor: { kind: 'unknown', key: outcome },
+      }]);
+      expect(persisted.body.data.findingSetVersion).toBe(1);
+      await h.tick();
+      expect((await h.fetch('/changes/A/findings')).body.data.items).toHaveLength(1);
     });
 
   it('records suspected flake when an environment retry disagrees', async () => {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,6 +9,7 @@ import { overlaps, resolveUnit, unitRegistry } from '../../src/leases/units';
 import { manifestDigest, normalizeManifest } from '../../src/verdicts/manifest';
 import { childEnvironment, git, temporaryWork } from '../../runner/git';
 import { executeJob, type CredentialProvider } from '../../runner/execute';
+import { regenerate } from '../../runner/generators';
 import { loadProfile, localEnvironment, type LocalProfile } from '../../runner/profiles';
 
 const pin = (`sha256:${'0'.repeat(64)}`) as Digest;
@@ -27,6 +28,51 @@ const profile: LocalProfile = { id: 'counts', kind: 'command', digest: pin, chec
   generatorCommands: { count: countCommand } };
 
 describe('declared generated files', () => {
+  it('rejects a generator changing another generator output', async () => {
+    await temporaryWork(async dir => {
+      await git(dir, ['init', '--quiet']);
+      const two = { ...policy, generators: [
+        { id: 'a', outputs: ['a.txt'], command: 'a' },
+        { id: 'b', outputs: ['b.txt'], command: 'b' },
+      ] };
+      const commands = { a: ['-c', 'printf a > a.txt'],
+        b: ['-c', 'printf b > b.txt; printf changed > a.txt'] };
+      await expect(regenerate(dir, two, { ...profile, generatorCommands: commands }))
+        .rejects.toThrow('GENERATOR_FAILED: b: undeclared output modified');
+    });
+  });
+
+  it('records sorted digests from the final generated tree', async () => {
+    await temporaryWork(async dir => {
+      await git(dir, ['init', '--quiet']);
+      await writeFile(join(dir, 'seed.txt'), 'seed');
+      await git(dir, ['add', 'seed.txt']);
+      await git(dir, ['commit', '-m', 'seed'], 30_000, commitEnv);
+      const two = { ...policy, generators: [
+        { id: 'b', outputs: ['b.txt'], command: 'b' },
+        { id: 'a', outputs: ['a.txt'], command: 'a' },
+      ] };
+      const generated = await regenerate(dir, two, { ...profile, generatorCommands: {
+        a: ['-c', 'printf a > a.txt'], b: ['-c', 'cat a.txt > b.txt'],
+      } });
+      const contentDigest = `sha256:${createHash('sha256').update('a').digest('hex')}`;
+      const expected = await digest([{ path: 'a.txt', mode: '100644', contentDigest }]);
+      expect(generated).toEqual([
+        { id: 'a', outputDigest: expected },
+        { id: 'b', outputDigest: await digest([{ path: 'b.txt', mode: '100644', contentDigest }]) },
+      ]);
+    });
+  });
+
+  it('caps generated file bytes before hashing', async () => {
+    await temporaryWork(async dir => {
+      const file = await open(join(dir, 'count.txt'), 'w');
+      try { await file.truncate(8 * 1024 * 1024 + 1); } finally { await file.close(); }
+      await expect(regenerate(dir, policy, { ...profile, generatorCommands: { count: ['-c', 'true'] } }))
+        .rejects.toThrow('GENERATOR_FAILED: count.txt: output exceeds size cap');
+    });
+  });
+
   it('resolves each declared generator as a unit over its exact outputs', () => {
     const registry = unitRegistry(policy);
     expect(resolveUnit(registry, 'gen:counts').generatedFiles).toEqual(['count.txt']);

@@ -951,6 +951,11 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
   }
   if (result.outcome === 'GENERATOR_FAILED' || result.outcome === 'GENERATOR_NONDETERMINISTIC') {
     state.blockedReason = result.outcome;
+    for (const id of record.memberIds) {
+      const entry = member(state, record, id);
+      if (entry) requireGate(context.call('findings.recordGeneratorFailure', id, entry.revision,
+        result.jobId, result.outcome, result.log, result.resultDigest));
+    }
     emit(context, 'queue.generator_finding', record.memberIds, { jobId: result.jobId,
       code: result.outcome, log: result.log });
     failRecord(context, state, record, result.outcome);

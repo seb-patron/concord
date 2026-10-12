@@ -339,6 +339,8 @@ export interface ServiceHooks {
   'leases.reservationLive': (context: ModuleContext, changeId: Id, fences: Record<string, number>) => Gate;
   'leases.releaseReservation': (context: ModuleContext, changeId: Id) => Gate;
   'findings.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ findingSetVersion: number; unresolvedIds: Id[]; pendingRound: number | null }>;
+  'findings.recordGeneratorFailure': (context: ModuleContext, changeId: Id, revision: number,
+    jobId: Id, outcome: 'GENERATOR_FAILED' | 'GENERATOR_NONDETERMINISTIC', log: string, evidenceDigest: Digest) => Gate<{ findingId: Id }>;
   'verdicts.gate': (context: ModuleContext, changeId: Id, revision: number) => Gate<{ verdictId: Id; reviewManifestDigest: Digest; findingSetVersion: number }>;
   'verdicts.evaluateCarry': (context: ModuleContext, result: DeltaResult) => Gate<{ verdictId: Id }>;
   'queue.onResult': (context: ModuleContext, result: StackResult | PromotionResult) => Gate<{ promotionId: Id | null }>;

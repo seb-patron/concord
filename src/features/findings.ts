@@ -248,5 +248,34 @@ export const findings: FeatureModule = {
     return { status: context.version() === 0 ? 'unavailable' : 'ready', items, rounds, findingSetVersions };
   },
   nextDeadline: () => null, onAlarm: () => undefined,
-  hooks: { 'findings.gate': gate },
+  hooks: {
+    'findings.gate': gate,
+    'findings.recordGeneratorFailure': (context, changeId, requestedRevision, jobId, outcome, log, evidenceDigest) => {
+      if (!context.readChange) return { status: 'blocked', version: context.version?.() ?? 0,
+        code: 'MODULE_UNAVAILABLE', reason: 'Trusted change view unavailable', evidenceIds: [] };
+      const change = view(context, changeId);
+      if (change.revision !== requestedRevision || !change.headOid) {
+        return { status: 'blocked', version: context.version(), code: 'REVISION_STALE',
+          reason: 'Generator failure belongs to a different revision', evidenceIds: [changeId] };
+      }
+      return context.transaction(() => {
+        const current = ledger(context, changeId);
+        const version = context.nextVersion();
+        const created: Finding = { findingId: crypto.randomUUID(), changeId, originRevision: requestedRevision,
+          unitKey: 'generator', text: `${outcome}: ${log}`.slice(0, 8192), evidenceDigest,
+          semanticAnchor: { kind: 'unknown', key: outcome }, status: 'open', repairRound: null,
+          resolvedAtRevision: null, resolvingReviewerId: null, version };
+        current.findingIds.push(created.findingId);
+        current.findingSetVersion++;
+        context.state.put(`finding:${created.findingId}`, created);
+        context.state.put(`ledger:${changeId}`, current);
+        if (current.findingIds.length === 1) context.state.put('changes', [...(context.state.get<Id[]>('changes') ?? []), changeId]);
+        context.appendEvent('finding.created', [created.findingId, changeId], {
+          originRevision: requestedRevision, originHeadOid: change.headOid, unitKey: created.unitKey,
+          semanticAnchor: created.semanticAnchor, text: created.text, evidenceDigest,
+          generatorJobId: jobId, findingSetVersion: current.findingSetVersion }, version);
+        return { status: 'eligible', version, evidenceIds: [created.findingId], value: { findingId: created.findingId } };
+      });
+    },
+  },
 };
