@@ -19,7 +19,8 @@
     "replay": "tsx replay/main.ts",
     "demo": "tsx demo/main.ts",
     "mirror": "tsx deploy/mirror.ts",
-    "deploy:check": "tsx deploy/preflight.ts"
+    "deploy:check": "tsx deploy/preflight.ts",
+    "deploy:trusted-parts": "tsx deploy/trusted-parts.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.0",

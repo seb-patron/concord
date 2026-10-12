@@ -150,9 +150,9 @@ The `--force-with-lease` commands above are **only** for the disposable stale-re
 
 Review the [cost guards and owner billing steps](cost.md) before deployment.
 
-On a fresh account, first provision a `workers.dev` subdomain. Create a mode-0600 JSON file outside the clone containing `AUTH_TOKENS` and `TRUSTED_CONFIG`, then make the first deployment with `npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"` (where `SECRETS_FILE` is that file's absolute path). `versions upload` and `versions secret put` require an existing Worker and otherwise fail with code 10007.
+On a fresh account, first provision a `workers.dev` subdomain. Create a mode-0600 JSON file outside the clone containing `AUTH_TOKENS` and either `TRUSTED_CONFIG` or the numbered trusted config secrets described below, then make the first deployment with `npx wrangler deploy --config wrangler.jsonc --secrets-file "$SECRETS_FILE"` (where `SECRETS_FILE` is that file's absolute path). `versions upload` and `versions secret put` require an existing Worker and otherwise fail with code 10007.
 
-For later releases, first upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and `TRUSTED_CONFIG`. Neither belongs in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
+For later releases using a single trusted secret, first upload an undeployed version, then attach secrets with `versions secret put`; ordinary `secret put` immediately deploys a version and is unsuitable for this controlled sequence. The owner then explicitly deploys. Wrangler may prompt; record the emitted version ID and URL. The required production secrets are `AUTH_TOKENS` and either `TRUSTED_CONFIG` or `TRUSTED_CONFIG_PARTS` with its numbered parts. They do not belong in `wrangler.jsonc` or an `.env` file in the clone. [Wrangler versioned secrets and rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/) are documented by Cloudflare.
 
 ```sh
 test -s "$AUTH_TOKENS_FILE" && test -s "$TRUSTED_CONFIG_FILE"
@@ -163,6 +163,17 @@ npx wrangler deploy --config wrangler.jsonc
 ```
 
 If versioned secret provisioning reports that no Worker/version exists, use the first-deploy path above after confirming the account state with the owner; do not publish a fixture-authenticated substitute. A production secret change is a release action too. Do not run these commands during an account-free local rehearsal.
+
+### Large trusted configurations
+
+For a trusted configuration too large for one Worker secret, set `TRUSTED_PARTS_FILE` to a new absolute path outside the clone, then create a private bulk file and upload its numbered secrets:
+
+```sh
+npm run deploy:trusted-parts -- --in "$TRUSTED_CONFIG_FILE" --out "$TRUSTED_PARTS_FILE"
+  npx wrangler secret bulk "$TRUSTED_PARTS_FILE" --config wrangler.jsonc
+```
+
+The helper creates a mode-0600 file and refuses to overwrite one. `wrangler secret bulk` uploads the parts and count in one call. When switching from the single secret, run `npx wrangler secret delete TRUSTED_CONFIG --config wrangler.jsonc` so both formats are never present together. When switching back to `TRUSTED_CONFIG`, delete `TRUSTED_CONFIG_PARTS` with `npx wrangler secret delete TRUSTED_CONFIG_PARTS --config wrangler.jsonc`; the Worker then ignores leftover numbered parts. Keep the bulk file private and outside the clone.
 
 ## Deployed smoke and evidence
 
@@ -185,7 +196,7 @@ test -s "$TRUSTED_CONFIG_FILE"
 export CONCORD_TOKEN="$(jq -r '.owner' "$DEMO_TOKENS_FILE")"
 ```
 
-Upload the newly generated `AUTH_TOKENS` and `TRUSTED_CONFIG` with the exact `npx wrangler versions secret put` commands in [Provision secrets and deploy](#provision-secrets-and-deploy), then deploy that version. Do not reuse a deployment with an old token mapping. The commands in this section are remote-only and intentionally outside the `verified-by: 12c` local command blocks. Run the health check and seed after Wrangler prints the deployed URL.
+Upload the newly generated `AUTH_TOKENS` with the command in [Provision secrets and deploy](#provision-secrets-and-deploy). Upload `TRUSTED_CONFIG` with the single-secret command there if it fits; otherwise use [Large trusted configurations](#large-trusted-configurations). Do not reuse a deployment with an old token mapping. The commands in this section are remote-only and intentionally outside the `verified-by: 12c` local command blocks. Run the health check and seed after Wrangler prints the deployed URL.
 
 ```sh
 curl -fsS "$CONCORD_URL/health" | jq -e '.status == "ok" and .mode == "production" and .storageBackend == "artifacts"'

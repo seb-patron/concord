@@ -8,6 +8,7 @@ interface Env {
   ARTIFACTS?: Artifacts;
   AUTH_TOKENS?: string;
   TRUSTED_CONFIG?: string;
+  TRUSTED_CONFIG_PARTS?: string;
   BRIDGE_URL?: string;
   CONCORD_TEST_NOW?: string;
 }

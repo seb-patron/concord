@@ -141,6 +141,24 @@ describe('local Worker and SQLite Durable Objects', () => {
     expect(() => loadTrustedConfig({ ...env, TRUSTED_CONFIG: JSON.stringify(nullProfile) })).toThrow('TRUSTED_CONFIG_INVALID');
   });
 
+  it('loads numbered trusted configuration parts and rejects incomplete or conflicting bindings', () => {
+    const text = JSON.stringify(localFixtureConfig('local'));
+    const production = { CONCORD_MODE: 'production' } as Env;
+    expect(loadTrustedConfig({ ...production, TRUSTED_CONFIG: text })).toEqual(JSON.parse(text));
+    const parts = { ...production, TRUSTED_CONFIG_PARTS: '2', TRUSTED_CONFIG_PART_0: text.slice(0, 30), TRUSTED_CONFIG_PART_1: text.slice(30), TRUSTED_CONFIG_PART_2: 'ignored' };
+    expect(loadTrustedConfig(parts)).toEqual(JSON.parse(text));
+    const missing = { ...parts, TRUSTED_CONFIG_PART_1: undefined };
+    const nonString = { ...parts, TRUSTED_CONFIG_PART_1: 3 };
+    expect(() => loadTrustedConfig(missing)).toThrow('TRUSTED_CONFIG_INVALID');
+    expect(() => loadTrustedConfig(nonString)).toThrow('TRUSTED_CONFIG_INVALID');
+    expect(() => loadTrustedConfig({ ...parts, TRUSTED_CONFIG: text })).toThrow('TRUSTED_CONFIG_INVALID');
+    for (const count of ['0', '65', '1.5', 'NaN', '-1']) {
+      expect(() => loadTrustedConfig({ ...parts, TRUSTED_CONFIG_PARTS: count })).toThrow('TRUSTED_CONFIG_INVALID');
+    }
+    const malformed = { ...parts, TRUSTED_CONFIG_PART_1: 'invalid' };
+    expect(() => loadTrustedConfig(malformed)).toThrow('TRUSTED_CONFIG_INVALID');
+  });
+
   it('rejects conflicting bodies, stale versions, and verdicts without a change', async () => {
     const path = '/v1/repos/beta/queue/enqueue';
     const first = await fetchApi(mutation(path, { expectedVersion: 0, changeId: 'one', verdictId: 'approval', leaseFences: {} }, 'same-key'));
