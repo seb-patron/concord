@@ -108,6 +108,33 @@ describe('land input and evidence gates', () => {
     }
     expect(request).not.toHaveBeenCalled();
   });
+  it.each(['single commit', 'range'])('preserves a leading UTF-8 BOM in Git paths for a %s before API requests', async (kind) => {
+    const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
+    await writeFile(join(dir, 'seed.txt'), 'seed\n');
+    await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
+    const base = await git(dir, 'rev-parse', 'HEAD');
+    const seedBlob = await git(dir, 'rev-parse', `${base}:seed.txt`);
+    const emptyBlob = await git(dir, 'hash-object', '-w', '--', '/dev/null');
+    const rawName = Buffer.from('efbbbf612e747874', 'hex');
+    const makeTree = (withSecond: boolean): string => {
+      const entries = [Buffer.from(`100644 blob ${seedBlob}\tseed.txt\0`),
+        Buffer.concat([Buffer.from(`100644 blob ${emptyBlob}\t`), rawName, Buffer.from([0])])];
+      if (withSecond) entries.push(Buffer.from(`100644 blob ${emptyBlob}\t😀.txt\0`));
+      return execFileSync('git', ['mktree', '-z'], { cwd: dir, input: Buffer.concat(entries) }).toString().trim();
+    };
+    const first = await git(dir, 'commit-tree', makeTree(false), '-p', base, '-m', 'first');
+    const head = await git(dir, 'commit-tree', makeTree(true), '-p', first, '-m', 'second');
+    const commit = kind === 'range' ? head : first;
+    const rangeBase = kind === 'range' ? base : undefined;
+    const raw = execFileSync('git', ['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', base, commit], { cwd: dir });
+    expect(raw.includes(Buffer.concat([rawName, Buffer.from([0])]))).toBe(true);
+    const allowed = join(await temp(), 'allowed.txt'); await writeFile(allowed, 'a.txt\n😀.txt\n');
+    const request = vi.fn();
+    expect((await filesChanged(dir, commit, rangeBase)).files).toContain('\uFEFFa.txt');
+    await expect(land({ repo: 'demo', source: dir, commit, base: rangeBase, intentKey: 'task', intent: 'test', allowedFiles: allowed,
+      client: { request } as never })).rejects.toThrow('OUTSIDE_ALLOWED_FILES: \uFEFFa.txt');
+    expect(request).not.toHaveBeenCalled();
+  });
   it('requires one unambiguous approval line naming the published SHA', () => {
     const head = 'a'.repeat(40);
     const report = `# ✅ APPROVED FOR MERGE — head ${head}\n\nReview details.\n\nAPPROVED for merge`;

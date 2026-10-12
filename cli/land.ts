@@ -81,7 +81,7 @@ export async function filesChanged(source: string, commit: string, base?: string
   const parent = base ?? parents[1];
   const raw = await gitBytes(['diff-tree', '--no-commit-id', '-r', '--no-renames', '--name-only', '-z', parent, commit], {}, source);
   let decoded: string;
-  try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw); }
+  try { decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw); }
   catch { throw new ConcordError('REFUSED: Git path is not valid UTF-8', 'usage'); }
   const files = decoded.split('\0').filter(Boolean);
   if (!files.length) throw new ConcordError(base ? 'REFUSED: range has an empty diff' : 'candidate commit changes no files', 'usage');
