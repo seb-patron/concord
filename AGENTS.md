@@ -1,5 +1,7 @@
 # Concord agent loop
 
+The lease workflow below applies only when the repository being edited is registered in Concord and both `CONCORD_URL` and `CONCORD_TOKEN` are set in the agent environment. Otherwise, work normally.
+
 Concord coordinates candidate changes by semantic unit. Read this before editing any Concord managed repository.
 
 1. Get `repo_get` and `repo_context`; use the observed canonical head as the base for `change_create`. Keep one stable `intentKey` for the task.

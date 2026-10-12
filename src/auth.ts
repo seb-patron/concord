@@ -16,22 +16,33 @@ const local: Record<string, Omit<Principal, 'expiresAt'>> = {
 };
 
 const localTenants = new Set(Object.values(local).map(principal => principal.tenantId));
-let configured: { raw: string | undefined; mappings: Record<string, Principal>; tenants: ReadonlySet<string> } | undefined;
+const modelLabel = /^[A-Za-z0-9._:/-]{1,64}$/;
+type TokenPrincipal = Omit<Principal, 'expiresAt'> & { expiresAt: number | null };
+type AuthConfig = { source: string; mappings: Record<string, TokenPrincipal>; tenants: ReadonlySet<string> };
+let cachedTokens: AuthConfig | undefined;
 
-function configuredAuth(env: Env): NonNullable<typeof configured> {
-  const cached = configured;
-  if (cached && cached.raw === env.AUTH_TOKENS) return cached;
-  let mappings: Record<string, Principal> = {};
-  if (env.AUTH_TOKENS) {
-    try { mappings = JSON.parse(env.AUTH_TOKENS) as Record<string, Principal>; }
-    catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
+/** Validate the entire secret mapping when loaded, and cache its operator tenant IDs for delegated-token routing. */
+function loadAuthConfig(source: string): AuthConfig {
+  if (cachedTokens?.source === source) return cachedTokens;
+  let value: unknown;
+  try { value = JSON.parse(source); } catch { throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.values(value).some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      ('model' in entry && (typeof entry.model !== 'string' || !modelLabel.test(entry.model))))) {
+    throw new HttpError(503, 'AUTH_CONFIG_INVALID', 'Authentication configuration unavailable');
   }
+  const mappings = value as Record<string, TokenPrincipal>;
   const tenants = new Set<string>();
   for (const principal of Object.values(mappings)) {
-    if (principal && typeof principal.tenantId === 'string') tenants.add(principal.tenantId);
+    if (typeof principal.tenantId === 'string') tenants.add(principal.tenantId);
   }
-  configured = { raw: env.AUTH_TOKENS, mappings, tenants };
-  return configured;
+  cachedTokens = { source, mappings, tenants };
+  return cachedTokens;
+}
+
+/** Validate the entire secret mapping when loaded, before selecting a credential. */
+export function loadAuthTokens(source: string): Record<string, TokenPrincipal> {
+  return loadAuthConfig(source).mappings;
 }
 
 export function clock(env: Pick<Env, 'CONCORD_MODE' | 'CONCORD_TEST_NOW'>): () => number {
@@ -43,25 +54,26 @@ export function clock(env: Pick<Env, 'CONCORD_MODE' | 'CONCORD_TEST_NOW'>): () =
   return Date.now;
 }
 
-export async function authenticate(request: Request, env: Env, now: () => number = clock(env)): Promise<Principal> {
+export async function authenticateWithExpiry(request: Request, env: Env, now: () => number = clock(env)):
+Promise<{ principal: Principal; expiresAt: number | null }> {
   const match = /^Bearer (\S+)$/i.exec(request.headers.get('authorization') ?? '');
   if (!match) throw new HttpError(401, 'UNAUTHORIZED', 'Bearer credential required');
   const secret = match[1];
-  let principal: Principal | undefined;
+  let credential: TokenPrincipal | undefined;
   let key: string | undefined;
   if (env.CONCORD_MODE === 'local') {
     const fixture = local[secret];
-    if (fixture) principal = { ...fixture, expiresAt: Number.MAX_SAFE_INTEGER };
+    if (fixture) credential = { ...fixture, expiresAt: Number.MAX_SAFE_INTEGER };
   } else if (secret.startsWith('local-')) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Fixture credential is not valid in production');
   }
-  const auth = !principal ? configuredAuth(env) : undefined;
-  if (!principal && env.AUTH_TOKENS) {
+  const auth = !credential && env.AUTH_TOKENS ? loadAuthConfig(env.AUTH_TOKENS) : undefined;
+  if (!credential && auth) {
     const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
     key = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
-    principal = auth?.mappings[key];
+    credential = auth.mappings[key];
   }
-  if (!principal) {
+  if (!credential) {
     const delegated = /^cct_([A-Za-z0-9_-]{1,64})_([a-f0-9]{64})$/.exec(secret);
     if (delegated) {
       const tenantId = delegated[1];
@@ -77,20 +89,28 @@ export async function authenticate(request: Request, env: Env, now: () => number
         method: 'POST', headers: { 'content-type': 'application/json', 'x-concord-tenant': tenantId },
         body: JSON.stringify({ digest: key }),
       }));
-      if (lookup.ok) principal = (await lookup.json() as { data: Principal | null }).data ?? undefined;
+      if (lookup.ok) {
+        const found = (await lookup.json() as { data: Principal | null }).data;
+        // Delegated principals always carry a bounded numeric expiry; never treat a missing one as non-expiring.
+        if (found && typeof found.expiresAt === 'number') credential = found;
+      }
     }
   }
   const validId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
   const validRoles: Role[] = ['owner', 'agent', 'reviewer', 'checker', 'promoter', 'viewer'];
-  if (!principal || !validId(principal.principalId) || !validId(principal.tenantId) ||
-    !Array.isArray(principal.roles) || principal.roles.length === 0 || principal.roles.some(role => !validRoles.includes(role)) ||
-    (principal.repoIds !== '*' && (!Array.isArray(principal.repoIds) || principal.repoIds.some(repoId => !validId(repoId))))) {
+  if (!credential || !validId(credential.principalId) || !validId(credential.tenantId) ||
+    !Array.isArray(credential.roles) || credential.roles.length === 0 || credential.roles.some(role => !validRoles.includes(role)) ||
+    (credential.repoIds !== '*' && (!Array.isArray(credential.repoIds) || credential.repoIds.some(repoId => !validId(repoId))))) {
     throw new HttpError(401, 'UNAUTHORIZED', 'Invalid credential');
   }
-  if (!Number.isFinite(principal.expiresAt) || principal.expiresAt <= now()) {
+  if (credential.expiresAt !== null && (!Number.isFinite(credential.expiresAt) || credential.expiresAt <= now())) {
     throw new HttpError(401, 'CREDENTIAL_EXPIRED', 'Credential expired');
   }
-  return principal;
+  return { principal: { ...credential, expiresAt: credential.expiresAt ?? Number.MAX_SAFE_INTEGER }, expiresAt: credential.expiresAt };
+}
+
+export async function authenticate(request: Request, env: Env, now: () => number = clock(env)): Promise<Principal> {
+  return (await authenticateWithExpiry(request, env, now)).principal;
 }
 
 export function requireRole(principal: Principal, ...roles: Role[]): void {

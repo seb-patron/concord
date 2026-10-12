@@ -1,0 +1,3 @@
+# Authentication API
+
+`GET /v1/me` requires a bearer credential and returns the standard `{ "data": ..., "version": 0, "eventSeq": 0 }` envelope. Its `data` is exactly `{ "principalId": string, "tenantId": string, "roles": string[], "repoIds": string[] | "*", "expiresAt": number | null, "model": string | null }`; absent credentials return `401`. No token, token digest, or secret is returned. An `AUTH_TOKENS` entry may set `model` to a 1–64 character label using only ASCII letters, digits, `.`, `_`, `:`, `/`, and `-`; invalid labels cause `AUTH_CONFIG_INVALID` when the mapping loads. An absent label appears as `null` and is captured on new changes as `authorModel: null`.

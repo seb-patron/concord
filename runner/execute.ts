@@ -3,9 +3,37 @@ import type { CandidateInput, CheckOutcome, Job, JobResult, StackResult } from '
 import { digest } from '../src/http';
 import { childEnvironment, command, conditionalPush, fetchOid, git, gitCredentialEnvironment, initWorktree, isAncestor, refOid, temporaryWork, treeOid, withJobDeadline, OUTPUT_CAP } from './git';
 import { inspectUnits, mergeTsv } from './units';
+import { tableForFile } from '../src/leases/units';
 import { checkProfile, loadProfile, pinnedCheck, verifyLocalProfile, type LocalProfile } from './profiles';
 
 type UnsignedResult = JobResult extends infer R ? R extends JobResult ? Omit<R, 'resultDigest'> : never : never;
+const tailLog = (value: string, cap: number): string => {
+  let tail = Buffer.from(value).subarray(Math.max(0, Buffer.byteLength(value) - cap)).toString('utf8');
+  while (Buffer.byteLength(tail) > cap) tail = tail.slice(1);
+  return tail;
+};
+
+function cappedChecks(cap: number, commandProfile: boolean) {
+  let body = '';
+  const markers: string[] = [];
+  let markerBytes = 0;
+  return {
+    append(log: string, label = '') {
+      const exit = commandProfile ? /^exit=-?\d+(?: timeout)?\n/.exec(log)?.[0] : undefined;
+      if (commandProfile && !exit) throw new Error('COMMAND_EXIT_MARKER_MISSING');
+      if (exit) {
+        const marker = tailLog(label, cap - Buffer.byteLength(exit)) + exit;
+        markerBytes += Buffer.byteLength(marker);
+        if (markerBytes > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
+        markers.push(marker);
+      }
+      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes);
+    },
+    value() {
+      return body + markers.join('');
+    },
+  };
+}
 
 export type Credential = { storageName: string; remote: string; secret: string; expiresAt: number };
 export type CredentialProvider = (operation: 'fetch' | 'scratch-push' | 'canonical-push') => Promise<Credential[]>;
@@ -25,7 +53,7 @@ async function fetchInput(directory: string, job: Job, name: string, oid: string
   await fetchOid(directory, item.remote, oid, await gitCredentialEnvironment(directory, item.secret));
 }
 
-async function compose(directory: string, base: string, inputs: CandidateInput[]): Promise<string> {
+async function compose(directory: string, base: string, inputs: CandidateInput[], job: Job): Promise<string> {
   await git(directory, ['switch', '--detach', base]);
   const env = childEnvironment({ GIT_AUTHOR_NAME: 'Concord Runner', GIT_AUTHOR_EMAIL: 'runner@concord.invalid',
     GIT_COMMITTER_NAME: 'Concord Runner', GIT_COMMITTER_EMAIL: 'runner@concord.invalid',
@@ -37,44 +65,54 @@ async function compose(directory: string, base: string, inputs: CandidateInput[]
       'merge', '--no-edit', '--no-ff', candidate.headOid], directory, 60_000, env);
     if (result.code === 0) continue;
     const conflicts = (await git(directory, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
-    if (conflicts.length !== 1 || conflicts[0] !== 'families.tsv') throw new Error('MERGE_CONFLICT');
-    const readStage = async (stage: number) => {
-      const value = await command('git', ['show', ':' + stage + ':families.tsv'], directory, 30_000);
-      if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
-      return value.stdout;
-    };
-    const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3));
-    await writeFile(directory + '/families.tsv', merged);
-    await git(directory, ['add', '--', 'families.tsv']);
+    if (!conflicts.length) throw new Error('MERGE_CONFLICT');
+    for (const path of conflicts) {
+      const table = tableForFile(job.unitPolicy, path);
+      if (!table) throw new Error('MERGE_CONFLICT');
+      const stages = await git(directory, ['ls-files', '--stage', '--', path]);
+      const modes = stages.split('\n').filter(Boolean).map(line => line.split(' ')[0]);
+      if (modes.length !== 3 || new Set(modes).size !== 1) throw new Error('MERGE_CONFLICT');
+      const readStage = async (stage: number) => {
+        const value = await command('git', ['show', ':' + stage + ':' + path], directory, 30_000);
+        if (value.code !== 0 || value.truncated) throw new Error('MERGE_CONFLICT');
+        return value.stdout;
+      };
+      const merged = mergeTsv(await readStage(1), await readStage(2), await readStage(3), table);
+      await writeFile(directory + '/' + path, merged);
+      await git(directory, ['add', '--', path]);
+    }
     await git(directory, ['commit', '--no-edit'], 60_000, env);
   }
   return git(directory, ['rev-parse', 'HEAD']);
 }
 
 async function runGates(profile: LocalProfile, job: Job, directory: string): Promise<{ outcome: CheckOutcome; gates: StackResult['gateResults']; log: string; score: StackResult['score'] }> {
+  // 128 markers fit the 4096-byte command minimum even with 32 bytes reserved per exit line.
+  if (profile.kind === 'command' && job.unitPolicy.acceptance.gates.length > 128)
+    throw new Error('TOO_MANY_COMMAND_GATES');
   const gates: StackResult['gateResults'] = [];
-  let log = '';
+  const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   let score: StackResult['score'] = null;
   for (const gate of job.unitPolicy.acceptance.gates) {
     const checked = await pinnedCheck(profile, job, directory, gate.id);
     gates.push({ gateId: gate.id, outcome: checked.outcome });
-    log += checked.log + '\n';
+    log.append(checked.log);
     score = job.contest === true ? checked.score : null;
-    if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log, score: null };
+    if (checked.outcome !== gate.requiredOutcome) return { outcome: checked.outcome === 'TIMEOUT' || checked.outcome === 'ENV_ERROR' ? checked.outcome : 'FAIL', gates, log: log.value(), score: null };
   }
-  return { outcome: 'PASS', gates, log, score };
+  return { outcome: 'PASS', gates, log: log.value(), score };
 }
 
 async function runAffected(profile: LocalProfile, job: Job, directory: string, unitKeys: string[]): Promise<{ outcome: CheckOutcome; log: string }> {
   const targets = profile.checkerId === 'dispatch-lab' ? ['all'] : [...new Set(unitKeys)].sort();
   if (!targets.length) return { outcome: 'UNVERIFIED_TARGET', log: 'No affected units identified' };
-  let log = '';
+  const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
   for (const unit of targets) {
     const checked = await pinnedCheck(profile, job, directory, unit);
-    log += unit + ': ' + checked.log + '\n';
-    if (!['PASS', 'MATCH'].includes(checked.outcome)) return { outcome: checked.outcome, log };
+    log.append(checked.log, unit + ': ');
+    if (!['PASS', 'MATCH'].includes(checked.outcome)) return { outcome: checked.outcome, log: log.value() };
   }
-  return { outcome: 'PASS', log };
+  return { outcome: 'PASS', log: log.value() };
 }
 
 async function reconcileScratch(directory: string, job: Extract<Job, { kind: 'validate-stack' }>, composed: string,
@@ -110,7 +148,17 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     const actual = await git(directory, ['rev-parse', candidate.headOid + '^{commit}']);
     if (candidate.baseOid && !await isAncestor(directory, candidate.baseOid, actual)) throw new Error('CANDIDATE_ANCESTRY');
     const inspected = await inspectUnits(directory, candidate.baseOid, actual, job);
-    return { ...common, kind: 'inspect-candidate', outcome: 'PASS', observedHeadOid: actual,
+    // A command profile validates the inspected tree as well as composed stacks.
+    // Dispatch-lab inspection retains its existing manifest-only behavior.
+    let outcome: CheckOutcome = 'PASS';
+    let log = '';
+    if (profile?.kind === 'command') {
+      await git(directory, ['switch', '--detach', actual]);
+      const checked = await pinnedCheck(profile, job, directory);
+      outcome = checked.outcome;
+      log = checked.log;
+    }
+    return { ...common, kind: 'inspect-candidate', outcome, log, observedHeadOid: actual,
       sourceTreeOid: await treeOid(directory, actual), unitKeys: inspected.unitKeys,
       reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest };
   }
@@ -134,7 +182,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
         await fetchInput(directory, job, candidate.storageName, candidate.baseOid, fetchTokens);
         await fetchInput(directory, job, candidate.storageName, candidate.headOid, fetchTokens);
       }
-      composed = await compose(directory, job.canonicalBaseOid, job.candidates);
+      composed = await compose(directory, job.canonicalBaseOid, job.candidates, job);
       if (job.baseCheck && composed !== job.canonicalBaseOid) throw new Error('BASE_CHECK_IDENTITY');
     }
     composed = await reconcileScratch(directory, job, composed, provide);
@@ -151,7 +199,7 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     }
     return { ...common, kind: 'validate-stack', bootstrap: job.bootstrap, canonicalBaseOid: job.canonicalBaseOid,
       sourceTreeOid: tree, composedOid: composed, composedTreeOid: tree,
-      outcome: checked.outcome, gateResults: checked.gates, score: checked.score, log: checked.log.slice(0, OUTPUT_CAP) } as UnsignedResult;
+      outcome: checked.outcome, gateResults: checked.gates, score: checked.score, log: checked.log } as UnsignedResult;
   }
   if (job.kind === 'delta-check') {
     if (!profile) throw new Error('PROFILE_REQUIRED');
@@ -160,14 +208,14 @@ async function executeIn(directory: string, job: Job, profile: LocalProfile | nu
     await fetchInput(directory, job, baseName, job.newBaseOid, fetchTokens);
     await fetchInput(directory, job, job.candidate.storageName, job.candidate.baseOid, fetchTokens);
     await fetchInput(directory, job, job.candidate.storageName, job.candidate.headOid, fetchTokens);
-    const composed = await compose(directory, job.newBaseOid, [job.candidate]);
+    const composed = await compose(directory, job.newBaseOid, [job.candidate], job);
     const inspected = await inspectUnits(directory, job.newBaseOid, composed, job);
     const checked = inspected.manifest.coverage === 'complete' ? await runAffected(profile, job, directory, inspected.unitKeys) :
       { outcome: 'UNVERIFIED_TARGET' as CheckOutcome, log: 'Unknown review dependency scope' };
     return { ...common, kind: 'delta-check', outcome: checked.outcome, sourceTreeOid: await treeOid(directory, composed),
       reviewManifest: inspected.manifest, reviewManifestDigest: inspected.digest,
       dependencyScope: inspected.manifest.dependencyScope, dependencyScopeDigest: await digest(inspected.manifest.dependencyScope),
-      log: checked.log.slice(0, OUTPUT_CAP) };
+      log: checked.log };
   }
   // Promoter mode has no profile load, checkout, source execution, or checker invocation.
   if (job.bootstrap && (!job.ownerAuthorized || job.expectedOldOid !== null)) throw new Error('BOOTSTRAP_UNAUTHORIZED');
@@ -226,7 +274,8 @@ export async function executeJob(job: Job, profile: LocalProfile | null, provide
   value.durationMs = Math.max(0, Date.now() - began);
   for (const secret of secrets) value.log = value.log.replaceAll(secret, '[REDACTED]');
   const cap = Math.min(job.maxOutputBytes, OUTPUT_CAP);
-  while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
+  if (value.kind === 'validate-stack' || value.kind === 'delta-check') value.log = tailLog(value.log, cap);
+  else while (Buffer.byteLength(value.log) > cap) value.log = value.log.slice(0, -1);
   const resultDigest = await digest(value);
   return { ...value, resultDigest } as JobResult;
 }

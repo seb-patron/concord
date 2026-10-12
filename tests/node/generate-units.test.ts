@@ -12,7 +12,9 @@ const row = { canonicalKey: 'row:families:alpha', file: 'families.tsv',
   resources: ['families.tsv#alpha'], dependencyKeys: ['file:README.md'] };
 const baseTemplate = { id: 'owner', version: 1, checkerId: 'checker', checkerDigest: zero,
   acceptance: { kind: 'hard-gates', gates: [{ id: 'required', requiredOutcome: 'PASS' }] },
-  units: { 'row:families:alpha': row }, tables: { 'families.tsv': { idColumn: 'family' } } };
+  units: { 'row:families:alpha': row },
+  tables: [{ name: 'families', file: 'families.tsv', header: ['family', 'value'],
+    keyColumn: 'family', keySpec: { charset: 'lower', minLength: 1, maxLength: 256 } }] };
 
 let directory: string;
 let repo: string;
@@ -80,6 +82,15 @@ describe('owner file-unit generator', () => {
     expect(digest).toBe(`sha256:${createHash('sha256').update(canonicalJson(preimage)).digest('hex')}`);
     expect(envelope.policyDigest).toBe(digest);
     expect(readFileSync(join(repo, 'README.md'), 'utf8')).toBe('owner\n');
+  });
+
+  it('rejects legacy table metadata instead of weakening the bounded key policy', () => {
+    writeFileSync(template, JSON.stringify({ ...baseTemplate,
+      tables: { 'families.tsv': { idColumn: 'family' } } }));
+    const result = run(['--oid', oid]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('TABLE_POLICY_INVALID');
+    expect(result.stdout).toBe('');
   });
 
   it('reads a union of path files and repeated direct paths', () => {

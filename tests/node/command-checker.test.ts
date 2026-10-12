@@ -1,0 +1,324 @@
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
+import { digest } from '../../src/http';
+import { childEnvironment, command, git, temporaryWork } from '../../runner/git';
+import { executeJob } from '../../runner/execute';
+import { loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
+
+const executable = '/bin/sh';
+const commandSettings = { executable, argv: ['scripts/validate.sh'], cwd: 'repo' as const,
+  timeoutSeconds: 2, env: ['PATH', 'TMPDIR', 'LANG'], outputCap: 4096 };
+const filePin = (bytes: Buffer | string) => ('sha256:' + createHash('sha256').update(bytes).digest('hex')) as Digest;
+const commitEnv = childEnvironment({ GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
+  GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' });
+
+async function profileIn(dir: string, changes: Record<string, unknown> = {}, maxOutputBytes = 4096) {
+  const binaryPin = filePin(await readFile(executable));
+  const settings = { ...commandSettings, ...changes };
+  const content = { id: 'command-demo', kind: 'command', checkerId: 'command-demo',
+    checkerDigest: binaryPin, toolchainDigest: binaryPin, oracleDigest: await digest(settings),
+    environmentDigest: await digest(localEnvironment()), timeoutMs: 5_000, maxOutputBytes,
+    toolchainFile: executable, ...settings };
+  const path = join(dir, 'profile.json');
+  await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
+  return path;
+}
+
+function jobFor(profile: Awaited<ReturnType<typeof loadProfile>>, remotes: Record<string, string>, base: string): Job {
+  const pin = profile.checkerDigest as Digest;
+  const policy: TrustedPolicy = { id: 'command-demo', digest: pin, version: 1, checkerId: 'command-demo',
+    checkerDigest: pin, units: {}, acceptance: { kind: 'hard-gates', gates: [{ id: 'default', requiredOutcome: 'PASS' }] } };
+  return { jobId: 'job', repoId: 'demo', inputDigest: pin, generation: 1, profileDigest: profile.digest as Digest,
+    policyId: policy.id, policyDigest: policy.digest, unitPolicy: policy, storageRemotes: remotes,
+    checkerId: profile.checkerId, checkerDigest: pin, oracleDigest: profile.oracleDigest as Digest,
+    toolchainDigest: profile.toolchainDigest as Digest, environmentDigest: profile.environmentDigest as Digest,
+    timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes, state: 'claimed', attempt: 1,
+    runnerId: 'runner', fence: 1, expiresAt: Date.now() + 60_000, version: 1,
+    kind: 'validate-stack', canonicalBaseOid: base, candidates: [], baseCheck: true, bootstrap: false,
+    stackId: 'stack', scratchStorageName: 'scratch', scratchRef: 'refs/heads/check',
+    expectedRefs: { canonical: base, scratch: null } };
+}
+
+describe('pinned command checker', () => {
+  it('rejects caps below 4096 bytes and accepts the minimum', async () => {
+    await temporaryWork(async dir => {
+      await expect(loadProfile(await profileIn(dir, { outputCap: 4095 }))).rejects.toThrow('INVALID_COMMAND_PROFILE');
+      expect((await loadProfile(await profileIn(dir, { outputCap: 4096 }))).outputCap).toBe(4096);
+    });
+  });
+
+  it('keeps five exit markers at the minimum cap and rejects excessive gates before execution', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'repo');
+      const canonical = join(dir, 'canonical.git');
+      const scratch = join(dir, 'scratch.git');
+      await git(dir, ['init', '--quiet', repo]);
+      await git(dir, ['init', '--bare', '--quiet', canonical]);
+      await git(dir, ['init', '--bare', '--quiet', scratch]);
+      await mkdir(join(repo, 'scripts'));
+      await writeFile(join(repo, 'scripts/validate.sh'), "printf '%s' '" + 'x'.repeat(4096) + "'\n");
+      await git(repo, ['add', 'scripts/validate.sh']);
+      await git(repo, ['commit', '--quiet', '-m', 'gates'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const profile = await loadProfile(await profileIn(dir));
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job = jobFor(profile, remotes, base);
+      const credentials = async () => Object.entries(remotes).map(([storageName, remote]) =>
+        ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
+      job.unitPolicy.acceptance.gates = Array.from({ length: 5 }, (_, index) =>
+        ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
+      const passing = await executeJob(job, profile, credentials);
+      expect(passing).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
+      expect(passing.log.match(/exit=0\n/g)).toHaveLength(5);
+      expect(Buffer.byteLength(passing.log)).toBeLessThanOrEqual(4096);
+      job.unitPolicy.acceptance.gates = Array.from({ length: 129 }, (_, index) =>
+        ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
+      const rejected = await executeJob(job, profile, credentials);
+      expect(rejected).toMatchObject({ kind: 'validate-stack', outcome: 'ENV_ERROR', gateResults: [] });
+      expect(rejected.log).toContain('TOO_MANY_COMMAND_GATES');
+    });
+  });
+
+  it('keeps a later failing gate and its exit marker when combined output reaches the cap', async () => {
+    for (const laterBytes of [16_383, 16_384, 16_385]) await temporaryWork(async dir => {
+      const repo = join(dir, 'repo');
+      const canonical = join(dir, 'canonical.git');
+      const scratch = join(dir, 'scratch.git');
+      await git(dir, ['init', '--quiet', repo]);
+      await git(dir, ['init', '--bare', '--quiet', canonical]);
+      await git(dir, ['init', '--bare', '--quiet', scratch]);
+      await mkdir(join(repo, 'scripts'));
+      await writeFile(join(repo, 'scripts/validate.sh'),
+        `if [ -f .first-gate-ran ]; then printf '%s' '${'y'.repeat(laterBytes)}'; exit 7; fi\n` +
+        `touch .first-gate-ran\nprintf '%s' '${'x'.repeat(16_384)}'\n`);
+      await git(repo, ['add', 'scripts/validate.sh']);
+      await git(repo, ['commit', '--quiet', '-m', 'gates'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const profile = await loadProfile(await profileIn(dir, { outputCap: 16_384 }, 16_384));
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job = jobFor(profile, remotes, base);
+      job.unitPolicy.acceptance.gates = [
+        { id: 'first', requiredOutcome: 'PASS' }, { id: 'later', requiredOutcome: 'PASS' }];
+      const credentials = async () => Object.entries(remotes).map(([storageName, remote]) =>
+        ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
+      const result = await executeJob(job, profile, credentials);
+      expect(result).toMatchObject({ kind: 'validate-stack', outcome: 'FAIL', gateResults: [
+        { gateId: 'first', outcome: 'PASS' }, { gateId: 'later', outcome: 'FAIL' }] });
+      expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(16_384);
+      expect(result.log).toContain('exit=7');
+      expect(result.log).toContain('exit=0');
+      expect(result.log).toContain('yyyyyyyy');
+      expect(result.log.endsWith('exit=7\n')).toBe(true);
+    });
+  }, 30_000); // Three Git fixture runs with composed checks.
+
+  it('omits a supervisor variable outside the command profile environment', async () => {
+    await temporaryWork(async dir => {
+      await mkdir(join(dir, 'scripts'));
+      await writeFile(join(dir, 'scripts/validate.sh'), 'printf "%s" "$SystemRoot"\n');
+      const profile = await loadProfile(await profileIn(dir));
+      const job = { profileDigest: profile.digest, checkerId: profile.checkerId,
+        checkerDigest: profile.checkerDigest, oracleDigest: profile.oracleDigest,
+        toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+        timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes } as Job;
+      const previous = process.env.SystemRoot;
+      try {
+        process.env.SystemRoot = 'synthetic-supervisor-secret';
+        const checked = await pinnedCheck(profile, job, dir);
+        expect(checked.outcome).toBe('PASS');
+        expect(checked.log).toBe('exit=0\n');
+        expect(checked.log).not.toContain('synthetic-supervisor-secret');
+      } finally {
+        if (previous === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = previous;
+      }
+    });
+  });
+
+  it('checks a composed checkout, then records a script failure with an authenticated result', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'repo');
+      const canonical = join(dir, 'canonical.git');
+      const scratch = join(dir, 'scratch.git');
+      await git(dir, ['init', '--quiet', repo]);
+      await git(dir, ['init', '--bare', '--quiet', canonical]);
+      await git(dir, ['init', '--bare', '--quiet', scratch]);
+      await mkdir(join(repo, 'scripts'));
+      await writeFile(join(repo, 'scripts/validate.sh'), 'echo passed\n');
+      await git(repo, ['add', 'scripts/validate.sh']);
+      await git(repo, ['commit', '--quiet', '-m', 'passing'], 30_000, commitEnv);
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const profile = await loadProfile(await profileIn(dir));
+      await verifyLocalProfile(profile);
+      const remotes = { canonical: pathToFileURL(canonical).href, scratch: pathToFileURL(scratch).href };
+      const job = jobFor(profile, remotes, base);
+      const credentials = async () => Object.entries(remotes).map(([storageName, remote]) =>
+        ({ storageName, remote, secret: 'unused', expiresAt: Date.now() + 60_000 }));
+      const passing = await executeJob(job, profile, credentials);
+      expect(passing).toMatchObject({ kind: 'validate-stack', outcome: 'PASS', composedOid: base });
+      expect(passing.log).toContain('exit=0');
+      expect(passing.resultDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+      const inspect = (headOid: string, baseOid: string): Job => ({ ...job, kind: 'inspect-candidate',
+        changeId: 'change', revision: 1, candidate: { changeId: 'change', revision: 1, baseOid,
+          headOid, storageName: 'canonical', ref: 'refs/heads/main' },
+        expectedRefs: { canonical: headOid } }) as Job;
+      expect(await executeJob(inspect(base, base), profile, credentials)).toMatchObject({
+        kind: 'inspect-candidate', outcome: 'PASS', observedHeadOid: base });
+
+      await writeFile(join(repo, 'scripts/validate.sh'), 'echo failed\nexit 7\n');
+      await git(repo, ['add', 'scripts/validate.sh']);
+      await git(repo, ['commit', '--quiet', '-m', 'failing'], 30_000, commitEnv);
+      const failedBase = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', '--quiet', canonical, 'HEAD:refs/heads/main']);
+      const failing = await executeJob({ ...job, canonicalBaseOid: failedBase,
+        expectedRefs: { canonical: failedBase, scratch: base } } as Job, profile, credentials);
+      expect(failing).toMatchObject({ kind: 'validate-stack', outcome: 'FAIL', composedOid: failedBase });
+      expect(failing.log).toContain('exit=7');
+      expect(failing.log).toContain('failed');
+      expect(failing.resultDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+      const failedInspection = await executeJob(inspect(failedBase, base), profile, credentials);
+      expect(failedInspection).toMatchObject({ kind: 'inspect-candidate', outcome: 'FAIL', observedHeadOid: failedBase });
+      expect(failedInspection.log).toContain('exit=7');
+    });
+  }, 15_000);
+
+  it('fails on timeout and keeps only the capped output tail', async () => {
+    await temporaryWork(async dir => {
+      const script = join(dir, 'scripts');
+      await mkdir(script);
+      const profile = await loadProfile(await profileIn(dir, { timeoutSeconds: 1 }));
+      const pin = profile.checkerDigest as Digest;
+      const job = { profileDigest: profile.digest, checkerId: profile.checkerId, checkerDigest: pin,
+        oracleDigest: profile.oracleDigest, toolchainDigest: profile.toolchainDigest,
+        environmentDigest: profile.environmentDigest, timeoutMs: profile.timeoutMs,
+        maxOutputBytes: profile.maxOutputBytes } as Job;
+      await writeFile(join(script, 'validate.sh'), "printf 'DISCARDED-START-" + 'x'.repeat(5000) + "END'\nexit 3\n");
+      const failed = await pinnedCheck(profile, job, dir);
+      expect(failed.outcome).toBe('FAIL');
+      expect(failed.log).toContain('exit=3');
+      expect(failed.log).toContain('END');
+      expect(failed.log).not.toContain('DISCARDED-START');
+      expect(Buffer.byteLength(failed.log)).toBeLessThanOrEqual(4096);
+      const previousLang = process.env.LANG;
+      try {
+        process.env.LANG = 'private-runner-value';
+        await writeFile(join(script, 'validate.sh'), 'printf "%s" "$LANG"\n');
+        const redacted = await pinnedCheck(profile, job, dir);
+        expect(redacted.log).toContain('[redacted]');
+        expect(redacted.log).not.toContain('private-runner-value');
+      } finally {
+        if (previousLang === undefined) delete process.env.LANG;
+        else process.env.LANG = previousLang;
+      }
+      await writeFile(join(script, 'validate.sh'), 'sleep 2\n');
+      const timeout = await pinnedCheck(profile, job, dir);
+      expect(timeout.outcome).toBe('FAIL');
+      expect(timeout.log).toContain('timeout');
+    });
+  }, 10_000);
+
+  it('redacts repeated environment values before the output tail is cut', async () => {
+    await temporaryWork(async dir => {
+      await mkdir(join(dir, 'scripts'));
+      const profile = await loadProfile(await profileIn(dir,
+        { env: [...commandSettings.env, 'UV_CACHE_DIR'] }));
+      const job = { profileDigest: profile.digest, checkerId: profile.checkerId,
+        checkerDigest: profile.checkerDigest, oracleDigest: profile.oracleDigest,
+        toolchainDigest: profile.toolchainDigest, environmentDigest: profile.environmentDigest,
+        timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes } as Job;
+      const secret = 'cache-' + 'Q'.repeat(88) + '-value'; // 100 bytes
+      const previous = process.env.UV_CACHE_DIR;
+      try {
+        process.env.UV_CACHE_DIR = secret;
+        await writeFile(join(dir, 'scripts/validate.sh'),
+          'i=0; while [ "$i" -lt 100 ]; do printf "%s" "$UV_CACHE_DIR"; i=$((i+1)); done\n');
+        const checked = await pinnedCheck(profile, job, dir);
+        expect(checked.outcome).toBe('PASS');
+        expect(checked.log).toContain('[redacted]');
+        expect(Buffer.byteLength(checked.log)).toBeLessThanOrEqual(4096);
+        for (let start = 0; start <= secret.length - 4; start++)
+          expect(checked.log).not.toContain(secret.slice(start, start + 4));
+      } finally {
+        if (previous === undefined) delete process.env.UV_CACHE_DIR;
+        else process.env.UV_CACHE_DIR = previous;
+      }
+    });
+  });
+
+  it('redacts a value split across output chunks before capture', async () => {
+    await temporaryWork(async dir => {
+      const secret = 'split-' + 'R'.repeat(80) + '-value';
+      const script = `process.stdout.write(${JSON.stringify(secret.slice(0, 50))});\n` +
+        `setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(50))}), 30);`;
+      const result = await command(process.execPath, ['-e', script], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(result.code).toBe(0);
+      expect(result.outputTail).toBe('[redacted]');
+    });
+  });
+
+  it('redacts a split value when the other stream writes between its chunks', async () => {
+    for (const stream of ['stdout', 'stderr'] as const) await temporaryWork(async dir => {
+      const other = stream === 'stdout' ? 'stderr' : 'stdout';
+      const secret = 'cache-' + 'Q'.repeat(88) + '-value'; // 100 bytes
+      const script = `process.${stream}.write(${JSON.stringify(secret.repeat(100))});\n` +
+        `setTimeout(() => process.${stream}.write(${JSON.stringify(secret.slice(0, 50))}), 30);\n` +
+        `setTimeout(() => process.${other}.write('!'), 60);\n` +
+        `setTimeout(() => process.${stream}.write(${JSON.stringify(secret.slice(50))}), 90);`;
+      const result = await command(process.execPath, ['-e', script], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(result.code).toBe(0);
+      expect(result.outputTail?.match(/\[redacted\]/g)).toHaveLength(101);
+      expect(result.outputTail).toBe('[redacted]'.repeat(101) + '!');
+      for (let start = 0; start <= secret.length - 4; start++)
+        expect(result.outputTail).not.toContain(secret.slice(start, start + 4));
+    });
+  });
+
+  it('keeps earlier stderr before later stdout at the capped redacted tail boundary', async () => {
+    await temporaryWork(async dir => {
+      const secret = 'private-' + 'Q'.repeat(84) + '-value';
+      const plainScript = "process.stderr.write('B'.repeat(50));\n" +
+        "setTimeout(() => process.stdout.write('A'.repeat(4090)), 30);";
+      const plain = await command(process.execPath, ['-e', plainScript], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(plain.code).toBe(0);
+      expect(plain.outputTail).toBe('B'.repeat(6) + 'A'.repeat(4090));
+
+      const script = `process.stderr.write('B'.repeat(50));\n` +
+        `setTimeout(() => process.stdout.write('A'.repeat(4080) + ${JSON.stringify(secret.slice(0, 50))}), 30);\n` +
+        `setTimeout(() => process.stdout.write(${JSON.stringify(secret.slice(50))} + 'Z'), 60);`;
+      const result = await command(process.execPath, ['-e', script], dir, 2000, childEnvironment(),
+        { outputCap: 4096, tail: true, redact: [secret] });
+      expect(result.code).toBe(0);
+      expect(result.outputTail).toBe('B'.repeat(5) + 'A'.repeat(4080) + '[redacted]Z');
+      expect(Buffer.byteLength(result.outputTail ?? '')).toBe(4096);
+      for (let start = 0; start <= secret.length - 4; start++)
+        expect(result.outputTail).not.toContain(secret.slice(start, start + 4));
+    });
+  });
+
+  it('rejects relative or unpinned executables, job placeholders, and unsafe environment names', async () => {
+    await temporaryWork(async dir => {
+      for (const changes of [
+        { executable: 'sh' },
+        { executable: '/bin/false' },
+        { argv: ['{unit}'] },
+        { env: ['PATH', 'CONCORD_TOKEN'] },
+      ]) await expect(loadProfile(await profileIn(dir, changes))).rejects.toThrow('INVALID_COMMAND_PROFILE');
+      const path = await profileIn(dir);
+      const content = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      delete content.digest;
+      content.checkerDigest = content.toolchainDigest = filePin('wrong binary');
+      await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
+      await expect(loadProfile(path)).rejects.toThrow('UNPINNED_EXECUTABLE');
+    });
+  });
+});
