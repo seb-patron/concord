@@ -64,6 +64,40 @@ A claim requires a ready repository record and a draft or ready change owned by 
 
 If any requested footprint is occupied, **none** of the request's keys are granted. `409 LEASE_CONFLICT` includes the holder ID, holder intent, expiry, conflicting keys, all conflict records, and a next action. The refusal and its intent remain in event history and in the snapshot's recent refusals. `GET /v1/repos/:repoId/leases` returns at most 100 rows per page, with live leases first, followed by historical rows. Follow the opaque `data.nextCursor` with `?cursor=<value>` until it is `null` to reach every lease that remains live until its page is read, then older history. Pages use the immutable creation time and lease ID as a keyset, so releasing a lease already returned does not skip a later live lease or repeat that released row. Historical rows changed after the first page are omitted from that traversal; start a new traversal for the latest history. Each row includes `remainingSeconds`; the page also includes `serverTime` and renewal guidance. `GET /v1/repos/:repoId/snapshot` includes the first lease page and its cursor. `GET /v1/repos/:repoId/events` retains claim, refusal, renewal, expiry, release, and reservation events.
 
+### Wait for a conflicting claim
+
+Set `wait: true` to join a FIFO queue instead of receiving `409 LEASE_CONFLICT`. `waitSeconds` is an integer from 30 through 3600 and defaults to 600. A claim that is free is still granted immediately with `201`. A conflicting claim returns `202` with `data.code: "LEASE_QUEUED"`:
+
+```json
+{
+  "changeId": "change-2",
+  "unitKeys": ["row:families:alpha"],
+  "intentText": "Update alpha",
+  "wait": true,
+  "waitSeconds": 600
+}
+```
+
+```json
+{
+  "data": {
+    "code": "LEASE_QUEUED", "waitId": "8d36c95f-31c1-448e-8486-826f1d71a2f4",
+    "state": "queued", "position": 1, "etaSeconds": 90,
+    "holderId": "agent-a", "intentText": "Fix alpha", "expiresAt": 1791840000000,
+    "keys": ["row:families:alpha"],
+    "conflicts": [{
+      "holderId": "agent-a", "intentText": "Fix alpha", "issueNumber": null,
+      "issueTitle": null, "expiresAt": 1791840000000,
+      "keys": ["row:families:alpha"], "leaseId": "lease-1", "state": "active"
+    }], "queue": []
+  }
+}
+```
+
+The `conflicts` array contains the same active holder records as `LEASE_CONFLICT` when a holder is present. `position` is the largest per-unit queue position among the requested units. `etaSeconds` is an estimate based on holder expiry or the recorded median completed lease duration, whichever is shorter, and is capped by the wait deadline. Queue position and ETA can change as claims finish. At most 64 queued waits per repository and eight per change are accepted; further waits return `429 WAIT_QUEUE_FULL`. A potential hold-and-wait cycle returns `409 LEASE_WAIT_DEADLOCK`.
+
+Poll `GET /v1/repos/:repoId/leases/waits/:waitId` for `queued` with updated position and ETA, `granted` with `leases` and current fences, `expired`, or `cancelled`. Only the change author or repository owner may read or cancel a wait. `DELETE` on the same path cancels a queued wait; send an idempotency key and `{ "expectedVersion": <current repository version> }`. A release, lease expiry, or landing reservation release grants the oldest eligible wait atomically when all its units are free. Earlier waits reserve their queued units against later claims, including claims without `wait`. The event stream records `lease.queued`, `lease.granted_from_queue`, `lease.wait_expired`, and `lease.wait_cancelled`.
+
 ## Renew and release
 
 `POST /v1/repos/:repoId/leases/:leaseId/renew` takes `{ "expectedVersion": 3, "fence": 7, "ttlSeconds": 120 }`. The current holder receives a new fence and expiry computed from server time. Renew near the 40-second guidance; the old fence becomes stale immediately.

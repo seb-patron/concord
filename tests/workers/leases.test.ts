@@ -44,6 +44,18 @@ async function claim(repo: string, actor: string, changeId: string, unitKeys: st
   return fetchApi(mutation(path(repo), { changeId, unitKeys, intentText: `Work by ${actor}`, ...extra }, key, actor));
 }
 
+async function releaseLease(repo: string, actor: string, lease: { leaseId: string; fence: number }, key: string) {
+  const version = (await responseBody(await fetchApi(apiRequest(path(repo), actor)))).version;
+  return fetchApi(mutation(`${path(repo)}/${lease.leaseId}/release`, { expectedVersion: version, fence: lease.fence }, key, actor));
+}
+
+async function cancelLeaseWait(repo: string, actor: string, waitId: string, key: string) {
+  const version = (await responseBody(await fetchApi(apiRequest(path(repo), actor)))).version;
+  return fetchApi(apiRequest(`${path(repo)}/waits/${waitId}`, actor, {
+    method: 'DELETE', headers: { 'idempotency-key': key }, body: JSON.stringify({ expectedVersion: version }),
+  }));
+}
+
 async function listing(repo: string) {
   const response = await fetchApi(apiRequest(path(repo), 'local-viewer'));
   expect(response.status).toBe(200);
@@ -233,6 +245,132 @@ describe('semantic lease identities', () => {
     const ambiguous = structuredClone(policy);
     ambiguous.units['row:other:alpha'] = { canonicalKey: 'row:other:alpha', file: 'data/families.tsv', resources: ['other-alpha'], dependencyKeys: [] };
     expect(() => unitRegistry(ambiguous)).toThrow('UNIT_REGISTRY_INVALID');
+  });
+});
+
+describe('lease wait queue', () => {
+  const alpha = 'row:families:alpha';
+  const beta = 'row:families:beta';
+
+  it('grants FIFO on release, reports position and fences, and prevents barging', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_fifo';
+    const first = (await responseBody(await claim(repo, 'local-agent-a', 'holder', [alpha], 'holder'))).data.leases[0];
+    const w1 = await claim(repo, 'local-agent-b', 'wait-one', [alpha], 'wait-one', { wait: true });
+    const w2 = await claim(repo, 'local-agent-c', 'wait-two', [alpha], 'wait-two', { wait: true });
+    expect(w1.status).toBe(202);
+    expect(w2.status).toBe(202);
+    const one = (await responseBody(w1)).data;
+    const two = (await responseBody(w2)).data;
+    expect(one).toMatchObject({ code: 'LEASE_QUEUED', position: 1, holderId: 'agent-a', keys: [alpha] });
+    expect(two.position).toBe(2);
+    const late = await claim(repo, 'local-agent-c', 'late', [alpha], 'late');
+    expect(late.status).toBe(409);
+    expect((await responseBody(late)).error.details.queue[0].waitId).toBe(one.waitId);
+    expect((await releaseLease(repo, 'local-agent-a', first, 'release-first')).status).toBe(200);
+    const granted = (await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${one.waitId}`, 'local-agent-b')))).data;
+    expect(granted).toMatchObject({ state: 'granted', leases: [{ unitKey: alpha, holderId: 'agent-b', fence: 2 }] });
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${two.waitId}`, 'local-agent-c')))).data.position).toBe(1);
+    expect((await releaseLease(repo, 'local-agent-b', granted.leases[0], 'release-second')).status).toBe(200);
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${two.waitId}`, 'local-agent-c')))).data)
+      .toMatchObject({ state: 'granted', leases: [{ unitKey: alpha, holderId: 'agent-c', fence: 3 }] });
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repo}/events`, 'local-owner')))).data.items;
+    expect(events.filter((event: Event) => event.kind === 'lease.queued')).toHaveLength(2);
+    expect(events.filter((event: Event) => event.kind === 'lease.granted_from_queue')).toHaveLength(2);
+  });
+
+  it('waits for every unit, then grants atomically', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_multi';
+    const first = (await responseBody(await claim(repo, 'local-agent-a', 'hold-a', [alpha], 'hold-a'))).data.leases[0];
+    const second = (await responseBody(await claim(repo, 'local-agent-c', 'hold-b', [beta], 'hold-b'))).data.leases[0];
+    const wait = (await responseBody(await claim(repo, 'local-agent-b', 'both', [alpha, beta], 'both', { wait: true }))).data;
+    expect((await releaseLease(repo, 'local-agent-a', first, 'release-a')).status).toBe(200);
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${wait.waitId}`, 'local-agent-b')))).data.state).toBe('queued');
+    expect((await claim(repo, 'local-agent-a', 'barge', [alpha], 'barge')).status).toBe(409);
+    expect((await releaseLease(repo, 'local-agent-c', second, 'release-b')).status).toBe(200);
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${wait.waitId}`, 'local-agent-b')))).data.leases)
+      .toMatchObject([{ unitKey: alpha, fence: 2 }, { unitKey: beta, fence: 2 }]);
+  });
+
+  it('cancels only for author or owner and expires waits', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_cancel';
+    await claim(repo, 'local-agent-a', 'holder', [alpha], 'holder');
+    const wait = (await responseBody(await claim(repo, 'local-agent-b', 'waiting', [alpha], 'waiting', { wait: true, waitSeconds: 30 }))).data;
+    expect((await fetchApi(apiRequest(`${path(repo)}/waits/${wait.waitId}`, 'local-agent-c'))).status).toBe(403);
+    expect((await fetchApi(apiRequest(`${path(repo)}/waits/${wait.waitId}`, 'local-owner'))).status).toBe(200);
+    expect((await cancelLeaseWait(repo, 'local-agent-c', wait.waitId, 'bad-cancel')).status).toBe(403);
+    expect((await cancelLeaseWait(repo, 'local-agent-b', wait.waitId, 'cancel')).status).toBe(200);
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${wait.waitId}`, 'local-agent-b')))).data.state).toBe('cancelled');
+    const expiring = (await responseBody(await claim(repo, 'local-agent-b', 'expiring', [alpha], 'expiring', { wait: true, waitSeconds: 30 }))).data;
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const context = contextFor(state, repo, 'agent-b', () => Date.now() + 31_000);
+      leases.onAlarm(context);
+    });
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${expiring.waitId}`, 'local-agent-b')))).data.state).toBe('expired');
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repo}/events`, 'local-owner')))).data.items;
+    expect(events.map((event: Event) => event.kind)).toContain('lease.wait_cancelled');
+    expect(events.map((event: Event) => event.kind)).toContain('lease.wait_expired');
+  });
+
+  it('grants after holder expiry and enforces per-change cap', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_expire';
+    await claim(repo, 'local-agent-a', 'holder', [alpha], 'holder', { ttlSeconds: 1 });
+    const waits = [];
+    for (let index = 0; index < 8; index++) {
+      const result = await claim(repo, 'local-agent-b', 'waiting', [alpha], `wait-${index}`, { wait: true });
+      expect(result.status).toBe(202);
+      waits.push((await responseBody(result)).data);
+    }
+    const full = await claim(repo, 'local-agent-b', 'waiting', [alpha], 'wait-over-cap', { wait: true });
+    expect(full.status).toBe(429);
+    expect((await responseBody(full)).error.code).toBe('WAIT_QUEUE_FULL');
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const context = contextFor(state, repo, 'agent-a', () => Date.now() + 2_000);
+      leases.onAlarm(context);
+    });
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${waits[0].waitId}`, 'local-agent-b')))).data)
+      .toMatchObject({ state: 'granted', leases: [{ fence: 2 }] });
+  });
+
+  it('limits queued waits to 64 per repository', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_repo_cap';
+    await claim(repo, 'local-agent-a', 'holder', [alpha], 'holder');
+    for (let index = 0; index < 64; index++) {
+      const response = await claim(repo, 'local-agent-b', `change-${index}`, [alpha], `wait-${index}`, { wait: true });
+      expect(response.status).toBe(202);
+    }
+    const full = await claim(repo, 'local-agent-c', 'overflow', [alpha], 'overflow', { wait: true });
+    expect(full.status).toBe(429);
+    expect((await responseBody(full)).error.code).toBe('WAIT_QUEUE_FULL');
+  });
+
+  it('refuses a direct hold-and-wait cycle', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_cycle';
+    await claim(repo, 'local-agent-a', 'change-a', [alpha], 'hold-a');
+    await claim(repo, 'local-agent-b', 'change-b', [beta], 'hold-b');
+    expect((await claim(repo, 'local-agent-a', 'change-a', [beta], 'wait-a', { wait: true })).status).toBe(202);
+    const cycle = await claim(repo, 'local-agent-b', 'change-b', [alpha], 'wait-b', { wait: true });
+    expect(cycle.status).toBe(409);
+    expect((await responseBody(cycle)).error.code).toBe('LEASE_WAIT_DEADLOCK');
+  });
+
+  it('refuses a transitive hold-and-wait cycle', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_long_cycle';
+    const gamma = 'declaration:callee_alpha';
+    await claim(repo, 'local-agent-a', 'change-a', [alpha], 'hold-a');
+    await claim(repo, 'local-agent-b', 'change-b', [beta], 'hold-b');
+    await claim(repo, 'local-agent-c', 'change-c', [gamma], 'hold-c');
+    expect((await claim(repo, 'local-agent-a', 'change-a', [beta], 'wait-a', { wait: true })).status).toBe(202);
+    expect((await claim(repo, 'local-agent-b', 'change-b', [gamma], 'wait-b', { wait: true })).status).toBe(202);
+    const cycle = await claim(repo, 'local-agent-c', 'change-c', [alpha], 'wait-c', { wait: true });
+    expect(cycle.status).toBe(409);
+    expect((await responseBody(cycle)).error.code).toBe('LEASE_WAIT_DEADLOCK');
   });
 });
 
