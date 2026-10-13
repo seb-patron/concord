@@ -233,13 +233,25 @@ async function repoDetail(context: ModuleContext): Promise<Response> {
   return respond(context, repo, repo.status === 'provisioning' ? 202 : 200);
 }
 
+function declaredUnitKeys(raw: unknown): string[] {
+  // ids() has a generic 128-item limit. Report the unit policy cap first for
+  // valid, distinct keys so large requests receive the same actionable error.
+  if (Array.isArray(raw) && raw.length > MAX_NORMALIZED_UNITS &&
+    raw.every(key => typeof key === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(key)) &&
+    new Set(raw).size === raw.length) {
+    fail(422, 'INVALID_UNITS', unitsOverCapMessage(raw.length));
+  }
+  const unitKeys = ids(raw, 'unitKeys');
+  if (unitKeys.length > MAX_NORMALIZED_UNITS) fail(422, 'INVALID_UNITS', unitsOverCapMessage(unitKeys.length));
+  return unitKeys;
+}
+
 function changeInput(body: CreateChangeBody) {
   const intentKey = text(body.intentKey, 'intentKey', 128);
   const intentText = text(body.intentText, 'intentText');
   const baseOid = body.baseOid === null ? null : oid(body.baseOid);
   const ref = branch(body.branch);
-  const unitKeys = ids(body.unitKeys, 'unitKeys');
-  if (unitKeys.length > MAX_NORMALIZED_UNITS) fail(422, 'INVALID_UNITS', unitsOverCapMessage(unitKeys.length));
+  const unitKeys = declaredUnitKeys(body.unitKeys);
   const dependencyChangeIds = ids(body.dependencyChangeIds, 'dependencyChangeIds');
   const attempt = body.attempt === undefined ? 1 : body.attempt;
   if (body.issueNumber !== undefined && (!Number.isSafeInteger(body.issueNumber) || body.issueNumber < 1)) fail(400, 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer');
@@ -442,8 +454,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   const baseOid = body.baseOid === null ? null : oid(body.baseOid);
   const headOid = oid(body.headOid);
   const ref = branch(body.branch);
-  const unitKeys = ids(body.unitKeys, 'unitKeys');
-  if (unitKeys.length > MAX_NORMALIZED_UNITS) fail(422, 'INVALID_UNITS', unitsOverCapMessage(unitKeys.length));
+  const unitKeys = declaredUnitKeys(body.unitKeys);
   if (!body.leaseFences || typeof body.leaseFences !== 'object' || Array.isArray(body.leaseFences)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must be a map');
   const leaseFences = body.leaseFences as Record<string, unknown>;
   if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');

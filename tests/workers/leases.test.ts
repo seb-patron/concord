@@ -237,6 +237,49 @@ describe('semantic lease identities', () => {
 });
 
 describe('RepoCoordinator lease routes', () => {
+  it('reports the unit cap for 129 distinct keys on change creation and publication', async () => {
+    setupPolicy();
+    const repo = 'unit_cap_129';
+    const createdRepo = await fetchApi(mutation('/v1/repos', {
+      name: repo, policyId: 'local-demo', profileId: 'local-demo',
+    }, 'create-unit-cap-repo'));
+    expect(createdRepo.status).toBe(201);
+    const unitKeys = Array.from({ length: 129 }, (_, index) => `file:tests/unit-${index}.ts`);
+    const base = { intentKey: 'unit-cap', intentText: 'Check unit cap', baseOid: null,
+      branch: 'refs/heads/unit-cap', dependencyChangeIds: [] };
+    const overCapCreate = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys }, 'create-over-cap'));
+    expect(overCapCreate.status).toBe(422);
+    expect((await responseBody(overCapCreate)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '129 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+
+    const draft = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys: [] }, 'create-draft'));
+    expect(draft.status).toBe(201);
+    const draftBody = await responseBody(draft);
+    const changeId = draftBody.data.changeId as string;
+    const overCapPublish = await fetchApi(mutation(`/v1/repos/${repo}/changes/${changeId}/publish`, {
+      expectedVersion: draftBody.version, baseOid: null, headOid: 'a'.repeat(40),
+      branch: base.branch, unitKeys, leaseFences: {},
+    }, 'publish-over-cap'));
+    expect(overCapPublish.status).toBe(422);
+    expect((await responseBody(overCapPublish)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '129 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+  });
+
+  it('accepts 65 raw claim keys when a duplicate leaves 64 normalized units', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const keys = Array.from({ length: 64 }, (_, index) => `file:tests/claim-${index}.ts`);
+    const response = await claim('lease_raw_duplicate', 'local-agent-a', 'draft', [...keys, keys[0]], 'claim-duplicate');
+    expect(response.status).toBe(201);
+    expect((await responseBody(response)).data.leases).toHaveLength(64);
+  });
+
   it('claims 64 units, detects a shared unit in another 64-unit request, and keeps the 128-live-lease cap', async () => {
     policy.newFilePrefixes = ['tests/'];
     setupPolicy();

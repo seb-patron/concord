@@ -9,6 +9,7 @@ import { ConcordError } from '../../cli/client.ts';
 import { patchId } from '../../cli/git.ts';
 import { readAwRun } from '../../cli/aw-run.ts';
 import { withoutNodeDeprecationWarnings } from '../helpers.ts';
+import { tools } from '../../mcp/tools.ts';
 
 const execFile = promisify(callback);
 const dirs: string[] = [];
@@ -33,6 +34,13 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
+  it('advertises lease claims by normalized count rather than raw array length', () => {
+    const claim = tools.find(tool => tool.name === 'lease_claim');
+    expect(claim?.inputSchema.properties?.unitKeys).toEqual({ type: 'array', items: { type: 'string' } });
+    expect(tools.find(tool => tool.name === 'change_create')?.inputSchema.properties?.unitKeys)
+      .toMatchObject({ maxItems: 64 });
+  });
+
   it('derives an exact new file unit from an Allowed-files list under an approved prefix', async () => {
     const dir = await temp(); await git(dir, 'init', '-q');
     await writeFile(join(dir, 'first.txt'), 'base\n');
