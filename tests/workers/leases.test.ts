@@ -293,6 +293,46 @@ describe('lease wait queue', () => {
       .toMatchObject([{ unitKey: alpha, fence: 2 }, { unitKey: beta, fence: 2 }]);
   });
 
+  it('cancels closed and no longer owned waits before granting the next claimant', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_stale_change';
+    const held = (await responseBody(await claim(repo, 'local-agent-a', 'holder', [alpha], 'holder'))).data.leases[0];
+    const closed = (await responseBody(await claim(repo, 'local-agent-b', 'closed', [alpha], 'closed', { wait: true }))).data;
+    const reassigned = (await responseBody(await claim(repo, 'local-agent-c', 'reassigned', [alpha], 'reassigned', { wait: true }))).data;
+    const next = (await responseBody(await claim(repo, 'local-agent-b', 'next', [alpha], 'next', { wait: true }))).data;
+    await runInDurableObject(stubFor(repo), async (_instance, state) => {
+      const store = sqlState(state.storage.sql);
+      for (const [changeId, update] of [['closed', { status: 'closed' }], ['reassigned', { authorId: 'agent-a' }]] as const) {
+        const change = store.get<Change>(`module:repos:change:${changeId}`)!;
+        store.put(`module:repos:change:${changeId}`, { ...change, ...update });
+      }
+    });
+    expect((await releaseLease(repo, 'local-agent-a', held, 'release-stale')).status).toBe(200);
+    for (const [wait, actor] of [[closed, 'local-agent-b'], [reassigned, 'local-agent-c']] as const) {
+      expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${wait.waitId}`, actor)))).data.state).toBe('cancelled');
+    }
+    const granted = (await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${next.waitId}`, 'local-agent-b')))).data;
+    expect(granted).toMatchObject({ state: 'granted', leases: [{ holderId: 'agent-b', unitKey: alpha, fence: 2 }] });
+    const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repo}/events`, 'local-owner')))).data.items as Event[];
+    expect(events.filter(event => event.kind === 'lease.wait_cancelled').map(event => event.payload))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ waitId: closed.waitId, reason: 'change_not_open' }),
+        expect.objectContaining({ waitId: reassigned.waitId, reason: 'change_not_open' }),
+      ]));
+  });
+
+  it('derives ETA through an earlier multi-unit wait', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_eta_chain';
+    await claim(repo, 'local-agent-a', 'holder', [beta], 'holder');
+    const first = (await responseBody(await claim(repo, 'local-agent-b', 'first', [alpha, beta], 'first', { wait: true }))).data;
+    const second = (await responseBody(await claim(repo, 'local-agent-c', 'second', [alpha], 'second', { wait: true }))).data;
+    expect(first.etaSeconds).toBeGreaterThan(0);
+    expect(second.etaSeconds).toBeGreaterThan(0);
+    const polled = (await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${second.waitId}`, 'local-agent-c')))).data;
+    expect(polled.etaSeconds).toBeGreaterThan(0);
+  });
+
   it('cancels only for author or owner and expires waits', async () => {
     setupPolicy();
     const repo = 'lease_wait_cancel';
@@ -357,6 +397,20 @@ describe('lease wait queue', () => {
     const cycle = await claim(repo, 'local-agent-b', 'change-b', [alpha], 'wait-b', { wait: true });
     expect(cycle.status).toBe(409);
     expect((await responseBody(cycle)).error.code).toBe('LEASE_WAIT_DEADLOCK');
+  });
+
+  it('refuses a cycle through an older wait for an unheld unit', async () => {
+    setupPolicy();
+    const repo = 'lease_wait_fifo_cycle';
+    const gamma = 'declaration:callee_alpha';
+    await claim(repo, 'local-agent-a', 'change-a', [alpha], 'hold-a');
+    await claim(repo, 'local-agent-b', 'change-b', [beta], 'hold-b');
+    expect((await claim(repo, 'local-agent-a', 'change-a', [beta, gamma], 'wait-a', { wait: true })).status).toBe(202);
+    const cycle = await claim(repo, 'local-agent-b', 'change-b', [gamma], 'wait-b', { wait: true });
+    expect(cycle.status).toBe(409);
+    expect((await responseBody(cycle)).error).toMatchObject({
+      code: 'LEASE_WAIT_DEADLOCK', details: { cycle: ['change-b', 'change-a', 'change-b'] },
+    });
   });
 
   it('refuses a transitive hold-and-wait cycle', async () => {

@@ -100,26 +100,39 @@ function intersects(a: readonly UnitIdentity[], b: readonly UnitIdentity[]): boo
   return a.some(left => b.some(right => overlaps(left, right)));
 }
 
-function wouldDeadlock(registry: Map<string, UnitIdentity>, current: LeaseRow[], waits: WaitRow[],
-  changeId: string, units: UnitIdentity[]): boolean {
+function deadlockCycle(registry: Map<string, UnitIdentity>, current: LeaseRow[], waits: WaitRow[],
+  changeId: string, units: UnitIdentity[]): string[] | null {
   const dependencies = new Map<string, Set<string>>();
+  const older: Array<{ changeId: string; units: UnitIdentity[] }> = [];
   for (const wait of waits) {
     const targets = dependencies.get(wait.change_id) ?? new Set<string>();
+    const waitingUnits = waitUnits(registry, wait);
     for (const lease of current) {
-      if (intersects(waitUnits(registry, wait), [resolveUnit(registry, lease.unit_key)])) targets.add(lease.change_id);
+      if (intersects(waitingUnits, [resolveUnit(registry, lease.unit_key)])) targets.add(lease.change_id);
     }
+    for (const earlier of older) if (earlier.changeId !== wait.change_id && intersects(waitingUnits, earlier.units)) targets.add(earlier.changeId);
     dependencies.set(wait.change_id, targets);
+    older.push({ changeId: wait.change_id, units: waitingUnits });
   }
   const newTargets = new Set(current.filter(lease => intersects(units, [resolveUnit(registry, lease.unit_key)]))
     .map(lease => lease.change_id));
+  for (const earlier of older) if (earlier.changeId !== changeId && intersects(units, earlier.units)) newTargets.add(earlier.changeId);
   const visited = new Set<string>();
-  const reachesRequester = (node: string): boolean => {
-    if (node === changeId) return true;
-    if (visited.has(node)) return false;
+  const pathToRequester = (node: string): string[] | null => {
+    if (node === changeId) return [node];
+    if (visited.has(node)) return null;
     visited.add(node);
-    return [...(dependencies.get(node) ?? [])].some(reachesRequester);
+    for (const next of dependencies.get(node) ?? []) {
+      const path = pathToRequester(next);
+      if (path) return [node, ...path];
+    }
+    return null;
   };
-  return [...newTargets].some(reachesRequester);
+  for (const target of newTargets) {
+    const path = pathToRequester(target);
+    if (path) return [changeId, ...path];
+  }
+  return null;
 }
 
 function grant(context: ModuleContext, units: UnitIdentity[], changeId: string, holderId: string,
@@ -160,6 +173,14 @@ function grantWaits(context: ModuleContext, now: number): void {
   const blocked: UnitIdentity[][] = [];
   const live = activeRows(context, now);
   for (const wait of pending) {
+    const change = context.readChange?.(wait.change_id);
+    if (change?.status !== 'eligible' || change.value.authorId !== wait.requester_id ||
+      !['draft', 'ready'].includes(change.value.status)) {
+      context.sql.exec("UPDATE leases_waits SET state = 'cancelled' WHERE wait_id = ?", wait.wait_id);
+      context.appendEvent('lease.wait_cancelled', [wait.wait_id, wait.change_id],
+        { waitId: wait.wait_id, changeId: wait.change_id, reason: 'change_not_open' }, context.nextVersion());
+      continue;
+    }
     const units = waitUnits(registry, wait);
     const occupied = live.some(row => intersects(units, [resolveUnit(registry, row.unit_key)]));
     if (occupied || blocked.some(older => intersects(units, older)) || live.length + units.length > MAX_LIVE_LEASES) {
@@ -180,15 +201,21 @@ function waitPosition(context: ModuleContext, wait: WaitRow, registry: Map<strin
   return Math.max(1, ...units.map(unit => earlier.filter(item => intersects([unit], waitUnits(registry, item))).length));
 }
 
-function waitEta(context: ModuleContext, wait: WaitRow, registry: Map<string, UnitIdentity>, now: number): number {
-  const units = waitUnits(registry, wait);
-  const holders = activeRows(context, now).filter(row => intersects(units, [resolveUnit(registry, row.unit_key)]));
-  const completed = rows(context, "SELECT * FROM leases_claims WHERE state IN ('released','expired') ORDER BY updated_at DESC LIMIT 63")
-    .map(row => Math.max(1, Math.ceil((row.updated_at - row.created_at) / 1000))).sort((a, b) => a - b);
-  const median = completed.length ? completed[Math.floor(completed.length / 2)] : null;
-  const holderEta = holders.length ? Math.max(...holders.map(row => Math.max(0, Math.ceil((row.expires_at - now) / 1000)))) : 0;
-  const interval = median === null ? holderEta : Math.min(holderEta || median, median);
-  return Math.min(Math.max(0, Math.ceil((wait.expires_at - now) / 1000)), interval * waitPosition(context, wait, registry));
+function waitEta(context: ModuleContext, wait: WaitRow, registry: Map<string, UnitIdentity>, now: number): number | null {
+  const live = activeRows(context, now).map(row => ({ unit: resolveUnit(registry, row.unit_key),
+    eta: Math.max(1, Math.ceil((row.expires_at - now) / 1000)) }));
+  const earlier: Array<{ units: UnitIdentity[]; eta: number | null }> = [];
+  for (const item of queued(context).filter(row => row.ordinal <= wait.ordinal)) {
+    const units = waitUnits(registry, item);
+    const blockers = units.flatMap(unit => [
+      ...live.filter(holder => intersects([unit], [holder.unit])).map(holder => holder.eta),
+      ...earlier.filter(prior => intersects([unit], prior.units)).map(prior => prior.eta),
+    ]);
+    const eta = blockers.length && blockers.every(value => value !== null)
+      ? Math.min(Math.max(1, Math.ceil((item.expires_at - now) / 1000)), Math.max(...blockers as number[])) : null;
+    earlier.push({ units, eta });
+  }
+  return earlier.at(-1)?.eta ?? null;
 }
 
 function waitStatus(context: ModuleContext, wait: WaitRow): Record<string, unknown> {
@@ -276,8 +303,9 @@ function claim(context: ModuleContext, body: unknown): Response {
         if (waits.length >= MAX_WAITS || waits.filter(item => item.change_id === input.changeId).length >= MAX_CHANGE_WAITS) {
           return failure(new HttpError(429, 'WAIT_QUEUE_FULL', 'Lease wait queue is full'));
         }
-        if (wouldDeadlock(registry, current, waits, input.changeId as string, units)) {
-          return failure(new HttpError(409, 'LEASE_WAIT_DEADLOCK', 'Waiting would create a lease dependency cycle'));
+        const cycle = deadlockCycle(registry, current, waits, input.changeId as string, units);
+        if (cycle) {
+          return failure(new HttpError(409, 'LEASE_WAIT_DEADLOCK', 'Waiting would create a lease dependency cycle', { cycle }));
         }
         const waitId = crypto.randomUUID();
         context.sql.exec('INSERT INTO leases_waits(wait_id, change_id, requester_id, intent_text, unit_keys, ttl_seconds, expires_at, state, leases, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
