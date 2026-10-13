@@ -438,12 +438,10 @@ describe('land input and evidence gates', () => {
 
 // A real bridge, Worker, and separate runner verify the orchestration route.
 // The runner is pumped once per observed job; land never executes it itself.
-import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { digest } from '../../src/http.ts';
-import { localEnvironment } from '../../runner/profiles.ts';
 import { wranglerStateDir } from '../../demo/scenarios.ts';
 
 const services: ChildProcess[] = [];
@@ -491,11 +489,11 @@ it('lands a generic agent commit through a separate checker, reviewer, queue, an
   const secret = 'local-bridge-land-fixture';
   const environment = { ...process.env, TMPDIR: dir, XDG_CONFIG_HOME: dir, CONCORD_RUN_DIR: dir,
     CONCORD_URL: url, CONCORD_SHOW_DECOMPILED_C: '0' };
-  const binary = `sha256:${createHash('sha256').update(await readFile('/bin/sh')).digest('hex')}`;
   const settings = { executable: '/bin/sh', argv: ['check.sh'], cwd: 'repo' as const, timeoutSeconds: 3,
     env: ['PATH', 'TMPDIR', 'LANG'], outputCap: 4096 };
+  const binary = await digest(settings);
   const profileInput = { id: 'generic-land', kind: 'command', checkerId: 'generic-land', checkerDigest: binary,
-    toolchainDigest: binary, oracleDigest: await digest(settings), environmentDigest: await digest(localEnvironment()),
+    toolchainDigest: binary, oracleDigest: binary, environmentDigest: binary,
     timeoutMs: 10_000, maxOutputBytes: 4096, toolchainFile: '/bin/sh', ...settings };
   const profile = { ...profileInput, digest: await digest(profileInput) };
   const profilePath = join(dir, 'profile.json'); await writeFile(profilePath, JSON.stringify(profile));

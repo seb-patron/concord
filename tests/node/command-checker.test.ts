@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -7,7 +7,7 @@ import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
 import { childEnvironment, command, git, temporaryWork } from '../../runner/git';
 import { executeJob } from '../../runner/execute';
-import { loadProfile, localEnvironment, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
+import { loadProfile, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
 
 const executable = '/bin/sh';
 const commandSettings = { executable, argv: ['scripts/validate.sh'], cwd: 'repo' as const,
@@ -17,12 +17,12 @@ const commitEnv = childEnvironment({ GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 
   GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' });
 
 async function profileIn(dir: string, changes: Record<string, unknown> = {}, maxOutputBytes = 4096) {
-  const binaryPin = filePin(await readFile(executable));
   const settings = { ...commandSettings, ...changes };
+  const pin = await digest(settings);
   const content = { id: 'command-demo', kind: 'command', checkerId: 'command-demo',
-    checkerDigest: binaryPin, toolchainDigest: binaryPin, oracleDigest: await digest(settings),
-    environmentDigest: await digest(localEnvironment()), timeoutMs: 5_000, maxOutputBytes,
-    toolchainFile: executable, ...settings };
+    checkerDigest: pin, toolchainDigest: pin, oracleDigest: pin,
+    environmentDigest: pin, timeoutMs: 5_000, maxOutputBytes,
+    toolchainFile: settings.executable, ...settings };
   const path = join(dir, 'profile.json');
   await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
   return path;
@@ -48,6 +48,12 @@ describe('pinned command checker', () => {
     await temporaryWork(async dir => {
       await expect(loadProfile(await profileIn(dir, { outputCap: 4095 }))).rejects.toThrow('INVALID_COMMAND_PROFILE');
       expect((await loadProfile(await profileIn(dir, { outputCap: 4096 }))).outputCap).toBe(4096);
+      const path = await profileIn(dir);
+      const content = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      content.timeoutMs = 35 * 60_000 + 1;
+      delete content.digest;
+      await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_PROFILE: timeoutMs');
     });
   });
 
@@ -73,6 +79,7 @@ describe('pinned command checker', () => {
       job.unitPolicy.acceptance.gates = Array.from({ length: 5 }, (_, index) =>
         ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
       const passing = await executeJob(job, profile, credentials);
+      expect(passing.log).toMatch(/^host=.+ exe_sha256=sha256:[a-f0-9]{64}\n/);
       expect(passing).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
       expect(passing.log.match(/exit=0\n/g)).toHaveLength(5);
       expect(Buffer.byteLength(passing.log)).toBeLessThanOrEqual(4096);
@@ -132,7 +139,7 @@ describe('pinned command checker', () => {
         process.env.SystemRoot = 'synthetic-supervisor-secret';
         const checked = await pinnedCheck(profile, job, dir);
         expect(checked.outcome).toBe('PASS');
-        expect(checked.log).toBe('exit=0\n');
+        expect(checked.log).toMatch(/^host=.+ exe_sha256=sha256:[a-f0-9]{64}\nexit=0\n$/);
         expect(checked.log).not.toContain('synthetic-supervisor-secret');
       } finally {
         if (previous === undefined) delete process.env.SystemRoot;
@@ -309,16 +316,75 @@ describe('pinned command checker', () => {
     await temporaryWork(async dir => {
       for (const changes of [
         { executable: 'sh' },
-        { executable: '/bin/false' },
         { argv: ['{unit}'] },
         { env: ['PATH', 'CONCORD_TOKEN'] },
       ]) await expect(loadProfile(await profileIn(dir, changes))).rejects.toThrow('INVALID_COMMAND_PROFILE');
+      const missing = join(dir, 'missing');
+      await expect(loadProfile(await profileIn(dir, { executable: missing }))).rejects.toThrow('ENV_ERROR');
+      const nonExecutable = join(dir, 'not-executable');
+      await writeFile(nonExecutable, 'echo no');
+      await chmod(nonExecutable, 0o644);
+      await expect(loadProfile(await profileIn(dir, { executable: nonExecutable }))).rejects.toThrow('ENV_ERROR');
       const path = await profileIn(dir);
       const content = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      const tampered: Record<string, unknown> = { ...content, argv: ['different.sh'] };
+      delete tampered.digest;
+      await writeFile(path, JSON.stringify({ ...tampered, digest: await digest(tampered) }));
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
+      const changedEnv: Record<string, unknown> = { ...content, env: ['PATH', 'LANG'] };
+      delete changedEnv.digest;
+      await writeFile(path, JSON.stringify({ ...changedEnv, digest: await digest(changedEnv) }));
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
       delete content.digest;
       content.checkerDigest = content.toolchainDigest = filePin('wrong binary');
       await writeFile(path, JSON.stringify({ ...content, digest: await digest(content) }));
-      await expect(loadProfile(path)).rejects.toThrow('UNPINNED_EXECUTABLE');
+      await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
+    });
+  });
+
+  it('generates a loadable command profile from a config file', async () => {
+    await temporaryWork(async dir => {
+      const config = join(dir, 'config.json');
+      const output = join(dir, 'generated.json');
+      await writeFile(config, JSON.stringify({ id: 'command-demo', checkerId: 'command-demo',
+        timeoutMs: 5000, maxOutputBytes: 4096, ...commandSettings }));
+      const result = await command(process.execPath, ['--import', 'tsx', 'runner/main.ts', 'profile',
+        '--command-config', config, '--out', output], process.cwd(), 10_000, childEnvironment());
+      expect(result.code).toBe(0);
+      const profile = await loadProfile(output);
+      expect(result.stdout.trim()).toBe(profile.digest);
+      expect(profile.checkerDigest).toBe(await digest(commandSettings));
+    });
+  });
+
+  it('keeps config and job pins across different executable bytes and simulated hosts', async () => {
+    await temporaryWork(async dir => {
+      const binary = join(dir, 'shell');
+      const original = await readFile(executable);
+      await writeFile(binary, Buffer.concat([original, Buffer.from('host-one')]));
+      await chmod(binary, 0o755);
+      const path = await profileIn(dir, { executable: binary });
+      const first = await loadProfile(path);
+      const firstJob = jobFor(first, {}, 'a'.repeat(40));
+      await writeFile(binary, Buffer.concat([original, Buffer.from('host-two')]));
+      await chmod(binary, 0o755);
+      const arch = Object.getOwnPropertyDescriptor(process, 'arch')!;
+      const version = Object.getOwnPropertyDescriptor(process, 'version')!;
+      try {
+        Object.defineProperty(process, 'arch', { configurable: true, value: 'simulated-arch' });
+        Object.defineProperty(process, 'version', { configurable: true, value: 'v99.0.0' });
+        const second = await loadProfile(path);
+        await verifyLocalProfile(second);
+        const secondJob = jobFor(second, {}, 'a'.repeat(40));
+        expect(second.digest).toBe(first.digest);
+        expect(secondJob.profileDigest).toBe(firstJob.profileDigest);
+        expect(secondJob.inputDigest).toBe(firstJob.inputDigest);
+        expect(secondJob.checkerDigest).toBe(firstJob.checkerDigest);
+        expect(secondJob.environmentDigest).toBe(firstJob.environmentDigest);
+      } finally {
+        Object.defineProperty(process, 'arch', arch);
+        Object.defineProperty(process, 'version', version);
+      }
     });
   });
 });
