@@ -7,7 +7,7 @@ import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
-import { createTracker } from './tracker.js';
+import { appendObservedEvents, createTracker } from './tracker.js';
 
 const $ = id => document.getElementById(id);
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
@@ -172,7 +172,7 @@ function acceptSnapshot(body, repoId) {
   return true;
 }
 async function refreshVerdicts(gen = state.generation) {
-  const ids = new Set(changes().filter(c => ['ready', 'queued'].includes(c?.status)).map(c => c.changeId));
+  const ids = new Set(changes().filter(c => ['ready', 'queued', 'checking'].includes(c?.status)).map(c => c.changeId));
   if (state.selected) ids.add(state.selected);
   if (state.inboxSelected) {
     const item = deriveInbox(state.snapshot).find(i => i.id === state.inboxSelected);
@@ -218,7 +218,7 @@ async function poll(gen = state.generation) {
       if (items.length === 0) break;
       const last = items.at(-1)?.sequence;
       if (!Number.isSafeInteger(last) || last <= state.seq) break;
-      state.events.push(...items); state.events = state.events.slice(-2000); state.seq = last;
+      state.events = appendObservedEvents(state.events, items); state.seq = last;
       if (last >= (page.eventSeq ?? last)) break;
     }
     if (page?.version > state.version) {

@@ -17,8 +17,14 @@ const el = (tag, value, className) => {
 const live = (lease, now) => ['active', 'reserved'].includes(lease?.state) && lease.expiresAt > now;
 const time = value => Number.isFinite(value) ? new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—';
 const today = (value, now) => Number.isFinite(value) && new Date(value).toDateString() === new Date(now).toDateString();
-const eventIssue = (event, number, changeIds) => arr(event.relatedIds).some(id => id === String(number) || changeIds.includes(id));
+const eventIssue = (event, number, changeIds, verdictIds) => arr(event.relatedIds).some(id =>
+  id === String(number) || changeIds.includes(id) || verdictIds.includes(id));
 const matches = (event, kinds) => kinds.includes(event.kind);
+
+/** Keep the evidence used by daily counts and issue timelines across event pages. */
+export function appendObservedEvents(events, page) {
+  return [...events, ...arr(page)];
+}
 
 /** Pure tracker projection. Unknown event kinds never count as completed work. */
 export function trackerModel(snapshot, events = [], identity = null, milestoneId = '', now = Date.now(), principals = [], verdicts = {}) {
@@ -30,24 +36,30 @@ export function trackerModel(snapshot, events = [], identity = null, milestoneId
   const entries = arr(p.queue?.entries);
   const selectedMilestone = milestoneId === '*' ? '*' : milestoneId || milestones.find(item => item.state === 'open')?.milestoneId || milestones[0]?.milestoneId || '*';
   const inMilestone = issue => selectedMilestone === '*' || issue.milestoneId === selectedMilestone;
-  const cards = issues.filter(issue => inMilestone(issue) && !arr(issue.labels).includes('friction')).map(issue => {
+  const cards = issues.filter(issue => inMilestone(issue) && !arr(issue.labels).includes('friction') &&
+    (issue.state !== 'closed' || !!issue.closedBy)).map(issue => {
     const linked = changes.filter(change => change.issueNumber === issue.number);
     const linkedIds = linked.map(change => change.changeId);
     const queue = entries.filter(entry => linkedIds.includes(entry.changeId) && entry.state !== 'withdrawn').at(-1);
     const active = linked.filter(change => !['merged', 'closed', 'superseded'].includes(change.status)).at(-1);
     const leases = held.filter(item => item.issueNumber === issue.number || linkedIds.includes(item.changeId));
-    const holder = leases[0]?.holderId ?? null;
+    const holders = [...new Set(leases.map(item => item.holderId).filter(Boolean))];
+    const holder = holders.join(', ') || null;
     const agent = active?.authorId ?? linked.at(-1)?.authorId ?? null;
     const landed = issue.state === 'closed' && !!issue.closedBy;
-    const stage = landed ? 'Landed' : queue?.state === 'checking' || active?.status === 'checking' || active?.status === 'ready'
-      ? 'Checking & review' : ['waiting', 'reserved'].includes(queue?.state) || active?.status === 'queued'
-        ? 'Queued' : leases.length ? 'Claimed' : 'Ready to claim';
+    const stage = landed ? 'Landed' : queue?.state === 'checking' ? 'Checking & review' :
+      ['admitted', 'reserved', 'waiting'].includes(queue?.state) ? 'Queued' :
+        active?.status === 'checking' || active?.status === 'ready' ? 'Checking & review' :
+          active?.status === 'queued' ? 'Queued' : leases.length ? 'Claimed' : 'Ready to claim';
     const units = leases.length ? leases.map(item => item.unitKey) : arr(active?.unitKeys).length ? active.unitKeys : arr(issue.allowedFiles);
     const expiry = leases.length ? Math.min(...leases.map(item => item.expiresAt)) : null;
-    const carried = queue?.carriedFrom || active?.carriedFrom || arr(verdicts[active?.changeId]).some(item => item.carriedFrom);
-    const timeline = events.filter(event => eventIssue(event, issue.number, linkedIds));
-    const principal = arr(principals).find(item => item.id === (holder ?? agent) || item.principalId === (holder ?? agent));
-    return { issue, stage, holder, agent, harness: principal?.name ?? active?.authorModel ?? active?.model ?? '', units,
+    const relatedVerdicts = linkedIds.flatMap(id => arr(verdicts[id]));
+    const verdictIds = relatedVerdicts.flatMap(item => [item.verdictId, item.parentVerdictId].filter(Boolean));
+    const admittedVerdict = relatedVerdicts.find(item => item.verdictId === queue?.verdictId);
+    const carried = !!(admittedVerdict?.parentVerdictId && admittedVerdict?.deltaResultId);
+    const timeline = events.filter(event => eventIssue(event, issue.number, linkedIds, verdictIds));
+    const principal = arr(principals).find(item => item.id === (holders[0] ?? agent) || item.principalId === (holders[0] ?? agent));
+    return { issue, stage, holder, holders, agent, harness: principal?.name ?? active?.authorModel ?? active?.model ?? '', units,
       expiry, meta: landed ? time(timeline.findLast(e => e.kind === 'issue.closed')?.timestamp) :
         stage === 'Queued' && carried ? 'rebased · carried' :
           stage === 'Claimed' && expiry ? `${Math.max(0, Math.ceil((expiry - now) / 60000))}m left` :
@@ -89,7 +101,9 @@ export function trackerModel(snapshot, events = [], identity = null, milestoneId
     return { issue, when: created ? time(created.timestamp) : 'issue', what: issue.title, cost, did };
   });
   return { cards, lanes, milestones, selectedMilestone, stats: statDefs, friction: [...friction, ...manual],
-    working: cards.filter(card => card.leases.length), principalId: identity?.principalId ?? null };
+    working: cards.flatMap(card => card.holders.map(holder =>
+      ({ issue: card.issue, holder, units: card.leases.filter(lease => lease.holderId === holder).map(lease => lease.unitKey) }))),
+    principalId: identity?.principalId ?? null };
 }
 
 export function createTracker(root, callbacks) {
@@ -150,7 +164,7 @@ export function createTracker(root, callbacks) {
     }
     const layout = el('div', null, 'tracker-layout'); const scroll = el('div', null, 'tracker-scroll'); const board = el('div', null, 'tracker-board');
     const visible = model.cards.filter(card => filter === 'all' || filter === 'ready' && card.stage === 'Ready to claim' ||
-      filter === 'agents' && card.leases.length > 0 || filter === 'mine' && !!model.principalId && card.holder === model.principalId);
+      filter === 'agents' && card.leases.length > 0 || filter === 'mine' && !!model.principalId && card.holders.includes(model.principalId));
     for (const [name, hint] of model.lanes) {
       const lane = el('section', null, 'tracker-lane'); lane.setAttribute('aria-label', name);
       const cards = visible.filter(card => card.stage === name);
@@ -160,7 +174,10 @@ export function createTracker(root, callbacks) {
         const item = keyed(button('', () => { selected = card.issue.number; editing = false; issueOpen = false; render(context); }, 'tracker-card'), `card-${card.issue.number}`);
         item.setAttribute('aria-pressed', String(selected === card.issue.number));
         item.append(el('strong', `#${card.issue.number} ${card.issue.title}`));
-        const chips = el('span', null, 'tracker-chips'); for (const unit of card.units) chips.append(el('code', unit));
+        const chips = el('span', null, 'tracker-chips'); for (const unit of card.units) {
+          const owner = card.holders.length > 1 ? card.leases.find(lease => lease.unitKey === unit)?.holderId : null;
+          chips.append(el('code', owner ? `${unit} · ${owner}` : unit));
+        }
         if (!card.units.length) chips.append(el('span', 'No declared units'));
         item.append(chips, el('span', `${card.holder ?? card.agent ?? 'unclaimed'}${card.harness ? ` · ${card.harness}` : ''} · ${card.meta}`, 'tracker-card-foot'));
         lane.append(item);

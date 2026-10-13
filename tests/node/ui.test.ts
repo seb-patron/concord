@@ -8,7 +8,7 @@ const { JSDOM } = require('jsdom') as any;
 const { deriveInbox, normalizeDiagnosis, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions } = require('../../web/api.js') as any;
-const { trackerModel, createTracker } = require('../../web/tracker.js') as any;
+const { trackerModel, createTracker, appendObservedEvents } = require('../../web/tracker.js') as any;
 
 const fixture = {
   data: { projections: {
@@ -114,34 +114,90 @@ describe('Repository tracker', () => {
       { number: 1, title: 'Free <work>', state: 'open', milestoneId: 'm', allowedFiles: ['web/free.js'], labels: [], changes: [], authorId: 'owner', version: 1 },
       { number: 2, title: 'Held work', state: 'open', milestoneId: 'm', allowedFiles: ['web/held.js'], labels: [], changes: [{ changeId: 'c2', status: 'draft' }], authorId: 'owner', version: 2 },
       { number: 3, title: 'Review work', state: 'open', milestoneId: 'm', labels: [], changes: [{ changeId: 'c3', status: 'ready' }] },
-      { number: 4, title: 'Queued work', state: 'open', milestoneId: 'm', labels: [], changes: [{ changeId: 'c4', status: 'queued' }] },
+      { number: 4, title: 'Queued work', state: 'open', milestoneId: 'm', labels: [], changes: [{ changeId: 'c4', status: 'ready' }] },
       { number: 5, title: 'Landed work', state: 'closed', milestoneId: 'm', labels: [], closedBy: { changeId: 'c5' }, changes: [{ changeId: 'c5', status: 'merged' }] },
       { number: 6, title: 'Manual wait', state: 'open', milestoneId: 'm', labels: ['friction'], body: '6 minutes', authorId: 'owner' },
     ], milestones: [{ milestoneId: 'm', title: 'Release', state: 'open' }] },
     repos: { changes: [
       { changeId: 'c2', issueNumber: 2, authorId: 'agent-a', authorModel: 'Codex', status: 'draft', unitKeys: ['fn:held'] },
       { changeId: 'c3', issueNumber: 3, authorId: 'agent-b', status: 'ready', unitKeys: ['fn:review'] },
-      { changeId: 'c4', issueNumber: 4, authorId: 'agent-c', status: 'queued', unitKeys: ['fn:queue'] },
+      { changeId: 'c4', issueNumber: 4, authorId: 'agent-c', status: 'ready', unitKeys: ['fn:queue'] },
       { changeId: 'c5', issueNumber: 5, authorId: 'agent-d', status: 'merged', unitKeys: ['fn:land'] },
     ] },
     leases: { heldItems: [{ changeId: 'c2', issueNumber: 2, holderId: 'agent-a', unitKey: 'fn:held', state: 'active', expiresAt: now + 120000 }] },
-    queue: { entries: [{ changeId: 'c4', state: 'waiting', carriedFrom: { sourceOid: 'old' } }, { changeId: 'c5', state: 'merged' }] },
+    queue: { entries: [{ changeId: 'c4', state: 'reserved', verdictId: 'v4' }, { changeId: 'c5', state: 'landed' }] },
   } } };
   const events = [
     { sequence: 1, kind: 'lease.claimed', timestamp: now, relatedIds: ['c2'], actorId: 'agent-a' },
     { sequence: 2, kind: 'lease.refused', timestamp: now, relatedIds: ['c2'], actorId: 'agent-b' },
     { sequence: 3, kind: 'change.rebased', timestamp: now, relatedIds: ['c4'], actorId: 'concord' },
-    { sequence: 4, kind: 'verdict.carried', timestamp: now, relatedIds: ['c4'], actorId: 'reviewer' },
+    { sequence: 4, kind: 'verdict.carried', timestamp: now, relatedIds: ['v4', 'v-old', 'job-4'], actorId: 'reviewer' },
     { sequence: 5, kind: 'queue.promotion_applied', timestamp: now, relatedIds: ['c5'], actorId: 'concord' },
   ];
   it('derives five lanes, live holds, event counts, and friction without sample cards', () => {
-    const model = trackerModel(data, events, { principalId: 'agent-a' }, 'm', now);
+    const model = trackerModel(data, events, { principalId: 'agent-a' }, 'm', now, [], {
+      c4: [{ verdictId: 'v4', changeId: 'c4', parentVerdictId: 'v-old', deltaResultId: 'job-4' }],
+    });
     expect(model.cards.map((card: any) => card.stage)).toEqual(['Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed']);
     expect(model.cards[0].units).toEqual(['web/free.js']);
     expect(model.cards[1]).toMatchObject({ holder: 'agent-a', harness: 'Codex', meta: '2m left' });
     expect(model.cards[3].meta).toBe('rebased · carried');
+    expect(model.cards[3].timeline.map((event: any) => event.kind)).toContain('verdict.carried');
     expect(model.stats.map((stat: any) => stat[1])).toEqual([1, 1, 1, 1, 1]);
     expect(model.friction.map((row: any) => row.what)).toContain('Manual wait');
+  });
+  it('does not put manually closed issues back into Ready', () => {
+    const snapshot = structuredClone(data) as any;
+    snapshot.data.projections.issues.items.push({ number: 7, title: 'Closed by owner', state: 'closed',
+      closedBy: null, milestoneId: 'm', labels: [] });
+    const model = trackerModel(snapshot, [], null, 'm', now);
+    expect(model.cards.map((card: any) => card.issue.number)).not.toContain(7);
+    expect(model.cards.find((card: any) => card.issue.number === 5).stage).toBe('Landed');
+  });
+  it('labels a queue entry from its admitted verdict, not an older carry', () => {
+    const snapshot = structuredClone(data) as any;
+    snapshot.data.projections.queue.entries[0].verdictId = 'v-direct';
+    const model = trackerModel(snapshot, events, null, 'm', now, [], { c4: [
+      { verdictId: 'v4', changeId: 'c4', parentVerdictId: 'v-old', deltaResultId: 'job-4' },
+      { verdictId: 'v-direct', changeId: 'c4', parentVerdictId: null, deltaResultId: null },
+    ] });
+    expect(model.cards[3].stage).toBe('Queued');
+    expect(model.cards[3].meta).not.toBe('rebased · carried');
+  });
+  it('shows each live unit with its own holder and includes both in Mine', () => {
+    const snapshot = structuredClone(data) as any;
+    snapshot.data.projections.leases.heldItems = [
+      { changeId: 'c2', issueNumber: 2, holderId: 'alice', unitKey: 'u:a', state: 'active', expiresAt: Math.max(now, Date.now()) + 120000 },
+      { changeId: 'c2', issueNumber: 2, holderId: 'bob', unitKey: 'u:b', state: 'active', expiresAt: Math.max(now, Date.now()) + 120000 },
+    ];
+    const model = trackerModel(snapshot, [], { principalId: 'bob' }, 'm', now);
+    expect(model.working).toEqual([
+      { issue: snapshot.data.projections.issues.items[1], holder: 'alice', units: ['u:a'] },
+      { issue: snapshot.data.projections.issues.items[1], holder: 'bob', units: ['u:b'] },
+    ]);
+    const dom = new JSDOM('<main id="tracker"></main>');
+    const previous = globalThis.document;
+    globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('tracker')!;
+      const tracker = createTracker(root, { refresh: async () => {} });
+      tracker.render({ repoId: 'repo', snapshot, events: [], identity: { principalId: 'bob' } });
+      expect(root.querySelector('.tracker-working')?.textContent).toContain('#2 · alice · u:a');
+      expect(root.querySelector('.tracker-working')?.textContent).toContain('#2 · bob · u:b');
+      expect(root.querySelectorAll('.tracker-card')[1].textContent).toContain('u:b · bob');
+      (root.querySelectorAll('.tracker-filters button')[3] as HTMLButtonElement).click();
+      expect(root.querySelectorAll('.tracker-card')).toHaveLength(1);
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
+  it('keeps daily evidence after the 2,000th event', () => {
+    const first = { sequence: 1, kind: 'lease.refused', timestamp: now, relatedIds: ['c2'] };
+    const later = Array.from({ length: 2000 }, (_, index) => ({ sequence: index + 2, kind: 'issue.updated',
+      timestamp: now, relatedIds: ['2'] }));
+    const observed = appendObservedEvents(appendObservedEvents([], [first, ...later.slice(0, 999)]), later.slice(999));
+    const model = trackerModel(data, observed, null, 'm', now);
+    expect(observed).toHaveLength(2001);
+    expect(model.stats.find((stat: any) => stat[0] === 'Collisions avoided')[1]).toBe(1);
+    expect(model.cards[1].timeline).toContainEqual(first);
   });
   it('renders filters, drawer, event evidence, edit and friction submissions, and empty/error states', async () => {
     const dom = new JSDOM('<main id="tracker"></main>', { url: 'http://localhost/' });
