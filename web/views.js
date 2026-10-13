@@ -348,3 +348,188 @@ export function restoreScroll(el, saved) {
   el.scrollLeft = saved.left;
   return true;
 }
+
+/**
+ * Issue editor: parse one units-editor entry.
+ * Accepts a file path (`src/foo.py`), a section of a markdown file
+ * (`docs/architecture.md § Components`), or a TSV row key
+ * (`row:families:alpha`). Anything else is kept verbatim as `unknown`
+ * so the server — not the client — decides at claim time.
+ */
+export function parseUnitEntry(raw) {
+  const text = safeText(raw).trim();
+  if (!text) return { kind: 'empty', key: '', file: null, label: '' };
+  if (/^row:[^\s]+$/.test(text)) return { kind: 'row', key: text, file: null, label: text };
+  const cut = text.indexOf('§');
+  if (cut >= 0) {
+    const file = text.slice(0, cut).trim();
+    const section = text.slice(cut + 1).trim();
+    if (file && section) return { kind: 'section', key: `${file} § ${section}`, file, label: `${file} § ${section}` };
+    return { kind: 'unknown', key: text, file: null, label: text };
+  }
+  if (/[\s\\]/.test(text) || text.startsWith('/')) return { kind: 'unknown', key: text, file: null, label: text };
+  return { kind: 'file', key: text, file: text, label: text };
+}
+
+/** True when a live lease unit key covers an editor entry. */
+function leaseCoversEntry(entry, unitKey) {
+  if (typeof unitKey !== 'string' || !unitKey) return false;
+  if (unitKey === entry.key) return true;
+  if (unitKey.startsWith('file:')) return entry.file === unitKey.slice(5);
+  // Symmetric file comparison: a section entry sees a whole-file lease and
+  // a file entry sees a section-keyed lease of the same file.
+  if (!entry.file) return false;
+  return parseUnitEntry(unitKey).file === entry.file;
+}
+
+/**
+ * Issue editor: live free/held state for one parsed unit entry.
+ * `leases` are snapshot lease rows; only active/reserved unexpired rows
+ * count. Returns { state: 'free' } or { state: 'held', holders: [...] }
+ * with each holder's unitKey, holderId, changeId, issueNumber and title.
+ */
+export function unitLeaseState(entry, leases, nowMs = Date.now()) {
+  const live = Array.isArray(leases) ? leases.filter(lease =>
+    ['active', 'reserved'].includes(lease?.state) && Number.isFinite(lease?.expiresAt) && lease.expiresAt > nowMs) : [];
+  const holders = live.filter(lease => leaseCoversEntry(entry, lease?.unitKey)).map(lease => ({
+    unitKey: lease.unitKey, holderId: lease.holderId ?? null, changeId: lease.changeId ?? null,
+    issueNumber: lease.issueNumber ?? null, issueTitle: lease.issueTitle ?? null,
+  }));
+  if (!holders.length) return { state: 'free', holders: [] };
+  return { state: 'held', holders };
+}
+
+/** File identity used for overlap comparison (null when unknown). */
+function entryFile(entry) {
+  if (entry.file) return entry.file;
+  return null;
+}
+
+/**
+ * Issue editor: other open issues whose declared units overlap.
+ * Two entries overlap on an exact key match, or when both resolve to
+ * the same file (a section entry and its file, two sections of one
+ * file). Row keys carry no file without the trusted policy, so they
+ * only match exactly. Returns [{ number, title, units, explanation }].
+ */
+export function issueOverlaps(issue, openIssues) {
+  const mine = [...new Set((Array.isArray(issue?.allowedFiles) ? issue.allowedFiles : [])
+    .map(entry => parseUnitEntry(entry)).filter(entry => entry.kind !== 'empty').map(entry => entry.key))];
+  if (!mine.length) return [];
+  const parsed = mine.map(key => ({ key, entry: parseUnitEntry(key) }));
+  const overlaps = [];
+  for (const other of Array.isArray(openIssues) ? openIssues : []) {
+    if (other?.number === issue?.number || other?.state === 'closed') continue;
+    const theirs = new Set((Array.isArray(other?.allowedFiles) ? other.allowedFiles : [])
+      .map(entry => parseUnitEntry(entry).key));
+    const shared = parsed.filter(({ key, entry }) => theirs.has(key) ||
+      (entryFile(entry) && [...theirs].some(key => {
+        const peer = parseUnitEntry(key);
+        return entryFile(peer) === entryFile(entry);
+      }))).map(({ key }) => key);
+    if (!shared.length) continue;
+    overlaps.push({ number: other.number, title: other.title ?? '',
+      units: [...new Set(shared)],
+      explanation: `#${other.number} also declares ${shared.join(', ')}: whichever agent starts first holds the unit and the other waits.` });
+  }
+  return overlaps.sort((a, b) => a.number - b.number);
+}
+
+/**
+ * Issue editor: the exact structured spec an agent receives, from the
+ * issue API object only. Read-only; every line quotes a field the
+ * server returned, never a prototype sample.
+ */
+export function agentSpecText(issue, milestoneTitle = null) {
+  const lines = [
+    `issue: ${issue?.number ?? '?'}`,
+    `title: ${issue?.title ?? ''}`,
+    `state: ${issue?.state ?? '?'}`,
+    `labels: ${Array.isArray(issue?.labels) && issue.labels.length ? issue.labels.join(', ') : 'none'}`,
+    `milestone: ${milestoneTitle ?? 'none'}`,
+    'units:',
+  ];
+  const units = Array.isArray(issue?.allowedFiles) ? issue.allowedFiles : [];
+  if (!units.length) lines.push('  (none declared)');
+  for (const unit of units) lines.push(`  - ${unit}`);
+  lines.push('body:');
+  lines.push(safeText(issue?.body ?? ''));
+  lines.push('linked changes:');
+  const changes = Array.isArray(issue?.changes) ? issue.changes : [];
+  if (!changes.length) lines.push('  (none)');
+  for (const change of changes) lines.push(`  - ${change?.changeId ?? '?'}: ${change?.status ?? 'unknown'}`);
+  return lines.join('\n');
+}
+
+/**
+ * Issue editor: timeline for an issue from repository events.
+ * Keeps events whose relatedIds name the issue number or one of its
+ * linked change IDs, oldest first. Pure selection and sort; unknown
+ * kinds are kept verbatim, never reinterpreted.
+ */
+export function issueTimeline(issueNumber, changes, events) {
+  const ids = new Set([String(issueNumber),
+    ...(Array.isArray(changes) ? changes.map(change => String(change?.changeId)) : [])]);
+  return (Array.isArray(events) ? events : [])
+    .filter(event => Array.isArray(event?.relatedIds) && event.relatedIds.some(id => ids.has(String(id))))
+    .slice()
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    .map(event => ({ sequence: event.sequence ?? null, kind: event.kind ?? 'unknown',
+      actorId: event.actorId ?? null, timestamp: event.timestamp ?? null }));
+}
+
+/** Split a labels text field into unique nonempty labels. */
+export function parseLabelsInput(value) {
+  return [...new Set(safeText(value).split(',').map(label => label.trim()).filter(Boolean))];
+}
+
+/** Render a labels array for the text field. */
+export function formatLabelsInput(labels) {
+  return Array.isArray(labels) ? labels.join(', ') : '';
+}
+
+/** Escape text for the markdown preview (HTML is never interpreted). */
+function escapeHtml(value) {
+  return safeText(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * Issue editor: minimal Markdown preview (fences, headings, lists,
+ * paragraphs). Output is escaped first, so markup-looking spec text
+ * renders literally. No dependency; unknown constructs stay plain text.
+ */
+export function renderMarkdown(text) {
+  const lines = safeText(text).split('\n');
+  let html = '';
+  let inCode = false;
+  let inList = false;
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  for (const line of lines) {
+    if (/^```/.test(line)) {
+      closeList();
+      html += inCode ? '</code></pre>' : '<pre><code>';
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { html += `${escapeHtml(line)}\n`; continue; }
+    const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      html += `<h${level + 3} class="md-h">${escapeHtml(heading[2])}</h${level + 3}>`;
+      continue;
+    }
+    const item = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (item) {
+      if (!inList) { html += '<ul class="md-list">'; inList = true; }
+      html += `<li>${escapeHtml(item[1])}</li>`;
+      continue;
+    }
+    if (!line.trim()) { closeList(); continue; }
+    closeList();
+    html += `<p class="md-p">${escapeHtml(line)}</p>`;
+  }
+  closeList();
+  if (inCode) html += '</code></pre>';
+  return html || '<p class="muted">Nothing to preview.</p>';
+}

@@ -180,6 +180,32 @@ export function getEvents(repoId, after, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/events?${params}`, {}, fetchImpl);
 }
 
+/** GET /v1/repos/:r/issues/:n — issue with linked changes and their status. */
+export function getIssue(repoId, number, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(number)}`, {}, fetchImpl);
+}
+
+/** GET /v1/repos/:r/issues — page of issues with nextCursor. */
+export function listIssues(repoId, params = {}, fetchImpl) {
+  const query = new URLSearchParams();
+  for (const key of ['state', 'label', 'milestoneId', 'cursor', 'limit']) {
+    if (params?.[key] !== undefined && params[key] !== null && params[key] !== '') query.set(key, String(params[key]));
+  }
+  const suffix = query.size ? `?${query}` : '';
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues${suffix}`, {}, fetchImpl);
+}
+
+/** PATCH /v1/repos/:r/issues/:n — requires expectedVersion; null clears milestone/units. */
+export function updateIssue(repoId, number, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/issues/${encodeURIComponent(number)}`,
+    { method: 'PATCH', body, idempotencyKey }, fetchImpl);
+}
+
+/** GET /v1/repos/:r/milestones — page of milestones with progress. */
+export function listMilestones(repoId, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/milestones`, {}, fetchImpl);
+}
+
 /** POST /v1/repos/:r/leases — creation calls carry no expectedVersion. */
 export function claimUnits(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/leases`, { method: 'POST', body, idempotencyKey }, fetchImpl);
