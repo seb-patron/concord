@@ -16,22 +16,29 @@ const tailLog = (value: string, cap: number): string => {
 
 function cappedChecks(cap: number, commandProfile: boolean) {
   let body = '';
+  let host = '';
   const markers: string[] = [];
   let markerBytes = 0;
   return {
     append(log: string, label = '') {
+      const header = commandProfile ? /^host=[^\n]+\n/.exec(log)?.[0] : undefined;
+      if (header) {
+        if (host && host !== header) throw new Error('COMMAND_HOST_CHANGED');
+        host = header;
+        log = log.slice(header.length);
+      }
       const exit = commandProfile ? /^exit=-?\d+(?: timeout)?\n/.exec(log)?.[0] : undefined;
       if (commandProfile && !exit) throw new Error('COMMAND_EXIT_MARKER_MISSING');
       if (exit) {
-        const marker = tailLog(label, cap - Buffer.byteLength(exit)) + exit;
+        const marker = tailLog(label, cap - Buffer.byteLength(host) - Buffer.byteLength(exit)) + exit;
         markerBytes += Buffer.byteLength(marker);
-        if (markerBytes > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
+        if (markerBytes + Buffer.byteLength(host) > cap) throw new Error('EXIT_MARKERS_EXCEED_OUTPUT_CAP');
         markers.push(marker);
       }
-      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes);
+      body = tailLog(body + label + (exit ? log.slice(exit.length) : log) + '\n', cap - markerBytes - Buffer.byteLength(host));
     },
     value() {
-      return body + markers.join('');
+      return host + body + markers.join('');
     },
   };
 }
