@@ -3,14 +3,13 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredentialsIn } from '../cli/client.ts';
 import { assertCommit, assertHeadBasedOn, git, rejectCanonicalTarget, resolveHead, validateRemote } from '../cli/git.ts';
-import { MAX_NORMALIZED_UNITS } from '../src/leases/units.ts';
 
 type Args = Record<string, unknown>;
 type Shape = Record<string, Record<string, unknown>>;
 const s = { type: 'string' };
 const n = { type: 'integer', minimum: 0 };
 const strings = { type: 'array', items: s };
-const unitKeys = { ...strings, maxItems: MAX_NORMALIZED_UNITS };
+const unitKeys = { ...strings, maxItems: 128 };
 const fences = { type: 'object', additionalProperties: { type: 'integer', minimum: 1 } };
 function tool(name: string, description: string, properties: Shape, required: string[] = []): Tool {
   return { name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false } };

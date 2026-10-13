@@ -238,6 +238,7 @@ describe('semantic lease identities', () => {
 
 describe('RepoCoordinator lease routes', () => {
   it('reports the unit cap for 129 distinct keys on change creation and publication', async () => {
+    policy.newFilePrefixes = ['tests/'];
     setupPolicy();
     const repo = 'unit_cap_129';
     const createdRepo = await fetchApi(mutation('/v1/repos', {
@@ -268,6 +269,51 @@ describe('RepoCoordinator lease routes', () => {
     expect((await responseBody(overCapPublish)).error).toMatchObject({
       code: 'INVALID_UNITS',
       message: '129 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+  });
+
+  it('counts canonical units on change creation and publication', async () => {
+    policy.newFilePrefixes = ['tests/'];
+    setupPolicy();
+    const repo = 'change_normalized_cap';
+    const createdRepo = await fetchApi(mutation('/v1/repos', {
+      name: repo, policyId: 'local-demo', profileId: 'local-demo',
+    }, 'create-normalized-cap-repo'));
+    expect(createdRepo.status).toBe(201);
+    const otherKeys = Array.from({ length: 63 }, (_, index) => `file:tests/change-${index}.ts`);
+    const unitKeys = ['declaration:old_callee_alpha', 'declaration:callee_alpha', ...otherKeys];
+    const canonicalKeys = ['declaration:callee_alpha', ...otherKeys].sort();
+    const base = { intentKey: 'normalized-cap', intentText: 'Check normalized cap', baseOid: null,
+      branch: 'refs/heads/normalized-cap', dependencyChangeIds: [] };
+    const created = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, unitKeys }, 'create-normalized-cap'));
+    expect(created.status).toBe(201);
+    const createdBody = await responseBody(created);
+    expect(createdBody.data.unitKeys).toEqual(canonicalKeys);
+
+    const overCapKeys = [...canonicalKeys, 'file:tests/change-extra.ts'];
+    const overCapCreate = await fetchApi(mutation(`/v1/repos/${repo}/changes`,
+      { ...base, intentKey: 'over-normalized-cap', unitKeys: overCapKeys }, 'create-over-normalized-cap'));
+    expect(overCapCreate.status).toBe(422);
+    expect((await responseBody(overCapCreate)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
+    });
+
+    const changeId = createdBody.data.changeId as string;
+    const publishBody = { expectedVersion: createdBody.version, baseOid: null, headOid: 'a'.repeat(40),
+      branch: base.branch, unitKeys, leaseFences: Object.fromEntries(canonicalKeys.map(key => [key, 1])) };
+    const acceptedPublish = await fetchApi(mutation(`/v1/repos/${repo}/changes/${changeId}/publish`,
+      publishBody, 'publish-normalized-cap'));
+    expect(acceptedPublish.status).toBe(409);
+    expect((await responseBody(acceptedPublish)).error.code).toBe('SEED_REQUIRES_BOOTSTRAP');
+
+    const overCapPublish = await fetchApi(mutation(`/v1/repos/${repo}/changes/${changeId}/publish`,
+      { ...publishBody, unitKeys: overCapKeys }, 'publish-over-normalized-cap'));
+    expect(overCapPublish.status).toBe(422);
+    expect((await responseBody(overCapPublish)).error).toMatchObject({
+      code: 'INVALID_UNITS',
+      message: '65 normalized units exceed the cap of 64; declare coarser prefix or section units in policy',
     });
   });
 

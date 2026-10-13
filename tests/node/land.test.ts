@@ -38,7 +38,7 @@ describe('land input and evidence gates', () => {
     const claim = tools.find(tool => tool.name === 'lease_claim');
     expect(claim?.inputSchema.properties?.unitKeys).toEqual({ type: 'array', items: { type: 'string' } });
     expect(tools.find(tool => tool.name === 'change_create')?.inputSchema.properties?.unitKeys)
-      .toMatchObject({ maxItems: 64 });
+      .toMatchObject({ maxItems: 128 });
   });
 
   it('derives an exact new file unit from an Allowed-files list under an approved prefix', async () => {

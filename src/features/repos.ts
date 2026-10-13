@@ -1,4 +1,4 @@
-import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, ValidateStackJob } from '../contracts';
+import type { BootstrapBody, BootstrapHandoff, Branch, Change, CreateChangeBody, CreateRepoBody, FeatureModule, InspectionResult, InspectCandidateJob, Intent, ModuleContext, Repo, StorageRepo, TrustedPolicy, ValidateStackJob } from '../contracts';
 import { requireRole } from '../auth';
 import { digest, encodeCursor, failure, HttpError, json, parseCursor, stableJson, unavailableGate } from '../http';
 import { costLimits, eventSequence } from '../state';
@@ -233,25 +233,28 @@ async function repoDetail(context: ModuleContext): Promise<Response> {
   return respond(context, repo, repo.status === 'provisioning' ? 202 : 200);
 }
 
-function declaredUnitKeys(raw: unknown): string[] {
-  // ids() has a generic 128-item limit. Report the unit policy cap first for
-  // valid, distinct keys so large requests receive the same actionable error.
-  if (Array.isArray(raw) && raw.length > MAX_NORMALIZED_UNITS &&
-    raw.every(key => typeof key === 'string' && /^[A-Za-z0-9._:/-]{1,128}$/.test(key)) &&
-    new Set(raw).size === raw.length) {
-    fail(422, 'INVALID_UNITS', unitsOverCapMessage(raw.length));
-  }
-  const unitKeys = ids(raw, 'unitKeys');
+function declaredUnitKeys(raw: unknown, policy: TrustedPolicy, allowUnknown = false): string[] {
+  if (!Array.isArray(raw) || raw.some(key => typeof key !== 'string' || !/^[A-Za-z0-9._:/-]{1,128}$/.test(key)) ||
+    new Set(raw).size !== raw.length) fail(400, 'INVALID_INPUT', 'unitKeys must contain unique identifiers');
+  const rawKeys = raw as string[];
+  const registry = unitRegistry(policy);
+  const unitKeys = [...new Set(rawKeys.map(key => {
+    try { return resolveUnit(registry, key).key; }
+    catch (error) {
+      if (allowUnknown && error instanceof HttpError && error.code === 'UNKNOWN_UNIT') return key;
+      throw error;
+    }
+  }))].sort();
   if (unitKeys.length > MAX_NORMALIZED_UNITS) fail(422, 'INVALID_UNITS', unitsOverCapMessage(unitKeys.length));
   return unitKeys;
 }
 
-function changeInput(body: CreateChangeBody) {
+function changeInput(body: CreateChangeBody, policy: TrustedPolicy) {
   const intentKey = text(body.intentKey, 'intentKey', 128);
   const intentText = text(body.intentText, 'intentText');
   const baseOid = body.baseOid === null ? null : oid(body.baseOid);
   const ref = branch(body.branch);
-  const unitKeys = declaredUnitKeys(body.unitKeys);
+  const unitKeys = declaredUnitKeys(body.unitKeys, policy, true);
   const dependencyChangeIds = ids(body.dependencyChangeIds, 'dependencyChangeIds');
   const attempt = body.attempt === undefined ? 1 : body.attempt;
   if (body.issueNumber !== undefined && (!Number.isSafeInteger(body.issueNumber) || body.issueNumber < 1)) fail(400, 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer');
@@ -285,7 +288,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   requireRole(context.principal, 'owner', 'agent');
   const repo = await catalogRepo(context);
   requireReady(repo);
-  const input = changeInput(body);
+  const input = changeInput(body, context.trusted.policies[repo.policyId]);
   if (input.issueNumber !== null) {
     const linked = context.call('issues.validate', input.issueNumber);
     if (linked.status === 'blocked') fail(409, linked.code, linked.reason);
@@ -454,14 +457,12 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   const baseOid = body.baseOid === null ? null : oid(body.baseOid);
   const headOid = oid(body.headOid);
   const ref = branch(body.branch);
-  const unitKeys = declaredUnitKeys(body.unitKeys);
+  const unitKeys = declaredUnitKeys(body.unitKeys, context.trusted.policies[repo.policyId]);
   if (!body.leaseFences || typeof body.leaseFences !== 'object' || Array.isArray(body.leaseFences)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must be a map');
   const leaseFences = body.leaseFences as Record<string, unknown>;
   if (Object.keys(leaseFences).length !== unitKeys.length || unitKeys.some(key => !Number.isSafeInteger(leaseFences[key]) || Number(leaseFences[key]) < 1)) fail(400, 'INVALID_LEASE_FENCES', 'leaseFences must cover every declared unit with a positive fence');
   if (baseOid === null || change.baseOid === null) fail(409, 'SEED_REQUIRES_BOOTSTRAP', 'Seed drafts use owner bootstrap');
   if (ref !== change.branch) fail(409, 'BRANCH_MISMATCH', 'Change branch differs');
-  const registry = unitRegistry(context.trusted.policies[repo.policyId]);
-  for (const key of unitKeys) resolveUnit(registry, key);
   const registered = list<Branch>(context, 'branches').find(item => item.storageName === change.candidateStorageName && item.ref === ref && item.ownerId === change.authorId);
   if (!registered || registered.observedHead !== headOid) fail(409, 'BRANCH_NOT_REGISTERED', 'Register the current fork branch before publishing');
   if (await context.storage.resolveRef(change.candidateStorageName, ref) !== headOid) fail(409, 'HEAD_MOVED', 'Registered candidate ref changed');
