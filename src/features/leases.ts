@@ -8,6 +8,14 @@ const MAX_TTL_SECONDS = 300;
 const RENEW_AFTER_SECONDS = 40;
 const RESERVATION_MS = 30 * 60 * 1000;
 const MAX_LIVE_LEASES = 128;
+const MAX_WAITS = 64;
+const MAX_CHANGE_WAITS = 8;
+
+type WaitRow = {
+  wait_id: string; change_id: string; requester_id: string; intent_text: string;
+  unit_keys: string; ttl_seconds: number; expires_at: number; state: 'queued' | 'granted' | 'expired' | 'cancelled';
+  leases: string | null; created_at: number; ordinal: number;
+};
 
 type LeaseRow = {
   lease_id: string; unit_key: string; holder_id: string; change_id: string;
@@ -70,6 +78,131 @@ function makeEvent(context: ModuleContext, kind: string, row: LeaseRow, version:
   }, version).sequence;
 }
 
+function queued(context: ModuleContext): WaitRow[] {
+  ensureWaitTable(context);
+  return context.sql.exec<WaitRow>("SELECT * FROM leases_waits WHERE state = 'queued' ORDER BY ordinal").toArray();
+}
+
+function ensureWaitTable(context: ModuleContext): void {
+  // Version 1 installations predate waits; create the additive table on first access.
+  if (context.state.get<boolean>('waitSchemaReady')) return;
+  context.sql.exec("CREATE TABLE IF NOT EXISTS leases_waits (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, wait_id TEXT NOT NULL UNIQUE, change_id TEXT NOT NULL, requester_id TEXT NOT NULL, intent_text TEXT NOT NULL, unit_keys TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL, leases TEXT, created_at INTEGER NOT NULL)");
+  context.sql.exec('CREATE INDEX IF NOT EXISTS leases_waits_queue ON leases_waits(state, ordinal)');
+  context.sql.exec('CREATE INDEX IF NOT EXISTS leases_waits_deadline ON leases_waits(state, expires_at)');
+  context.state.put('waitSchemaReady', true);
+}
+
+function waitUnits(registry: Map<string, UnitIdentity>, row: WaitRow): UnitIdentity[] {
+  return (JSON.parse(row.unit_keys) as string[]).map(key => resolveUnit(registry, key));
+}
+
+function intersects(a: readonly UnitIdentity[], b: readonly UnitIdentity[]): boolean {
+  return a.some(left => b.some(right => overlaps(left, right)));
+}
+
+function wouldDeadlock(registry: Map<string, UnitIdentity>, current: LeaseRow[], waits: WaitRow[],
+  changeId: string, units: UnitIdentity[]): boolean {
+  const dependencies = new Map<string, Set<string>>();
+  for (const wait of waits) {
+    const targets = dependencies.get(wait.change_id) ?? new Set<string>();
+    for (const lease of current) {
+      if (intersects(waitUnits(registry, wait), [resolveUnit(registry, lease.unit_key)])) targets.add(lease.change_id);
+    }
+    dependencies.set(wait.change_id, targets);
+  }
+  const newTargets = new Set(current.filter(lease => intersects(units, [resolveUnit(registry, lease.unit_key)]))
+    .map(lease => lease.change_id));
+  const visited = new Set<string>();
+  const reachesRequester = (node: string): boolean => {
+    if (node === changeId) return true;
+    if (visited.has(node)) return false;
+    visited.add(node);
+    return [...(dependencies.get(node) ?? [])].some(reachesRequester);
+  };
+  return [...newTargets].some(reachesRequester);
+}
+
+function grant(context: ModuleContext, units: UnitIdentity[], changeId: string, holderId: string,
+  intentText: string, ttlSeconds: number, now: number): Lease[] {
+  const granted: Lease[] = [];
+  for (const unit of units) {
+    const previous = context.sql.exec<{ fence: number }>('SELECT fence FROM leases_fences WHERE unit_key = ?', unit.key).toArray()[0];
+    const nextFence = (previous?.fence ?? 0) + 1;
+    context.sql.exec('INSERT INTO leases_fences(unit_key, fence) VALUES(?, ?) ON CONFLICT(unit_key) DO UPDATE SET fence = excluded.fence', unit.key, nextFence);
+    const version = context.nextVersion();
+    const row: LeaseRow = {
+      lease_id: crypto.randomUUID(), unit_key: unit.key, holder_id: holderId, change_id: changeId,
+      intent_text: intentText, fence: nextFence, expires_at: now + ttlSeconds * 1000,
+      state: 'active', version, created_at: now, updated_at: now,
+    };
+    context.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      row.lease_id, row.unit_key, row.holder_id, row.change_id, row.intent_text,
+      row.fence, row.expires_at, row.state, row.version, row.created_at, row.updated_at);
+    makeEvent(context, 'lease.claimed', row, version);
+    granted.push(asLease(context, row));
+  }
+  return granted;
+}
+
+function expireWaits(context: ModuleContext, now: number): void {
+  for (const wait of queued(context).filter(item => item.expires_at <= now)) {
+    context.sql.exec("UPDATE leases_waits SET state = 'expired' WHERE wait_id = ?", wait.wait_id);
+    context.appendEvent('lease.wait_expired', [wait.wait_id, wait.change_id],
+      { waitId: wait.wait_id, changeId: wait.change_id }, context.nextVersion());
+  }
+}
+
+/** The ordinal is stable even when a holder releases several units in one transaction. */
+function grantWaits(context: ModuleContext, now: number): void {
+  expireWaits(context, now);
+  const registry = unitRegistry(policy(context));
+  const pending = queued(context);
+  const blocked: UnitIdentity[][] = [];
+  const live = activeRows(context, now);
+  for (const wait of pending) {
+    const units = waitUnits(registry, wait);
+    const occupied = live.some(row => intersects(units, [resolveUnit(registry, row.unit_key)]));
+    if (occupied || blocked.some(older => intersects(units, older)) || live.length + units.length > MAX_LIVE_LEASES) {
+      blocked.push(units);
+      continue;
+    }
+    const leases = grant(context, units, wait.change_id, wait.requester_id, wait.intent_text, wait.ttl_seconds, now);
+    context.sql.exec("UPDATE leases_waits SET state = 'granted', leases = ? WHERE wait_id = ?", JSON.stringify(leases), wait.wait_id);
+    context.appendEvent('lease.granted_from_queue', [wait.wait_id, wait.change_id, ...leases.map(item => item.leaseId)],
+      { waitId: wait.wait_id, changeId: wait.change_id, leases }, context.nextVersion());
+    for (const lease of leases) live.push(rows(context, 'SELECT * FROM leases_claims WHERE lease_id = ?', lease.leaseId)[0]);
+  }
+}
+
+function waitPosition(context: ModuleContext, wait: WaitRow, registry: Map<string, UnitIdentity>): number {
+  const units = waitUnits(registry, wait);
+  const earlier = queued(context).filter(item => item.ordinal <= wait.ordinal);
+  return Math.max(1, ...units.map(unit => earlier.filter(item => intersects([unit], waitUnits(registry, item))).length));
+}
+
+function waitEta(context: ModuleContext, wait: WaitRow, registry: Map<string, UnitIdentity>, now: number): number {
+  const units = waitUnits(registry, wait);
+  const holders = activeRows(context, now).filter(row => intersects(units, [resolveUnit(registry, row.unit_key)]));
+  const completed = rows(context, "SELECT * FROM leases_claims WHERE state IN ('released','expired') ORDER BY updated_at DESC LIMIT 63")
+    .map(row => Math.max(1, Math.ceil((row.updated_at - row.created_at) / 1000))).sort((a, b) => a - b);
+  const median = completed.length ? completed[Math.floor(completed.length / 2)] : null;
+  const holderEta = holders.length ? Math.max(...holders.map(row => Math.max(0, Math.ceil((row.expires_at - now) / 1000)))) : 0;
+  const interval = median === null ? holderEta : Math.min(holderEta || median, median);
+  return Math.min(Math.max(0, Math.ceil((wait.expires_at - now) / 1000)), interval * waitPosition(context, wait, registry));
+}
+
+function waitStatus(context: ModuleContext, wait: WaitRow): Record<string, unknown> {
+  if (wait.state === 'queued') return { waitId: wait.wait_id, state: 'queued',
+    position: waitPosition(context, wait, unitRegistry(policy(context))),
+    etaSeconds: waitEta(context, wait, unitRegistry(policy(context)), context.now()), expiresAt: wait.expires_at };
+  if (wait.state === 'granted') return { waitId: wait.wait_id, state: 'granted',
+    leases: (JSON.parse(wait.leases ?? '[]') as Lease[]).map(item => {
+      const row = rows(context, 'SELECT * FROM leases_claims WHERE lease_id = ?', item.leaseId)[0];
+      return row ? asLease(context, row) : item;
+    }) };
+  return { waitId: wait.wait_id, state: wait.state };
+}
+
 function expireDue(context: ModuleContext, now: number): void {
   for (const row of rows(context, "SELECT * FROM leases_claims WHERE state IN ('active','reserved') AND expires_at <= ? ORDER BY expires_at, lease_id LIMIT 128", now)) {
     const version = context.nextVersion();
@@ -118,9 +251,15 @@ function claim(context: ModuleContext, body: unknown): Response {
   const registry = unitRegistry(policy(context));
   const units = normalizeUnits(registry, input.unitKeys);
   const ttlSeconds = ttl(input.ttlSeconds);
+  if (input.wait !== undefined && typeof input.wait !== 'boolean') throw new HttpError(422, 'INVALID_WAIT', 'wait must be boolean');
+  const waitSeconds = input.waitSeconds === undefined ? 600 : input.waitSeconds;
+  if (input.wait === true && (!Number.isSafeInteger(waitSeconds) || (waitSeconds as number) < 30 || (waitSeconds as number) > 3600)) {
+    throw new HttpError(422, 'INVALID_WAIT_SECONDS', 'waitSeconds must be 30 to 3600');
+  }
   return context.transaction(() => {
     const now = context.now();
     expireDue(context, now);
+    grantWaits(context, now);
     const current = activeRows(context, now);
     const conflicts = current.flatMap(row => {
       const identity = resolveUnit(registry, row.unit_key);
@@ -128,46 +267,54 @@ function claim(context: ModuleContext, body: unknown): Response {
       return keys.length ? [{ holderId: row.holder_id, intentText: row.intent_text, ...issueFor(context, row.change_id),
         expiresAt: row.expires_at, keys, leaseId: row.lease_id, state: row.state }] : [];
     });
-    if (conflicts.length) {
-      const keys = [...new Set(conflicts.flatMap(item => item.keys))].sort();
+    const pending = queued(context).filter(item => intersects(units, waitUnits(registry, item)));
+    if (conflicts.length || pending.length) {
+      const keys = [...new Set([...conflicts.flatMap(item => item.keys), ...pending.flatMap(item =>
+        units.filter(unit => intersects([unit], waitUnits(registry, item))).map(unit => unit.key))])].sort();
+      if (input.wait === true) {
+        const waits = queued(context);
+        if (waits.length >= MAX_WAITS || waits.filter(item => item.change_id === input.changeId).length >= MAX_CHANGE_WAITS) {
+          return failure(new HttpError(429, 'WAIT_QUEUE_FULL', 'Lease wait queue is full'));
+        }
+        if (wouldDeadlock(registry, current, waits, input.changeId as string, units)) {
+          return failure(new HttpError(409, 'LEASE_WAIT_DEADLOCK', 'Waiting would create a lease dependency cycle'));
+        }
+        const waitId = crypto.randomUUID();
+        context.sql.exec('INSERT INTO leases_waits(wait_id, change_id, requester_id, intent_text, unit_keys, ttl_seconds, expires_at, state, leases, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          waitId, input.changeId as string, context.principal.principalId, input.intentText as string,
+          JSON.stringify(units.map(unit => unit.key)), ttlSeconds, now + (waitSeconds as number) * 1000, 'queued', null, now);
+        const wait = context.sql.exec<WaitRow>('SELECT * FROM leases_waits WHERE wait_id = ?', waitId).toArray()[0];
+        const status = waitStatus(context, wait);
+        const sequence = context.appendEvent('lease.queued', [waitId, input.changeId as string],
+          { ...status, keys, conflicts }, context.nextVersion()).sequence;
+        return json({ code: 'LEASE_QUEUED', ...status, holderId: conflicts[0]?.holderId ?? null,
+          intentText: conflicts[0]?.intentText ?? null, expiresAt: conflicts[0]?.expiresAt ?? null,
+          keys, conflicts, queue: pending.map(item => ({ waitId: item.wait_id, changeId: item.change_id })) },
+          context.version(), sequence, 202);
+      }
       context.sql.exec('INSERT INTO leases_refusals(change_id, requester_id, intent_text, keys, conflicts, created_at) VALUES(?, ?, ?, ?, ?, ?)',
         input.changeId as string, context.principal.principalId, input.intentText as string,
         JSON.stringify(units.map(unit => unit.key)), JSON.stringify(conflicts), now);
       const version = context.nextVersion();
       context.appendEvent('lease.refused', [input.changeId as string], {
-        intentText: input.intentText as string, keys, conflicts,
+        intentText: input.intentText as string, keys, conflicts, queue: pending.map(item => ({ waitId: item.wait_id, changeId: item.change_id })),
         nextAction: "Wait for the holder's lease to expire or be released, then retry the claim.",
       }, version);
       return failure(new HttpError(409, 'LEASE_CONFLICT', 'One or more units are already claimed', {
-        holderId: conflicts[0].holderId, intentText: conflicts[0].intentText, issueNumber: conflicts[0].issueNumber, issueTitle: conflicts[0].issueTitle,
-        expiresAt: conflicts[0].expiresAt, keys, conflicts,
-        nextAction: `Wait until ${new Date(Math.max(...conflicts.map(item => item.expiresAt))).toISOString()} or ask the holder to release, then retry.`,
+        holderId: conflicts[0]?.holderId ?? null, intentText: conflicts[0]?.intentText ?? null,
+        issueNumber: conflicts[0]?.issueNumber ?? null, issueTitle: conflicts[0]?.issueTitle ?? null,
+        expiresAt: conflicts[0]?.expiresAt ?? null, keys, conflicts,
+        queue: pending.map(item => ({ waitId: item.wait_id, changeId: item.change_id })),
+        nextAction: pending.length ? 'Wait for the earlier queued claim to complete, then retry.' :
+          `Wait until ${new Date(Math.max(...conflicts.map(item => item.expiresAt))).toISOString()} or ask the holder to release, then retry.`,
       }));
     }
     if (current.length + units.length > MAX_LIVE_LEASES) {
       return failure(new HttpError(429, 'LEASE_CAPACITY', 'Repository has too many live leases'));
     }
-    const granted: Lease[] = [];
-    let sequence = eventSequence(context.sql);
-    for (const unit of units) {
-      const previous = context.sql.exec<{ fence: number }>('SELECT fence FROM leases_fences WHERE unit_key = ?', unit.key).toArray()[0];
-      const nextFence = (previous?.fence ?? 0) + 1;
-      context.sql.exec('INSERT INTO leases_fences(unit_key, fence) VALUES(?, ?) ON CONFLICT(unit_key) DO UPDATE SET fence = excluded.fence', unit.key, nextFence);
-      const version = context.nextVersion();
-      const row: LeaseRow = {
-        lease_id: crypto.randomUUID(), unit_key: unit.key,
-        holder_id: context.principal.principalId, change_id: input.changeId as string,
-        intent_text: input.intentText as string, fence: nextFence,
-        expires_at: now + ttlSeconds * 1000, state: 'active', version,
-        created_at: now, updated_at: now,
-      };
-      context.sql.exec('INSERT INTO leases_claims(lease_id, unit_key, holder_id, change_id, intent_text, fence, expires_at, state, version, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        row.lease_id, row.unit_key, row.holder_id, row.change_id, row.intent_text,
-        row.fence, row.expires_at, row.state, row.version, row.created_at, row.updated_at);
-      sequence = makeEvent(context, 'lease.claimed', row, version);
-      granted.push(asLease(context, row));
-    }
-    return json({ leases: granted, renewAfterSeconds: RENEW_AFTER_SECONDS }, context.version(), sequence, 201);
+    const granted = grant(context, units, input.changeId as string, context.principal.principalId,
+      input.intentText as string, ttlSeconds, now);
+    return json({ leases: granted, renewAfterSeconds: RENEW_AFTER_SECONDS }, context.version(), eventSequence(context.sql), 201);
   });
 }
 
@@ -205,8 +352,46 @@ function release(context: ModuleContext, leaseId: string, body: unknown): Respon
     const row = currentLease(context, leaseId, input.fence);
     const version = context.nextVersion();
     context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, context.now(), leaseId);
-    const sequence = makeEvent(context, 'lease.released', row, version);
-    return json({ lease: asLease(context, { ...row, state: 'released', version }) }, version, sequence);
+    makeEvent(context, 'lease.released', row, version);
+    grantWaits(context, context.now());
+    return json({ lease: asLease(context, { ...row, state: 'released', version }) }, context.version(), eventSequence(context.sql));
+  });
+}
+
+function ownedWait(context: ModuleContext, waitId: string): WaitRow {
+  ensureWaitTable(context);
+  const wait = context.sql.exec<WaitRow>('SELECT * FROM leases_waits WHERE wait_id = ?', waitId).toArray()[0];
+  if (!wait) throw new HttpError(404, 'WAIT_NOT_FOUND', 'Lease wait not found');
+  if (wait.requester_id !== context.principal.principalId && !context.principal.roles.includes('owner')) {
+    throw new HttpError(403, 'WAIT_NOT_OWNED', 'Change author or owner required');
+  }
+  return wait;
+}
+
+function getWait(context: ModuleContext, waitId: string): Response {
+  return context.transaction(() => {
+    const wait = ownedWait(context, waitId);
+    const now = context.now();
+    expireDue(context, now);
+    grantWaits(context, now);
+    const latest = ownedWait(context, waitId);
+    return json(waitStatus(context, latest), context.version(), eventSequence(context.sql));
+  });
+}
+
+function cancelWait(context: ModuleContext, waitId: string): Response {
+  return context.transaction(() => {
+    const wait = ownedWait(context, waitId);
+    const now = context.now();
+    expireDue(context, now);
+    expireWaits(context, now);
+    if (wait.state === 'queued' && wait.expires_at > now) {
+      context.sql.exec("UPDATE leases_waits SET state = 'cancelled' WHERE wait_id = ?", waitId);
+      context.appendEvent('lease.wait_cancelled', [waitId, wait.change_id],
+        { waitId, changeId: wait.change_id }, context.nextVersion());
+      grantWaits(context, now);
+    }
+    return json(waitStatus(context, ownedWait(context, waitId)), context.version(), eventSequence(context.sql));
   });
 }
 
@@ -295,6 +480,7 @@ function reserve(context: ModuleContext, changeId: string, fences: Record<string
   return context.transaction(() => {
     const now = context.now();
     expireDue(context, now);
+    grantWaits(context, now);
     const evidence = verifiedFootprint(context, changeId);
     if (!evidence) return blocked(context, 'UNVERIFIED_FOOTPRINT', 'Exact checker-verified write footprint is required');
     const { change, verified, registry } = evidence;
@@ -396,6 +582,8 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
         const closed = { ...parent, closed: true };
         state.put(`module:queue:contest:${parent.contestId}`, closed);
       }
+      expireDue(context, now);
+      grantWaits(context, now);
       return { status: 'eligible', version: context.version(), evidenceIds: previous.map(row => row.lease_id), value: undefined };
     }
     for (const row of selected) {
@@ -403,6 +591,7 @@ function releaseReservation(context: ModuleContext, changeId: string): Gate {
       context.sql.exec("UPDATE leases_claims SET state = 'released', version = ?, updated_at = ? WHERE lease_id = ?", version, now, row.lease_id);
       makeEvent(context, 'lease.reservationReleased', row, version);
     }
+    grantWaits(context, now);
     if (shared) {
       const closed = { ...parent, closed: true };
       state.put(`module:queue:contest:${parent.contestId}`, closed);
@@ -430,6 +619,7 @@ function reservationLive(context: ModuleContext, changeId: string, fences: Recor
 
 const collection = /^\/v1\/repos\/[^/]+\/leases$/;
 const leaseAction = /^\/v1\/repos\/[^/]+\/leases\/([A-Za-z0-9_-]+)\/(renew|release)$/;
+const waitAction = /^\/v1\/repos\/[^/]+\/leases\/waits\/([A-Za-z0-9_-]+)$/;
 
 export const leases: FeatureModule = {
   name: 'leases',
@@ -438,15 +628,20 @@ export const leases: FeatureModule = {
     'CREATE TABLE IF NOT EXISTS leases_fences (unit_key TEXT PRIMARY KEY, fence INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS leases_refusals (id INTEGER PRIMARY KEY AUTOINCREMENT, change_id TEXT NOT NULL, requester_id TEXT NOT NULL, intent_text TEXT NOT NULL, keys TEXT NOT NULL, conflicts TEXT NOT NULL, created_at INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS leases_claims_live ON leases_claims(state, expires_at)',
+    "CREATE TABLE IF NOT EXISTS leases_waits (ordinal INTEGER PRIMARY KEY AUTOINCREMENT, wait_id TEXT NOT NULL UNIQUE, change_id TEXT NOT NULL, requester_id TEXT NOT NULL, intent_text TEXT NOT NULL, unit_keys TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL, leases TEXT, created_at INTEGER NOT NULL)",
+    'CREATE INDEX IF NOT EXISTS leases_waits_queue ON leases_waits(state, ordinal)',
+    'CREATE INDEX IF NOT EXISTS leases_waits_deadline ON leases_waits(state, expires_at)',
   ] }],
   routes: [
     { method: 'GET', pattern: collection, handle: (context, request) => json(projection(context,
       parseLeaseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
     { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
+    { method: 'GET', pattern: waitAction, handle: (context, _request, match) => getWait(context, match[1]) },
+    { method: 'DELETE', pattern: waitAction, handle: (context, _request, match) => cancelWait(context, match[1]) },
   ],
   snapshot: context => ({ ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row)) }),
-  nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,
-  onAlarm: context => context.transaction(() => expireDue(context, context.now())),
+  nextDeadline: context => { ensureWaitTable(context); return context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM (SELECT expires_at FROM leases_claims WHERE state IN ('active','reserved') UNION ALL SELECT expires_at FROM leases_waits WHERE state = 'queued')").toArray()[0]?.deadline ?? null; },
+  onAlarm: context => context.transaction(() => { const now = context.now(); expireDue(context, now); grantWaits(context, now); }),
   hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation },
 };
