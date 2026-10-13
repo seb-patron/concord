@@ -353,6 +353,53 @@ describe('delegated principals', () => {
     expect((await fetchApi(apiRequest('/v1/repos', short.token))).status).toBe(401);
   });
 
+  it('lets an owner mint a repo-scoped checker that polls its repo until revoked', async () => {
+    const minted = await mint({ roles: ['checker'], repoIds: ['alpha'], ttlSeconds: 3600, name: 'mac-mini' }, crypto.randomUUID(), 'local-owner');
+    expect(minted.status).toBe(201);
+    const item = (await responseBody(minted)).data;
+    expect(item.token).toMatch(/^cct_local_[a-f0-9]{64}$/);
+    expect(item).toMatchObject({ roles: ['checker'], repoIds: ['alpha'], parentId: 'owner', name: 'mac-mini', revokedAt: null });
+    const poll = (repo: string) => fetchApi(mutation(`/v1/repos/${repo}/runner/poll`,
+      { runnerId: 'mac-mini', role: 'checker', supportedProfileDigests: [] }, crypto.randomUUID(), item.token));
+    expect((await poll('alpha')).status).toBe(204);
+    expect((await poll('beta')).status).toBe(403);
+    const revoked = await fetchApi(apiRequest(`/v1/principals/${item.id}`, 'local-owner', { method: 'DELETE' }));
+    expect(revoked.status).toBe(200);
+    expect((await poll('alpha')).status).toBe(401);
+  });
+
+  it('refuses checker mints for non-owners and promoter mints entirely', async () => {
+    for (const token of ['local-agent-a', 'local-reviewer', 'local-checker']) {
+      expect((await mint({ roles: ['checker'] }, crypto.randomUUID(), token)).status).toBe(403);
+    }
+    expect((await mint({ roles: ['promoter'] }, crypto.randomUUID(), 'local-owner')).status).toBe(403);
+    expect((await mint({ roles: ['checker', 'promoter'] }, crypto.randomUUID(), 'local-owner')).status).toBe(403);
+    const checker = (await responseBody(await mint({ roles: ['checker'], ttlSeconds: 60 }, crypto.randomUUID(), 'local-owner'))).data;
+    expect((await mint({ roles: ['checker'] }, crypto.randomUUID(), checker.token)).status).toBe(403);
+    expect((await mint({ roles: ['agent'] }, crypto.randomUUID(), checker.token)).status).toBe(403);
+  });
+
+  it('caps checker TTL at the smaller of 30 days and the trusted maximum', async () => {
+    const DAY_MS = 86_400_000;
+    runtime.TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'), delegatedPrincipals: { maxTtlMs: 90 * DAY_MS } });
+    const over = await mint({ roles: ['checker'], ttlSeconds: 30 * 86400 + 1 }, crypto.randomUUID(), 'local-owner');
+    expect(over.status).toBe(400);
+    expect((await responseBody(over)).error.code).toBe('INVALID_TTL');
+    const minted = await mint({ roles: ['checker'], ttlSeconds: 30 * 86400, name: 'runner-30d' }, crypto.randomUUID(), 'local-owner');
+    expect(minted.status).toBe(201);
+    const item = (await responseBody(minted)).data;
+    expect(item.expiresAt).toBeGreaterThan(Date.now() + 29 * DAY_MS);
+    expect(item.expiresAt).toBeLessThanOrEqual(Date.now() + 30 * DAY_MS);
+    const agent = await mint({ roles: ['agent'], ttlSeconds: 45 * 86400 });
+    expect(agent.status).toBe(201);
+    const agentId = (await responseBody(agent)).data.id;
+    await fetchApi(apiRequest(`/v1/principals/${agentId}`, 'local-agent-a', { method: 'DELETE' }));
+
+    runtime.TRUSTED_CONFIG = JSON.stringify({ ...localFixtureConfig('local'), delegatedPrincipals: { maxTtlMs: DAY_MS } });
+    expect((await mint({ roles: ['checker'], ttlSeconds: 2 * 86400 }, crypto.randomUUID(), 'local-owner')).status).toBe(400);
+    expect((await mint({ roles: ['checker'], ttlSeconds: 86400 }, crypto.randomUUID(), 'local-owner')).status).toBe(201);
+  });
+
   it('keeps local fixture credentials invalid in production', async () => {
     await expect(authenticate(apiRequest('/v1/principals', 'local-owner'), { CONCORD_MODE: 'production' } as Env))
       .rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
