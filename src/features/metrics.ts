@@ -5,7 +5,7 @@ type Count = { value: number; n: number; eventKinds: string[] };
 type Duration = { medianMs: number; p90Ms: number; totalMs: number; n: number; eventKinds: string[] };
 type Revision = { median: number; mean: number; n: number; eventKinds: string[] };
 export interface RepoMetrics {
-  since: string; until: string;
+  since: string; until: string; truncated: boolean;
   changesLanded: Count;
   publishToLand: Duration; claimToLand: Duration; reviewWait: Duration; queueWait: Duration;
   leaseClaimsRefused: Count; distinctIssuesWithRefusedClaims: Count; refusalWait: Duration;
@@ -17,55 +17,43 @@ export interface RepoMetrics {
 }
 
 const DAY = 86_400_000;
-const METRIC_PAGE_SIZE = 128;
+/** Maximum number of indexed window events examined by one metrics request. */
+export const METRIC_EVENT_LIMIT = 20_000;
+export const METRIC_SAMPLE_LIMIT = 2_000;
 type EventRow = { sequence: number; kind: string; actor_id: string; timestamp: number; version: number; related_ids: string; payload: string };
 function decodeEvent(row: EventRow): Event {
   return { sequence: row.sequence, kind: row.kind, actorId: row.actor_id, timestamp: row.timestamp,
     version: row.version, relatedIds: JSON.parse(row.related_ids) as string[], payload: JSON.parse(row.payload) as Record<string, unknown> };
 }
 
-/** Keyset pages keep both SQLite's result and the JS working set bounded. */
+/** Iterate the indexed SQL result without materializing the bounded window in JS. */
 export function* metricWindowEvents(sql: SqlStorage, since: number, until: number): Generator<Event> {
-  let timestamp = since; let sequence = 0;
-  for (;;) {
-    const rows = sql.exec<EventRow>(`SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload
-      FROM concord_events WHERE timestamp >= ? AND timestamp < ? AND (timestamp, sequence) > (?, ?)
-      ORDER BY timestamp, sequence LIMIT ?`, since, until, timestamp, sequence, METRIC_PAGE_SIZE).toArray();
-    for (const row of rows) yield decodeEvent(row);
-    if (rows.length < METRIC_PAGE_SIZE) return;
-    timestamp = rows[rows.length - 1].timestamp;
-    sequence = rows[rows.length - 1].sequence;
-  }
+  for (const row of sql.exec<EventRow>(`SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload
+    FROM concord_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp, sequence LIMIT ?`,
+  since, until, METRIC_EVENT_LIMIT)) yield decodeEvent(row);
 }
 
-export function* metricLandingIds(sql: SqlStorage, since: number, until: number): Generator<string> {
-  let timestamp = since; let sequence = 0;
-  for (;;) {
-    const rows = sql.exec<{ timestamp: number; sequence: number; related_ids: string }>(`SELECT timestamp, sequence, related_ids
-      FROM concord_events WHERE kind = 'queue.promotion_applied' AND timestamp >= ? AND timestamp < ?
-        AND (timestamp, sequence) > (?, ?) ORDER BY timestamp, sequence LIMIT ?`,
-    since, until, timestamp, sequence, METRIC_PAGE_SIZE).toArray();
-    for (const row of rows) yield* JSON.parse(row.related_ids) as string[];
-    if (rows.length < METRIC_PAGE_SIZE) return;
-    timestamp = rows[rows.length - 1].timestamp;
-    sequence = rows[rows.length - 1].sequence;
+/** Fixed-size, reproducible reservoir. Totals and n always cover every observed value. */
+export class MetricSample {
+  private readonly values: number[] = [];
+  private seed: number;
+  total = 0;
+  n = 0;
+  constructor(seed: number) { this.seed = seed >>> 0 || 1; }
+  add(value: number): void {
+    if (!Number.isFinite(value) || value < 0) return;
+    this.n++;
+    this.total += value;
+    // xorshift32 gives stable sampling across processes and requests.
+    this.seed ^= this.seed << 13; this.seed ^= this.seed >>> 17; this.seed ^= this.seed << 5;
+    const slot = (this.seed >>> 0) % this.n;
+    if (this.values.length < METRIC_SAMPLE_LIMIT) this.values.push(value);
+    else if (slot < METRIC_SAMPLE_LIMIT) this.values[slot] = value;
   }
-}
-
-/** Only a change landing in the window needs its earlier origin events. */
-export function* metricPriorEvents(sql: SqlStorage, id: string, since: number): Generator<Event> {
-  let timestamp = -Number.MAX_SAFE_INTEGER; let sequence = 0;
-  for (;;) {
-    const rows = sql.exec<EventRow>(`SELECT sequence, kind, actor_id, timestamp, version, related_ids, payload
-      FROM concord_events WHERE timestamp < ? AND (timestamp, sequence) > (?, ?) AND (
-        (kind IN ('change.published', 'queue.enqueued') AND json_extract(related_ids, '$[0]') = ?) OR
-        (kind IN ('lease.claimed', 'verdict.created') AND json_extract(related_ids, '$[1]') = ?) OR
-        (kind = 'lease.claimed' AND json_extract(payload, '$.changeId') = ?))
-      ORDER BY timestamp, sequence LIMIT ?`, since, timestamp, sequence, id, id, id, METRIC_PAGE_SIZE).toArray();
-    for (const row of rows) yield decodeEvent(row);
-    if (rows.length < METRIC_PAGE_SIZE) return;
-    timestamp = rows[rows.length - 1].timestamp;
-    sequence = rows[rows.length - 1].sequence;
+  get sampleSize(): number { return this.values.length; }
+  quantile(fraction: number): number { return quantile([...this.values].sort((a, b) => a - b), fraction); }
+  duration(kinds: string[]): Duration {
+    return { medianMs: this.quantile(.5), p90Ms: this.quantile(.9), totalMs: this.total, n: this.n, eventKinds: kinds };
   }
 }
 
@@ -78,98 +66,80 @@ export function metricPriorRedStart(sql: SqlStorage, since: number): number | nu
     ORDER BY timestamp, sequence LIMIT 1`, since, green?.timestamp ?? -Number.MAX_SAFE_INTEGER, green?.sequence ?? 0).toArray()[0];
   return red?.timestamp ?? null;
 }
-export function metricsWindow(search: URLSearchParams): { since: number; until: number; sinceIso: string; untilIso: string } {
-  const from = search.get('since'); const to = search.get('until');
-  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
-  if (!from || !to || !iso.test(from) || !iso.test(to)) throw new HttpError(400, 'INVALID_METRICS_WINDOW', 'since and until must be UTC ISO timestamps');
-  const since = Date.parse(from); const until = Date.parse(to);
-  if (!Number.isFinite(since) || !Number.isFinite(until) || new Date(since).toISOString() !== new Date(from).toISOString() ||
-    new Date(until).toISOString() !== new Date(to).toISOString() || until <= since || until - since > 31 * DAY) {
-    throw new HttpError(400, 'INVALID_METRICS_WINDOW', 'Window must be positive and at most 31 days');
-  }
-  return { since, until, sinceIso: new Date(since).toISOString(), untilIso: new Date(until).toISOString() };
+
+type OriginRow = { first_claim: number | null; first_publish: number | null; first_approval: number | null;
+  last_enqueue: number | null; published: number; revisions: number };
+function landOrigins(sql: SqlStorage, id: string, land: Event): OriginRow {
+  return sql.exec<OriginRow>(`SELECT
+    MIN(CASE WHEN kind = 'lease.claimed' THEN timestamp END) AS first_claim,
+    MIN(CASE WHEN kind = 'change.published' THEN timestamp END) AS first_publish,
+    MIN(CASE WHEN kind = 'verdict.created' AND json_extract(payload, '$.decision') = 'approve' THEN timestamp END) AS first_approval,
+    MAX(CASE WHEN kind = 'queue.enqueued' THEN timestamp END) AS last_enqueue,
+    SUM(CASE WHEN kind = 'change.published' THEN 1 ELSE 0 END) AS published,
+    COUNT(DISTINCT CASE WHEN kind = 'change.published' AND json_type(payload, '$.revision') IN ('integer', 'real')
+      THEN json_extract(payload, '$.revision') END) AS revisions
+    FROM concord_events WHERE (timestamp, sequence) < (?, ?) AND (
+      (kind IN ('change.published', 'queue.enqueued') AND json_extract(related_ids, '$[0]') = ?) OR
+      (kind = 'verdict.created' AND json_extract(related_ids, '$[1]') = ?) OR
+      (kind = 'lease.claimed' AND (json_extract(related_ids, '$[1]') = ? OR json_extract(payload, '$.changeId') = ?)))`,
+  land.timestamp, land.sequence, id, id, id, id).toArray()[0];
 }
 
-function count(value: number, kinds: string[], n = value): Count { return { value, n, eventKinds: kinds }; }
-function quantile(sorted: number[], fraction: number): number {
-  if (!sorted.length) return 0;
-  const rank = (sorted.length - 1) * fraction;
-  const lower = Math.floor(rank); const upper = Math.ceil(rank);
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * (rank - lower);
+function firstGrantAfterRefusal(sql: SqlStorage, event: Event, until: number,
+  cutoff: { timestamp: number; sequence: number } | undefined): number | null {
+  const id = changeId(event);
+  const keys = Array.isArray(event.payload.keys) ? event.payload.keys.filter((key): key is string => typeof key === 'string') : [];
+  if (!id || !keys.length) return null;
+  const row = sql.exec<{ timestamp: number }>(`SELECT timestamp FROM concord_events
+    WHERE kind = 'lease.claimed' AND (json_extract(payload, '$.changeId') = ? OR json_extract(related_ids, '$[1]') = ?)
+      AND (timestamp, sequence) > (?, ?) AND timestamp < ? AND (timestamp, sequence) <= (?, ?)
+      AND EXISTS (SELECT 1 FROM json_each(?) WHERE value = json_extract(concord_events.payload, '$.unitKey'))
+    ORDER BY timestamp, sequence LIMIT 1`, id, id, event.timestamp, event.sequence, until,
+  cutoff?.timestamp ?? until, cutoff?.sequence ?? Number.MAX_SAFE_INTEGER, JSON.stringify(keys)).toArray()[0];
+  return row?.timestamp ?? null;
 }
-function duration(values: number[], kinds: string[]): Duration {
-  const ordered = values.filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
-  return { medianMs: quantile(ordered, .5), p90Ms: quantile(ordered, .9), totalMs: ordered.reduce((a, b) => a + b, 0), n: ordered.length, eventKinds: kinds };
-}
-const changeId = (event: Event): string | undefined => event.kind.startsWith('lease.') ?
-  (typeof event.payload.changeId === 'string' ? event.payload.changeId : event.kind === 'lease.refused' ? event.relatedIds[0] : event.relatedIds[1]) :
-  event.kind.startsWith('verdict.') ? event.relatedIds[1] : event.relatedIds[0];
 
-/** Consume ordered history without retaining unrelated events. Prior origins may precede since. */
-export function measureEventStream(events: Iterable<Event>, since: number, until: number,
-  landedIds: ReadonlySet<string>, initialRedStart: number | null = null): RepoMetrics {
-  type ChangeSummary = { firstClaim?: number; firstPublish?: number; firstApproval?: number; lastEnqueue?: number;
-    published: boolean; revisions: Set<number> };
-  const changes = new Map<string, ChangeSummary>();
-  const publishToLand: number[] = []; const claimToLand: number[] = []; const queueWait: number[] = [];
-  const reviewWait: number[] = []; const revisions: number[] = [];
-  let changesLanded = 0;
-  let pendingLandAt: number | null = null;
-  const pendingLands: string[] = [];
-  const finishLands = () => {
-    if (pendingLandAt === null) return;
-    for (const id of pendingLands) {
-      const history = changes.get(id);
-      if (!history) continue;
-      if (history.firstPublish !== undefined) publishToLand.push(pendingLandAt - history.firstPublish);
-      if (history.firstClaim !== undefined) claimToLand.push(pendingLandAt - history.firstClaim);
-      if (history.lastEnqueue !== undefined) queueWait.push(pendingLandAt - history.lastEnqueue);
-      if (history.published) revisions.push(history.revisions.size);
-      if (history.firstApproval !== undefined && history.firstPublish !== undefined && history.firstApproval >= history.firstPublish) {
-        reviewWait.push(history.firstApproval - history.firstPublish);
-      }
-    }
-    pendingLands.length = 0;
-    pendingLandAt = null;
-  };
-  const refused: Event[] = [];
-  const grants = new Map<string, Event[]>();
-  const issues = new Set<number>();
-  let rebases = 0; let carried = 0; let failures = 0; let infrastructureFailures = 0;
-  let blames = 0; let issueCloses = 0;
-  let redStart = initialRedStart; let redTotal = 0; let redCount = 0;
-  for (const event of events) {
-    if (event.timestamp >= until) continue;
-    if (pendingLandAt !== null && event.timestamp !== pendingLandAt) finishLands();
-    if (landedIds.has(changeId(event) ?? '') && ['queue.enqueued', 'change.published', 'lease.claimed', 'verdict.created'].includes(event.kind)) {
-      const id = changeId(event)!;
-      const history = changes.get(id) ?? { published: false, revisions: new Set<number>() };
-      if (event.kind === 'lease.claimed') history.firstClaim ??= event.timestamp;
-      if (event.kind === 'change.published') {
-        history.firstPublish ??= event.timestamp;
-        history.published = true;
-        if (typeof event.payload.revision === 'number') history.revisions.add(event.payload.revision);
-      }
-      if (event.kind === 'verdict.created' && event.payload.decision === 'approve') history.firstApproval ??= event.timestamp;
-      if (event.kind === 'queue.enqueued') history.lastEnqueue = event.timestamp;
-      changes.set(id, history);
-    }
-    if (event.timestamp < since) {
-      if (event.kind === 'queue.diagnosis' && event.payload.reason === 'BASE_RED' && redStart === null) redStart = event.timestamp;
-      if (event.kind === 'queue.main_green') redStart = null;
-      continue;
-    }
+/** Exact issue cardinality over the same bounded prefix, computed inside SQLite. */
+function refusedIssueCount(sql: SqlStorage, since: number, until: number): number {
+  return sql.exec<{ n: number }>(`SELECT COUNT(DISTINCT json_extract(payload, '$.issueNumber')) AS n FROM (
+    SELECT kind, payload FROM concord_events WHERE timestamp >= ? AND timestamp < ?
+    ORDER BY timestamp, sequence LIMIT ?
+  ) WHERE kind = 'lease.refused' AND json_type(payload, '$.issueNumber') IN ('integer', 'real')`,
+  since, until, METRIC_EVENT_LIMIT).toArray()[0].n;
+}
+
+/** One pass over at most 20,000 indexed window events; no per-event history is retained. */
+export function measureSqlMetrics(sql: SqlStorage, since: number, until: number): RepoMetrics {
+  // The cutoff also keeps forward-looking refusal waits inside the reported prefix.
+  const cutoff = sql.exec<{ timestamp: number; sequence: number }>(`SELECT timestamp, sequence FROM concord_events
+    WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp, sequence LIMIT 1 OFFSET ?`,
+  since, until, METRIC_EVENT_LIMIT - 1).toArray()[0];
+  const publish = new MetricSample(1); const claim = new MetricSample(2); const review = new MetricSample(3);
+  const queued = new MetricSample(4); const refusedWait = new MetricSample(5); const revisions = new MetricSample(6);
+  let seen = 0; let landed = 0; let refused = 0; let rebases = 0; let carried = 0;
+  let rework = 0; let failures = 0; let infrastructureFailures = 0; let blames = 0; let issueCloses = 0;
+  let redStart = metricPriorRedStart(sql, since); let redTotal = 0; let redCount = 0;
+  for (const event of metricWindowEvents(sql, since, until)) {
+    seen++;
     if (event.kind === 'queue.promotion_applied') {
-      pendingLandAt = event.timestamp;
-      for (const id of event.relatedIds) { pendingLands.push(id); changesLanded++; }
+      for (const id of event.relatedIds) {
+        landed++;
+        const origin = landOrigins(sql, id, event);
+        if (origin.first_publish !== null) publish.add(event.timestamp - origin.first_publish);
+        if (origin.first_claim !== null) claim.add(event.timestamp - origin.first_claim);
+        if (origin.last_enqueue !== null) queued.add(event.timestamp - origin.last_enqueue);
+        if (origin.published) {
+          revisions.add(origin.revisions);
+          rework += Math.max(0, origin.revisions - 1);
+        }
+        if (origin.first_approval !== null && origin.first_publish !== null && origin.first_approval >= origin.first_publish)
+          review.add(origin.first_approval - origin.first_publish);
+      }
     }
     if (event.kind === 'lease.refused') {
-      refused.push(event);
-      if (typeof event.payload.issueNumber === 'number') issues.add(event.payload.issueNumber);
-    }
-    if (event.kind === 'lease.claimed') {
-      const id = changeId(event);
-      if (id) { const history = grants.get(id) ?? []; history.push(event); grants.set(id, history); }
+      refused++;
+      const grant = firstGrantAfterRefusal(sql, event, until, cutoff);
+      if (grant !== null) refusedWait.add(grant - event.timestamp);
     }
     if (['queue.auto_rebased', 'queue.rebased', 'change.auto_rebased'].includes(event.kind)) rebases++;
     if (event.kind === 'verdict.created' && (event.payload.carriedFrom as { method?: unknown } | null)?.method === 'patch-id') carried++;
@@ -191,44 +161,49 @@ export function measureEventStream(events: Iterable<Event>, since: number, until
     }
     if (event.kind === 'issue.closed' && event.payload.closedBy && typeof event.payload.closedBy === 'object') issueCloses++;
   }
-  finishLands();
-  const waits = refused.flatMap(event => {
-    const id = changeId(event);
-    const keys = Array.isArray(event.payload.keys) ? event.payload.keys.filter((key): key is string => typeof key === 'string') : [];
-    const granted = id && keys.length && (grants.get(id) ?? []).find(item =>
-      (item.timestamp > event.timestamp || item.timestamp === event.timestamp && item.sequence > event.sequence)
-      && keys.includes(item.payload.unitKey as string));
-    return granted ? [granted.timestamp - event.timestamp] : [];
-  });
-  const revisionValues = revisions.sort((a, b) => a - b);
+  const issues = refused ? refusedIssueCount(sql, since, until) : 0;
   return {
-    since: new Date(since).toISOString(), until: new Date(until).toISOString(),
-    changesLanded: count(changesLanded, ['queue.promotion_applied']),
-    publishToLand: duration(publishToLand, ['change.published', 'queue.promotion_applied']),
-    claimToLand: duration(claimToLand, ['lease.claimed', 'queue.promotion_applied']),
-    reviewWait: duration(reviewWait, ['change.published', 'verdict.created', 'queue.promotion_applied']),
-    queueWait: duration(queueWait, ['queue.enqueued', 'queue.promotion_applied']),
-    leaseClaimsRefused: count(refused.length, ['lease.refused']),
-    distinctIssuesWithRefusedClaims: count(issues.size, ['lease.refused']),
-    refusalWait: duration(waits, ['lease.refused', 'lease.claimed']),
+    since: new Date(since).toISOString(), until: new Date(until).toISOString(), truncated: seen === METRIC_EVENT_LIMIT,
+    changesLanded: count(landed, ['queue.promotion_applied']),
+    publishToLand: publish.duration(['change.published', 'queue.promotion_applied']),
+    claimToLand: claim.duration(['lease.claimed', 'queue.promotion_applied']),
+    reviewWait: review.duration(['change.published', 'verdict.created', 'queue.promotion_applied']),
+    queueWait: queued.duration(['queue.enqueued', 'queue.promotion_applied']),
+    leaseClaimsRefused: count(refused, ['lease.refused']),
+    distinctIssuesWithRefusedClaims: count(issues, ['lease.refused']),
+    refusalWait: refusedWait.duration(['lease.refused', 'lease.claimed']),
     automaticRebases: count(rebases, ['queue.auto_rebased', 'queue.rebased', 'change.auto_rebased']),
     approvalsCarriedByPatchId: count(carried, ['verdict.created']),
-    revisionsPerLandedChange: { median: quantile(revisionValues, .5), mean: revisionValues.length ? revisionValues.reduce((a, b) => a + b, 0) / revisionValues.length : 0,
-      n: revisionValues.length, eventKinds: ['change.published', 'queue.promotion_applied'] },
-    reworkRevisions: count(revisionValues.reduce((sum, value) => sum + Math.max(0, value - 1), 0), ['change.published', 'queue.promotion_applied'], revisionValues.length),
+    revisionsPerLandedChange: { median: revisions.quantile(.5), mean: revisions.n ? revisions.total / revisions.n : 0,
+      n: revisions.n, eventKinds: ['change.published', 'queue.promotion_applied'] },
+    reworkRevisions: count(rework, ['change.published', 'queue.promotion_applied'], revisions.n),
     combinedTreeCheckFailures: count(failures, ['queue.result_received']),
     stackInfrastructureFailures: count(infrastructureFailures, ['queue.result_received']),
     bisectBlames: count(blames, ['queue.diagnosis']),
-    mainRedTime: { totalMs: redTotal, n: redCount,
-      unresolved: redStart !== null, eventKinds: ['queue.diagnosis', 'queue.main_green'] },
+    mainRedTime: { totalMs: redTotal, n: redCount, unresolved: redStart !== null,
+      eventKinds: ['queue.diagnosis', 'queue.main_green'] },
     issuesClosedByLand: count(issueCloses, ['issue.closed']),
   };
 }
-
-/** Compute from event history only. The window selects terminal/count events; origins may predate it. */
-export function measureEvents(events: Event[], since: number, until: number): RepoMetrics {
-  const ordered = [...events].filter(event => event.timestamp < until).sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence);
-  const landedIds = new Set(ordered.filter(event => event.timestamp >= since && event.kind === 'queue.promotion_applied')
-    .flatMap(event => event.relatedIds));
-  return measureEventStream(ordered, since, until, landedIds);
+export function metricsWindow(search: URLSearchParams): { since: number; until: number; sinceIso: string; untilIso: string } {
+  const from = search.get('since'); const to = search.get('until');
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+  if (!from || !to || !iso.test(from) || !iso.test(to)) throw new HttpError(400, 'INVALID_METRICS_WINDOW', 'since and until must be UTC ISO timestamps');
+  const since = Date.parse(from); const until = Date.parse(to);
+  if (!Number.isFinite(since) || !Number.isFinite(until) || new Date(since).toISOString() !== new Date(from).toISOString() ||
+    new Date(until).toISOString() !== new Date(to).toISOString() || until <= since || until - since > 31 * DAY) {
+    throw new HttpError(400, 'INVALID_METRICS_WINDOW', 'Window must be positive and at most 31 days');
+  }
+  return { since, until, sinceIso: new Date(since).toISOString(), untilIso: new Date(until).toISOString() };
 }
+
+function count(value: number, kinds: string[], n = value): Count { return { value, n, eventKinds: kinds }; }
+function quantile(sorted: number[], fraction: number): number {
+  if (!sorted.length) return 0;
+  const rank = (sorted.length - 1) * fraction;
+  const lower = Math.floor(rank); const upper = Math.ceil(rank);
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (rank - lower);
+}
+const changeId = (event: Event): string | undefined => event.kind.startsWith('lease.') ?
+  (typeof event.payload.changeId === 'string' ? event.payload.changeId : event.kind === 'lease.refused' ? event.relatedIds[0] : event.relatedIds[1]) :
+  event.kind.startsWith('verdict.') ? event.relatedIds[1] : event.relatedIds[0];

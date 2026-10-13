@@ -13,7 +13,7 @@ import { runners } from './features/runners';
 import { findings } from './features/findings';
 import { verdicts } from './features/verdicts';
 import { issuesFeature } from './features/issues';
-import { measureEventStream, metricLandingIds, metricPriorEvents, metricPriorRedStart, metricWindowEvents, metricsWindow, type RepoMetrics } from './features/metrics';
+import { measureSqlMetrics, metricsWindow, type RepoMetrics } from './features/metrics';
 
 /** The six modules are registered once. Each supplies migrations, routes, alarms and projections. */
 export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature];
@@ -124,13 +124,8 @@ export class RepoCoordinator extends DurableObject<Env> {
         const key = `${sinceIso}/${untilIso}`;
         let cached = this.metricsCache.get(key);
         if (!cached || cached.expiresAt <= this.now()) {
-          const landedIds = new Set(metricLandingIds(core.sql, since, until));
-          function* relevantEvents() {
-            for (const id of landedIds) yield* metricPriorEvents(core.sql, id, since);
-            yield* metricWindowEvents(core.sql, since, until);
-          }
           cached = { expiresAt: this.now() + 60_000,
-            data: measureEventStream(relevantEvents(), since, until, landedIds, metricPriorRedStart(core.sql, since)) };
+            data: measureSqlMetrics(core.sql, since, until) };
           const now = this.now();
           for (const [oldKey, entry] of this.metricsCache) if (entry.expiresAt <= now) this.metricsCache.delete(oldKey);
           this.metricsCache.delete(key);

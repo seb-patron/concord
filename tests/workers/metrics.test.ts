@@ -3,7 +3,8 @@ import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import worker from '../../src/worker';
 import type { Event, ModuleContext, Principal, StackResult } from '../../src/contracts';
-import { measureEvents, metricLandingIds, metricPriorEvents, metricPriorRedStart, metricWindowEvents, metricsWindow } from '../../src/features/metrics';
+import { METRIC_EVENT_LIMIT, METRIC_SAMPLE_LIMIT, MetricSample, measureSqlMetrics,
+  metricPriorRedStart, metricWindowEvents, metricsWindow } from '../../src/features/metrics';
 import { queue } from '../../src/features/queue';
 import type { RepoCoordinator } from '../../src/coordinator';
 import { FakeStorage } from '../../src/storage/fake';
@@ -16,19 +17,77 @@ function event(at: number, kind: string, relatedIds: string[], payload: Record<s
   return { sequence: ++sequence, timestamp: base + at, kind, actorId: 'fixture', version: sequence, relatedIds, payload };
 }
 
+let fixtureRepo = 0;
+async function measureEvents(events: Event[], since: number, until: number) {
+  const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:metric-fixture-${++fixtureRepo}`));
+  return runInDurableObject(stub, (_instance, durable) => {
+    const sql = durable.storage.sql;
+    for (const item of events) sql.exec(
+      'INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)',
+      item.kind, item.actorId, item.timestamp, item.version, JSON.stringify(item.relatedIds), JSON.stringify(item.payload));
+    return measureSqlMetrics(sql, since, until);
+  });
+}
+
 describe('repository event metrics', () => {
-  it('returns all zeros and n=0 for an empty window', () => {
-    const metrics = measureEvents([], base, base + 100_000);
+  it('keeps a deterministic 2000-value reservoir with exact counts and totals', async () => {
+    const first = new MetricSample(42); const second = new MetricSample(42);
+    for (let i = 0; i < 10_000; i++) { first.add(i); second.add(i); }
+    expect(first.sampleSize).toBe(METRIC_SAMPLE_LIMIT);
+    expect(first.duration(['test'])).toEqual(second.duration(['test']));
+    expect(first.duration(['test'])).toMatchObject({ n: 10_000, totalMs: 49_995_000 });
+  });
+
+  it('stops a valid indexed window at 20000 events and reports truncation', async () => {
+    const repo = 'metrics_event_cap';
+    const created = await worker.fetch(apiRequest('/v1/repos', 'local-owner', {
+      method: 'POST', headers: { 'idempotency-key': 'metrics-event-cap' },
+      body: JSON.stringify({ name: repo, policyId: 'local-demo', profileId: 'local-demo' }),
+    }), env);
+    expect(created.status).toBe(201);
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${repo}`));
+    await runInDurableObject(stub, (_instance, durable) => {
+      const sql = durable.storage.sql;
+      sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)',
+        'lease.refused', 'fixture', base + 500, 1, '["after-cap"]', '{"keys":["unit"],"issueNumber":57}');
+      for (let batch = 0; batch < METRIC_EVENT_LIMIT / 1000; batch++) {
+        sql.exec(`WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x + 1 FROM n WHERE x < 999)
+          INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload)
+          SELECT 'lease.claimed', 'fixture', ?, 1, json_array('lease', 'c' || (? + x)),
+            json_object('changeId', 'c' || (? + x), 'unitKey', 'unit') FROM n`,
+        base + 1000 + batch, batch * 1000, batch * 1000);
+      }
+      sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)',
+        'lease.claimed', 'fixture', base + 1800, 1, '["lease","after-cap"]', '{"changeId":"after-cap","unitKey":"unit"}');
+      sql.exec('INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload) VALUES(?, ?, ?, ?, ?, ?)',
+        'queue.promotion_applied', 'fixture', base + 2000, 1, '["after-cap"]', '{}');
+    });
+    const path = `/v1/repos/${repo}/metrics?since=${encodeURIComponent(new Date(base).toISOString())}&until=${encodeURIComponent(new Date(base + 3000).toISOString())}`;
+    const response = await worker.fetch(apiRequest(path, 'local-viewer'), env);
+    expect(response.status).toBe(200);
+    expect((await responseBody(response)).data).toMatchObject({ truncated: true,
+      changesLanded: { value: 0 }, leaseClaimsRefused: { value: 1 },
+      distinctIssuesWithRefusedClaims: { value: 1 }, refusalWait: { n: 0 } });
+    await runInDurableObject(stub, (_instance, durable) => {
+      const window = metricWindowEvents(durable.storage.sql, base, base + 3000);
+      let count = 0;
+      for (const item of window) { expect(item.kind).toBe(count === 0 ? 'lease.refused' : 'lease.claimed'); count++; }
+      expect(count).toBe(METRIC_EVENT_LIMIT);
+    });
+  });
+
+  it('returns all zeros and n=0 for an empty window', async () => {
+    const metrics = await measureEvents([], base, base + 100_000);
     expect(metrics.changesLanded).toEqual({ value: 0, n: 0, eventKinds: ['queue.promotion_applied'] });
     for (const [name, value] of Object.entries(metrics)) {
-      if (name === 'since' || name === 'until') continue;
+      if (name === 'since' || name === 'until' || name === 'truncated') continue;
       expect(value.n, name).toBe(0);
       expect(Object.values(value).some(item => typeof item === 'number' && !Number.isFinite(item)), name).toBe(false);
       expect(value.eventKinds.length, name).toBeGreaterThan(0);
     }
   });
 
-  it('measures one landed change from claim, publish, approval, enqueue and land events', () => {
+  it('measures one landed change from claim, publish, approval, enqueue and land events', async () => {
     const events = [
       event(1000, 'lease.claimed', ['l1', 'c1'], { changeId: 'c1' }),
       event(2000, 'change.published', ['c1'], { revision: 1 }),
@@ -37,7 +96,7 @@ describe('repository event metrics', () => {
       event(10_000, 'queue.promotion_applied', ['c1']),
       event(10_000, 'issue.closed', ['1', 'c1'], { closedBy: { changeId: 'c1' } }),
     ];
-    const metrics = measureEvents(events, base, base + 20_000);
+    const metrics = await measureEvents(events, base, base + 20_000);
     expect(metrics.changesLanded.value).toBe(1);
     expect(metrics.publishToLand).toMatchObject({ medianMs: 8000, p90Ms: 8000, n: 1 });
     expect(metrics.claimToLand).toMatchObject({ medianMs: 9000, n: 1 });
@@ -47,7 +106,7 @@ describe('repository event metrics', () => {
     expect(metrics.issuesClosedByLand.value).toBe(1);
   });
 
-  it('counts recorded rebases, carried approvals, rework and prior-window origins', () => {
+  it('counts recorded rebases, carried approvals, rework and prior-window origins', async () => {
     const events = [
       event(1000, 'change.published', ['c2'], { revision: 1 }),
       event(2000, 'change.published', ['c2'], { revision: 2 }),
@@ -56,7 +115,7 @@ describe('repository event metrics', () => {
       event(5000, 'queue.enqueued', ['c2']),
       event(10_000, 'queue.promotion_applied', ['c2']),
     ];
-    const metrics = measureEvents(events, base + 3000, base + 20_000);
+    const metrics = await measureEvents(events, base + 3000, base + 20_000);
     expect(metrics.changesLanded.value).toBe(1);
     expect(metrics.publishToLand.medianMs).toBe(9000);
     expect(metrics.automaticRebases).toMatchObject({ value: 1, n: 1 });
@@ -65,20 +124,20 @@ describe('repository event metrics', () => {
     expect(metrics.reworkRevisions.value).toBe(1);
   });
 
-  it('measures refused claims and waits only when a grant is logged', () => {
+  it('measures refused claims and waits only when a grant is logged', async () => {
     const events = [
       event(1000, 'lease.refused', ['c3'], { issueNumber: 57, keys: ['A'] }),
       event(2000, 'lease.refused', ['c3'], { issueNumber: 57, keys: ['A'] }),
       event(6000, 'lease.claimed', ['l3', 'c3'], { changeId: 'c3', unitKey: 'A' }),
       event(7000, 'lease.refused', ['c4'], { issueNumber: 58, keys: ['B'] }),
     ];
-    const metrics = measureEvents(events, base, base + 20_000);
+    const metrics = await measureEvents(events, base, base + 20_000);
     expect(metrics.leaseClaimsRefused).toMatchObject({ value: 3, n: 3 });
     expect(metrics.distinctIssuesWithRefusedClaims).toMatchObject({ value: 2, n: 2 });
     expect(metrics.refusalWait).toMatchObject({ medianMs: 4500, p90Ms: 4900, totalMs: 9000, n: 2 });
   });
 
-  it('does not resolve a refused unit with a grant for another unit of the same change', () => {
+  it('does not resolve a refused unit with a grant for another unit of the same change', async () => {
     const events = [
       event(1000, 'lease.refused', ['c1'], { keys: ['A'] }),
       event(2000, 'lease.claimed', ['l1', 'c1'], { changeId: 'c1', unitKey: 'B' }),
@@ -86,23 +145,23 @@ describe('repository event metrics', () => {
       event(4000, 'lease.refused', ['c1'], { keys: ['C'] }),
       event(5000, 'lease.claimed', ['l3', 'c1'], { changeId: 'c1', unitKey: 'B' }),
     ];
-    expect(measureEvents(events, base, base + 10_000).refusalWait).toMatchObject({ totalMs: 2000, n: 1 });
+    expect((await measureEvents(events, base, base + 10_000)).refusalWait).toMatchObject({ totalMs: 2000, n: 1 });
   });
 
-  it('counts failed combined-tree checks and bisect blame without claiming main was red', () => {
+  it('counts failed combined-tree checks and bisect blame without claiming main was red', async () => {
     const events = [
       event(1000, 'queue.result_received', ['c5', 'c6'], { purpose: 'stack', outcome: 'FAIL', bootstrap: false, candidateCount: 2,
         composedTreeOid: 'tree-1', sourceTreeOid: 'tree-1' }),
       event(2000, 'queue.diagnostic_result', ['c5'], { outcome: 'FAIL' }),
       event(3000, 'queue.diagnosis', ['c5', 'c6'], { reason: 'SINGLETON', blame: ['c5'] }),
     ];
-    const metrics = measureEvents(events, base, base + 20_000);
+    const metrics = await measureEvents(events, base, base + 20_000);
     expect(metrics.combinedTreeCheckFailures).toMatchObject({ value: 1, n: 1 });
     expect(metrics.bisectBlames).toMatchObject({ value: 1, n: 1 });
     expect(metrics.mainRedTime).toMatchObject({ totalMs: 0, n: 0 });
   });
 
-  it('counts only failures with checked combined trees and reports infrastructure failures separately', () => {
+  it('counts only failures with checked combined trees and reports infrastructure failures separately', async () => {
     const events = [
       event(1000, 'queue.result_received', ['c1'], { purpose: 'stack', outcome: 'ENV_ERROR', bootstrap: false, candidateCount: 1,
         composedTreeOid: null, sourceTreeOid: null }),
@@ -119,23 +178,23 @@ describe('repository event metrics', () => {
       event(7000, 'queue.result_received', ['seed'], { purpose: 'stack', outcome: 'FAIL', bootstrap: true, candidateCount: 1,
         composedTreeOid: 'seed-tree', sourceTreeOid: 'seed-tree' }),
     ];
-    const metrics = measureEvents(events, base, base + 10_000);
+    const metrics = await measureEvents(events, base, base + 10_000);
     expect(metrics.combinedTreeCheckFailures).toMatchObject({ value: 1, n: 1 });
     expect(metrics.stackInfrastructureFailures).toMatchObject({ value: 2, n: 2 });
   });
 
-  it('measures recovered red time across windows and marks an unresolved red interval', () => {
+  it('measures recovered red time across windows and marks an unresolved red interval', async () => {
     const events = [
       event(1000, 'queue.diagnosis', ['c1'], { reason: 'BASE_RED' }),
       event(2000, 'queue.diagnosis', ['c2'], { reason: 'BASE_RED' }),
       event(6000, 'queue.main_green', [], { jobId: 'baseline-1' }),
       event(8000, 'queue.diagnosis', ['c3'], { reason: 'BASE_RED' }),
     ];
-    expect(measureEvents(events, base + 3000, base + 7000).mainRedTime).toMatchObject({ totalMs: 3000, n: 1,
+    expect((await measureEvents(events, base + 3000, base + 7000)).mainRedTime).toMatchObject({ totalMs: 3000, n: 1,
       unresolved: false });
-    expect(measureEvents(events, base, base + 10_000).mainRedTime).toMatchObject({ totalMs: 5000, n: 1,
+    expect((await measureEvents(events, base, base + 10_000)).mainRedTime).toMatchObject({ totalMs: 5000, n: 1,
       unresolved: true });
-    expect(measureEvents(events, base + 8000, base + 10_000).mainRedTime).toMatchObject({ totalMs: 0, n: 0,
+    expect((await measureEvents(events, base + 8000, base + 10_000)).mainRedTime).toMatchObject({ totalMs: 0, n: 0,
       unresolved: true });
   });
 
@@ -210,7 +269,7 @@ describe('repository event metrics', () => {
     expect((await worker.fetch(apiRequest(`/v1/repos/${repo}/metrics?since=bad&until=bad`, 'local-viewer'), env)).status).toBe(400);
   });
 
-  it('pages a window without reading unrelated prior events and bounds cached windows', async () => {
+  it('streams the indexed window without unrelated prior events and bounds cached windows', async () => {
     const repo = 'metrics_paged';
     const created = await worker.fetch(apiRequest('/v1/repos', 'local-owner', {
       method: 'POST', headers: { 'idempotency-key': 'metrics-paged-repo' },
@@ -233,30 +292,19 @@ describe('repository event metrics', () => {
       insert('queue.main_green', base + 5000, []);
       insert('queue.promotion_applied', base + 10_000, ['landed']);
       insert('queue.promotion_applied', base + 21_000, ['late']);
-      let pages = 0;
+      let reads = 0;
       const boundedSql = { exec: (query: string, ...args: (string | number)[]) => {
-        pages++;
+        reads++;
         expect(query).toContain('timestamp >= ? AND timestamp < ?');
         expect(query).toContain('LIMIT ?');
-        expect(args.at(-1)).toBeLessThanOrEqual(128);
+        expect(args.at(-1)).toBe(METRIC_EVENT_LIMIT);
         return sql.exec(query, ...args);
       } } as unknown as SqlStorage;
       const window = Array.from(metricWindowEvents(boundedSql, base, base + 20_000));
       expect(window).toHaveLength(262);
       expect(window.every(item => item.timestamp >= base && item.timestamp < base + 20_000)).toBe(true);
-      expect(pages).toBe(3);
-      expect(Array.from(metricLandingIds(sql, base, base + 20_000))).toEqual(['landed']);
-      let priorQuery = ''; let priorArgs: (string | number)[] = [];
-      const priorSql = { exec: (query: string, ...args: (string | number)[]) => {
-        priorQuery = query; priorArgs = args;
-        return sql.exec(query, ...args);
-      } } as unknown as SqlStorage;
-      expect(Array.from(metricPriorEvents(priorSql, 'landed', base)).map(item => item.kind)).toEqual([
-        'lease.claimed', 'change.published', 'verdict.created', 'queue.enqueued',
-      ]);
+      expect(reads).toBe(1);
       expect(metricPriorRedStart(sql, base)).toBe(base - 5000);
-      const plan = sql.exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${priorQuery}`, ...priorArgs).toArray().map(row => row.detail);
-      expect(plan.join(' ')).toMatch(/concord_events_metric_first/);
     });
     const path = (since: number) => `/v1/repos/${repo}/metrics?since=${encodeURIComponent(new Date(since).toISOString())}&until=${encodeURIComponent(new Date(base + 20_000).toISOString())}`;
     const response = await worker.fetch(apiRequest(path(base), 'local-viewer'), env);
