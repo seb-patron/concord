@@ -1195,6 +1195,31 @@ export function attemptBudget(family) {
       });
     });
 
+    it.each(['timeout', '503'] as const)('excludes a slow %s poll and its retry delay from idle time', async failure => {
+      let fakeNow = 0;
+      let polls = 0;
+      const delays: number[] = [];
+      const transport: Transport = async path => {
+        if (path !== 'runner/poll') throw new Error('UNEXPECTED_API:' + path);
+        polls++;
+        if (polls === 1) {
+          fakeNow += 30_000;
+          if (failure === 'timeout') throw new Error('timed out');
+          return { status: 503 };
+        }
+        return { status: 204 };
+      };
+      const options = parseArgs(['--repo', 'demo', '--role', 'promoter', '--profile-digest', pin,
+        '--max-jobs', '1', '--idle-timeout-seconds', '10']);
+      expect(await runLoop(options, transport, null, {
+        sleep: async ms => { delays.push(ms); fakeNow += ms; },
+        random: () => 0.5, log: () => {}, now: () => fakeNow,
+      })).toBe(0);
+      expect(polls).toBe(12);
+      expect(delays).toEqual(Array(11).fill(1000));
+      expect(fakeNow).toBe(41_000);
+    });
+
     it('retries a transient result submission and keeps fence conflicts fatal', async () => {
       let posts = 0;
       const transport = retryTransport(async () => {

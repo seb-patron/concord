@@ -22,7 +22,7 @@ Fatal (the runner exits non-zero with `POLL_FAILED:<code>`, as before):
 - `409 RUNNER_ID_CONFLICT` and any other non-retryable 409 (`STALE_JOB`, `RESULT_CONFLICT`, `RESULT_IDENTITY`, `IDEMPOTENCY_CONFLICT`, and unknown codes).
 - A job whose kind or profile digest does not match this runner exits with `JOB_ROLE_OR_PROFILE_MISMATCH`.
 
-Only idle (`204`) responses advance the `--idle-timeout-seconds` clock; time spent backing off on transient failures does not count towards the idle timeout. `--once` still performs a single poll-to-job cycle, with one retry of a transient poll failure before it exits with the error.
+Only idle (`204`) responses advance the `--idle-timeout-seconds` clock; the full interval from a failed poll request through its retry delay does not count towards the idle timeout. `--once` still performs a single poll-to-job cycle, with one retry of a transient poll failure before it exits with the error.
 
 The command checker executes code from the composed repository. Run checker workers only on a trusted, isolated machine or container with no valuable host files or credentials accessible to that code. The environment allowlist and credential filtering reduce accidental exposure; they are not an OS sandbox and do not make an untrusted checkout safe on an ordinary workstation.
 

@@ -111,15 +111,16 @@ export function retryTransport(transport: Transport, { sleep = defaultSleep, ran
 // The same idempotency key and body are reused across retries. In --once mode
 // a single transient failure is retried once; a second one ends the cycle so
 // the caller sees the error. Long-running callers retry until the server
-// answers. Returns the time spent backing off so callers can exclude it from
-// idle accounting.
+// answers. Returns the elapsed time from each failed request through its
+// retry delay so callers can exclude the full retry interval from idle time.
 async function pollWithRetry(transport: Transport, body: unknown, key: string,
-  { sleep, random, log, once }: { sleep: (ms: number) => Promise<void>; random: () => number;
-    log: (line: string) => void; once: boolean }):
+  { sleep, random, log, now, once }: { sleep: (ms: number) => Promise<void>; random: () => number;
+    log: (line: string) => void; now: () => number; once: boolean }):
   Promise<{ response: Awaited<ReturnType<Transport>>; retryMs: number }> {
   let retryMs = 0;
   let attempt = 0;
   for (;;) {
+    const attemptStarted = now();
     try {
       const response = await transport('runner/poll', body, key);
       if (!isTransientResponse(response) || (once && attempt >= 1)) return { response, retryMs };
@@ -127,15 +128,15 @@ async function pollWithRetry(transport: Transport, body: unknown, key: string,
       attempt++;
       // Code and next delay only: the body and idempotency key stay out of logs.
       log(`POLL_RETRY code=${responseCode(response)} delayMs=${Math.round(delay)}`);
-      retryMs += delay;
       await sleep(delay);
+      retryMs += now() - attemptStarted;
     } catch (error) {
       if (!networkFailure(error) || (once && attempt >= 1)) throw error;
       const delay = backoffDelayMs(attempt, random);
       attempt++;
       log(`POLL_RETRY code=${networkCode(error)} delayMs=${Math.round(delay)}`);
-      retryMs += delay;
       await sleep(delay);
+      retryMs += now() - attemptStarted;
     }
   }
 }
@@ -173,12 +174,11 @@ export async function runLoop(options: Options, transport: Transport, profile: L
   let retryMs = 0;
   while (count < options.maxJobs) {
     const answered = await pollWithRetry(transport, { runnerId: options.runnerId, role: options.role,
-      supportedProfileDigests: [profileDigest], maxJobs: 1 }, randomUUID(), { sleep, random, log, once: options.once });
+      supportedProfileDigests: [profileDigest], maxJobs: 1 }, randomUUID(), { sleep, random, log, now, once: options.once });
     retryMs += answered.retryMs;
     const poll = answered.response;
     if (poll.status === 204) {
-      // Only idle (204) time advances the idle clock; backoff spent on
-      // transient failures does not count towards the idle timeout.
+      // Failed poll attempts and their backoff do not count towards idle time.
       if (options.once || options.idleTimeoutSeconds === 0 || now() - idleSince - retryMs >= options.idleTimeoutSeconds * 1000) break;
       await sleep(Math.min(1000, options.idleTimeoutSeconds * 1000));
       continue;
