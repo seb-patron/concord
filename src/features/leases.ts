@@ -165,6 +165,31 @@ function expireWaits(context: ModuleContext, now: number): void {
   }
 }
 
+function cancelRevokedWaits(context: ModuleContext, requesterIds: string[]): void {
+  const revoked = new Set(requesterIds);
+  for (const id of revoked) context.state.put(`revokedRequester:${id}`, true);
+  for (const wait of queued(context).filter(item => revoked.has(item.requester_id))) {
+    context.sql.exec("UPDATE leases_waits SET state = 'cancelled' WHERE wait_id = ?", wait.wait_id);
+    context.appendEvent('lease.wait_cancelled', [wait.wait_id, wait.change_id],
+      { waitId: wait.wait_id, changeId: wait.change_id, reason: 'requester_revoked' }, context.nextVersion());
+  }
+}
+
+function invalidateRequesters(context: ModuleContext, body: unknown): Response {
+  if (context.principal.principalId !== 'system' || context.principal.roles.length !== 0) {
+    throw new HttpError(403, 'FORBIDDEN', 'Internal revocation only');
+  }
+  const ids = (body as { revokedPrincipalIds?: unknown })?.revokedPrincipalIds;
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 1000 || ids.some(id => !validId(id))) {
+    throw new HttpError(422, 'INVALID_REQUESTERS', 'Revoked principal IDs required');
+  }
+  return context.transaction(() => {
+    cancelRevokedWaits(context, ids as string[]);
+    if (queued(context).length) grantWaits(context, context.now());
+    return json({ cancelled: true }, context.version(), eventSequence(context.sql));
+  });
+}
+
 /** The ordinal is stable even when a holder releases several units in one transaction. */
 function grantWaits(context: ModuleContext, now: number): void {
   expireWaits(context, now);
@@ -173,6 +198,10 @@ function grantWaits(context: ModuleContext, now: number): void {
   const blocked: UnitIdentity[][] = [];
   const live = activeRows(context, now);
   for (const wait of pending) {
+    if (context.state.get<boolean>(`revokedRequester:${wait.requester_id}`)) {
+      cancelRevokedWaits(context, [wait.requester_id]);
+      continue;
+    }
     const change = context.readChange?.(wait.change_id);
     if (change?.status !== 'eligible' || change.value.authorId !== wait.requester_id ||
       !['draft', 'ready'].includes(change.value.status)) {
@@ -663,7 +692,9 @@ export const leases: FeatureModule = {
   routes: [
     { method: 'GET', pattern: collection, handle: (context, request) => json(projection(context,
       parseLeaseCursor(new URL(request.url).searchParams.get('cursor'))), context.version(), eventSequence(context.sql)) },
-    { method: 'POST', pattern: collection, handle: (context, _request, _match, body) => claim(context, body) },
+    { method: 'POST', pattern: collection, handle: (context, _request, _match, body) =>
+      (body as { revokedPrincipalIds?: unknown })?.revokedPrincipalIds !== undefined
+        ? invalidateRequesters(context, body) : claim(context, body) },
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
     { method: 'GET', pattern: waitAction, handle: (context, _request, match) => getWait(context, match[1]) },
     { method: 'DELETE', pattern: waitAction, handle: (context, _request, match) => cancelWait(context, match[1]) },

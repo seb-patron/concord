@@ -145,18 +145,41 @@ export async function handlePrincipalRoute(context: ModuleContext, request: Requ
       throw new HttpError(403, 'FORBIDDEN', 'Cannot revoke this principal');
     }
     const revoked: string[] = [];
+    const affected: Row[] = [];
     context.transaction(() => {
       const pending = [target.id];
       while (pending.length) {
         const id = pending.pop()!;
         const row = sql.exec<Row>('SELECT * FROM principals_records WHERE id = ?', id).toArray()[0];
-        if (!row || row.revoked_at !== null) continue;
-        revoked.push(id);
+        if (!row) continue;
         pending.push(...sql.exec<{ id: string }>('SELECT id FROM principals_records WHERE parent_id = ?', id).toArray().map(child => child.id));
+        affected.push(row);
+        if (row.revoked_at !== null) continue;
+        revoked.push(id);
         sql.exec('UPDATE principals_records SET revoked_at = ? WHERE id = ?', now, id);
       }
       if (revoked.length) context.appendEvent('principal.revoked', revoked, { rootId: target.id }, context.nextVersion());
     });
+    const indexedRepos = (context.state.get<Array<{ repoId: string }>>('catalog:index') ?? []).map(repo => repo.repoId);
+    const byRepo = new Map<string, string[]>();
+    for (const row of affected) {
+      const scope = JSON.parse(row.repo_ids) as string[] | '*';
+      for (const repoId of scope === '*' ? indexedRepos : scope) {
+        const ids = byRepo.get(repoId) ?? [];
+        ids.push(row.id);
+        byRepo.set(repoId, ids);
+      }
+    }
+    const system: Principal = { tenantId: context.tenantId, principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+    for (const [repoId, revokedPrincipalIds] of byRepo) {
+      const stub = context.env.REPO_COORDINATOR.get(context.env.REPO_COORDINATOR.idFromName(`repo:${context.tenantId}:${repoId}`));
+      const response = await stub.fetch(new Request(`https://concord.internal/v1/repos/${repoId}/leases`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID(),
+          'x-concord-principal': JSON.stringify(system), 'x-concord-tenant': context.tenantId },
+        body: JSON.stringify({ revokedPrincipalIds }),
+      }));
+      if (!response.ok) throw new HttpError(503, 'REVOCATION_SYNC_FAILED', 'Could not cancel revoked principal waits; retry revocation');
+    }
     return json({ revokedIds: revoked }, context.version(), eventSequence(sql));
   }
   throw new HttpError(404, 'NOT_FOUND', 'Unknown principal route');

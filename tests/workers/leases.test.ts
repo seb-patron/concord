@@ -321,6 +321,45 @@ describe('lease wait queue', () => {
       ]));
   });
 
+  it('cancels a revoked delegated requester in every scoped repo before releasing to the next waiter', async () => {
+    setupPolicy();
+    const repos = ['lease_revoke_one', 'lease_revoke_two'];
+    const delegatedResponse = await fetchApi(mutation('/v1/principals', { roles: ['agent'], repoIds: repos },
+      'mint-lease-waiter', 'local-agent-a'));
+    expect(delegatedResponse.status).toBe(201);
+    const delegated = (await responseBody(delegatedResponse)).data;
+    const waits: Array<{ repo: string; held: { leaseId: string; fence: number }; waitId: string }> = [];
+    for (const repo of repos) {
+      const held = (await responseBody(await claim(repo, 'local-agent-a', 'holder', [alpha], `hold-${repo}`))).data.leases[0];
+      await runInDurableObject(stubFor(repo), async (_instance, state) => seedClaim(state, repo, 'delegated', delegated.id));
+      const response = await fetchApi(mutation(path(repo), {
+        changeId: 'delegated', unitKeys: [alpha], intentText: 'delegated wait', wait: true,
+      }, `wait-${repo}`, delegated.token));
+      expect(response.status).toBe(202);
+      waits.push({ repo, held, waitId: (await responseBody(response)).data.waitId });
+    }
+    const spoof = await fetchApi(mutation(path(repos[0]), { revokedPrincipalIds: [delegated.id] },
+      'spoof-revocation', 'local-owner'));
+    expect(spoof.status).toBe(403);
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repos[0])}/waits/${waits[0].waitId}`, 'local-owner')))).data.state).toBe('queued');
+    const next = (await responseBody(await claim(repos[0], 'local-agent-b', 'next', [alpha], 'next', { wait: true }))).data;
+    const revoke = await fetchApi(apiRequest(`/v1/principals/${delegated.id}`, 'local-agent-a', { method: 'DELETE' }));
+    expect(revoke.status).toBe(200);
+    expect((await responseBody(revoke)).data.revokedIds).toContain(delegated.id);
+    expect((await fetchApi(apiRequest(path(repos[0]), delegated.token))).status).toBe(401);
+    for (const { repo, held, waitId } of waits) {
+      expect((await responseBody(await fetchApi(apiRequest(`${path(repo)}/waits/${waitId}`, 'local-owner')))).data.state).toBe('cancelled');
+      expect((await releaseLease(repo, 'local-agent-a', held, `release-${repo}`)).status).toBe(200);
+      const events = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repo}/events`, 'local-owner')))).data.items as Event[];
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'lease.wait_cancelled', payload: expect.objectContaining({ waitId, reason: 'requester_revoked' }) }),
+      ]));
+      expect(events.some(event => event.kind === 'lease.granted_from_queue' && event.payload.waitId === waitId)).toBe(false);
+    }
+    expect((await responseBody(await fetchApi(apiRequest(`${path(repos[0])}/waits/${next.waitId}`, 'local-agent-b')))).data)
+      .toMatchObject({ state: 'granted', leases: [{ holderId: 'agent-b', unitKey: alpha, fence: 2 }] });
+  });
+
   it('derives ETA through an earlier multi-unit wait', async () => {
     setupPolicy();
     const repo = 'lease_wait_eta_chain';
