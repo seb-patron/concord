@@ -1,17 +1,18 @@
 import {
   allowedActions, claimUnits, clearSessionToken, enqueueChange, getEvents, getHealth, getMe,
-  getSnapshot, getVerdicts, hasToken, isForbidden, listRepos, newIdempotencyKey,
+  getSnapshot, getVerdicts, hasToken, isForbidden, listPrincipals, listRepos, newIdempotencyKey,
   redactError, setSessionToken, submitVerdict, withdrawChange,
 } from './api.js';
 import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
+import { appendObservedEvents, createTracker } from './tracker.js';
 
 const $ = id => document.getElementById(id);
-const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
+const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
-  inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
+  inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
   awaitingFreshSnapshot: false };
 const demo = typeof window.CONCORD_DEMO_VIEWER_TOKEN === 'string' && window.CONCORD_DEMO_VIEWER_TOKEN.trim()
   ? window.CONCORD_DEMO_VIEWER_TOKEN.trim() : null;
@@ -21,6 +22,7 @@ const node = (tag, value, className) => {
   if (className) n.className = className;
   return n;
 };
+const tracker = createTracker($('tracker-view'), { refresh: () => loadRepo(state.generation, false) });
 const list = value => Array.isArray(value) ? value : [];
 const projections = () => state.snapshot?.data?.projections ?? {};
 const changes = () => snapshotCollections(state.snapshot).changes.items;
@@ -70,11 +72,12 @@ function showSession() {
 }
 function signOut(message) {
   ++state.generation; clearSessionToken();
-  state.repoId = null; state.snapshot = null; state.identity = null; state.repos = [];
+  state.repoId = null; state.snapshot = null; state.identity = null; state.repos = []; state.principals = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
   state.observedVersions.clear();
   state.awaitingFreshSnapshot = false;
   state.selected = null; state.inboxSelected = null;
+  state.view = 'tracker';
   $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = '';
   $('inbox-detail').replaceChildren(); $('inbox-detail').dataset.itemId = '';
   state.deskMessage = null;
@@ -94,6 +97,7 @@ async function signIn(token, preferredRepo) {
     const page = await listRepos();
     if (gen !== state.generation) return;
     state.identity = identity;
+    void refreshPrincipals(gen);
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
     const select = $('repo-select'); select.replaceChildren();
     if (!state.repos.length) {
@@ -115,6 +119,19 @@ async function signIn(token, preferredRepo) {
       `Could not sign in (${redactError(error).code}).`;
     signOut(message);
   }
+}
+async function refreshPrincipals(gen) {
+  try {
+    const items = []; const seen = new Set(); let cursor = null;
+    do {
+      const page = await listPrincipals(cursor);
+      if (gen !== state.generation) return;
+      items.push(...list(page?.data?.items)); cursor = page?.data?.nextCursor ?? null;
+      if (cursor && seen.has(cursor)) break;
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    if (gen === state.generation) { state.principals = items; render(); }
+  } catch { /* Principal visibility is narrower than repo visibility for some tokens. */ }
 }
 async function loadRepo(gen = state.generation, resetSelection = true) {
   if (resetSelection) {
@@ -155,7 +172,7 @@ function acceptSnapshot(body, repoId) {
   return true;
 }
 async function refreshVerdicts(gen = state.generation) {
-  const ids = new Set(changes().filter(c => c?.status === 'ready').map(c => c.changeId));
+  const ids = new Set(changes().filter(c => ['ready', 'queued', 'checking'].includes(c?.status)).map(c => c.changeId));
   if (state.selected) ids.add(state.selected);
   if (state.inboxSelected) {
     const item = deriveInbox(state.snapshot).find(i => i.id === state.inboxSelected);
@@ -201,7 +218,7 @@ async function poll(gen = state.generation) {
       if (items.length === 0) break;
       const last = items.at(-1)?.sequence;
       if (!Number.isSafeInteger(last) || last <= state.seq) break;
-      state.events.push(...items); state.events = state.events.slice(-2000); state.seq = last;
+      state.events = appendObservedEvents(state.events, items); state.seq = last;
       if (last >= (page.eventSeq ?? last)) break;
     }
     if (page?.version > state.version) {
@@ -601,7 +618,12 @@ function render() {
     if (!hasToken() || !state.identity) return;
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
+    $('desk').dataset.mainViewActive = state.view;
+    $('tracker-view').hidden=state.view!=='tracker';
     $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
+    for (const tab of document.querySelectorAll('[data-main-view]')) tab.setAttribute('aria-current', String(tab.dataset.mainView === state.view));
+    tracker.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
+      identity: state.identity, principals: state.principals, verdicts: state.verdicts, message: state.deskMessage });
     if (!state.snapshot) {
       if (!state.repoId) {
         renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderInbox();renderTabs();
@@ -672,6 +694,7 @@ function boot() {
   $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
+  for (const tab of document.querySelectorAll('[data-main-view]')) tab.addEventListener('click',()=>{state.view=tab.dataset.mainView;render();});
   $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});
   for(const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click',()=>{state.tab=b.dataset.tab;renderTabs();});
   $('work-board').addEventListener('keydown',e=>{
