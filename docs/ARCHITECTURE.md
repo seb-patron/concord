@@ -2,7 +2,7 @@
 
 Design contract v1, checked against live Cloudflare documentation on 2026-10-11 UTC. This repository currently contains a design, not an implemented service. Commands in the other documents are acceptance contracts for the implementation slices.
 
-**Git conflicts on lines. Agents collide on meaning.** Concord gives an agent a unit of work, exclusive semantic claims, preserved intent, content-bound review, and a checker-backed route to canonical history. Git remains the transport and immutable object format. A change, rather than a pull request, is the collaboration record.
+**Git conflicts on lines. Agents collide on meaning.** Concord gives an agent a unit of work, exclusive semantic claims, preserved intent, content-bound review, and a checker-backed route to canonical history. Git remains the transport and immutable object format. A change, rather than a pull request, is the collaboration record. The vocabulary used here (change, landing, claim, and the rest) is defined in the [glossary](GLOSSARY.md).
 
 ## Product boundary
 
