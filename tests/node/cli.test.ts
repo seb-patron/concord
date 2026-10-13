@@ -143,10 +143,10 @@ describe('Concord agent CLI client', () => {
     const env = { ...process.env, CONCORD_URL: url, CONCORD_TOKEN: 'owner-token' };
     const cli = (...args: string[]) => execFile(process.execPath, ['--import', 'tsx', 'cli/main.ts', ...args], { cwd: process.cwd(), env });
     try {
-      const minted = await cli('principals', 'mint', '--role', 'checker', '--repo', 'alpha', '--ttl', '30d', '--name', 'mac-mini');
+      const minted = await cli('principals', 'mint', '--role', 'checker', '--repo', 'alpha', '--ttl', '24h', '--name', 'mac-mini');
       expect(minted.stdout).toBe(`${token}\n`);
       expect(calls[0]).toMatchObject({ method: 'POST', path: '/v1/principals',
-        body: { roles: ['checker'], repoIds: ['alpha'], ttlSeconds: 30 * 86400, name: 'mac-mini' } });
+        body: { roles: ['checker'], repoIds: ['alpha'], ttlSeconds: 86400, name: 'mac-mini' } });
       expect(minted.stderr).toContain('checker-1');
       expect(minted.stderr).toContain(`CONCORD_URL=${url} CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo alpha --role checker`);
       expect(minted.stderr).not.toContain(token);

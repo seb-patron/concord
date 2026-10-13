@@ -10,6 +10,7 @@ import { digest } from '../../src/http';
 import { localFixtureConfig } from '../../src/state';
 import { FakeStorage } from '../../src/storage/fake';
 import { apiRequest, mutation, responseBody } from '../helpers';
+import runnerGuide from '../../docs/runner.md?raw';
 
 const runtime = env as Env;
 const originalConfig = runtime.TRUSTED_CONFIG;
@@ -427,6 +428,26 @@ describe('delegated principals', () => {
     const checker = (await responseBody(await mint({ roles: ['checker'], ttlSeconds: 60 }, crypto.randomUUID(), 'local-owner'))).data;
     expect((await mint({ roles: ['checker'] }, crypto.randomUUID(), checker.token)).status).toBe(403);
     expect((await mint({ roles: ['agent'] }, crypto.randomUUID(), checker.token)).status).toBe(403);
+  });
+
+  it('mints the documented checker request under default trusted limits and explains longer TTLs', async () => {
+    runtime.TRUSTED_CONFIG = JSON.stringify(localFixtureConfig('local'));
+    const example = /npm run concord -- principals mint --role checker --repo REPO_ID --ttl ([1-9]\d*)([smhd]) --name mac-mini/.exec(runnerGuide);
+    expect(example).not.toBeNull();
+    expect(`${example![1]}${example![2]}`).toBe('24h');
+    expect(runnerGuide).toContain('delegatedPrincipals.maxTtlMs');
+    expect(runnerGuide).toContain('"delegatedPrincipals": {"maxTtlMs": 2592000000}');
+    expect(runnerGuide).toContain('400 INVALID_TTL');
+
+    const ttlSeconds = Number(example![1]) * ({ s: 1, m: 60, h: 3600, d: 86400 } as const)[example![2] as 's' | 'm' | 'h' | 'd'];
+    const body = { roles: ['checker'], repoIds: ['REPO_ID'], ttlSeconds, name: 'mac-mini' };
+    const accepted = await mint(body, crypto.randomUUID(), 'local-owner');
+    expect(accepted.status).toBe(201);
+    expect((await responseBody(accepted)).data).toMatchObject({ roles: ['checker'], repoIds: ['REPO_ID'], name: 'mac-mini' });
+
+    const rejected = await mint({ ...body, ttlSeconds: 30 * 86400 }, crypto.randomUUID(), 'local-owner');
+    expect(rejected.status).toBe(400);
+    expect((await responseBody(rejected)).error.code).toBe('INVALID_TTL');
   });
 
   it('caps checker TTL at the smaller of 30 days and the trusted maximum', async () => {

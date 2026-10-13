@@ -63,10 +63,10 @@ For dispatch-lab, the stored job must carry a trusted `caseId` from the scenario
 A new checker machine needs no redeploy and no `AUTH_TOKENS` change: the owner mints a runtime checker principal, scoped to the repositories it may serve.
 
 ```sh
-npm run concord -- principals mint --role checker --repo REPO_ID --ttl 30d --name mac-mini
+npm run concord -- principals mint --role checker --repo REPO_ID --ttl 24h --name mac-mini
 ```
 
-The mint prints the token once on stdout — it is never shown again — and, on stderr, a ready-to-paste runner start command that reads the token from the `CHECKER_TOKEN` environment variable instead of embedding it. Checker mints are bounded by the smaller of 30 days and `TRUSTED_CONFIG.delegatedPrincipals.maxTtlMs`; set `maxTtlMs` to `2592000000` (30 days) to permit the full `--ttl 30d`. Copy the owner profile file to the machine, load the token without writing it to shell history, and start the runner:
+The mint prints the token once on stdout — it is never shown again — and, on stderr, a ready-to-paste runner start command that reads the token from the `CHECKER_TOKEN` environment variable instead of embedding it. The default trusted configuration allows a 24-hour checker token. For longer lifetimes (up to 30 days), first raise `delegatedPrincipals.maxTtlMs` in `TRUSTED_CONFIG`; for example, `"delegatedPrincipals": {"maxTtlMs": 2592000000}` permits `--ttl 30d`. Without that setting, `--ttl 30d` returns `400 INVALID_TTL`. Copy the owner profile file to the machine, load the token without writing it to shell history, and start the runner:
 
 ```sh
 read -rs CHECKER_TOKEN && export CHECKER_TOKEN    # paste the token at the prompt
