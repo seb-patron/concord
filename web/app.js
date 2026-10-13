@@ -7,8 +7,10 @@ import {
   boardStage, deriveInbox, environmentBadge, leaseCountdown, mutationEvidence,
   normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
 } from './views.js';
+import { mountPlan } from './plan.js';
 
 const $ = id => document.getElementById(id);
+let planScreen = null;
 const state = { generation: 0, repoId: null, repos: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'desk', tab: 'work', connected: true, busy: false, deskMessage: null,
@@ -63,6 +65,7 @@ function showSession() {
   $('desk').hidden = !signedIn;
   $('repo-picker').hidden = !signedIn;
   $('principal').hidden = !signedIn;
+  $('plan-open').hidden = !signedIn;
   $('token-clear').hidden = !signedIn;
   if (signedIn) $('principal').textContent = state.identity.principalId
     ? `Signed in as ${state.identity.principalId} · ${roles().join(', ') || 'role unverified'}${state.identity.model ? ` · ${state.identity.model}` : ''} · token in memory`
@@ -595,20 +598,27 @@ function renderTabs() {
   for (const b of document.querySelectorAll('[data-tab]')) b.setAttribute('aria-current',String(b.dataset.tab===state.tab));
   for (const pane of document.querySelectorAll('[data-pane]')) pane.classList.toggle('active-pane',pane.dataset.pane===state.tab);
 }
+function applyViewChrome() {
+  const plan = state.view==='plan';
+  $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
+  $('plan-view').hidden=!plan; $('stat-strip').hidden=plan; $('main-footer').hidden=plan;
+  if (plan) { $('inbox-alert').hidden=true; planScreen?.render(); }
+}
 function render() {
   preserve(()=>{
     showSession();
     if (!hasToken() || !state.identity) return;
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
-    $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
     if (!state.snapshot) {
       if (!state.repoId) {
         renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderInbox();renderTabs();
       }
+      applyViewChrome();
       return;
     }
     renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderTabs();
+    applyViewChrome();
   });
 }
 function selectChange(id) {
@@ -684,6 +694,12 @@ function boot() {
     const next=cards[(index+(e.key==='ArrowLeft'||e.key==='ArrowUp'?-1:1)+cards.length)%cards.length];
     selectChange(next.dataset.changeId);$(next.id)?.focus();
   });
+  planScreen = mountPlan($('plan-view'), {
+    snapshot: () => state.snapshot, repoId: () => state.repoId, identity: () => state.identity,
+    refresh: () => loadRepo(state.generation, false),
+    onClose: () => { state.view='desk'; render(); },
+  });
+  $('plan-open').addEventListener('click',()=>{state.view=state.view==='plan'?'desk':'plan';render();});
   window.setInterval(()=>{if(hasToken()&&state.repoId)void poll();},1000);
   void getHealth().then(body=>{const info=environmentBadge(body?.data,false);$('env-badge').textContent=info.label==='live Artifacts'?'Live · Cloudflare Artifacts':info.label;}).catch(()=>{$('env-badge').textContent='Backend unavailable';});
   render();
