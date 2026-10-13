@@ -134,7 +134,7 @@ These are already scoped cuts, not hidden acceptance exceptions. If the build sl
 
 | Order / status | Cut | Keep |
 | --- | --- | --- |
-| Already cut | Full GitHub parity: issues/projects/search/notifications, public signup, OAuth, organizations, multiple protected canonical branches | Repo/branch Git hosting, changes, independent review, merge, basic web UI, CLI |
+| Already cut (narrowed 10-12: issues, projects, and milestones now exist) | Full GitHub parity: search/notifications, public signup, OAuth, organizations, multiple protected canonical branches | Repo/branch Git hosting, changes, issues, projects, milestones, independent review, merge, basic web UI, CLI |
 | Already cut | General C/TypeScript semantic extraction and arbitrary shared-header rewriting | Explicit registered units, declaration identities, coarse file fallback, one trusted TSV row merger |
 | Already cut | Automatic lease waiting/priorities and large speculative search | Immediate informative refusal, fencing, width-4 stack, diagnostic budget, safe interaction block |
 | Already cut | Statistical flake model, flaky-test auto-waivers, production runner sandbox orchestration | Distinct environment failures, one diagnostic retry, disagreement blocks landing |

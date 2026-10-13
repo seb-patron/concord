@@ -542,3 +542,45 @@ describe('documented demo commands', () => {
     shell.assertComplete();
   }, liveBudget.timeout);
 });
+
+describe('live service documentation', () => {
+  const liveUrl = 'https://concord.sebastian-patrones.workers.dev';
+  const stale = [
+    'contains a design, not an implemented service',
+    'There is no Cloudflare account yet',
+    'fake Git bridge',
+    'No Cloudflare account or GitHub destination is provisioned',
+    'checked-landing gate remains missing',
+    'Full GitHub parity: issues/projects',
+  ];
+
+  it('opens the README with the live service and the agent-neutral setup path', async () => {
+    const readme = await readFile(join(cwd, 'README.md'), 'utf8');
+    expect(readme).toContain(liveUrl);
+    expect(readme).toContain('Connect your agent');
+    expect(readme).toContain('Use it for real');
+    expect(readme).toContain('docs/mcp.md');
+    expect(readme).toContain('docs/cli.md');
+    expect(readme).toContain('10 changes');
+    expect(readme).toContain('private trading-research project');
+    expect(readme.indexOf(liveUrl)).toBeLessThan(readme.indexOf('## Local development'));
+    expect(readme).not.toContain('## Five-minute local start');
+  });
+
+  it('has no stale design-only or unprovisioned lines in the allowed docs', async () => {
+    const paths = ['README.md', 'docs/ARCHITECTURE.md', 'docs/deploy.md', 'docs/DEMO.md', 'docs/land.md', 'docs/specs/README.md'];
+    for (const path of paths) {
+      const document = await readFile(join(cwd, path), 'utf8');
+      for (const phrase of stale) expect(document, `${path}: ${phrase}`).not.toContain(phrase);
+    }
+  });
+
+  it('keeps launcher-specific material under an optional adapters heading', async () => {
+    for (const path of ['docs/land.md', 'docs/DEMO.md']) {
+      const document = await readFile(join(cwd, path), 'utf8');
+      expect(document).toContain('## Launcher adapters (optional)');
+    }
+    const specs = await readFile(join(cwd, 'docs/specs/README.md'), 'utf8');
+    expect(specs).toContain('issues, projects, and milestones now exist');
+  });
+});

@@ -1,6 +1,16 @@
 # Concord
 
-Git conflicts on lines. Agents collide on meaning. Concord is a Git platform for agents working concurrently on one repository: an owner-defined unit policy lets them reserve semantic work, publish real commits to isolated forks, and earn a checked place in canonical history. The local demo uses a Cloudflare Worker with a fake Git bridge and an original retry-policy fixture.
+Git conflicts on lines. Agents collide on meaning. Concord is a live Git platform for agents working concurrently on one repository: agents claim meaning, not lines — an owner-defined unit policy lets them reserve semantic work, publish real commits to isolated forks, and earn a checked place in canonical history. The queue checks the combined tree and finds the bad change, and reviews survive edits through content-bound verdicts.
+
+Live service: https://concord.sebastian-patrones.workers.dev (`GET /health` reports `mode` production and `storageBackend` artifacts).
+
+## Connect your agent
+
+Set `CONCORD_URL` to the live service URL and `CONCORD_TOKEN` to your scoped token. Connect any agent through the MCP server (`npm run mcp` from a Concord checkout; see the [MCP guide](docs/mcp.md)) or drive the lifecycle with the CLI (`npm run concord -- <noun> <verb> --json`; see the [CLI guide](docs/cli.md)). Both paths use the same API; give the reviewer a separate token so review stays independent.
+
+## Use it for real
+
+Concord runs on Cloudflare Workers, Durable Objects, and Artifacts — not as a local-only demo. A private trading-research project landed 10 changes through Concord on 10-12, and Concord's own repository is imported into Concord with its PRs landing through it. Local mode still exists for development (see below).
 
 ## What is novel
 
@@ -9,20 +19,20 @@ Git conflicts on lines. Agents collide on meaning. Concord is a Git platform for
 - **Content-bound verdicts** can carry across a mechanical base move only after a trusted delta check; changed dependencies invalidate them.
 - **A findings ledger** keeps review objections and repair dispositions tied to change revisions rather than transient comments.
 
-The [architecture](docs/ARCHITECTURE.md) explains the Worker, Git storage, runner, trust boundaries, and limits. The [nine-minute demo](docs/DEMO.md) shows each local scene; the [judging map](docs/JUDGING.md) maps evidence to the competition criteria.
+The [architecture](docs/ARCHITECTURE.md) explains the Worker, Git storage, runner, trust boundaries, and limits. The [nine-minute demo](docs/DEMO.md) shows each scene; the [judging map](docs/JUDGING.md) maps evidence to the competition criteria.
 
 Concord issues hold task specs and link changes, leases, and milestones. See the [issues API](docs/api-issues.md), [CLI guide](docs/cli.md), and [MCP guide](docs/mcp.md).
 
 ```mermaid
 flowchart LR
   A[Agents and CLI] --> W[Worker: leases, changes, review, queue]
-  W --> B[Local Git bridge]
-  W --> C[Cloudflare Artifacts when deployed]
+  W --> B[Local Git bridge for development]
+  W --> C[Cloudflare Artifacts live storage]
   W --> R[Trusted checker and promoter runner]
   R --> W
 ```
 
-## Five-minute local start
+## Local development
 
 Prerequisites: Node 22+, npm, and native Git. In a clean clone, install the pinned dependencies first. Start from the clone's directory:
 
@@ -89,7 +99,7 @@ npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 
 ## Status and safety
 
-The local Worker, bridge, fixture checker, runner, scenario driver, CLI, and browser UI run without an account. Cloudflare Artifacts hosting, a public deployment, and any mirror require the owner's account, credentials, authorization, and the live evidence in the [deployment runbook](docs/deploy.md); a local bridge run is not that evidence. The AW scene uses a public mock adapter, not the private launcher. Historical improvement claims require an approved sanitized timeline and are not inferred from the supplied aggregates.
+The local Worker, bridge, fixture checker, runner, scenario driver, CLI, and browser UI run without an account; that is the development path. The live service above runs on the owner's Cloudflare account with Artifacts storage, and a local bridge run is not deployed evidence. Any mirror also needs owner authorization; see the [deployment runbook](docs/deploy.md). The AW scene uses a public mock adapter, not the private launcher. Historical improvement claims require an approved sanitized timeline and are not inferred from the supplied aggregates.
 
 Agents can follow [AGENTS.md](AGENTS.md), connect through the [MCP server](docs/mcp.md), and [land a finished agent run](docs/land.md).
 

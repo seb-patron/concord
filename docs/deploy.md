@@ -1,6 +1,6 @@
 # Concord deployment and one-way demo mirror
 
-The local bridge is a development fake. A public deployment uses the `concord-demo` Artifacts namespace and `wrangler.jsonc`; it never uses `wrangler.local.jsonc` or `BRIDGE_URL`. No Cloudflare account or GitHub destination is provisioned by this repository. The owner must authorize account creation, deployment, and any mirror push. Keep `CONCORD_SHOW_DECOMPILED_C=0`; this release contains only the original public synthetic fixture.
+The local bridge is a development fake. Concord is live at https://concord.sebastian-patrones.workers.dev on the `concord-demo` Artifacts namespace and `wrangler.jsonc` (`GET /health` reports `mode` production and `storageBackend` artifacts); the live service never uses `wrangler.local.jsonc` or `BRIDGE_URL`. The owner provisioned the Cloudflare account and authorizes deployments and any mirror push. Keep `CONCORD_SHOW_DECOMPILED_C=0`; this release contains only the original public synthetic fixture.
 
 ## Local acceptance and release inputs
 
@@ -16,7 +16,7 @@ sh scripts/validate.sh
 
 `--local` checks the production and local Wrangler configurations, safe content and credential settings, Node/Git, and local program availability. It reports `remote deployment unavailable: owner credentials required` without failing the local check. The production Worker accepts no `local-*` bearer tokens and selects Artifacts only. The [repo API guide](api-repos.md) documents the local bridge; its `file://` repositories are not deployed evidence.
 
-With the [README local bridge and Worker](../README.md#five-minute-local-start) running, these commands recheck the seeded fixture and its first barriers. They use the README's absolute `CONCORD_RUN_DIR` and local URL, and do not constitute deployed smoke evidence.
+With the [README local bridge and Worker](../README.md#local-development) running, these commands recheck the seeded fixture and its first barriers. They use the README's absolute `CONCORD_RUN_DIR` and local URL, and do not constitute deployed smoke evidence.
 
 <!-- verified-by: 12c -->
 ```sh
