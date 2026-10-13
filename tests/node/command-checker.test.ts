@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -7,12 +7,14 @@ import type { Digest, Job, TrustedPolicy } from '../../src/contracts';
 import { digest } from '../../src/http';
 import { childEnvironment, command, git, temporaryWork } from '../../runner/git';
 import { executeJob } from '../../runner/execute';
-import { loadProfile, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
+import { createCommandProfile, loadProfile, pinnedCheck, verifyLocalProfile } from '../../runner/profiles';
 
 const executable = '/bin/sh';
 const commandSettings = { executable, argv: ['scripts/validate.sh'], cwd: 'repo' as const,
   timeoutSeconds: 2, env: ['PATH', 'TMPDIR', 'LANG'], outputCap: 4096 };
 const filePin = (bytes: Buffer | string) => ('sha256:' + createHash('sha256').update(bytes).digest('hex')) as Digest;
+const expectedHostLine = async (path: string) =>
+  `host=${process.platform}/${process.arch} node=${process.version} exe_sha256=${filePin(await readFile(path))}\n`;
 const commitEnv = childEnvironment({ GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
   GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' });
 
@@ -79,7 +81,7 @@ describe('pinned command checker', () => {
       job.unitPolicy.acceptance.gates = Array.from({ length: 5 }, (_, index) =>
         ({ id: `gate-${index}`, requiredOutcome: 'PASS' }));
       const passing = await executeJob(job, profile, credentials);
-      expect(passing.log).toMatch(/^host=.+ exe_sha256=sha256:[a-f0-9]{64}\n/);
+      expect(passing.log.startsWith(await expectedHostLine(executable))).toBe(true);
       expect(passing).toMatchObject({ kind: 'validate-stack', outcome: 'PASS' });
       expect(passing.log.match(/exit=0\n/g)).toHaveLength(5);
       expect(Buffer.byteLength(passing.log)).toBeLessThanOrEqual(4096);
@@ -139,7 +141,7 @@ describe('pinned command checker', () => {
         process.env.SystemRoot = 'synthetic-supervisor-secret';
         const checked = await pinnedCheck(profile, job, dir);
         expect(checked.outcome).toBe('PASS');
-        expect(checked.log).toMatch(/^host=.+ exe_sha256=sha256:[a-f0-9]{64}\nexit=0\n$/);
+        expect(checked.log).toBe(await expectedHostLine(executable) + 'exit=0\n');
         expect(checked.log).not.toContain('synthetic-supervisor-secret');
       } finally {
         if (previous === undefined) delete process.env.SystemRoot;
@@ -341,6 +343,68 @@ describe('pinned command checker', () => {
       await expect(loadProfile(path)).rejects.toThrow('INVALID_COMMAND_PROFILE: checkerDigest');
     });
   });
+
+  it('rejects an outside symlink to a candidate checker even after the script changes', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const checker = join(repo, 'checker.sh');
+      await writeFile(checker, '#!/bin/sh\nexit 0\n');
+      await chmod(checker, 0o755);
+      const outside = join(dir, 'outside-checker');
+      await symlink(checker, outside);
+      const profile = await createCommandProfile({ id: 'linked', checkerId: 'linked', timeoutMs: 5000,
+        maxOutputBytes: 4096, ...commandSettings, executable: outside, argv: [] });
+      const path = join(dir, 'profile.json');
+      await writeFile(path, JSON.stringify(profile));
+      const loaded = await loadProfile(path);
+      await writeFile(checker, '#!/bin/sh\nprintf replaced\nexit 0\n');
+      expect((await loadProfile(path)).digest).toBe(profile.digest);
+      await expect(pinnedCheck(loaded, jobFor(loaded, {}, 'a'.repeat(40)), repo))
+        .rejects.toThrow('CHECKER_IN_CANDIDATE');
+    });
+  });
+
+  it('rejects a symlink hop through the candidate even when its final target is on the host', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const bridge = join(repo, 'bridge');
+      const outside = join(dir, 'outside-checker');
+      await symlink(executable, bridge);
+      await symlink(bridge, outside);
+      const profile = await loadProfile(await profileIn(dir, { executable: outside }));
+      await expect(pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo))
+        .rejects.toThrow('CHECKER_IN_CANDIDATE');
+    });
+  });
+
+  it('fails closed when the executable is atomically replaced while it runs', async () => {
+    await temporaryWork(async dir => {
+      const repo = join(dir, 'candidate');
+      await mkdir(repo);
+      const binary = join(dir, 'shell');
+      const replacement = join(dir, 'replacement');
+      const marker = join(repo, 'started');
+      await writeFile(binary, `#!/bin/sh\nprintf ready > "${marker}"\nsleep 1\n`);
+      await writeFile(replacement, `#!/bin/sh\nprintf ready > "${marker}"\nsleep 1\n# version B\n`);
+      await chmod(binary, 0o755);
+      await chmod(replacement, 0o755);
+      const profile = await loadProfile(await profileIn(dir, { executable: binary,
+        argv: [] }));
+      const checking = pinnedCheck(profile, jobFor(profile, {}, 'a'.repeat(40)), repo);
+      const observed = checking.then(value => ({ value }), error => ({ error: String(error) }));
+      let started = false;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        try { started = (await readFile(marker, 'utf8')) === 'ready'; } catch { /* child has not started */ }
+        if (started) break;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(started, JSON.stringify(started ? {} : await observed)).toBe(true);
+      await rename(replacement, binary);
+      await expect(checking).rejects.toThrow('ENV_ERROR: executable changed');
+    });
+  }, 5000);
 
   it('generates a loadable command profile from a config file', async () => {
     await temporaryWork(async dir => {

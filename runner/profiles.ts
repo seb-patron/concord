@@ -1,7 +1,7 @@
-import { access, lstat, readFile, stat } from 'node:fs/promises';
+import { access, lstat, open, readFile, readlink, realpath, stat } from 'node:fs/promises';
 import { constants, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { isAbsolute, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Job, CheckOutcome } from '../src/contracts';
 import { digest, stableJson } from '../src/http';
@@ -30,8 +30,58 @@ const fileDigest = async (path: string) => {
   return 'sha256:' + hash.digest('hex');
 };
 export const localEnvironment = () => ({ platform: process.platform, arch: process.arch, node: process.version });
-export async function commandHostLine(profile: LocalProfile): Promise<string> {
-  return `host=${process.platform}/${process.arch} node=${process.version} exe_sha256=${await fileDigest(profile.executable!)}\n`;
+export async function commandHostLine(profile: LocalProfile, executableDigest?: string): Promise<string> {
+  return `host=${process.platform}/${process.arch} node=${process.version} exe_sha256=${executableDigest ?? await fileDigest(profile.executable!)}\n`;
+}
+const inside = (path: string, root: string) => path === root || path.startsWith(root + sep);
+
+/** Check every symlink destination, including hops that leave the candidate again. */
+async function commandExecutableTarget(executable: string, repo: string): Promise<string> {
+  const roots = [resolve(repo), await realpath(repo)];
+  let path = resolve(executable);
+  for (let hops = 0; hops < 40; hops++) {
+    const { root } = parse(path);
+    let current = root;
+    let followed = false;
+    const parts = path.slice(root.length).split(sep).filter(Boolean);
+    for (let index = 0; index < parts.length; index++) {
+      current = join(current, parts[index]);
+      if (roots.some(candidate => inside(current, candidate))) throw new Error('CHECKER_IN_CANDIDATE');
+      if ((await lstat(current)).isSymbolicLink()) {
+        path = resolve(dirname(current), await readlink(current), ...parts.slice(index + 1));
+        if (roots.some(candidate => inside(path, candidate))) throw new Error('CHECKER_IN_CANDIDATE');
+        followed = true;
+        break;
+      }
+    }
+    if (!followed) {
+      const target = await realpath(path);
+      if (roots.some(candidate => inside(target, candidate))) throw new Error('CHECKER_IN_CANDIDATE');
+      return target;
+    }
+  }
+  throw new Error('ENV_ERROR: executable symlink chain');
+}
+
+type ExecutableSnapshot = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; sha256: string };
+const sameExecutable = (a: ExecutableSnapshot, b: ExecutableSnapshot) =>
+  a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.sha256 === b.sha256;
+
+async function executableSnapshot(path: string): Promise<ExecutableSnapshot> {
+  const handle = await open(path, 'r');
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new Error('ENV_ERROR: executable');
+    const hash = createHash('sha256');
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk);
+    const after = await handle.stat({ bigint: true });
+    const named = await stat(path, { bigint: true });
+    const snapshot = (value: typeof before): ExecutableSnapshot => ({ dev: value.dev, ino: value.ino,
+      size: value.size, mtimeNs: value.mtimeNs, sha256: '' });
+    if (!sameExecutable(snapshot(before), snapshot(after)) || !sameExecutable(snapshot(after), snapshot(named)))
+      throw new Error('ENV_ERROR: executable changed');
+    return { ...snapshot(after), sha256: 'sha256:' + hash.digest('hex') };
+  } finally { await handle.close(); }
 }
 async function commandExecutableAvailable(profile: LocalProfile): Promise<void> {
   try {
@@ -237,14 +287,17 @@ export const dispatchArgv = ['--input-type=module', '-e', candidateCode, '{repo}
 export async function pinnedCheck(profile: LocalProfile, job: Job, repo: string, unit = 'all'): Promise<{ outcome: CheckOutcome; log: string; score: { matched: number; total: number } | null }> {
   checkProfile(job, profile);
   if (profile.kind === 'command') {
-    if (resolve(profile.executable!).startsWith(resolve(repo) + sep)) throw new Error('CHECKER_IN_CANDIDATE');
+    const executable = await commandExecutableTarget(profile.executable!, repo);
+    const before = await executableSnapshot(executable);
     const env: NodeJS.ProcessEnv = {};
     for (const name of profile.env!) if (process.env[name] !== undefined) env[name] = process.env[name];
     const values = [...new Set(profile.env!.map(name => process.env[name]).filter((value): value is string => !!value))]
       .sort((a, b) => b.length - a.length);
-    const hostLine = await commandHostLine(profile);
-    const result = await command(profile.executable!, profile.argv!, repo, profile.timeoutSeconds! * 1000,
+    const hostLine = await commandHostLine(profile, before.sha256);
+    const result = await command(executable, profile.argv!, repo, profile.timeoutSeconds! * 1000,
       env, { outputCap: profile.outputCap!, tail: true, redact: values });
+    if (await commandExecutableTarget(profile.executable!, repo) !== executable ||
+      !sameExecutable(before, await executableSnapshot(executable))) throw new Error('ENV_ERROR: executable changed');
     const output = result.outputTail ?? '';
     const prefix = `${hostLine}exit=${result.code}${result.timedOut ? ' timeout' : ''}\n`;
     const remaining = profile.outputCap! - Buffer.byteLength(prefix);
