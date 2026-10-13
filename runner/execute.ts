@@ -108,6 +108,15 @@ async function runAffected(profile: LocalProfile, job: Job, directory: string, u
   const targets = profile.checkerId === 'dispatch-lab' ? ['all'] : [...new Set(unitKeys)].sort(compareKeys);
   if (!targets.length) return { outcome: 'UNVERIFIED_TARGET', log: 'No affected units identified' };
   const log = cappedChecks(Math.min(job.maxOutputBytes, OUTPUT_CAP), profile.kind === 'command');
+  if (profile.kind === 'command') {
+    const checked = await pinnedCheck(profile, job, directory);
+    const marker = /^exit=-?\d+(?: timeout)?\n/.exec(checked.log)?.[0];
+    if (!marker) throw new Error('COMMAND_EXIT_MARKER_MISSING');
+    for (const [index, unit] of targets.entries())
+      log.append(index === 0 ? checked.log : marker,
+        (index === 0 ? `delta-check: 1 run for ${targets.length} units\n` : '') + unit + ': ');
+    return { outcome: checked.outcome, log: log.value() };
+  }
   for (const unit of targets) {
     const checked = await pinnedCheck(profile, job, directory, unit);
     log.append(checked.log, unit + ': ');

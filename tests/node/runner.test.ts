@@ -1,4 +1,4 @@
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -702,16 +702,18 @@ export function attemptBudget(family) {
     });
   }, 15_000);
 
-  it('keeps a later failing affected unit and its exit marker after an earlier full log', async () => {
-    await gitFixture(async ({ repo, canonical, candidate, base }) => {
+  it.each([{ exitCode: 0, outcome: 'PASS' }, { exitCode: 7, outcome: 'FAIL' }] as const)(
+    'runs a command once for three affected units and records $outcome for each', async ({ exitCode, outcome }) => {
+    await gitFixture(async ({ dir, repo, canonical, candidate, base }) => {
       await writeFile(join(repo, 'example.txt'), 'changed\n');
       await writeFile(join(repo, 'later.txt'), 'added\n');
-      await git(repo, ['add', 'example.txt', 'later.txt']);
-      await git(repo, ['commit', '--quiet', '-m', 'two affected units'], 30_000, commitEnv);
+      await writeFile(join(repo, 'third.txt'), 'added\n');
+      await git(repo, ['add', 'example.txt', 'later.txt', 'third.txt']);
+      await git(repo, ['commit', '--quiet', '-m', 'three affected units'], 30_000, commitEnv);
       const head = await git(repo, ['rev-parse', 'HEAD']);
       await git(repo, ['push', '--quiet', candidate, 'HEAD:refs/heads/main']);
       const remotes = { canonical: pathToFileURL(canonical).href, candidate: pathToFileURL(candidate).href };
-      const units = Object.fromEntries(['example.txt', 'later.txt'].map(file => ['file:' + file,
+      const units = Object.fromEntries(['example.txt', 'later.txt', 'third.txt'].map(file => ['file:' + file,
         { canonicalKey: 'file:' + file, file, resources: [], dependencyKeys: [] }]));
       const oldReviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
@@ -722,16 +724,19 @@ export function attemptBudget(family) {
       const profile: LocalProfile = { id: 'local-demo', kind: 'command', digest: pin, checkerId: 'local-demo', checkerDigest: pin,
         oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin, timeoutMs: 120_000, maxOutputBytes: 16_384,
         executable: '/bin/sh', toolchainFile: '/bin/sh', argv: ['-c',
-          `if [ -f .first-unit-ran ]; then printf '%s' '${'y'.repeat(16_384)}'; exit 7; fi\n` +
-          `touch .first-unit-ran\nprintf '%s' '${'x'.repeat(16_384)}'`],
+          `printf 'run\\n' >> '${join(dir, 'invocations')}'\nprintf 'output once\\n'\nexit ${exitCode}`],
         cwd: 'repo', timeoutSeconds: 5, env: [], outputCap: 16_384 };
       const result = await executeJob(job, profile, credentials(remotes));
-      expect(result).toMatchObject({ kind: 'delta-check', outcome: 'FAIL' });
+      expect(result).toMatchObject({ kind: 'delta-check', outcome });
       if (result.kind !== 'delta-check') throw new Error('wrong result');
-      expect(result.reviewManifest?.changedUnits.map(unit => unit.unitKey)).toEqual(['file:example.txt', 'file:later.txt']);
+      expect(await readFile(join(dir, 'invocations'), 'utf8')).toBe('run\n');
+      expect(result.reviewManifest?.changedUnits.map(unit => unit.unitKey)).toEqual(
+        ['file:example.txt', 'file:later.txt', 'file:third.txt']);
       expect(Buffer.byteLength(result.log)).toBeLessThanOrEqual(16_384);
-      expect(result.log).toContain('file:later.txt: exit=7');
-      expect(result.log).toContain('yyyyyyyy');
+      expect(result.log).toContain('delta-check: 1 run for 3 units');
+      expect(result.log.match(/output once/g)).toHaveLength(1);
+      for (const unit of Object.keys(units)) expect(result.log).toContain(`${unit}: exit=${exitCode}`);
+      expect(result.log.match(new RegExp(`exit=${exitCode}\\n`, 'g'))).toHaveLength(3);
     });
   }, 15_000);
 
