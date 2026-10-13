@@ -29,7 +29,11 @@ function swarm(replicate: number, conflicts: number, duration: number) {
 }
 const serials = [serial(0, 30), serial(2, 40)];
 const swarms = [swarm(0, 0, 15), swarm(1, 1, 20), swarm(2, 2, 25)];
-const metrics = [{ automaticRebases: 2 }, {}, { automaticRebases: 4 }];
+const metrics = [
+  { since: start, until: at(15), automaticRebases: { value: 2, n: 2, eventKinds: ['rebase'] } },
+  {},
+  { since: at(1), until: at(25), automaticRebases: { value: 4, n: 2, eventKinds: ['rebase'] } },
+];
 
 describe('replay A/B report', () => {
   it('computes replicate medians, ranges, sample sizes and charge-derived time', () => {
@@ -43,9 +47,51 @@ describe('replay A/B report', () => {
     expect(row('workerRunsNeeded').concord.median).toBe(5);
     expect(row('workerRunsNeeded').serial.median).toBe(3);
     expect(row('workerRunsNeeded').concord.evidence).toBe('Replayed');
-    expect(row('automaticRebases').concord).toMatchObject({ evidence: 'Measured', median: 3, min: 2, max: 4, n: { replicates: 2 } });
+    expect(row('automaticRebases').concord).toMatchObject({ evidence: 'Measured', median: 3, min: 2, max: 4, n: { changes: 4, replicates: 2 }, window: { startAt: start, endAt: at(25) } });
     expect(row('queueWait').concord).toMatchObject({ evidence: 'Measured', value: 'n/a', range: 'n/a', median: null });
     expect(card.rows.every(item => [item.serial, item.concord].every(value => value.evidence && value.n && 'window' in value))).toBe(true);
+  });
+
+  it('reads documented count and latency metric objects, including a CLI data wrapper', () => {
+    const since = '2026-10-11T23:59:59Z';
+    const until = '2026-10-12T00:30:00Z';
+    const card = buildAbCard([serials[0]], [swarms[0]], [{ data: {
+      since, until,
+      automaticRebases: { value: 2, n: 2, eventKinds: ['lease.rebased'] },
+      publishToLand: { medianMs: 120000, p90Ms: 180000, n: 2 },
+      queueWait: { medianMs: 1000, p90Ms: 2000, n: 2 },
+    } }]);
+    const row = (key: string) => card.rows.find(item => item.key === key)!.concord;
+    expect(row('automaticRebases')).toMatchObject({ value: '2', range: '2–2', median: 2, n: { changes: 2, replicates: 1 }, window: { startAt: since, endAt: until } });
+    expect(row('publishToLand')).toMatchObject({ value: '120000 ms', range: '120000–120000 ms', median: 120000, n: { changes: 2, replicates: 1 }, window: { startAt: since, endAt: until }, note: 'p90: 180000 ms' });
+    expect(row('queueWait')).toMatchObject({ median: 1000, note: 'p90: 2000 ms' });
+    for (const invalid of [2, { value: 2 }, { value: 2, n: 2, eventKinds: 'rebase' }]) {
+      expect(() => buildAbCard([serials[0]], [swarms[0]], [{ since, until, automaticRebases: invalid }])).toThrow(/automaticRebases/);
+    }
+    expect(() => buildAbCard([serials[0]], [swarms[0]], [{ since, until, publishToLand: { medianMs: 120000, n: 2 } }])).toThrow(/p90Ms/);
+  });
+
+  it('combines fractional timestamp windows by instant rather than spelling', () => {
+    const later = structuredClone(swarms[0]) as ReturnType<typeof swarm>;
+    const earlier = structuredClone(swarms[0]) as ReturnType<typeof swarm>;
+    const laterSummary = (later.at(-1) as { summary: Record<string, unknown> }).summary;
+    const earlierSummary = (earlier.at(-1) as { summary: Record<string, unknown> }).summary;
+    laterSummary.firstCreatedAt = '2026-10-12T00:00:00.500Z';
+    laterSummary.lastLandedAt = '2026-10-12T00:00:01.500Z';
+    earlierSummary.firstCreatedAt = '2026-10-12T00:00:00Z';
+    earlierSummary.lastLandedAt = '2026-10-12T00:00:01Z';
+    const card = buildAbCard([serials[0]], [earlier, later], [{}]);
+    expect(card.rows.find(row => row.key === 'workerRunsNeeded')!.concord.window).toEqual({ startAt: start, endAt: '2026-10-12T00:00:01.500Z' });
+  });
+
+  it('leaves time to green unavailable when any swarm change failed', () => {
+    const failed = structuredClone(swarms[0]) as ReturnType<typeof swarm>;
+    (failed.at(-1) as { summary: Record<string, unknown> }).summary = {
+      ...(failed.at(-1) as { summary: Record<string, unknown> }).summary, landed: 1, failed: 1,
+    };
+    const card = buildAbCard([serials[0]], [failed], [{}]);
+    expect(card.rows.find(row => row.key === 'timeToGreenMinutes')!.concord).toMatchObject({ value: 'n/a', median: null, range: 'n/a', note: expect.stringContaining('failed') });
+    expect(card.rows.find(row => row.key === 'workerRunsNeeded')!.concord.median).toBe(4);
   });
 
   it('renders losses equally, with labels on every value, optional Monday, and no network references', () => {

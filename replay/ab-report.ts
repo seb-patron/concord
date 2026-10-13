@@ -7,7 +7,7 @@ type Counts = { changes: number; replicates: number };
 export type CardValue = { evidence: Evidence; value: string; range: string; median: number | null; min: number | null; max: number | null; n: Counts; window: Window | null; note?: string };
 export type CardRow = { key: string; label: string; serial: CardValue; concord: CardValue; monday?: CardValue };
 export type AbCard = { title: string; rows: CardRow[]; replicates: { serial: number; concord: number }; mondayLabel?: string };
-type Sample = { id: string; changes: number; window: Window; values: Record<string, number>; charged: boolean };
+type Sample = { id: string; changes: number; window: Window; values: Record<string, number>; charged: boolean; complete: boolean };
 type Obj = Record<string, unknown>;
 const keys = ['workerRunsNeeded', 'freshReviewsNeeded', 'conflictsHit', 'mainRedMerges', 'timeToGreenMinutes'] as const;
 const labels: Record<string, string> = {
@@ -60,7 +60,10 @@ function median(values: number[]): number {
 }
 function joinedWindow(samples: { window: Window }[]): Window | null {
   if (!samples.length) return null;
-  return { startAt: samples.map(s => s.window.startAt).sort()[0], endAt: samples.map(s => s.window.endAt).sort().at(-1)! };
+  return {
+    startAt: samples.reduce((first, sample) => Date.parse(sample.window.startAt) < Date.parse(first) ? sample.window.startAt : first, samples[0].window.startAt),
+    endAt: samples.reduce((last, sample) => Date.parse(sample.window.endAt) > Date.parse(last) ? sample.window.endAt : last, samples[0].window.endAt),
+  };
 }
 function aggregate(samples: Sample[], key: string, evidence: Evidence): CardValue {
   const nums = samples.map(s => s.values[key]);
@@ -78,8 +81,8 @@ function aggregate(samples: Sample[], key: string, evidence: Evidence): CardValu
     ...(!commonDenominator && isCount ? { note: `Replicate denominators: ${denominators.join(', ')}` } : {}),
   };
 }
-function unavailable(evidence: Evidence, n: Counts, windowValue: Window | null): CardValue {
-  return { evidence, value: 'n/a', range: 'n/a', median: null, min: null, max: null, n, window: windowValue };
+function unavailable(evidence: Evidence, n: Counts, windowValue: Window | null, note?: string): CardValue {
+  return { evidence, value: 'n/a', range: 'n/a', median: null, min: null, max: null, n, window: windowValue, ...(note ? { note } : {}) };
 }
 function serialSample(raw: unknown, index: number): Sample {
   const root = object(raw, `serial ${index}`);
@@ -111,7 +114,7 @@ function serialSample(raw: unknown, index: number): Sample {
   minutes(totals.timeToGreenMs, `serial ${index}.totals.timeToGreenMs`);
   return {
     id: `${index}`, changes: changes.length, window: window(root.startedAt, root.finishedAt, `serial ${index}`),
-    charged: (totals.chargedMinutes as number) > 0,
+    charged: (totals.chargedMinutes as number) > 0, complete: true,
     values: { workerRunsNeeded: changes.length + (totals.workerRunsCharged as number), freshReviewsNeeded: changes.length + (totals.freshReviewsCharged as number),
       conflictsHit: totals.conflicts as number, mainRedMerges: totals.mainRedMerges as number, timeToGreenMinutes: (totals.timeToGreenMs as number) / 60000 },
   };
@@ -170,23 +173,39 @@ function swarmSample(raw: unknown[], index: number, charges: Map<string, Charge>
     }
   }
   if (seen.size > n) bad(`swarm ${index} has more change ids than summary changes`);
-  return { id: string(summary.replicate, 'swarm summary.replicate'), changes: n, window: span, charged: charged > 0,
+  return { id: string(summary.replicate, 'swarm summary.replicate'), changes: n, window: span, charged: charged > 0, complete: summary.failed === 0,
     values: { workerRunsNeeded: runs, freshReviewsNeeded: reviews, conflictsHit: conflicts, mainRedMerges: mainRed,
       timeToGreenMinutes: (Date.parse(span.endAt) - Date.parse(span.startAt)) / 60000 + charged } };
 }
-function measuredValue(key: string, metrics: Obj[], samples: Sample[]): CardValue {
-  const n = { changes: samples.reduce((sum, sample) => sum + sample.changes, 0), replicates: metrics.length };
-  const span = joinedWindow(samples);
-  const present = metrics.filter(metric => Object.hasOwn(metric, key)).map(metric => metric[key]);
-  if (!present.length) return unavailable('Measured', n, span);
-  if (present.every(value => typeof value === 'number' && Number.isFinite(value))) {
-    const nums = present as number[];
-    return { evidence: 'Measured', value: format(median(nums)), range: `${format(Math.min(...nums))}–${format(Math.max(...nums))}`,
-      median: median(nums), min: Math.min(...nums), max: Math.max(...nums), n: { ...n, replicates: nums.length }, window: span };
+function measuredValue(key: string, metrics: Obj[]): CardValue {
+  const present = metrics.filter(metric => Object.hasOwn(metric, key));
+  if (!present.length) return unavailable('Measured', { changes: 0, replicates: 0 }, null);
+  const durations = key === 'publishToLand' || key === 'queueWait';
+  const values: number[] = [];
+  const p90s: number[] = [];
+  let changes = 0;
+  const windows: { window: Window }[] = [];
+  for (const [i, metric] of present.entries()) {
+    const where = `metrics ${i + 1}.${key}`;
+    const field = object(metric[key], where);
+    const size = count(field.n, `${where}.n`);
+    if (!size) bad(`${where}.n must be positive when the metric is present`);
+    changes += size;
+    windows.push({ window: window(metric.since, metric.until, `metrics ${i + 1}`) });
+    if (durations) {
+      values.push(minutes(field.medianMs, `${where}.medianMs`));
+      p90s.push(minutes(field.p90Ms, `${where}.p90Ms`));
+    } else {
+      values.push(minutes(field.value, `${where}.value`));
+      array(field.eventKinds, `${where}.eventKinds`).forEach(kind => string(kind, `${where}.eventKinds item`));
+    }
   }
-  const text = present.map(value => JSON.stringify(value)).join(' | ');
-  return { evidence: 'Measured', value: text, range: present.length > 1 ? text : 'n/a', median: null, min: null, max: null,
-    n: { ...n, replicates: present.length }, window: span };
+  const mid = median(values), min = Math.min(...values), max = Math.max(...values);
+  const unit = durations || key === 'mainRedTime' ? ' ms' : '';
+  return { evidence: 'Measured', value: `${format(mid)}${unit}`, range: `${format(min)}–${format(max)}${unit}`,
+    median: mid, min, max, n: { changes, replicates: present.length }, window: joinedWindow(windows),
+    ...(durations ? { note: `p90: ${format(median(p90s))} ms${p90s.length > 1 ? ' (median across metric windows)' : ''}` } : {}),
+  };
 }
 export function buildAbCard(serial: unknown[], swarm: unknown[][], metricsRaw: unknown[], mondayRaw?: unknown, manifestRaw?: unknown): AbCard {
   if (!serial.length || !swarm.length || !metricsRaw.length) bad('at least one --serial, --swarm, and --metrics is required');
@@ -194,17 +213,23 @@ export function buildAbCard(serial: unknown[], swarm: unknown[][], metricsRaw: u
   const charges = manifestRaw === undefined ? new Map<string, Charge>() : manifestCharges(manifestRaw);
   const serialSamples = serial.map(serialSample);
   const swarmSamples = swarm.map((lines, i) => swarmSample(lines, i + 1, charges));
-  const metrics = metricsRaw.map((item, i) => object(item, `metrics ${i + 1}`));
+  const metrics = metricsRaw.map((item, i) => {
+    const root = object(item, `metrics ${i + 1}`);
+    return Object.hasOwn(root, 'data') ? object(root.data, `metrics ${i + 1}.data`) : root;
+  });
   const monday = mondayRaw === undefined ? undefined : object(mondayRaw, 'Monday');
   const mondayRows = monday ? object(monday.rows, 'Monday.rows') : undefined;
   const mondayLabel = monday ? string(monday.label, 'Monday.label') : undefined;
   const rows: CardRow[] = keys.map(key => {
     const serialEvidence = key === 'timeToGreenMinutes' && serialSamples.some(s => s.charged) ? 'Charged' : 'Replayed';
     const concordEvidence = key === 'timeToGreenMinutes' && swarmSamples.some(s => s.charged) ? 'Charged' : 'Replayed';
-    return { key, label: labels[key], serial: aggregate(serialSamples, key, serialEvidence), concord: aggregate(swarmSamples, key, concordEvidence) };
+    const concord = key === 'timeToGreenMinutes' && swarmSamples.some(s => !s.complete)
+      ? unavailable(concordEvidence, { changes: swarmSamples.reduce((sum, s) => sum + s.changes, 0), replicates: swarmSamples.length }, joinedWindow(swarmSamples), 'Time to green unavailable: one or more changes failed')
+      : aggregate(swarmSamples, key, concordEvidence);
+    return { key, label: labels[key], serial: aggregate(serialSamples, key, serialEvidence), concord };
   });
   for (const key of metricKeys) rows.push({ key, label: labels[key], serial: unavailable('Measured', { changes: 0, replicates: 0 }, null),
-    concord: measuredValue(key, metrics, swarmSamples) });
+    concord: measuredValue(key, metrics) });
   if (mondayRows) for (const row of rows) {
     const entry = mondayRows[row.key];
     if (entry === undefined) { row.monday = unavailable('Owner log', { changes: 0, replicates: 0 }, null); continue; }
