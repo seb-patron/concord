@@ -29,8 +29,6 @@ For the optional contest, hard safety checks still apply. Epsilon's quality scor
 
 `demo/units.json` declares the `families.tsv` table, registers the original five row footprints, and includes a file-wide fallback. Pattern keys such as `row:families:zeta` can be claimed before the row exists. The trusted review policy gives alpha a dependency on beta and each other row no cross-row dependency. It records table schema and checker/profile digests for every manifest. This is not automatic semantic inference.
 
-The AW fixture is schemaVersion=1, project=`public-aw`, taskId=`task-17`, explicitAttempt=1, intent=`Increase gamma retry budget safely`, unitKeys=`["row:families:gamma"]`, workerLabel=`scripted-aw`, and worktree equal to the manifest's absolute AW-task checkout path. The driver materializes that path in its temporary runtime copy of the public fixture. Retry inputs may refresh observedBaseOid from actual observed history, but never alter the stable intent. `demo/profile.json` pins the public checker, acceptance matrix, policy, golden durations, and Node version digest; those digests are computed from the delivered files at seed time and recorded in the manifest, not supplied as invented constants here.
-
 | Alias in run manifest | Principal / intent | Exact delta from scene's captured base | Purpose |
 | --- | --- | --- | --- |
 | A | agent-a / tune-alpha | alpha retry_limit 1 → 2 | Good change on a shared file |
@@ -44,7 +42,6 @@ The AW fixture is schemaVersion=1, project=`public-aw`, taskId=`task-17`, explic
 | I | agent-b / beta-dependency | beta retry_limit 2 → 3 | Changes H's declared dependency |
 | J-low | contest-agent-low / epsilon-contest | epsilon retry_limit 1 → 2; timeout_ms stays 500 | Valid candidate, synthetic score 2/4 |
 | J-high | contest-agent-high / same contest | epsilon retry_limit 1 → 2; timeout_ms 500 → 1000 | Valid candidate, synthetic score 4/4 |
-| AW-task | mock-aw / public-aw/task-17/attempt-1 | gamma retry_limit 4 → 5 | Same task retried seven times; verdict and queue state read from the Worker |
 
 A/B/C originate from the same seed commit. Later scenes start from the current observed canonical tip. The manifest stores actual repo IDs, candidate forks, change IDs, lease fences, request versions, full OIDs, job IDs, and result digests. Friendly aliases are not server IDs or fabricated SHAs. Scene steps read current versions and wait for explicit state predicates with a 60-second maximum. On timeout, print the actual blocked state and stop; do not force progress.
 
@@ -60,7 +57,7 @@ export CONCORD_BRIDGE_PORT=8788
 npm run git-bridge
 ```
 
-Follow the four-terminal [README quickstart](../README.md#five-minute-local-start) for exact preflight, bridge, Worker, seed, and first-scene commands. Keep Wrangler persistence under the clone's ignored `.wrangler/state/`, even when `TMPDIR` and `CONCORD_RUN_DIR` point outside the clone. The README derives a separate persistence directory from each absolute run path. Prerequisites are Node 22+, installed lockfile dependencies, and native Git. No Cloudflare account is needed for the local path. A new rehearsal uses a fresh run ID and state directory. The final competition capture additionally needs the provisioned deployment described below.
+Follow the four-terminal [README quickstart](../README.md#local-development) for exact preflight, bridge, Worker, seed, and first-scene commands. Keep Wrangler persistence under the clone's ignored `.wrangler/state/`, even when `TMPDIR` and `CONCORD_RUN_DIR` point outside the clone. The README derives a separate persistence directory from each absolute run path. Prerequisites are Node 22+, installed lockfile dependencies, and native Git. No Cloudflare account is needed for the local path. A new rehearsal uses a fresh run ID and state directory. The final competition capture additionally needs the provisioned deployment described below.
 
 `seed` creates a new logical repo and seed draft fork, pushes the public seed there, requests owner-only bootstrap validation and conditional initial promotion, and captures the checked seed OID. It pumps the local checker/promoter for bootstrap in local mode, then allocates draft changes A/B/C/X, prepares A/B/C worktrees, and prints the repo URL. Bootstrap is allowed only for empty main; all main writes, including initialization, use stored promoter tickets. `seed` repeated with the same run ID returns the same manifest; it never deletes existing history.
 
@@ -91,7 +88,7 @@ Run the commands after the README quickstart in its driver terminal. Every `scen
 | 4:00–5:00 | repair | Reviewer records two gamma findings. An incomplete disposition gets 409; a complete B revision, disposition, verdict, and full check land. |
 | 5:00–6:00 | carry | Land E before approved D, rebuild D, run the real delta check, and show its derived verdict and full-stack check. Do not promise a speedup. |
 | 6:00–7:00 | invalidate, contest | A changed beta dependency refuses H's carry. Both J children pass the same hard gate; the synthetic 4/4 option beats 2/4 and lands after validation. |
-| 7:00–8:00 | aw, rows | Show seven public AW mock retries mapping to one task/change ID. Then show plain Git's captured append conflict, distinct new-row leases, the rival 409 with holder intent, and Concord's checked composition retaining both additions while epsilon stays retired. |
+| 7:00–8:00 | aw, rows | Show the optional launcher-adapter retries (see Launcher adapters (optional)) mapping to one task/change ID. Then show plain Git's captured append conflict, distinct new-row leases, the rival 409 with holder intent, and Concord's checked composition retaining both additions while epsilon stays retired. |
 | 8:00–9:00 | replay, inspect | Show approved historical replay if available, otherwise the unavailable-data panel. Walk through landed SHAs, finding history, verdicts, lease intents, queue state, and the account evidence. A local run alone does not prove Artifacts hosting. |
 
 The driver also implements **negative** (declared bad row and executable edits rejected by the checker) and **dedupe** (the low-level seven-request intent reservation) as optional local checks. Run them in the order below when rehearsing all implemented scenes. The AW scene uses the same absolute `CONCORD_RUN_DIR` as the other scenes.
@@ -146,7 +143,7 @@ Show “Historical comparison unavailable: owner export pending.” Continue the
 
 ## Live Cloudflare evidence and mirror
 
-Local fake mode is sufficient for development and rehearsals, but cannot prove the competition's Workers + Artifacts requirement. The owner must create the account and authorize the early Artifacts gate. The operator creates an empty disposable repo through the live API, attempts its empty-source fork, pushes the first commit to that fork and reads it back, and records actual responses and OIDs. If an empty-source fork fails, create a separate seed repo, push/read back its first commit, then fork the seeded repo and verify the seed. Use the seeded fork for checked absent-ref bootstrap once integrated. See [the Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) and [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/). The [deployment runbook](deploy.md) has the configured deployment and secret commands. Its checked-landing gate remains missing because the current scenario driver accepts only local bridge remotes and fixture principals.
+Local fake mode remains for development and rehearsals. Concord is also live at https://concord.sebastian-patrones.workers.dev with Artifacts storage, and the [live-scene runbook](deploy.md#deployed-smoke-and-evidence) records checked landings there. The operator creates an empty disposable repo through the live API, attempts its empty-source fork, pushes the first commit to that fork and reads it back, and records actual responses and OIDs. If an empty-source fork fails, create a separate seed repo, push/read back its first commit, then fork the seeded repo and verify the seed. Use the seeded fork for checked absent-ref bootstrap. See [the Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) and [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/). The [deployment runbook](deploy.md) has the configured deployment and secret commands.
 
 Record the deployed Worker URL, `storageBackend=artifacts`, namespace/repo metadata, a normal Git fetch of the canonical ref, and one real checked promotion whose SHA equals the UI. A metadata badge alone is insufficient. The early create/first-push/fork gate is a prerequisite; before filming, repeat it alongside the disposable-repo stale-push/token-isolation smoke in the runbook. If either gate fails, stop the deployed segment and report the actual limitation; no fake-to-live relabelling.
 
@@ -159,3 +156,15 @@ Keep `CONCORD_SHOW_DECOMPILED_C=0`. Only owner-supplied aggregate numbers and an
 Before capture, verify the exact production/fake badge, public fixture contents, token redaction, current demo test pass, and a fresh manifest. If a runner stalls, show its timed-out/offline state and use a previously recorded, clearly dated run of the same public fixture for that scene. Never manufacture a green result. If account access is missing, record a local rehearsal and mark the cloud-evidence/submission gate incomplete; the owner decides submission readiness.
 
 At the end of rehearsal stop foreground servers with Ctrl-C and verify runner children have exited. Keep the manifest and redacted logs as evidence outside the source tree. Do not delete a failed run to conceal its outcome.
+
+## Launcher adapters (optional)
+
+The rehearsal above needs no launcher-specific adapter. This section covers the optional AW mock scene, which exercises the same API as any other agent client.
+
+The AW fixture is schemaVersion=1, project=`public-aw`, taskId=`task-17`, explicitAttempt=1, intent=`Increase gamma retry budget safely`, unitKeys=`["row:families:gamma"]`, workerLabel=`scripted-aw`, and worktree equal to the manifest's absolute AW-task checkout path. The driver materializes that path in its temporary runtime copy of the public fixture. Retry inputs may refresh observedBaseOid from actual observed history, but never alter the stable intent. `demo/profile.json` pins the public checker, acceptance matrix, policy, golden durations, and Node version digest; those digests are computed from the delivered files at seed time and recorded in the manifest, not supplied as invented constants here.
+
+| Alias in run manifest | Principal / intent | Exact delta from scene's captured base | Purpose |
+| --- | --- | --- | --- |
+| AW-task | mock-aw / public-aw/task-17/attempt-1 | gamma retry_limit 4 → 5 | Same task retried seven times; verdict and queue state read from the Worker |
+
+In the minute-by-minute capture, the 7:00–8:00 slot shows seven public AW mock retries mapping to one task/change ID before the rows scene. The rehearsal commands run `scene aw` alongside the other scenes.

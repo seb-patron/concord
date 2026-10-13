@@ -27,7 +27,11 @@ With owner or reviewer credentials (set `CONCORD_REVIEWER_TOKEN` for an agent ru
 
 `--mirror-to https://github.com/OWNER/REPO.git` mirrors confirmed canonical main through the existing mirror implementation. Set `CONCORD_MIRROR_TOKEN` for a private destination. The mirror checks that destination main is absent or an ancestor and uses a normal push; it never force pushes.
 
-## AW launcher adapter
+## Launcher adapters (optional)
+
+The generic `land` command above works with any agent or orchestrator and does not depend on any launcher's files. The adapters below are optional conveniences for specific launchers.
+
+### AW launcher adapter
 
 A coordinator can use a finished delegate run directly:
 

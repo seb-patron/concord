@@ -1,16 +1,16 @@
 # Concord architecture
 
-Design contract v1, checked against live Cloudflare documentation on 2026-10-11 UTC. This repository currently contains a design, not an implemented service. Commands in the other documents are acceptance contracts for the implementation slices.
+Architecture contract v1 for the live Concord service on Cloudflare Workers, Durable Objects, and Artifacts, checked against live Cloudflare documentation on 2026-10-11 UTC. Concord is deployed at https://concord.sebastian-patrones.workers.dev; the local bridge loopback remains for development. [The slice index](specs/README.md) records the implementation order.
 
 **Git conflicts on lines. Agents collide on meaning.** Concord gives an agent a unit of work, exclusive semantic claims, preserved intent, content-bound review, and a checker-backed route to canonical history. Git remains the transport and immutable object format. A change, rather than a pull request, is the collaboration record.
 
 ## Product boundary
 
-The prototype supports one owner, several repositories, a small fleet, one canonical branch per repository, candidate branches, independent reviewers, and trusted local checker runners. Artifacts hosts Git repositories; Workers serves the API and UI; Durable Objects coordinate the fleet. A demo-only AW adapter exercises the same API as the CLI. No existing project switches hosting, and no real launcher is modified.
+The service supports one owner, several repositories, a small fleet, one canonical branch per repository, candidate branches, independent reviewers, and trusted local checker runners. Artifacts hosts Git repositories; Workers serves the API and UI; Durable Objects coordinate the fleet. A demo-only AW adapter exercises the same API as the CLI. A private trading-research project landed 10 changes through Concord on 10-12, and Concord's own repository is imported with its PRs landing through it. No launcher is modified.
 
 The owner-provided motivation is evidence, not a Concord benchmark: 111/122 decomp batch PRs touched `callees.h`; 726 functions were `land_blocked`; 44 declaration conflicts were recorded; one nine-batch streak lasted over three hours without a commit. Three of nine PRs on 10-10 were approved before becoming conflicted; each required another worker and a 7–8 minute serialized check. These aggregate reports do not establish a replay baseline without underlying timelines.
 
-Build the leases, bounded speculative queue, and usable UI first. General semantic parsing, public multi-tenancy, a full GitHub feature set, and live migration are outside the prototype. [The slice index](specs/README.md) defines cuts and integration order.
+The leases, bounded speculative queue, and usable UI are the core. General semantic parsing, public multi-tenancy, a full GitHub feature set, and live migration are out of scope. [The slice index](specs/README.md) defines cuts and integration order.
 
 ## What runs where
 
@@ -46,7 +46,7 @@ Workers hosts request handling rather than a native compiler or a long-running v
 
 ## Verified Artifacts capability boundary
 
-These are observed documentation capabilities, not claims that deployment has been tested. There is no Cloudflare account yet.
+These documentation capabilities are live in the deployed service, which reports `mode` production and `storageBackend` artifacts at `/health`. The account is provisioned; the local bridge loopback remains for development.
 
 | Need | Verified surface | Concord choice |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ Changes transition `draft -> ready -> queued -> checking -> merged`, with side s
 
 An empty repo needs one explicit bootstrap path. Owner-only `POST /repos/:r/bootstrap` accepts a registered seed fork/ref and immutable head plus trusted policy/profile IDs. It schedules `validate-stack` with `canonicalBaseOid=null` and one seed input; the checker validates that root tree. The owner authorizes initialization, and the normal promoter then receives a ticket with `expectedOldOid=null` (the branch must not exist). No unchecked direct push or public initial write token is exposed. Ref absence is checked conditionally at push and read back afterward. Bootstrap is rejected forever after canonical main exists; a concurrent initializer loses the absent-ref check. This is the only initialization exception to change/reviewer admission, and it is visible in the event history.
 
-**Early Artifacts bootstrap gate:** as soon as the owner's account and a disposable namespace exist, the authorized operator uses the live binding/API to create an empty repo and attempts to fork it. If the empty fork succeeds, push its first seed commit to the fork's returned Git remote and read back its SHA. If empty-source fork fails, use the documented fallback: create a *separate* disposable seed repo, push its first commit to its returned remote, read back the SHA, then fork that seeded repo and verify the fork contains the seed. In either path use the seeded fork as the source for owner-only bootstrap and prove checked absent-ref promotion initializes canonical `main` once the implementation is integrated. Record API responses, remote URLs, Git OIDs, and fork status; run the provider operation gate before waiting for slice 12. If creating, first pushing, or forking a seeded repo fails, stop Artifacts-dependent integration and escalate with the observed response. The [Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) documents create/fork and returned remotes; the [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/) documents normal push. Those pages do not themselves prove this empty-repo sequence, so the live gate is required.
+**Early Artifacts bootstrap gate:** this gate qualified the live deployment and repeats before each release. With the owner's account and a disposable namespace, the authorized operator uses the live binding/API to create an empty repo and attempts to fork it. If the empty fork succeeds, push its first seed commit to the fork's returned Git remote and read back its SHA. If empty-source fork fails, use the documented fallback: create a *separate* disposable seed repo, push its first commit to its returned remote, read back the SHA, then fork that seeded repo and verify the fork contains the seed. In either path use the seeded fork as the source for owner-only bootstrap and prove checked absent-ref promotion initializes canonical `main` once the implementation is integrated. Record API responses, remote URLs, Git OIDs, and fork status; run the provider operation gate before waiting for slice 12. If creating, first pushing, or forking a seeded repo fails, stop Artifacts-dependent integration and escalate with the observed response. The [Workers binding](https://developers.cloudflare.com/artifacts/api/workers-binding/) documents create/fork and returned remotes; the [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/) documents normal push. Those pages do not themselves prove this empty-repo sequence, so the live gate is required.
 
 ## Semantic leases
 
@@ -181,7 +181,7 @@ Example result shape (metavariables below are schema values, not prerecorded per
 
 `durationMs` is measured by the runner, not set to this example's placeholder zero. Outcomes include `PASS`, `FAIL`, `MATCH`, `MISMATCH`, `COMPILE_ERROR`, `UNVERIFIED_TARGET`, `MERGE_CONFLICT`, `ENV_ERROR`, and `TIMEOUT`. Store only capped text (16 KB), summary hashes, and evidence references in the DO; local raw logs are opt-in and are not published automatically. Human-readable decomp status names can retain their original hyphenated spelling in the UI.
 
-The same result envelope supports the owner's five definitions of done. This table describes adapters to configure later, not integrations performed by the prototype; only dispatch-lab runs publicly.
+The same result envelope supports the owner's five definitions of done. This table describes adapters to configure later, not integrations performed yet; only dispatch-lab runs publicly.
 
 | Project | Pinned acceptance / progress policy | Runner placement and public evidence |
 | --- | --- | --- |
@@ -268,7 +268,7 @@ Use `wrangler dev --config wrangler.local.jsonc` without remote bindings and the
 
 | Risk / decision owner | Evidence and closest alternative | Release condition |
 | --- | --- | --- |
-| Account and Artifacts access — owner | Docs require access; none has been provisioned. Offline fake allows development but cannot satisfy the competition's deployed Artifacts evidence. | Owner creates account and grants narrowly scoped access for slice 12; otherwise label deployment blocked. |
+| Account and Artifacts access — owner | Account provisioned; the service is live at https://concord.sebastian-patrones.workers.dev with Artifacts storage. The offline bridge remains for development. | Satisfied by the live deployment (`/health` reports `mode` production and `storageBackend` artifacts); repeat the gate before each release. |
 | Branch-scoped write protection — architecture | Documented Git tokens are repo-scoped, so candidate forks and a trusted sole canonical promoter are the chosen alternative. | Never distribute canonical write tokens to agents; test cross-repo token rejection. |
 | Git conditional update semantics — slice 12 integrator | Git protocol docs support standard pushes; no explicit binding CAS API was found. Use expected-old Git push and readback, with ancestry enforcement. | Race two stale updates against a disposable deployed repo. If old-OID rejection fails, stop: closest alternative is immutable release refs plus a DO-owned canonical pointer, requiring owner approval of changed Git UX. |
 | General semantic dependency accuracy — owner | Explicit metadata covers only the synthetic row domain. Unknown dependencies force fresh review/coarse file claims. | Do not advertise automatic C dependency extraction or broad semantic correctness. |
