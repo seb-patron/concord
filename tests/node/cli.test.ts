@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConcordClient, ConcordError, redactOutput, rememberCredential } from '../../cli/client.ts';
 import { git, pushCandidate, rejectCanonicalTarget, resolveHead } from '../../cli/git.ts';
+import { parseArgs as parseRunnerArgs, runLoop } from '../../runner/main.ts';
 
 const execFile = promisify(execFileCallback);
 const tempDirs: string[] = [];
@@ -149,6 +150,22 @@ describe('Concord agent CLI client', () => {
       expect(minted.stderr).toContain('checker-1');
       expect(minted.stderr).toContain(`CONCORD_URL=${url} CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo alpha --role checker`);
       expect(minted.stderr).not.toContain(token);
+      const command = minted.stderr.match(/npm run runner -- ([^\n]+)/)?.[1];
+      expect(command).toBeDefined();
+      const options = parseRunnerArgs(command!.trim().split(/\s+/));
+      expect(options).toMatchObject({ repo: 'alpha', role: 'checker', once: false,
+        maxJobs: 1000, idleTimeoutSeconds: 86400 });
+      vi.useFakeTimers();
+      try {
+        let polls = 0;
+        const stopped = expect(runLoop({ ...options, profileDigest: `sha256:${'0'.repeat(64)}` }, async () => {
+          polls++;
+          return polls === 1 ? { status: 204 } : { status: 403, error: { code: 'STOP' } };
+        }, null)).rejects.toThrow('POLL_FAILED:STOP');
+        await vi.advanceTimersByTimeAsync(1000);
+        await stopped;
+        expect(polls).toBe(2);
+      } finally { vi.useRealTimers(); }
       await expect(cli('principals', 'mint', '--role', 'promoter')).rejects.toMatchObject({ code: 2, stdout: '' });
       expect(calls).toHaveLength(1);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

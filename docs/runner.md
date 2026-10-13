@@ -70,15 +70,15 @@ The mint prints the token once on stdout — it is never shown again — and, on
 
 ```sh
 read -rs CHECKER_TOKEN && export CHECKER_TOKEN    # paste the token at the prompt
-CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo REPO_ID --role checker --profile "$PROFILE_FILE"
+CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo REPO_ID --role checker --profile "$PROFILE_FILE" --max-jobs 1000 --idle-timeout-seconds 86400
 ```
 
-`npm run concord -- principals revoke PRINCIPAL_ID` stops the machine's next poll with 401. Token refreshes of the owner credential never affect minted principals, and `promoter` principals are never mintable: they remain `AUTH_TOKENS` identities.
+Run this command under a supervisor that restarts it when its 1,000-job or 24-hour bound is reached. `npm run concord -- principals revoke PRINCIPAL_ID` stops the machine's next poll with 401. Token refreshes of the owner credential never affect minted principals, and `promoter` principals are never mintable: they remain `AUTH_TOKENS` identities.
 
 ## Run
 
 ```sh
-CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$REPO_ID" --role checker --profile "$PROFILE_FILE" --once
+CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo "$REPO_ID" --role checker --profile "$PROFILE_FILE" --max-jobs 1000 --idle-timeout-seconds 86400
 CONCORD_URL=http://127.0.0.1:8787 CONCORD_TOKEN="$PROMOTER_TOKEN" npm run runner -- --repo "$REPO_ID" --role promoter --profile-digest "$PROFILE_DIGEST" --once
 ```
 

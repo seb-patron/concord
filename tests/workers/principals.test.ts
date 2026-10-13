@@ -1,8 +1,14 @@
 import { env } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../../src/worker';
 import { authenticate } from '../../src/auth';
+import type { RepoCoordinator } from '../../src/coordinator';
+import type { Job, ModuleContext, Principal } from '../../src/contracts';
+import { jobInput, runners } from '../../src/features/runners';
+import { digest } from '../../src/http';
 import { localFixtureConfig } from '../../src/state';
+import { FakeStorage } from '../../src/storage/fake';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
 const runtime = env as Env;
@@ -359,9 +365,53 @@ describe('delegated principals', () => {
     const item = (await responseBody(minted)).data;
     expect(item.token).toMatch(/^cct_local_[a-f0-9]{64}$/);
     expect(item).toMatchObject({ roles: ['checker'], repoIds: ['alpha'], parentId: 'owner', name: 'mac-mini', revokedAt: null });
-    const poll = (repo: string) => fetchApi(mutation(`/v1/repos/${repo}/runner/poll`,
-      { runnerId: 'mac-mini', role: 'checker', supportedProfileDigests: [] }, crypto.randomUUID(), item.token));
+    const pin = `sha256:${'0'.repeat(64)}` as const;
+    const headOid = 'a'.repeat(40);
+    const treeOid = 'b'.repeat(40);
+    const jobId = `checker-${crypto.randomUUID().replaceAll('-', '')}`;
+    const owner: Principal = { tenantId: 'local', principalId: 'owner', roles: ['owner'], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
+    const stub = runtime.REPO_COORDINATOR.get(runtime.REPO_COORDINATOR.idFromName('repo:local:alpha'));
+    await runInDurableObject<RepoCoordinator, void>(stub, async instance => {
+      const context = (instance as unknown as { context(name: 'runners', principal: Principal, repoId: string): ModuleContext })
+        .context('runners', owner, 'alpha');
+      const storage = context.storage as FakeStorage;
+      await storage.ensureRepo('delegated-candidate');
+      storage.putCommit('delegated-candidate', { oid: headOid, treeOid, parents: [] });
+      storage.conditionalUpdateRef('delegated-candidate', 'refs/heads/main', null, headOid);
+      const job: Job = {
+        kind: 'inspect-candidate', jobId, repoId: 'alpha', inputDigest: pin, generation: 1,
+        profileDigest: pin, policyId: 'local-demo', policyDigest: pin,
+        unitPolicy: localFixtureConfig('local').policies['local-demo'],
+        expectedRefs: { 'delegated-candidate': headOid }, storageRemotes: { 'delegated-candidate': 'file:///delegated-candidate' },
+        checkerId: 'local-demo', checkerDigest: pin, oracleDigest: pin, toolchainDigest: pin, environmentDigest: pin,
+        timeoutMs: 120_000, maxOutputBytes: 16 * 1024, state: 'pending', attempt: 0,
+        runnerId: null, fence: 0, expiresAt: null, version: 0, changeId: 'change1', revision: 1,
+        candidate: { changeId: 'change1', revision: 1, baseOid: headOid, headOid,
+          storageName: 'delegated-candidate', ref: 'refs/heads/main' },
+      };
+      expect(runners.hooks['runners.schedule']!(context, { ...job, inputDigest: await digest(jobInput(job)) }).status).toBe('eligible');
+    });
+    const poll = (repo: string, profiles: string[] = []) => fetchApi(mutation(`/v1/repos/${repo}/runner/poll`,
+      { runnerId: 'mac-mini', role: 'checker', supportedProfileDigests: profiles }, crypto.randomUUID(), item.token));
     expect((await poll('alpha')).status).toBe(204);
+    const claimed = await poll('alpha', [pin]);
+    expect(claimed.status).toBe(200);
+    const job = (await responseBody(claimed)).data.job as Job;
+    expect(job).toMatchObject({ jobId, state: 'claimed', runnerId: 'mac-mini' });
+    const reviewManifest = { changedUnits: [], policyVersion: 1, policyDigest: pin, checkerDigest: pin,
+      oracleDigest: pin, toolchainDigest: pin, coverage: 'complete' as const, dependencyScope: [] };
+    const unsigned = { jobId, attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest,
+      kind: 'inspect-candidate' as const, checkerDigest: pin, oracleDigest: pin, toolchainDigest: pin,
+      environmentDigest: pin, sourceTreeOid: treeOid, durationMs: 1, log: '', outcome: 'PASS' as const,
+      observedHeadOid: headOid, unitKeys: [], reviewManifestDigest: await digest(reviewManifest), reviewManifest };
+    const resultDigest = await digest(unsigned);
+    const submitted = await fetchApi(mutation(`/v1/repos/alpha/jobs/${jobId}/result`, {
+      attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest,
+      resultDigest, result: { ...unsigned, resultDigest },
+    }, crypto.randomUUID(), item.token));
+    expect(submitted.status).toBe(200);
+    expect((await responseBody(submitted)).data.resultDigest).toBe(resultDigest);
+    expect((await poll('alpha', [pin])).status).toBe(204);
     expect((await poll('beta')).status).toBe(403);
     const revoked = await fetchApi(apiRequest(`/v1/principals/${item.id}`, 'local-owner', { method: 'DELETE' }));
     expect(revoked.status).toBe(200);

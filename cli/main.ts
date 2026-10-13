@@ -155,7 +155,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
           `Minted checker principal ${typeof minted.id === 'string' ? minted.id : '(id unknown)'}${expiry}; the token above is shown once.\n` +
           'On the runner machine, load it without writing it to shell history:\n' +
           '  read -rs CHECKER_TOKEN && export CHECKER_TOKEN    # paste the token at the prompt\n' +
-          `  CONCORD_URL=${process.env.CONCORD_URL} CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo ${repo || 'REPO_ID'} --role checker --profile "$PROFILE_FILE"\n` +
+          `  CONCORD_URL=${process.env.CONCORD_URL} CONCORD_TOKEN="$CHECKER_TOKEN" npm run runner -- --repo ${repo || 'REPO_ID'} --role checker --profile "$PROFILE_FILE" --max-jobs 1000 --idle-timeout-seconds 86400\n` +
           `Revoke it with: npm run concord -- principals revoke ${typeof minted.id === 'string' ? minted.id : 'PRINCIPAL_ID'}\n`);
       }
       return;
