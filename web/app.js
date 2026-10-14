@@ -16,7 +16,10 @@ const $ = id => document.getElementById(id);
 let initialTheme = 'light';
 try { initialTheme = pickTheme(window.localStorage.getItem('concord-theme')); } catch { initialTheme = 'light'; }
 document.documentElement.dataset.theme = initialTheme;
-const repoPage = createRepoPage($('code-view'));
+const repoPage = createRepoPage($('code-view'), undefined, changeId => {
+  state.view = 'desk';
+  selectChange(changeId);
+});
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,

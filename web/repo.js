@@ -30,7 +30,7 @@ function renderSafeMarkdown(target, source) {
   }
 }
 
-export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoReadme }) {
+export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoReadme }, selectChange = null) {
   let repoId = null;
   let oid = null;
   let path = '';
@@ -50,11 +50,40 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
   let retryMessage = null;
   let cloneOpen = false;
   let cloneTab = 'Git';
+  const expandedChanges = new Set();
   const button = (label, action, className) => { const b = element('button', label, className); b.type = 'button'; b.addEventListener('click', action); return b; };
   const card = (title, className = '') => { const section = element('section', undefined, `repo-card ${className}`); section.setAttribute('aria-label', title); section.append(element('h2', title)); return section; };
   const held = () => array(snapshot?.data?.projections?.leases?.heldItems ?? snapshot?.data?.projections?.leases?.items)
     .filter(lease => ['active', 'reserved'].includes(lease.state) && lease.expiresAt > Date.now());
   const workingNow = () => held().filter(lease => lease.state === 'active');
+  const workingGroups = () => {
+    const changes = array(snapshot?.data?.projections?.repos?.changes);
+    const issues = array(snapshot?.data?.projections?.issues?.items);
+    const groups = new Map();
+    for (const lease of workingNow()) {
+      if (!lease.changeId) continue;
+      const group = groups.get(lease.changeId) ?? { changeId: lease.changeId, leases: [], latest: 0 };
+      group.leases.push(lease);
+      group.latest = Math.max(group.latest, Number(lease.createdAt ?? lease.expiresAt ?? 0));
+      groups.set(lease.changeId, group);
+    }
+    const result = [...groups.values()].map(group => {
+      const change = changes.find(item => item.changeId === group.changeId) ?? {};
+      const issueNumber = change.issueNumber ?? group.leases.find(lease => lease.issueNumber != null)?.issueNumber;
+      const issue = issues.find(item => item.number === issueNumber);
+      const lease = group.leases[0];
+      return { ...group, change, issueNumber, issueTitle: issue?.title ?? lease.issueTitle ?? null };
+    }).sort((a, b) => b.leases.length - a.leases.length || b.latest - a.latest);
+    const active = new Set(result.map(group => group.changeId));
+    for (const changeId of expandedChanges) if (!active.has(changeId)) expandedChanges.delete(changeId);
+    return result;
+  };
+  const timeLeft = lease => {
+    const seconds = Number.isFinite(lease.remainingSeconds)
+      ? lease.remainingSeconds : Math.max(0, Math.ceil((lease.expiresAt - Date.now()) / 1000));
+    const minutes = Math.max(1, Math.ceil(seconds / 60));
+    return `${minutes} min left`;
+  };
   const claimed = entryPath => held().filter(lease => {
     const key = String(lease.unitKey ?? '');
     const rowTable = key.startsWith('row:') ? key.split(':')[1] : null;
@@ -197,18 +226,46 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     const aside = element('aside', undefined, 'repo-aside');
     const about = card('About');
     const issues = array(snapshot?.data?.projections?.issues?.items).filter(item => item.state === 'open');
-    const agents = new Set(workingNow().map(lease => lease.holderId));
+    const groups = workingGroups();
     const landings = array(snapshot?.data?.projections?.queue?.entries).filter(item => item.state === 'landed');
     const stats = element('dl', undefined, 'repo-stats');
-    for (const [label, value] of [['Open issues', issues.length], ['Agents now', agents.size], ['Observed landings', landings.length], ['Backup', 'Not reported']]) {
+    for (const [label, value] of [['Open issues', issues.length], ['Agents now', groups.length], ['Observed landings', landings.length], ['Backup', 'Not reported']]) {
       const cell = element('div'); cell.append(element('dt', label), element('dd', value)); stats.append(cell);
     }
     about.append(stats); aside.append(about);
     const working = card('Working now');
-    if (!workingNow().length) working.append(element('p', 'No agents hold a live claim.', 'repo-empty'));
+    if (!groups.length) working.append(element('p', 'No agents hold a live claim.', 'repo-empty'));
     else {
-      const list = element('ul');
-      for (const lease of workingNow()) list.append(element('li', `${lease.holderId} on ${lease.issueNumber ? `#${lease.issueNumber} · ` : ''}${lease.unitKey}`));
+      const list = element('ul', undefined, 'repo-working-list');
+      for (const group of groups) {
+        const row = element('li', undefined, 'repo-working-row');
+        const heading = element('div', undefined, 'repo-working-heading');
+        const disclosure = button(expandedChanges.has(group.changeId) ? '▾' : '▸', () => {
+          if (expandedChanges.has(group.changeId)) expandedChanges.delete(group.changeId);
+          else expandedChanges.add(group.changeId);
+          draw();
+        }, 'repo-working-disclosure');
+        disclosure.setAttribute('aria-expanded', String(expandedChanges.has(group.changeId)));
+        disclosure.setAttribute('aria-label', `${expandedChanges.has(group.changeId) ? 'Collapse' : 'Expand'} files for ${group.changeId}`);
+        const title = group.issueNumber != null
+          ? `#${group.issueNumber}${group.issueTitle ? ` ${group.issueTitle}` : ''}`
+          : group.change.intentText ?? group.leases[0].intentText ?? group.changeId;
+        const titleButton = button(title, () => selectChange?.(group.changeId), 'repo-working-title');
+        heading.append(disclosure, titleButton);
+        row.append(heading);
+        row.append(element('p', group.change.authorModel ?? group.leases[0].holderId, 'repo-working-model'));
+        row.append(element('p', group.change.branch ?? 'Branch unavailable', 'repo-working-branch'));
+        row.append(element('p', `${group.leases.length} ${group.leases.length === 1 ? 'file' : 'files'}`, 'repo-working-count'));
+        if (expandedChanges.has(group.changeId)) {
+          const units = element('ul', undefined, 'repo-working-units');
+          for (const lease of group.leases) {
+            const unit = element('li'); unit.append(element('code', lease.unitKey), element('span', timeLeft(lease)));
+            units.append(unit);
+          }
+          row.append(units);
+        }
+        list.append(row);
+      }
       working.append(list);
     }
     aside.append(working);
