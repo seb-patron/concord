@@ -127,12 +127,12 @@ export interface CostLimits {
 }
 const defaultCostLimits: CostLimits = {
   maxReposPerTenant: 100, maxForksPerTenant: 1000, maxTokenMintsPerTenantPerDay: 1000,
-  maxActiveChangesPerRepo: 32, activeChangeLimits: {}, maxLeaseHoldSeconds: 14400,
+  maxActiveChangesPerRepo: 64, activeChangeLimits: {}, maxLeaseHoldSeconds: 14400,
 };
 export function costLimits(config: TrustedConfiguration): CostLimits {
   return { ...defaultCostLimits, ...config.costLimits };
 }
-/** Effective non-terminal change cap for one repo: its override, else the install default, else 32. */
+/** Effective non-terminal change cap for one repo: its override, else the install default, else 64. */
 export function activeChangeLimit(config: TrustedConfiguration, repoId: string): number {
   const limits = costLimits(config);
   const overrides = limits.activeChangeLimits ?? {};

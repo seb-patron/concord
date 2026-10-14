@@ -518,16 +518,16 @@ describe('repository and change lifecycle', () => {
     branch: `refs/heads/task-${index}`, unitKeys: [], dependencyChangeIds: [],
   }, `${name}-change-${index}`));
 
-  it('enforces the default active-change limit of 32', async () => {
+  it('enforces the default active-change limit of 64', async () => {
     const name = 'limit_default_case';
     await makeReady(name);
-    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data.activeChangeLimit).toBe(32);
-    for (let index = 0; index < 32; index++) expect((await createChange(name, index)).status).toBe(201);
-    const denied = await createChange(name, 32);
+    expect((await responseBody(await fetchApi(apiRequest(`/v1/repos/${name}`)))).data.activeChangeLimit).toBe(64);
+    for (let index = 0; index < 64; index++) expect((await createChange(name, index)).status).toBe(201);
+    const denied = await createChange(name, 64);
     expect(denied.status).toBe(429);
     const deniedBody = await responseBody(denied);
     expect(deniedBody.error.code).toBe('CHANGE_LIMIT');
-    expect(deniedBody.error.details).toEqual({ limit: 32, active: 32 });
+    expect(deniedBody.error.details).toEqual({ limit: 64, active: 64 });
   });
 
   it('enforces an installed maxActiveChangesPerRepo above the default', async () => {

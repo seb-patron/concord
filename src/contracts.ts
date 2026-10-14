@@ -162,7 +162,7 @@ export interface TrustedConfiguration {
   humans?: HumanIdentity[];
   costLimits?: {
     maxReposPerTenant?: number; maxForksPerTenant?: number; maxTokenMintsPerTenantPerDay?: number;
-    /** Install-wide ceiling on non-terminal changes per repo (default 32); agents cannot change it. */
+    /** Install-wide ceiling on non-terminal changes per repo (default 64); agents cannot change it. */
     maxActiveChangesPerRepo?: number;
     /** Per-repo overrides of maxActiveChangesPerRepo, keyed by repoId. */
     activeChangeLimits?: Record<Id, number>;
