@@ -365,7 +365,7 @@ export interface RepoStorage {
   info(name: string): Promise<StorageRepo | null>;
   resolveRef(name: string, ref: string): Promise<Oid | null>;
   readCommit(name: string, oid: Oid): Promise<StorageCommit | null>;
-  listTree(name: string, oid: Oid, path: string): Promise<StorageTreeEntry[] | null>;
+  listTree(name: string, oid: Oid, path: string, treeOid?: Oid): Promise<StorageTreeEntry[] | null>;
   readFile(name: string, oid: Oid, path: string, maxBytes?: number): Promise<Uint8Array | null>;
   mintToken(name: string, scope: 'read' | 'write', ttlSeconds: number): Promise<StorageToken>;
   revokeToken(name: string, tokenIdOrSecret: string): Promise<boolean>;

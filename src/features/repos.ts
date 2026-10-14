@@ -252,7 +252,8 @@ async function catalogRepo(context: ModuleContext): Promise<Repo> {
     if (catalog) {
       catalog.public = catalog.public === true;
       const stored = context.state.get<Repo>('repo');
-      const repo = stored?.canonicalStorageName === catalog.canonicalStorageName && catalog.observedCanonicalOid === null
+      const repo = stored?.canonicalStorageName === catalog.canonicalStorageName
+        && (stored.observedCanonicalOid !== null || catalog.observedCanonicalOid === null)
         ? { ...catalog, observedCanonicalOid: stored.observedCanonicalOid }
         : catalog;
       context.state.put('repo', repo);
@@ -288,6 +289,54 @@ async function repoDetail(context: ModuleContext): Promise<Response> {
 }
 
 const MAX_CONTENT_BYTES = 64 * 1024;
+const CANONICAL_READ_CACHE_TTL = 31_536_000;
+const CANONICAL_READ_LRU_LIMIT = 200;
+const canonicalReadLruBySql = new WeakMap<SqlStorage, Map<string, CanonicalReadData>>();
+type CanonicalReadData = Record<string, unknown>;
+function cacheLru(sql: SqlStorage): Map<string, CanonicalReadData> {
+  let cache = canonicalReadLruBySql.get(sql);
+  if (!cache) { cache = new Map(); canonicalReadLruBySql.set(sql, cache); }
+  return cache;
+}
+function cacheLruGet(sql: SqlStorage, key: string): CanonicalReadData | undefined {
+  const lru = cacheLru(sql);
+  const value = lru.get(key);
+  if (value) {
+    lru.delete(key);
+    lru.set(key, value);
+  }
+  return value;
+}
+function cacheLruPut(sql: SqlStorage, key: string, value: CanonicalReadData): void {
+  const lru = cacheLru(sql);
+  lru.delete(key);
+  lru.set(key, value);
+  if (lru.size > CANONICAL_READ_LRU_LIMIT) {
+    lru.delete(lru.keys().next().value!);
+  }
+}
+function canonicalReadCacheKey(storageName: string, commitOid: string, kind: string, path: string): string {
+  return `https://concord-cache.invalid/canonical-read/${encodeURIComponent(storageName)}/${commitOid}/${kind}/${encodeURIComponent(path)}`;
+}
+async function canonicalReadCachedData(context: ModuleContext, key: string): Promise<CanonicalReadData | undefined> {
+  const memory = cacheLruGet(context.sql, key);
+  if (memory) return memory;
+  try {
+    const cached = await (caches as CacheStorage & { default: Cache }).default.match(key);
+    if (!cached) return undefined;
+    const data = await cached.json() as CanonicalReadData;
+    cacheLruPut(context.sql, key, data);
+    return data;
+  } catch { return undefined; }
+}
+async function cacheCanonicalReadData(context: ModuleContext, key: string, data: CanonicalReadData): Promise<void> {
+  cacheLruPut(context.sql, key, data);
+  try {
+    await (caches as CacheStorage & { default: Cache }).default.put(key, new Response(JSON.stringify(data), {
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': `public, max-age=${CANONICAL_READ_CACHE_TTL}, immutable` },
+    }));
+  } catch { /* Cache API availability must not affect a successful canonical read. */ }
+}
 function canonicalPath(value: string | null, allowEmpty = false): string {
   if (value === null && allowEmpty) return '';
   if (!isRepoPath(value, allowEmpty)) {
@@ -303,18 +352,30 @@ async function canonicalRead(context: ModuleContext, request: Request, kind: 'tr
   // A present OID is validated before touching main, including the empty string.
   const commitOid = requestedOid === null ? null : oid(requestedOid);
   const contentPath = kind === 'tree' ? canonicalPath(params.get('path'), true) : kind === 'readme' ? 'README.md' : canonicalPath(params.get('path'));
-  const resolvedOid = commitOid ?? await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
+  const knownCanonicalOid = requestedOid === null ? repo.observedCanonicalOid : null;
+  const resolvedOid = commitOid ?? knownCanonicalOid ?? await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
   if (!resolvedOid) return fail(404, 'MAIN_NOT_FOUND', 'Canonical main is empty');
-  if (!await context.storage.readCommit(repo.canonicalStorageName, resolvedOid)) return fail(404, 'COMMIT_NOT_FOUND', 'Commit not found');
+  const knownCanonicalCommit = knownCanonicalOid === resolvedOid;
+  const commit = knownCanonicalCommit ? null : await context.storage.readCommit(repo.canonicalStorageName, resolvedOid);
+  if (!knownCanonicalCommit && !commit) return fail(404, 'COMMIT_NOT_FOUND', 'Commit not found');
+  const cacheKey = canonicalReadCacheKey(repo.canonicalStorageName, resolvedOid, kind, contentPath);
+  let unitFiles: Record<string, string> | undefined;
+  let rowTables: Record<string, string> | undefined;
   if (kind === 'tree') {
-    const path = contentPath;
-    const allEntries = await context.storage.listTree(repo.canonicalStorageName, resolvedOid, path);
-    if (!allEntries) return fail(404, 'TREE_NOT_FOUND', 'Directory not found');
     const policy = context.trusted.policies[repo.policyId];
     if (!policy || policy.digest !== repo.policyDigest) return fail(503, 'UNIT_POLICY_UNAVAILABLE', 'Trusted unit policy unavailable');
-    const unitFiles = Object.fromEntries(Object.values(policy.units).map(unit => [unit.canonicalKey, unit.file]));
-    const rowTables = Object.fromEntries((policy.tables ?? []).map(table => [table.name, table.file]));
-    return respond(context, { oid: resolvedOid, path, entries: allEntries.slice(0, 1000), truncated: allEntries.length > 1000, unitFiles, rowTables });
+    unitFiles = Object.fromEntries(Object.values(policy.units).map(unit => [unit.canonicalKey, unit.file]));
+    rowTables = Object.fromEntries((policy.tables ?? []).map(table => [table.name, table.file]));
+  }
+  const cachedData = await canonicalReadCachedData(context, cacheKey);
+  if (cachedData) return respond(context, kind === 'tree' ? { ...cachedData, unitFiles, rowTables } : cachedData);
+  if (kind === 'tree') {
+    const path = contentPath;
+    const allEntries = await context.storage.listTree(repo.canonicalStorageName, resolvedOid, path, commit?.treeOid);
+    if (!allEntries) return fail(404, 'TREE_NOT_FOUND', 'Directory not found');
+    const data = { oid: resolvedOid, path, entries: allEntries.slice(0, 1000), truncated: allEntries.length > 1000, unitFiles, rowTables };
+    await cacheCanonicalReadData(context, cacheKey, data);
+    return respond(context, data);
   }
   const path = contentPath;
   let bytes: Uint8Array | null;
@@ -330,7 +391,9 @@ async function canonicalRead(context: ModuleContext, request: Request, kind: 'tr
   try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
   catch { return fail(415, 'BINARY_FILE', 'Binary files cannot be displayed'); }
   if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/.test(content)) fail(415, 'BINARY_FILE', 'Binary files cannot be displayed');
-  return respond(context, { oid: resolvedOid, path, content, size: bytes.byteLength });
+  const data = { oid: resolvedOid, path, content, size: bytes.byteLength };
+  await cacheCanonicalReadData(context, cacheKey, data);
+  return respond(context, data);
 }
 
 function declaredUnitKeys(raw: unknown, policy: TrustedPolicy, allowUnknown = false): string[] {
