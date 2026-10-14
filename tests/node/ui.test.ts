@@ -34,6 +34,28 @@ describe('Work UI theme and tracker lanes', () => {
     for (const label of ['Code', 'Tracker', 'Milestones', 'In flight']) expect(html).toContain(`>${label}</button>`);
     expect(html).toMatch(/id="theme-toggle"[^>]*aria-label="[^"]+"/);
   });
+  it('keeps the logo and selected main-nav tab visible in both themes', () => {
+    const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+    const finalDeclarations = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const declarations = [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 'g'))]
+        .flatMap(([, body]) => (body ?? '').split(';'))
+        .map(declaration => declaration.trim().split(/:\s*/, 2))
+        .filter(([property, value]) => property && value);
+      return Object.fromEntries(declarations);
+    };
+    const logo = finalDeclarations('.brand svg');
+    expect(logo.color).toBe('var(--hex-f5a524)');
+    for (const theme of [':root{', ':root[data-theme="dark"]{']) {
+      const start = css.indexOf(theme);
+      const end = css.indexOf('}', start);
+      expect(css.slice(start, end)).toContain('--hex-f5a524:#f5a524');
+      expect(css.slice(start, end)).toContain('--hex-2a2e37:#2a2e37');
+    }
+    const selected = finalDeclarations('.main-nav button[aria-current=true]');
+    expect(selected).toMatchObject({ background: 'var(--hex-2a2e37)', color: '#fff', 'font-weight': '600' });
+    expect(selected.background).not.toBe(selected.color);
+  });
   it('keeps five ordered lanes and badges exceptional states in their work lane', () => {
     expect(trackerLaneNames).toEqual(['Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed']);
     expect(trackerLaneForIssue({ status: 'blocked', hasLease: true })).toEqual({ lane: 'Claimed', badge: 'blocked' });
