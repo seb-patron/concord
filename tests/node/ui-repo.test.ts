@@ -28,6 +28,58 @@ const fixture = {
 };
 
 describe('Repository code page', () => {
+  it('shows Code details and an accessible Git, Concord, and mirror clone panel', async () => {
+    const dom = new JSDOM('<main id="page"></main>', { url: 'http://localhost/' });
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('page')!;
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.queue.entries[1] = { changeId: 'x', state: 'landed', landedAt: Date.now() - 120000 };
+      const page = createRepoPage(root, {
+        getRepoTree: async () => ({ data: { oid: 'abcdef0123456789', entries: [{ name: 'README.md', type: 'blob' }, { name: 'src', type: 'tree' }] } }),
+        getRepoReadme: async () => ({ data: { content: '# Main' } }),
+        getRepoFile: async () => { throw { status: 404 }; },
+      });
+      page.show('concord-v2', snapshot);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(root.querySelector('.branch-chip')?.textContent).toBe('main');
+      expect(root.querySelector('.commit-oid')?.textContent).toBe('abcdef0');
+      expect(root.querySelector('.latest-landing')?.textContent).toContain('Cap retries');
+      expect(root.querySelector('.latest-landing')?.textContent).toContain('model-from-api');
+      expect(root.querySelector('.latest-landing')?.textContent).toContain('2m ago');
+      expect(root.querySelector('.repo-counts')?.textContent).toContain('1 file');
+      expect(root.querySelector('.repo-meta')?.textContent).not.toContain('npm run concord -- repo clone');
+      (root.querySelector('.code-button') as HTMLButtonElement).click();
+      let panel = root.querySelector('[role="dialog"]')!;
+      expect(panel.getAttribute('aria-modal')).toBe('true');
+      expect([...panel.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(['Git', 'Concord', 'GitHub mirror']);
+      expect(panel.querySelector('#clone-command')?.textContent).toBe('npm run concord -- repo clone --repo concord-v2 --path ./concord-v2');
+      expect(panel.querySelectorAll('.clone-copy')).toHaveLength(1);
+      (panel.querySelector('#clone-tab-concord') as HTMLButtonElement).click();
+      panel = root.querySelector('[role="dialog"]')!;
+      expect(panel.querySelector('#clone-command')?.textContent).toBe("npm run concord -- start --repo concord-v2 --intent-key task-17 --intent 'Tune gamma safely' --allowed-files allowed-files.txt --json\nnpm run concord -- land --repo concord-v2 --source . --commit FULL_OID --intent-key task-17 --intent 'Tune gamma safely' --allowed-files allowed-files.txt");
+      expect(panel.querySelector('.clone-source')?.textContent).toBe('Commands follow docs/cli.md.');
+      (panel.querySelector('#clone-tab-github-mirror') as HTMLButtonElement).click();
+      panel = root.querySelector('[role="dialog"]')!;
+      expect(panel.querySelector('#clone-command')?.textContent).toBe('https://github.com/seb-patron/concord');
+      expect(panel.querySelector('.clone-copy')?.textContent).toBe('Copy');
+      dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(root.querySelector('[role="dialog"]')).toBeNull();
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
+  it('says no mirror is configured for repositories without the concord-v2 mirror', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('page')!;
+      const page = createRepoPage(root, { getRepoTree: async () => ({ data: { entries: [] } }), getRepoReadme: async () => ({ data: {} }), getRepoFile: async () => ({ data: {} }) });
+      page.show('another-repo', fixture);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      (root.querySelector('.code-button') as HTMLButtonElement).click();
+      (root.querySelector('#clone-tab-github-mirror') as HTMLButtonElement).click();
+      expect(root.querySelector('#clone-command')?.textContent).toBe('No mirror configured');
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
   it('uses the queue observed main after a landing when the repo projection is stale', async () => {
     const dom = new JSDOM('<main id="page"></main>');
     const previous = globalThis.document; globalThis.document = dom.window.document;

@@ -33,6 +33,14 @@ describe('Work UI theme and tracker lanes', () => {
     const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
     for (const label of ['Code', 'Tracker', 'Milestones', 'In flight']) expect(html).toContain(`>${label}</button>`);
     expect(html).toMatch(/id="theme-toggle"[^>]*aria-label="[^"]+"/);
+    expect(html).toContain('id="repo-owner"');
+    expect(html).toContain('id="repo-link"');
+    expect(html).not.toContain('id="repo-select"');
+    for (const selector of ['#settings-panel,.side-panel', '.inbox-alert']) {
+      const rule = css.split('}').filter(part => part.includes(selector)).at(-1);
+      expect(rule, `${selector} should resolve through theme tokens`).toMatch(/var\(--(card|border|text|alert-bg|alert-border|alert-text)/);
+      expect(rule).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    }
   });
   it('keeps the logo and selected main-nav tab visible in both themes', () => {
     const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
@@ -475,6 +483,9 @@ describe('Fleet desk DOM', () => {
       expect(principalPageCalls).toBe(5);
       expect(byId('desk').hidden).toBe(false);
       expect(byId('tracker-view').hidden).toBe(false);
+      expect(byId('repo-owner').textContent).toBe('reviewer');
+      expect(byId('repo-link').textContent).toBe('demo');
+      expect(doc.querySelector('#repo-select')).toBeNull();
       expect(byId('tracker-view').textContent).toContain('#1 <task>');
       expect(byId('tracker-view').querySelector('task')).toBeNull();
       expect([...doc.querySelectorAll('[data-main-view]')].map((button: any) => button.textContent)).toEqual(['Code', 'Tracker', 'Milestones', 'In flight']);
@@ -613,7 +624,8 @@ describe('Fleet desk DOM', () => {
       await flush(); await flush();
       expect(byId('principal').textContent).toContain('Signed in as owner');
       expect(byId('principal').textContent).toContain('owner · token in memory');
-      expect(byId('repo-select').textContent).toContain('No repositories yet');
+      (byId('repo-owner') as HTMLAnchorElement).click();
+      expect(byId('repositories-list').textContent).toContain('No repositories yet');
       expect(byId('desk-message').textContent).toContain('Create one');
       expect(byId('stat-strip').textContent).toContain('Agents working0');
       expect(byId('stat-strip').textContent).toContain('In queue0');
@@ -723,8 +735,14 @@ describe('Fleet desk DOM', () => {
 
       (byId('inbox-alert') as HTMLButtonElement).click();
       (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
-      (byId('repo-select') as HTMLSelectElement).value = 'second';
-      byId('repo-select').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+      expect(byId('repo-link').textContent).toBe('demo');
+      expect(doc.querySelector('#repo-select')).toBeNull();
+      (byId('repo-owner') as HTMLAnchorElement).click();
+      const secondRepo = [...byId('repositories-list').querySelectorAll('button')]
+        .find(button => button.textContent === 'Second') as HTMLButtonElement;
+      secondRepo.click();
+      expect(byId('repo-link').textContent).toBe('second');
+      expect(dom.window.location.search).toBe('?repo=second');
       expect(byId('inbox-alert').hidden).toBe(true);
       expect(byId('alert-count').textContent).toContain('0 decisions');
       releaseSecondSnapshot?.(); await flush(); await flush();
@@ -785,7 +803,8 @@ describe('Fleet desk DOM', () => {
       expect(byId('signed-out').hidden).toBe(true);
       expect(byId('principal').textContent).toBe('Public, read-only');
       expect(byId('tracker-view').textContent).toContain('#1');
-      expect((byId('repo-select') as HTMLSelectElement).disabled).toBe(true);
+      expect(byId('repo-link').textContent).toBe('public-demo');
+      expect(dom.window.document.querySelector('#repo-select')).toBeNull();
       expect(requests.some(request => request.url.endsWith('/snapshot'))).toBe(true);
       expect(requests.every(request => request.authorization === null)).toBe(true);
       expect(byId('tracker-view').querySelectorAll('form')).toHaveLength(0);

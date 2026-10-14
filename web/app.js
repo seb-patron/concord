@@ -107,8 +107,13 @@ function showSession() {
   const access = state.identity?.authMethod === 'access';
   $('signed-out').hidden = signedIn;
   $('desk').hidden = !signedIn;
-  $('repo-picker').hidden = !signedIn;
-  $('repo-separator').hidden = !signedIn;
+  $('repo-owner').hidden = !signedIn;
+  $('repo-link').hidden = !signedIn || !state.repoId;
+  $('repo-separator').hidden = !signedIn || !state.repoId;
+  $('repo-owner').textContent = state.identity?.tenantName ?? state.identity?.ownerName ?? state.identity?.name ?? state.identity?.principalId ?? 'Concord user';
+  $('repo-owner').href = '#repositories';
+  $('repo-link').textContent = state.repos.find(repo => repo.repoId === state.repoId)?.repoId ?? state.repoId ?? '';
+  $('repo-link').href = `?repo=${encodeURIComponent(state.repoId ?? '')}#code`;
   $('principal').hidden = !signedIn;
   $('profile').hidden = !signedIn || publicMode;
   $('inbox-button').hidden = !signedIn || publicMode;
@@ -148,7 +153,7 @@ function showSession() {
     button.type = 'button'; button.setAttribute('role', 'menuitem');
     button.setAttribute('aria-current', String(repo.repoId === state.repoId));
     button.addEventListener('click', () => {
-      state.repoId = repo.repoId; $('repo-select').value = repo.repoId; state.view = 'tracker';
+      state.repoId = repo.repoId; state.view = 'tracker';
       closeProfileMenu(); ++state.generation; void loadRepo();
     });
     repoList.append(button);
@@ -189,16 +194,8 @@ async function signIn(token, preferredRepo, accessSession = null) {
     state.identity = identity;
     void refreshPrincipals(gen);
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
-    const select = $('repo-select'); select.replaceChildren(); select.disabled = false;
-    if (!state.repos.length) {
-      const option = node('option', 'No repositories yet'); option.value = ''; select.append(option);
-    }
-    for (const repo of state.repos) {
-      const option = node('option', repo.displayName ?? repo.repoId);
-      option.value = repo.repoId; select.append(option);
-    }
-    state.repoId = state.repos.find(r => r.repoId === preferredRepo)?.repoId ?? state.repos[0]?.repoId ?? null;
-    if (state.repoId) select.value = state.repoId;
+    const requestedRepo = preferredRepo ?? new URLSearchParams(window.location.search).get('repo');
+    state.repoId = state.repos.find(r => r.repoId === requestedRepo)?.repoId ?? state.repos[0]?.repoId ?? null;
     showSession();
     if (state.repoId) await loadRepo(gen);
     else { state.deskMessage = 'No repositories yet. Create one with concord repo create or the MCP tool.'; render(); }
@@ -218,9 +215,6 @@ async function enterPublicRead(repoId) {
   state.identity = { principalId: 'anonymous', roles: ['viewer'], repoIds: [repoId] };
   state.repos = [{ repoId, displayName: repoId }];
   state.repoId = repoId;
-  const select = $('repo-select'); select.replaceChildren();
-  const option = node('option', repoId); option.value = repoId; select.append(option);
-  select.value = repoId; select.disabled = true;
   showSession();
   await loadRepo(gen);
 }
@@ -796,12 +790,13 @@ function render() {
     $('desk').dataset.mainViewActive = state.view;
     const mainOid = projections().repos?.repo?.observedCanonicalOid;
     $('env-badge').textContent = `${state.connected ? 'Live' : 'Offline'} · main ${mainOid ? String(mainOid).slice(0, 7) : '—'}`;
-    const sections = { code: $('code-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
+    const sections = { code: $('code-view'), repositories: $('repositories-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
     for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
     $('stat-strip').hidden = state.view !== 'desk';
     $('inbox-alert').hidden = state.view === 'inbox' || inboxCount(state.snapshot) === 0;
     for (const button of document.querySelectorAll('[data-main-view]')) button.setAttribute('aria-current', String(button.dataset.mainView === state.view));
     if (state.view !== 'code') repoPage.hide();
+    if (state.view === 'repositories') renderRepositories();
     views[state.view]?.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
       identity: state.identity, principals: state.principals, roles: roles(),
       verdicts: state.verdicts, verdictErrors: state.verdictErrors, message: state.deskMessage,
@@ -818,6 +813,23 @@ function render() {
     }
     renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderSettings();renderTabs();
   });
+}
+function renderRepositories() {
+  const target = $('repositories-list');
+  target.replaceChildren();
+  if (!state.repos.length) { target.append(node('li', 'No repositories yet.')); return; }
+  for (const repo of state.repos) {
+    const item = node('li');
+    const choice = node('button', repo.displayName ?? repo.repoId, 'repository-choice');
+    choice.type = 'button';
+    choice.setAttribute('aria-current', String(repo.repoId === state.repoId));
+    choice.addEventListener('click', () => {
+      state.repoId = repo.repoId; state.view = 'code'; ++state.generation;
+      window.history?.replaceState?.({}, '', `?repo=${encodeURIComponent(repo.repoId)}#code`);
+      showSession(); void loadRepo();
+    });
+    item.append(choice, node('code', repo.repoId)); target.append(item);
+  }
 }
 function renderSettings() {
   const panel=$('settings-panel');
@@ -939,6 +951,14 @@ function boot() {
     setProfileMenuOpen(open);
     if (open) $('profile-menu').querySelector('[role="menuitem"]:not(:disabled)')?.focus();
   });
+  $('repo-owner').addEventListener('click', event => {
+    if (!state.identity) return;
+    event.preventDefault(); state.view = 'repositories'; render();
+  });
+  $('repo-link').addEventListener('click', event => {
+    if (!state.repoId) return;
+    event.preventDefault(); state.view = 'code'; render();
+  });
   $('inbox-button').addEventListener('click', () => { state.view = 'inbox'; render(); });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !$('profile-menu').hidden) {
@@ -960,7 +980,6 @@ function boot() {
     themeToggle.setAttribute('aria-label', next === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
   });
   $('refresh-button').addEventListener('click',()=>void poll(state.generation,true));
-  $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; state.view='tracker'; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
   $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});

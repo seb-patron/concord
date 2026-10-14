@@ -48,6 +48,8 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
   let selectedFile = null;
   let error = null;
   let retryMessage = null;
+  let cloneOpen = false;
+  let cloneTab = 'Git';
   const button = (label, action, className) => { const b = element('button', label, className); b.type = 'button'; b.addEventListener('click', action); return b; };
   const card = (title, className = '') => { const section = element('section', undefined, `repo-card ${className}`); section.setAttribute('aria-label', title); section.append(element('h2', title)); return section; };
   const held = () => array(snapshot?.data?.projections?.leases?.heldItems ?? snapshot?.data?.projections?.leases?.items)
@@ -63,8 +65,57 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     const landings = array(snapshot?.data?.projections?.queue?.entries).filter(item => item.state === 'landed');
     const entry = landings.at(-1);
     const change = array(snapshot?.data?.projections?.repos?.changes).find(item => item.changeId === entry?.changeId);
-    return change ? `${change.intentText} landed by ${change.authorModel ?? change.authorId}` : entry ? `Change ${entry.changeId} landed` : 'No landing recorded yet.';
+    return { entry, change };
   };
+  const relativeTime = timestamp => {
+    const value = typeof timestamp === 'number' ? timestamp : Date.parse(timestamp ?? '');
+    if (!Number.isFinite(value)) return null;
+    const minutes = Math.max(0, Math.floor((Date.now() - value) / 60000));
+    return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`;
+  };
+  function drawClonePanel() {
+    if (!cloneOpen) return;
+    const panel = element('section', undefined, 'clone-panel');
+    panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-labelledby', 'clone-heading');
+    const heading = element('div', undefined, 'clone-heading-row');
+    const title = element('h2', 'Clone repository'); title.id = 'clone-heading';
+    heading.append(title, button('Close', closeClone, 'clone-close'));
+    panel.append(heading);
+    const tabs = element('div', undefined, 'clone-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Clone options');
+    for (const name of ['Git', 'Concord', 'GitHub mirror']) {
+      const tab = button(name, () => { cloneTab = name; draw(); });
+      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(cloneTab === name)); tab.id = `clone-tab-${name.toLowerCase().replaceAll(' ', '-')}`;
+      tabs.append(tab);
+    }
+    panel.append(tabs);
+    const command = cloneTab === 'Git'
+      ? `npm run concord -- repo clone --repo ${repoId} --path ./${repoId}`
+      : cloneTab === 'Concord'
+        ? `npm run concord -- start --repo ${repoId} --intent-key task-17 --intent 'Tune gamma safely' --allowed-files allowed-files.txt --json\nnpm run concord -- land --repo ${repoId} --source . --commit FULL_OID --intent-key task-17 --intent 'Tune gamma safely' --allowed-files allowed-files.txt`
+        : repoId === 'concord-v2' ? 'https://github.com/seb-patron/concord' : 'No mirror configured';
+    const code = element('pre', command); code.id = 'clone-command'; panel.append(code);
+    if (cloneTab === 'Concord') panel.append(element('p', 'Commands follow docs/cli.md.', 'clone-source'));
+    const copy = button('Copy', async () => {
+      try { await navigator.clipboard.writeText(command); copy.textContent = 'Copied'; }
+      catch { copy.textContent = 'Copy unavailable'; }
+    }, 'clone-copy');
+    copy.setAttribute('aria-label', `Copy ${cloneTab} ${cloneTab === 'GitHub mirror' ? 'URL' : 'commands'}`);
+    panel.append(copy); root.append(panel);
+    panel.querySelector('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
+  }
+  function closeClone() { cloneOpen = false; draw(); root.querySelector('.code-button')?.focus(); }
+  function onCloneKey(event) {
+    if (!cloneOpen) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeClone(); }
+    if (event.key === 'Tab') {
+      const focusable = [...root.querySelectorAll('.clone-panel button')];
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  }
+  document.addEventListener('keydown', onCloneKey);
   function draw() {
     root.replaceChildren();
     if (!repoId) { root.append(element('p', 'Choose a repository to view its code.')); return; }
@@ -76,8 +127,22 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     }
     top.append(group, element('span', audience === 'human' ? 'README, files and activity, written for humans.' : 'Repository snapshot (GET /snapshot, what repo_context fetches; MCP also redacts registered secrets).', 'repo-note'));
     const meta = element('div', undefined, 'repo-meta');
-    meta.append(element('code', `main · ${oid ? oid.slice(0, 7) : 'empty'}`), element('code', `npm run concord -- repo clone --repo ${repoId} --path './${repoId}'`));
-    top.append(meta); root.append(top);
+    const details = element('div', undefined, 'repo-code-details');
+    details.append(element('span', 'main', 'branch-chip'), element('code', oid ? oid.slice(0, 7) : 'empty', 'commit-oid'));
+    const recent = latest();
+    const landingLabel = recent.change ? `${recent.change.intentText ?? `Change ${recent.change.changeId}`} · ${recent.change.authorModel ?? recent.change.authorId ?? 'author unavailable'}` : recent.entry ? `Change ${recent.entry.changeId} landed` : 'No landing recorded yet';
+    const age = relativeTime(recent.change?.updatedAt ?? recent.change?.landedAt ?? recent.entry?.landedAt ?? recent.entry?.createdAt ?? recent.entry?.timestamp);
+    details.append(element('span', age ? `${landingLabel} · ${age}` : landingLabel, 'latest-landing'));
+    const changes = array(snapshot?.data?.projections?.repos?.changes);
+    const landedCount = array(snapshot?.data?.projections?.queue?.entries).filter(item => item.state === 'landed').length;
+    const openCount = changes.filter(change => !['merged', 'closed', 'withdrawn'].includes(change.status)).length;
+    const fileCount = tree ? tree.filter(entry => entry.type === 'blob').length : null;
+    details.append(element('span', `${landedCount} changes landed · ${openCount} open changes · ${fileCount ?? '—'} ${fileCount === 1 ? 'file' : 'files'}`, 'repo-counts'));
+    meta.append(details);
+    const cloneButton = button('Code', () => { cloneOpen = true; draw(); }, 'code-button');
+    cloneButton.setAttribute('aria-haspopup', 'dialog'); cloneButton.setAttribute('aria-expanded', String(cloneOpen));
+    meta.append(cloneButton); top.append(meta); root.append(top);
+    drawClonePanel();
     if (error) root.append(element('p', error, 'repo-error'));
     if (retryMessage) root.append(element('p', retryMessage, 'repo-error'));
     if (audience === 'agent') drawAgent(); else drawHuman();
@@ -99,7 +164,8 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     const layout = element('div', undefined, 'repo-layout');
     const primary = element('div', undefined, 'repo-primary');
     const files = card('Files');
-    files.append(element('p', latest(), 'repo-landing'));
+    const recent = latest();
+    files.append(element('p', recent.change ? `${recent.change.intentText ?? 'Change'} landed by ${recent.change.authorModel ?? recent.change.authorId ?? 'author unavailable'}` : recent.entry ? `Change ${recent.entry.changeId} landed` : 'No landing recorded yet.', 'repo-landing'));
     const crumbs = element('nav', undefined, 'repo-crumbs'); crumbs.setAttribute('aria-label', 'Directory');
     crumbs.append(button(repoId, () => navigate('')));
     let current = '';
@@ -235,6 +301,6 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
       repoId = nextRepoId; oid = nextOid; snapshot = nextSnapshot; version = nextVersion;
       if (changed) { path = ''; void load().catch(cause => { error = errorCopy(cause); draw(); }); } else draw();
     },
-    hide() { ++generation; repoId = null; oid = null; version = null; root.replaceChildren(); },
+    hide() { ++generation; cloneOpen = false; repoId = null; oid = null; version = null; root.replaceChildren(); },
   };
 }
