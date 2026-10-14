@@ -21,7 +21,7 @@ const state = { generation: 0, repoId: null, repos: [], principals: [], identity
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
   inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
   awaitingFreshSnapshot: false, accessSignIn: false, metrics: null, metricsFetchedAt: 0,
-  publicRead: false, publicPollAt: 0, publicRequestTimes: [] };
+  publicRead: false, publicPollAt: 0, publicRequestTimes: [], lastPollAt: 0, lastLifecycleRefreshAt: 0 };
 // Keep anonymous traffic below the Worker's shared authentication limit.
 function publicRequestAvailable() {
   if (!state.publicRead) return true;
@@ -108,6 +108,8 @@ function showSession() {
   $('token-clear').hidden = !signedIn || access || publicMode;
   $('access-logout').hidden = !signedIn || !access;
   $('access-signin').hidden = signedIn || !state.accessSignIn;
+  $('refresh-button').hidden = !signedIn || !state.repoId;
+  $('refresh-status').hidden = !signedIn || !state.repoId;
   if (access) {
     $('principal').textContent = `Signed in as ${state.identity.principalId} via Cloudflare Access`;
     $('access-logout').href = state.identity.logoutUrl;
@@ -123,6 +125,7 @@ function signOut(message) {
   state.repoId = null; state.snapshot = null; state.identity = null; state.repos = []; state.principals = [];
   state.verdicts = {}; state.verdictErrors = {}; state.events = []; state.seq = 0; state.version = 0;
   state.metrics = null; state.metricsFetchedAt = 0;
+  state.lastPollAt = 0;
   verdictLoader.reset();
   state.observedVersions.clear();
   state.awaitingFreshSnapshot = false;
@@ -204,6 +207,7 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
     verdictLoader.reset();
     state.seq = 0; state.version = 0;
     state.metrics = null; state.metricsFetchedAt = 0;
+    state.lastPollAt = 0;
   }
   state.deskMessage = null;
   if (resetSelection) { state.selected = null; state.inboxSelected = null; }
@@ -254,13 +258,14 @@ async function refreshVerdicts(gen = state.generation) {
   for (const id of ids) if (changeFor(id)?.status === 'merged') terminal.push(id);
   if (gen === state.generation) verdictLoader.request(ids, terminal);
 }
-async function poll(gen = state.generation) {
+async function poll(gen = state.generation, force = false) {
   if (!state.repoId || gen !== state.generation || state.busy) return;
   if (state.publicRead) {
-    if (Date.now() - state.publicPollAt < 60_000) return;
+    if (!force && Date.now() - state.publicPollAt < 60_000) return;
     state.publicPollAt = Date.now();
   }
   state.busy = true;
+  render();
   try {
     let page;
     for (let i = 0; i < (state.publicRead ? 1 : 20); i++) {
@@ -299,7 +304,7 @@ async function poll(gen = state.generation) {
       }
       state.metricsFetchedAt = Date.now();
     }
-    state.connected = true; render();
+    state.connected = true; state.lastPollAt = Date.now(); render();
   } catch (error) {
     if (gen !== state.generation) return;
     if (error.status === 401) return signOut(state.publicRead
@@ -308,7 +313,12 @@ async function poll(gen = state.generation) {
     state.connected = false;
     state.deskMessage = error.status === 403 ? 'Your token cannot see this repository.' : 'Disconnected. Showing the last known state.';
     render();
-  } finally { state.busy = false; }
+  } finally { state.busy = false; render(); }
+}
+function relativeUpdateTime() {
+  if (!state.lastPollAt) return 'Updated —';
+  const seconds = Math.max(0, Math.floor((Date.now() - state.lastPollAt) / 1000));
+  return `Updated ${seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`} ago`;
 }
 function stat(label, value, sub) {
   const box = node('div', null, 'stat');
@@ -739,6 +749,10 @@ function renderTabs() {
 function render() {
   preserve(()=>{
     showSession();
+    const refresh = $('refresh-button');
+    refresh.disabled = state.busy;
+    refresh.textContent = state.busy ? 'Refreshing…' : 'Refresh';
+    $('refresh-status').textContent = relativeUpdateTime();
     if (!canRender({ token: hasToken(), identity: state.identity, publicRead: state.publicRead }) || !state.identity) return;
     $('desk').dataset.mainViewActive = state.view;
     const mainOid = projections().repos?.repo?.observedCanonicalOid;
@@ -889,6 +903,7 @@ function boot() {
     themeToggle.textContent = next === 'dark' ? 'Light mode' : 'Dark mode';
     themeToggle.setAttribute('aria-label', next === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
   });
+  $('refresh-button').addEventListener('click',()=>void poll(state.generation,true));
   $('repo-select').addEventListener('change',()=>{state.repoId=$('repo-select').value; state.view='tracker'; ++state.generation;void loadRepo();});
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
@@ -904,11 +919,16 @@ function boot() {
     const next=cards[(index+(e.key==='ArrowLeft'||e.key==='ArrowUp'?-1:1)+cards.length)%cards.length];
     selectChange(next.dataset.changeId);$(next.id)?.focus();
   });
-  window.setInterval(()=>{
-    if (!canRender({ token: hasToken(), identity: state.identity, publicRead: state.publicRead }) || !state.repoId) return;
-    if (state.publicRead && Date.now() - state.publicPollAt < 60_000) return;
-    void poll();
-  },1000);
+  const refreshOnReturn = () => {
+    if (document.visibilityState === 'hidden' || !state.repoId) return;
+    const now = Date.now();
+    if (now - state.lastLifecycleRefreshAt < 5_000) return;
+    state.lastLifecycleRefreshAt = now;
+    void poll(state.generation,true);
+  };
+  document.addEventListener('visibilitychange', refreshOnReturn);
+  window.addEventListener('focus', refreshOnReturn);
+  window.setInterval(()=>{ $('refresh-status').textContent = relativeUpdateTime(); },15_000);
   const urlRepo = new URLSearchParams(window.location.search).get('repo');
   const tryPublicRead = () => {
     if (!hasToken() && urlRepo && /^[A-Za-z0-9_-]{1,64}$/.test(urlRepo)) void enterPublicRead(urlRepo);

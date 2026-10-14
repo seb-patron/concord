@@ -294,8 +294,7 @@ describe('Fleet desk DOM', () => {
     Object.assign(globalThis, { document: dom.window.document, window: dom.window });
     dom.window.HTMLElement.prototype.scrollIntoView = () => {};
     dom.window.scrollTo = () => {};
-    let tick: (() => void) | undefined;
-    dom.window.setInterval = ((callback: () => void) => { tick = callback; return 1; }) as any;
+    dom.window.setInterval = (() => 1) as any;
     const doc = dom.window.document;
     const byId = (id: string) => doc.getElementById(id)!;
     const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -453,7 +452,7 @@ describe('Fleet desk DOM', () => {
       expect(byId('inbox-detail').querySelector('.inbox-actions')).toBeTruthy();
       const inboxManifest = byId('inbox-detail').querySelector('input[name="manifest"]') as HTMLInputElement;
       inboxManifest.value = 'sha256:in-progress'; inboxManifest.focus();
-      tick!(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush();
       expect(byId('inbox-detail').querySelector('input[name="manifest"]')).toBe(inboxManifest);
       expect(inboxManifest.value).toBe('sha256:in-progress');
       expect(doc.activeElement).toBe(inboxManifest);
@@ -497,7 +496,7 @@ describe('Fleet desk DOM', () => {
       const manifest = doc.querySelector('input[name="manifest"]') as HTMLInputElement;
       const evidence = doc.querySelector('input[name="evidence"]') as HTMLInputElement;
       manifest.value = 'sha256:manifest'; evidence.value = 'sha256:evidence';
-      manifest.focus(); tick!(); await flush();
+      manifest.focus(); (byId('refresh-button') as HTMLButtonElement).click(); await flush();
       expect(doc.querySelector('input[name="manifest"]')).toBe(manifest);
       expect(manifest.value).toBe('sha256:manifest');
       expect(doc.activeElement).toBe(manifest);
@@ -594,7 +593,7 @@ describe('Fleet desk DOM', () => {
       await flush();
       expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(requestsBeforeRetry);
       snapshotVersion = 9; eventVersion = 9;
-      tick!(); await flush(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush();
       expect((raceEnqueue.querySelector('button') as HTMLButtonElement).disabled).toBe(false);
       raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
@@ -603,7 +602,7 @@ describe('Fleet desk DOM', () => {
       expect(byId('work-board').textContent).not.toContain('Stale version 8');
       // An in-flight v10 snapshot cannot clear the v11 requirement from a stale refusal.
       snapshotVersion = 10; eventVersion = 10;
-      tick!();
+      (byId('refresh-button') as HTMLButtonElement).click();
       staleNextEnqueue = true; failNextSnapshot = true;
       raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
@@ -622,7 +621,7 @@ describe('Fleet desk DOM', () => {
       await flush();
       expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(postsAfterStale);
       interaction = true; snapshotVersion = 11; eventVersion = 11;
-      tick!(); await flush(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush();
       const recoveredButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
       expect(recoveredButtons.every(button => !button.disabled)).toBe(true);
       const recoveredEnqueue = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
@@ -634,12 +633,12 @@ describe('Fleet desk DOM', () => {
       expect(byId('queue-tree').querySelectorAll('li.highlight')).toHaveLength(3);
       const retainedClaim = byId('action-panel').querySelector('input[name="intentText"]') as HTMLInputElement;
       retainedClaim.value = 'Unsubmitted lease intent';
-      tick!(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush();
       expect(byId('action-panel').querySelector('input[name="intentText"]')).toBe(retainedClaim);
       expect(retainedClaim.value).toBe('Unsubmitted lease intent');
       const historyRequests = requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts').length;
       changeStatus = 'merged'; snapshotVersion = 12; eventVersion = 12;
-      tick!(); await flush(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush();
       expect(requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts')).toHaveLength(historyRequests);
       expect(byId('detail-body').textContent).toContain('Status: merged');
       expect(byId('action-panel').textContent).not.toContain('Claim');
@@ -655,7 +654,7 @@ describe('Fleet desk DOM', () => {
         ...Array.from({ length: 8 }, (_, index) => ({ changeId: `r${index}`, issueNumber: 60 + index, status: 'ready', revision: 1, authorId: `agent-${index}` })),
       ];
       snapshotVersion = 13; eventVersion = 13;
-      tick!(); await flush(); await flush(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush(); await flush();
       expect(verdictRequests).not.toContain('m0');
       for (let index = 0; index < 8; index++) expect(verdictRequests).not.toContain(`r${index}`);
       expect(verdictMaxInflight).toBeLessThanOrEqual(4);
@@ -666,9 +665,9 @@ describe('Fleet desk DOM', () => {
       expect(verdictRequests.filter(id => id === 'm0')).toHaveLength(1);
       expect(byId('tracker-view').querySelector('.tracker-timeline')?.textContent).toContain('verdict.carried');
       snapshotVersion = 14; eventVersion = 14;
-      tick!(); await flush(); await flush();
+      (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush();
       expect(verdictRequests.filter(id => id === 'm0')).toHaveLength(1);
-      eventVersion = 6; tick!(); await flush();
+      eventVersion = 6; (byId('refresh-button') as HTMLButtonElement).click(); await flush();
       expect(byId('event-log').textContent).not.toContain('stale.event');
 
       (byId('inbox-alert') as HTMLButtonElement).click();
@@ -740,6 +739,46 @@ describe('Fleet desk DOM', () => {
       expect(requests.every(request => request.authorization === null)).toBe(true);
       expect(byId('tracker-view').querySelectorAll('form')).toHaveLength(0);
     } finally {
+      clearSessionToken();
+      Object.assign(globalThis, previous);
+      dom.window.close();
+    }
+  });
+
+  it('refreshes on demand and when returning to a visible tab, without background polling', async () => {
+    const { dom, byId, flush, requests, previous } = await publicDom('refresh-demo', true);
+    try {
+      vi.resetModules();
+      // @ts-expect-error Browser JS is intentionally untyped.
+      await import('../../web/app.js');
+      await flush(); await flush(); await flush(); await flush();
+      const count = (suffix: string) => requests.filter(request => request.url.includes(suffix)).length;
+      const eventsBefore = count('/events?after=0');
+      const snapshotsBefore = count('/snapshot');
+      Object.defineProperty(dom.window.document, 'visibilityState', { configurable: true, value: 'visible' });
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(count('/events?after=0')).toBe(eventsBefore);
+      expect(count('/snapshot')).toBe(snapshotsBefore);
+
+      dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(count('/events?after=0')).toBe(eventsBefore + 1);
+      dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
+      dom.window.dispatchEvent(new dom.window.Event('focus'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(count('/events?after=0')).toBe(eventsBefore + 1);
+
+      expect((byId('refresh-button') as HTMLButtonElement).getAttribute('aria-label')).toBe('Refresh');
+      (byId('refresh-button') as HTMLButtonElement).click();
+      expect((byId('refresh-button') as HTMLButtonElement).disabled).toBe(true);
+      (byId('refresh-button') as HTMLButtonElement).click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(count('/events?after=0')).toBe(eventsBefore + 2);
+      expect(count('/snapshot')).toBe(snapshotsBefore);
+      expect(byId('refresh-status').textContent).toMatch(/^Updated /);
+    } finally {
+      vi.useRealTimers();
       clearSessionToken();
       Object.assign(globalThis, previous);
       dom.window.close();
