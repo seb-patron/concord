@@ -142,6 +142,88 @@ describe('durable runner protocol', () => {
     expect((await stale.route('runner/poll', { runnerId: 'two', role: 'checker', supportedProfileDigests: [pin] })).status).toBe(204);
   });
 
+  it('polls only indexed open jobs after terminal history has accumulated', async () => {
+    for (const withPending of [false, true]) {
+      const f = await fixture();
+      const terminalIds = Array.from({ length: 500 }, (_, index) => `done${index}`);
+      f.context.state.put('ids', [...terminalIds, ...(withPending ? ['job1'] : [])]);
+      for (const id of terminalIds) f.context.state.put(`job:${id}`, { job: { ...f.job, jobId: id, state: 'completed' } });
+      if (withPending) f.context.state.put('job:job1', { job: f.job });
+      f.context.state.put('pending-ids', withPending ? [{ id: 'job1', order: 500 }] : []);
+      f.context.state.put('claimed-ids', []);
+      let jobReads = 0;
+      let runnerWrites = 0;
+      const get = f.context.state.get.bind(f.context.state);
+      f.context.state.get = ((key: string) => {
+        if (key.startsWith('job:')) jobReads++;
+        return get(key);
+      }) as typeof f.context.state.get;
+      const put = f.context.state.put.bind(f.context.state);
+      f.context.state.put = (key: string, value: unknown) => {
+        if (key.startsWith('runner:')) runnerWrites++;
+        put(key, value);
+      };
+      const before = f.context.version();
+      const response = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+      if (withPending) {
+        expect(response.status).toBe(200);
+        expect((await response.json() as { data: { job: Job } }).data.job.jobId).toBe('job1');
+      } else {
+        expect(response.status).toBe(204);
+        expect(f.context.version()).toBe(before);
+      }
+      expect(jobReads).toBeLessThanOrEqual(5);
+      if (!withPending) {
+        f.advance(59_999);
+        await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+        f.advance(1);
+        await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+        expect(runnerWrites).toBe(2);
+      }
+    }
+  });
+
+  it('rebuilds missing indexes once, then polls without scanning terminal history', async () => {
+    const f = await fixture();
+    const terminalIds = Array.from({ length: 500 }, (_, index) => `done${index}`);
+    f.context.state.put('ids', [...terminalIds, 'job1']);
+    for (const id of terminalIds) f.context.state.put(`job:${id}`, { job: { ...f.job, jobId: id, state: 'completed' } });
+    f.context.state.put('job:job1', { job: f.job });
+    let jobReads = 0;
+    const get = f.context.state.get.bind(f.context.state);
+    f.context.state.get = ((key: string) => {
+      if (key.startsWith('job:')) jobReads++;
+      return get(key);
+    }) as typeof f.context.state.get;
+    expect((await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] })).status).toBe(200);
+    expect(jobReads).toBe(502);
+    jobReads = 0;
+    expect((await f.route('runner/poll', { runnerId: 'two', role: 'checker', supportedProfileDigests: [pin] })).status).toBe(204);
+    expect(jobReads).toBe(1);
+  });
+
+  it('returns an expired earlier job ahead of later pending work without reading terminal jobs', async () => {
+    const f = await fixture();
+    const terminalIds = Array.from({ length: 500 }, (_, index) => `done${index}`);
+    const expired = { ...f.job, state: 'claimed' as const, attempt: 1, fence: 1, runnerId: 'old', expiresAt: f.now() };
+    f.context.state.put('ids', ['job1', 'job2', ...terminalIds]);
+    f.context.state.put('job:job1', { job: expired });
+    f.context.state.put('job:job2', { job: { ...f.job, jobId: 'job2' } });
+    for (const id of terminalIds) f.context.state.put(`job:${id}`, { job: { ...f.job, jobId: id, state: 'completed' } });
+    f.context.state.put('pending-ids', [{ id: 'job2', order: 1 }]);
+    f.context.state.put('claimed-ids', [{ id: 'job1', order: 0 }]);
+    let jobReads = 0;
+    const get = f.context.state.get.bind(f.context.state);
+    f.context.state.get = ((key: string) => {
+      if (key.startsWith('job:')) jobReads++;
+      return get(key);
+    }) as typeof f.context.state.get;
+    const response = await f.route('runner/poll', { runnerId: 'new', role: 'checker', supportedProfileDigests: [pin] });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { data: { job: Job } }).data.job).toMatchObject({ jobId: 'job1', attempt: 2 });
+    expect(jobReads).toBeLessThanOrEqual(5);
+  });
+
   it('checks the canonical immutable input digest before scheduling', async () => {
     const f = await fixture();
     expect(runners.hooks['runners.schedule']!(f.context, { ...f.job, inputDigest: pin })).toMatchObject({ status: 'blocked', code: 'INVALID_JOB' });

@@ -6,6 +6,10 @@ Poll, heartbeat, credential, and result HTTP calls share one transient classific
 
 ## Poll resilience
 
+The coordinator keeps `ids` for complete job listings and two ordered indexes for polling: `pending-ids` contains claimable jobs and `claimed-ids` contains live claims. Each index entry retains the job's position in scheduling order, so an expired earlier job returns ahead of later pending work. Scheduling, claiming, expiry, policy blocking, bootstrap cancellation, and result completion update the indexes. Polling checks only pending jobs, while expiry checks only claimed jobs, so completed and blocked job history does not increase the work per poll. Repositories created before these indexes existed rebuild them from `ids` and job rows in the first poll transaction; subsequent polls use the indexes directly. Snapshot and list views continue to include historical jobs.
+
+An empty poll records runner activity at most once every 60 seconds. The runner status view uses `lastSeenAt` to mark a runner offline after 60 seconds, so this keeps status current without writing the runner row on every idle poll. Polls that claim a job still record activity immediately.
+
 A long-running runner survives transient server responses instead of exiting, so landing never stalls because a runner process died. A transient poll is retried with capped exponential backoff and jitter (start 1 s, doubling per attempt, cap 30 s; `Retry-After` is honored up to the same 30 s cap) with the same `Idempotency-Key` and body. Each retry logs one line with the code and the next delay (`POLL_RETRY code=... delayMs=...`, and `TRANSPORT_RETRY route=... code=... delayMs=...` for job calls); retry logs never include a token, body, or key.
 
 Transient (retried, never exits the runner):

@@ -5,11 +5,15 @@ import { reserveTokenMint } from './repos';
 import { jobPolicy, storedJob, withJobPolicy, type StoredJob } from '../jobs/policy';
 
 const CLAIM_MS = 60_000;
+const RUNNER_SEEN_MS = 60_000;
+const PENDING_IDS = 'pending-ids';
+const CLAIMED_IDS = 'claimed-ids';
 // Artifacts and bridge issue Git credentials for at least 60 seconds.
 // Give their claims room for token minting and request latency.
 const providerMinimum = (c: ModuleContext) => c.env?.STORAGE_BACKEND === 'bridge' || c.env?.STORAGE_BACKEND === 'artifacts';
 const claimMs = (c: ModuleContext) => providerMinimum(c) ? 90_000 : CLAIM_MS;
 type Stored = { job: StoredJob; result?: JobResult; dispatch?: Gate<unknown>; completedPrincipalId?: string };
+type JobIndexEntry = { id: string; order: number };
 type RunnerState = { principalId: string; role: 'checker' | 'promoter'; activeJobId: string | null;
   supportedProfileDigests: string[]; lastSeenAt: number };
 const ids = (c: ModuleContext) => c.state.get<string[]>('ids') ?? [];
@@ -17,6 +21,38 @@ const load = (c: ModuleContext, id: string) => c.state.get<Stored>('job:' + id);
 const save = (c: ModuleContext, row: Stored) => c.state.put('job:' + row.job.jobId, { ...row, job: storedJob(row.job as Job) });
 const runner = (c: ModuleContext, id: string) => c.state.get<RunnerState>('runner:' + id);
 const saveRunner = (c: ModuleContext, id: string, value: RunnerState) => c.state.put('runner:' + id, value);
+function validIndex(value: unknown): value is JobIndexEntry[] {
+  return Array.isArray(value) && value.every(item => item && typeof item.id === 'string' && Number.isSafeInteger(item.order));
+}
+function indexJob(c: ModuleContext, id: string, state: Job['state'] | null): void {
+  const pending = c.state.get<JobIndexEntry[]>(PENDING_IDS) ?? [];
+  const claimed = c.state.get<JobIndexEntry[]>(CLAIMED_IDS) ?? [];
+  const prior = pending.find(item => item.id === id) ?? claimed.find(item => item.id === id);
+  const order = prior?.order ?? ids(c).indexOf(id);
+  const nextPending = pending.filter(item => item.id !== id);
+  const nextClaimed = claimed.filter(item => item.id !== id);
+  const entry = { id, order };
+  if (state === 'pending' && order >= 0) nextPending.push(entry);
+  if (state === 'claimed' && order >= 0) nextClaimed.push(entry);
+  nextPending.sort((a, b) => a.order - b.order);
+  nextClaimed.sort((a, b) => a.order - b.order);
+  c.state.put(PENDING_IDS, nextPending);
+  c.state.put(CLAIMED_IDS, nextClaimed);
+}
+function ensureIndexes(c: ModuleContext): void {
+  const pendingIndex = c.state.get<unknown>(PENDING_IDS);
+  const claimedIndex = c.state.get<unknown>(CLAIMED_IDS);
+  if (validIndex(pendingIndex) && validIndex(claimedIndex)) return;
+  const pending: JobIndexEntry[] = [];
+  const claimed: JobIndexEntry[] = [];
+  ids(c).forEach((id, order) => {
+    const row = load(c, id);
+    if (row?.job.state === 'pending') pending.push({ id, order });
+    if (row?.job.state === 'claimed') claimed.push({ id, order });
+  });
+  c.state.put(PENDING_IDS, pending);
+  c.state.put(CLAIMED_IDS, claimed);
+}
 const conflict = (code: string): never => { throw new HttpError(409, code, code); };
 const visibilityRetryDelays = [200, 500, 1000];
 async function rereadUntil<T>(read: () => Promise<T>, matches: (value: T) => boolean): Promise<T> {
@@ -114,13 +150,18 @@ function validManifest(job: Job, manifest: ReviewManifest | null): manifest is R
 }
 
 function expire(c: ModuleContext): void {
-  for (const id of ids(c)) {
+  for (const { id } of c.state.get<JobIndexEntry[]>(CLAIMED_IDS) ?? []) {
     const row = load(c, id);
-    if (!row || row.job.state !== 'claimed' || row.job.expiresAt === null || row.job.expiresAt > c.now()) continue;
+    if (!row || row.job.state !== 'claimed') {
+      indexJob(c, id, null);
+      continue;
+    }
+    if (row.job.expiresAt === null || row.job.expiresAt > c.now()) continue;
     const old = row.job.runnerId ? runner(c, row.job.runnerId) : null;
     if (old?.activeJobId === id) saveRunner(c, row.job.runnerId!, { ...old, activeJobId: null });
     row.job = { ...row.job, state: row.job.attempt >= 3 ? 'blocked' : 'pending', runnerId: null, expiresAt: null, version: c.nextVersion() };
     save(c, row);
+    indexJob(c, id, row.job.state);
     c.appendEvent('runner.expired', [id], { attempt: row.job.attempt, state: row.job.state }, row.job.version);
   }
 }
@@ -194,9 +235,11 @@ function schedule(c: ModuleContext, job: Job): Gate<{ jobId: string }> {
       { status: 'blocked', version: prior.job.version, code: 'JOB_CONFLICT', reason: 'Job identity changed', evidenceIds: [job.jobId] };
     if (!validJob(c, job) || inputHash(stableJson(jobInput(job))) !== job.inputDigest)
       return { status: 'blocked', version: c.version(), code: 'INVALID_JOB', reason: 'Job pins or input digest invalid', evidenceIds: [] };
+    ensureIndexes(c);
     const version = c.nextVersion();
     save(c, { job: { ...job, version } });
     c.state.put('ids', [...ids(c), job.jobId]);
+    indexJob(c, job.jobId, 'pending');
     c.appendEvent('runner.scheduled', [job.jobId], { kind: job.kind }, version);
     return { status: 'eligible', version, evidenceIds: [job.jobId], value: { jobId: job.jobId } };
   });
@@ -207,6 +250,7 @@ function cancelBootstrap(c: ModuleContext, jobId: string): Gate {
     return { status: 'blocked', version: 0, code: 'MODULE_UNAVAILABLE', reason: 'Runner context unavailable', evidenceIds: [] };
   requireRole(c.principal, 'owner');
   return c.transaction(() => {
+    ensureIndexes(c);
     const row = load(c, jobId);
     if (!row) return { status: 'eligible', version: c.version(), evidenceIds: [jobId], value: undefined };
     if ((row.job.kind !== 'validate-stack' && row.job.kind !== 'promote') || !row.job.bootstrap)
@@ -220,6 +264,7 @@ function cancelBootstrap(c: ModuleContext, jobId: string): Gate {
     row.job = { ...row.job, state: 'blocked', runnerId: null, expiresAt: null,
       fence: row.job.fence + 1, version: c.nextVersion() };
     save(c, row);
+    indexJob(c, jobId, 'blocked');
     c.appendEvent('runner.cancelled', [jobId], { reason: 'BOOTSTRAP_REPINNED' }, row.job.version);
     return { status: 'eligible', version: row.job.version, evidenceIds: [jobId], value: undefined };
   });
@@ -231,17 +276,24 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
     body.maxJobs !== undefined && body.maxJobs !== 1) throw new HttpError(400, 'INVALID_POLL', 'Invalid runner registration');
   requireRole(c.principal, body.role);
   return c.transaction(() => {
+    ensureIndexes(c);
     expire(c);
     const previous = runner(c, body.runnerId);
     if (previous && (previous.principalId !== c.principal.principalId || previous.role !== body.role)) conflict('RUNNER_ID_CONFLICT');
     if (previous?.activeJobId) conflict('RUNNER_BUSY');
     let row: Stored | undefined;
-    for (const item of ids(c).map(id => load(c, id))) {
-      if (!item || item.job.state !== 'pending' || !body.supportedProfileDigests.includes(item.job.profileDigest) ||
+    for (const { id } of c.state.get<JobIndexEntry[]>(PENDING_IDS) ?? []) {
+      const item = load(c, id);
+      if (!item || item.job.state !== 'pending') {
+        indexJob(c, id, null);
+        continue;
+      }
+      if (!body.supportedProfileDigests.includes(item.job.profileDigest) ||
         (item.job.kind === 'promote') !== (body.role === 'promoter')) continue;
       if (!jobPolicy(c.trusted, item.job)) {
         item.job = { ...item.job, state: 'blocked', version: c.nextVersion() } as Job;
         save(c, item);
+        indexJob(c, item.job.jobId, 'blocked');
         c.appendEvent('runner.blocked', [item.job.jobId], { reason: 'JOB_POLICY_UNAVAILABLE',
           policyId: item.job.policyId, policyDigest: item.job.policyDigest }, item.job.version);
         continue;
@@ -249,13 +301,16 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
       row = item;
       break;
     }
-    saveRunner(c, body.runnerId, { principalId: c.principal.principalId, role: body.role, activeJobId: row?.job.jobId ?? null,
-      supportedProfileDigests: body.supportedProfileDigests, lastSeenAt: c.now() });
+    if (row || !previous || c.now() - previous.lastSeenAt >= RUNNER_SEEN_MS) {
+      saveRunner(c, body.runnerId, { principalId: c.principal.principalId, role: body.role, activeJobId: row?.job.jobId ?? null,
+        supportedProfileDigests: body.supportedProfileDigests, lastSeenAt: c.now() });
+    }
     if (!previous) c.state.put('runner-ids', [...(c.state.get<string[]>('runner-ids') ?? []), body.runnerId]);
     if (!row) return new Response(null, { status: 204 });
     row.job = { ...row.job, state: 'claimed', attempt: row.job.attempt + 1, fence: row.job.fence + 1,
       runnerId: body.runnerId, expiresAt: c.now() + claimMs(c), version: c.nextVersion() };
     save(c, row);
+    indexJob(c, row.job.jobId, 'claimed');
     const event = c.appendEvent('runner.claimed', [row.job.jobId], { attempt: row.job.attempt, fence: row.job.fence }, row.job.version);
     return json({ job: withJobPolicy(c.trusted, row.job) }, row.job.version, event.sequence);
   });
@@ -454,6 +509,7 @@ async function result(c: ModuleContext, id: string, body: JobResultBody): Promis
     const version = c.nextVersion();
     save(c, { job: { ...job, state: 'completed', runnerId: null, expiresAt: null, version }, result: value, dispatch: dispatched,
       completedPrincipalId: c.principal.principalId });
+    indexJob(c, id, 'completed');
     const owner = runner(c, job.runnerId!);
     if (owner) saveRunner(c, job.runnerId!, { ...owner, activeJobId: null, lastSeenAt: c.now() });
     const event = c.appendEvent('runner.result', [id], { resultDigest: body.resultDigest, outcome: value.outcome, dispatch: dispatched.status }, version);
