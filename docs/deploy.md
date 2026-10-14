@@ -12,6 +12,8 @@ The local bridge is a development fake. A public deployment uses the `concord-de
 
 ## Local acceptance and release inputs
 
+The Worker has two rate-limit bindings. `AUTH_RATE_LIMIT` allows 20 failed-authentication attempts per client IP per 60 seconds. Credentialless GETs under a public repository use `ANON_READ_LIMIT`, keyed by client IP and repository ID, with a limit of 300 requests per 60 seconds. An exhausted anonymous-read bucket returns `429 READ_RATE_LIMITED` and a `Retry-After` value in seconds; authenticated requests use neither bucket.
+
 From a clean clone with Node 22+, npm, and Git:
 
 ```sh

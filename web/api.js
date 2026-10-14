@@ -39,7 +39,7 @@ export function hasToken() {
 }
 
 export class ApiError extends Error {
-  constructor(status, code, message, requestId = null, retryable = false, details = null) {
+  constructor(status, code, message, requestId = null, retryable = false, details = null, retryAfter = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
@@ -47,6 +47,7 @@ export class ApiError extends Error {
     this.requestId = requestId;
     this.retryable = retryable;
     this.details = details;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -135,7 +136,9 @@ export async function apiFetch(path, options = {}, fetchImpl = fetch) {
       conflictingKeys: Array.isArray(raw.conflictingKeys) ? raw.conflictingKeys.filter(key => typeof key === 'string').slice(0, 16).map(redactText) : [],
     } : raw && typeof raw === 'object' && code === 'STALE_VERSION' && Number.isSafeInteger(raw.currentVersion) && raw.currentVersion >= 0
       ? { currentVersion: raw.currentVersion } : null;
-    throw new ApiError(response.status, code, message, requestId, response.status === 429 || response.status >= 500, details);
+    const retryAfterHeader = response.headers.get('retry-after');
+    const retryAfter = retryAfterHeader !== null && /^\d+$/.test(retryAfterHeader) ? Number(retryAfterHeader) : null;
+    throw new ApiError(response.status, code, message, requestId, response.status === 429 || response.status >= 500, details, retryAfter);
   }
   return parsed;
 }

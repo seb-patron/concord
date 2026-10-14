@@ -6,7 +6,7 @@ import { PUBLIC_DIRECTORY_NAME } from '../../src/contracts';
 import { apiRequest, mutation, responseBody } from '../helpers';
 
 const fetchApi = (request: Request) => worker.fetch(request, env);
-// Anonymous reads share the credential rate limit; a distinct IP per test keeps each bucket fresh.
+// A distinct IP per test keeps each anonymous read bucket fresh.
 let bucket = 0;
 const freshIp = () => `10.9.9.${++bucket}`;
 const anonymousGet = (path: string, ip: string) => new Request(`https://concord.test${path}`, {
@@ -188,5 +188,38 @@ describe('per-repository public flag', () => {
   it('publishes an own-key-sensitive but valid repository name', async () => {
     await createRepo('__proto__', true);
     expect((await fetchApi(anonymousGet('/v1/repos/__proto__/snapshot', freshIp()))).status).toBe(200);
+  });
+
+  it('allows 25 anonymous reads while the failed-auth limiter is exhausted', async () => {
+    const name = 'public_flag_separate_limits';
+    await createRepo(name, true);
+    const authLimit = vi.fn(async () => ({ success: false }));
+    const seen = new Map<string, number>();
+    const anonLimit = vi.fn(async ({ key }: { key: string }) => {
+      const count = (seen.get(key) ?? 0) + 1;
+      seen.set(key, count);
+      return { success: count <= 300 };
+    });
+    const limitedEnv = { ...env, AUTH_RATE_LIMIT: { limit: authLimit }, ANON_READ_LIMIT: { limit: anonLimit } } as Env;
+    const ip = freshIp();
+    for (let i = 0; i < 25; i++) {
+      expect((await worker.fetch(anonymousGet(`/v1/repos/${name}/snapshot`, ip), limitedEnv)).status).toBe(200);
+    }
+    expect(authLimit).not.toHaveBeenCalled();
+    expect(anonLimit).toHaveBeenCalledTimes(25);
+    expect(anonLimit).toHaveBeenCalledWith({ key: `${ip}:${name}` });
+  });
+
+  it('returns a retry hint when the anonymous read limiter is exhausted', async () => {
+    const name = 'public_flag_read_limited';
+    await createRepo(name, true);
+    const authLimit = vi.fn(async () => ({ success: true }));
+    const anonLimit = vi.fn(async () => ({ success: false }));
+    const limitedEnv = { ...env, AUTH_RATE_LIMIT: { limit: authLimit }, ANON_READ_LIMIT: { limit: anonLimit } } as Env;
+    const response = await worker.fetch(anonymousGet(`/v1/repos/${name}/snapshot`, freshIp()), limitedEnv);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('60');
+    expect((await responseBody(response)).error.code).toBe('READ_RATE_LIMITED');
+    expect(authLimit).not.toHaveBeenCalled();
   });
 });

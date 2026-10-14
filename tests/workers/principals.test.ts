@@ -56,7 +56,8 @@ describe('delegated principals', () => {
     const guardedEnv = { CONCORD_MODE: 'production',
       AUTH_TOKENS: JSON.stringify({ operator: { tenantId: 'known', principalId: 'owner',
         roles: ['owner'], repoIds: '*', expiresAt: Date.now() + 60_000 } }),
-      TENANT_CATALOG: { idFromName, get }, AUTH_RATE_LIMIT: { limit } } as unknown as Env;
+      TENANT_CATALOG: { idFromName, get }, AUTH_RATE_LIMIT: { limit },
+      ANON_READ_LIMIT: { limit: vi.fn(async () => ({ success: true })) } } as unknown as Env;
     const first = await worker.fetch(apiRequest('/v1/repos', `cct_trialA_${'a'.repeat(64)}`), guardedEnv);
     expect(first.status).toBe(401);
     expect((await responseBody(first)).error.code).toBe('UNAUTHORIZED');

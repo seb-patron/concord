@@ -13,6 +13,12 @@ async function limitAuthFailure(request: Request, env: Env): Promise<void> {
   if (!result.success) throw new HttpError(429, 'RATE_LIMITED', 'Authentication rate limit reached');
 }
 
+async function limitAnonymousRead(request: Request, env: Env, repoId: string): Promise<void> {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  const result = await env.ANON_READ_LIMIT.limit({ key: `${ip}:${repoId}` });
+  if (!result.success) throw new HttpError(429, 'READ_RATE_LIMITED', 'Anonymous repository read limit reached');
+}
+
 async function enforceBodyLimit(request: Request): Promise<Request> {
   const length = request.headers.get('content-length');
   if (length !== null && Number(length) > MAX_REQUEST_BODY_BYTES) throw new HttpError(413, 'BODY_TOO_LARGE', 'Request body exceeds 256 KiB');
@@ -158,8 +164,7 @@ export default {
         : null;
       try {
         if (anonymousRepoId) {
-          // Anonymous reads share the credential rate/cost guard rather than bypassing it.
-          await limitAuthFailure(request, env);
+          await limitAnonymousRead(request, env, anonymousRepoId);
           metered = true;
           const tenantId = await publicRepoTenant(env, anonymousRepoId);
           if (tenantId) {
@@ -203,7 +208,9 @@ export default {
       if (repo) response = await refreshSnapshotRepo(response, repo);
       return anonymous ? scrubAnonymousResponse(response) : response;
     } catch (error) {
-      return failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'));
+      const response = failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'));
+      if (error instanceof HttpError && error.code === 'READ_RATE_LIMITED') response.headers.set('Retry-After', '60');
+      return response;
     }
   },
 } satisfies ExportedHandler<Env>;

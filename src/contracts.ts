@@ -5,6 +5,17 @@ export type Digest = `sha256:${string}`;
 export type Role = 'owner' | 'agent' | 'reviewer' | 'checker' | 'promoter' | 'viewer';
 export type Versioned = { version: number };
 
+declare global {
+  interface Env {
+    ANON_READ_LIMIT: RateLimit;
+  }
+  namespace Cloudflare {
+    interface Env {
+      ANON_READ_LIMIT: RateLimit;
+    }
+  }
+}
+
 export interface AgentDescriptor {
   model?: string;
   effort?: string;

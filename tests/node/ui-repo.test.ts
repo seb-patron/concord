@@ -228,6 +228,29 @@ describe('Repository code page', () => {
       expect(root.textContent).toContain(resolvedOid.slice(0, 7));
     } finally { globalThis.document = previous; }
   });
+  it('shows the anonymous read retry message and retries the request once', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const root = dom.window.document.getElementById('page')!;
+      let rootTreeCalls = 0;
+      const page = createRepoPage(root, {
+        getRepoTree: async (_repo: string, path: string) => {
+          if (!path) {
+            rootTreeCalls++;
+            if (rootTreeCalls <= 2) throw { status: 429, code: 'READ_RATE_LIMITED', retryAfter: 0 };
+          }
+          return { data: { entries: [] } };
+        },
+        getRepoReadme: async () => ({ data: { content: '# Main' } }),
+        getRepoFile: async () => { throw { status: 404 }; },
+      });
+      page.show('limited', { data: { projections: { repos: { repo: { observedCanonicalOid: 'a'.repeat(40) } } } } });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(rootTreeCalls).toBe(2);
+      expect(root.textContent).toContain('Busy, retrying in 0s');
+    } finally { globalThis.document = previous; }
+  });
   it('caps agent document discovery at 20 and concurrent reads at four, showing read error codes', async () => {
     const dom = new JSDOM('<main id="page"></main>');
     const previous = globalThis.document; globalThis.document = dom.window.document;

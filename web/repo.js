@@ -10,6 +10,7 @@ const element = (tag, value, className) => {
 const array = value => Array.isArray(value) ? value : [];
 const errorCopy = error => error?.status === 404 ? 'Not found on canonical main.' :
   error?.status === 403 ? 'Your token cannot read this repository.' :
+    error?.code === 'READ_RATE_LIMITED' ? `Busy, retrying in ${error.retryAfter ?? 60}s` :
     `Could not load (${error?.code ?? redactError(error).code}).`;
 
 /** Small Markdown subset. Text nodes keep raw HTML inert. */
@@ -46,6 +47,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
   let rowTables = {};
   let selectedFile = null;
   let error = null;
+  let retryMessage = null;
   const button = (label, action, className) => { const b = element('button', label, className); b.type = 'button'; b.addEventListener('click', action); return b; };
   const card = (title, className = '') => { const section = element('section', undefined, `repo-card ${className}`); section.setAttribute('aria-label', title); section.append(element('h2', title)); return section; };
   const held = () => array(snapshot?.data?.projections?.leases?.heldItems ?? snapshot?.data?.projections?.leases?.items)
@@ -77,7 +79,21 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     meta.append(element('code', `main · ${oid ? oid.slice(0, 7) : 'empty'}`), element('code', `npm run concord -- repo clone --repo ${repoId} --path './${repoId}'`));
     top.append(meta); root.append(top);
     if (error) root.append(element('p', error, 'repo-error'));
+    if (retryMessage) root.append(element('p', retryMessage, 'repo-error'));
     if (audience === 'agent') drawAgent(); else drawHuman();
+  }
+  async function readWithRetry(read) {
+    try { return await read(); }
+    catch (cause) {
+      if (cause?.code !== 'READ_RATE_LIMITED') throw cause;
+      const seconds = Number.isSafeInteger(cause.retryAfter) && cause.retryAfter >= 0 ? cause.retryAfter : 60;
+      retryMessage = `Busy, retrying in ${seconds}s`;
+      draw();
+      await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+      retryMessage = null;
+      draw();
+      return read();
+    }
   }
   function drawHuman() {
     const layout = element('div', undefined, 'repo-layout');
@@ -173,7 +189,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     if (!repoId) return;
     const currentRepo = repoId, currentOid = oid;
     const readFailure = settled => settled.status === 'rejected' && settled.reason?.status !== 404 ? errorCopy(settled.reason) : null;
-    const rootResult = await Promise.allSettled([api.getRepoTree(currentRepo, path, currentOid)]).then(items => items[0]);
+    const rootResult = await Promise.allSettled([readWithRetry(() => api.getRepoTree(currentRepo, path, currentOid))]).then(items => items[0]);
     if (run !== generation) return;
     if (rootResult.status === 'fulfilled') {
       tree = array(rootResult.value.data.entries);
@@ -183,7 +199,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     const resolvedOid = rootResult.status === 'fulfilled' ? rootResult.value.data.oid : currentOid;
     if (resolvedOid) oid = resolvedOid;
     const result = await Promise.allSettled([
-      api.getRepoReadme(currentRepo, resolvedOid), api.getRepoTree(currentRepo, 'agents', resolvedOid), api.getRepoFile(currentRepo, 'AGENTS.md', resolvedOid),
+      readWithRetry(() => api.getRepoReadme(currentRepo, resolvedOid)), readWithRetry(() => api.getRepoTree(currentRepo, 'agents', resolvedOid)), readWithRetry(() => api.getRepoFile(currentRepo, 'AGENTS.md', resolvedOid)),
     ]);
     if (run !== generation) return;
     readme = result[0].status === 'fulfilled' ? result[0].value.data : null;
@@ -193,7 +209,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     if (result[2].status === 'rejected' && result[2].reason?.status === 404) docs.push({ path: 'AGENTS.md', content: '', missing: true });
     docsError = readFailure(result[1]) ?? readFailure(result[2]);
     for (let at = 0; at < paths.length; at += 4) {
-      const found = await Promise.allSettled(paths.slice(at, at + 4).map(doc => api.getRepoFile(currentRepo, doc, resolvedOid)));
+      const found = await Promise.allSettled(paths.slice(at, at + 4).map(doc => readWithRetry(() => api.getRepoFile(currentRepo, doc, resolvedOid))));
       if (run !== generation) return;
       docs.push(...found.filter(item => item.status === 'fulfilled').map(item => item.value.data));
       docsError = docsError ?? found.map(readFailure).find(message => message !== null) ?? null;
@@ -203,7 +219,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
   function navigate(next) { path = next; void load().catch(cause => { error = errorCopy(cause); draw(); }); }
   async function openFile(next) {
     const run = ++generation;
-    try { const response = await api.getRepoFile(repoId, next, oid); if (run !== generation) return; selectedFile = response.data; error = null; }
+    try { const response = await readWithRetry(() => api.getRepoFile(repoId, next, oid)); if (run !== generation) return; selectedFile = response.data; error = null; }
     catch (cause) { if (run !== generation) return; error = errorCopy(cause); }
     draw();
   }
