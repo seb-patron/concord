@@ -1,0 +1,401 @@
+$ node spikes/v3/sp-c/gen.ts
+=== OpenAPI 3.1 ===
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Concord prototype API",
+    "version": "0.0.1"
+  },
+  "paths": {
+    "/v1/repos/{repo}/files/{path}": {
+      "get": {
+        "operationId": "read_file",
+        "summary": "Read one file from a repository",
+        "x-concord-scope": "repo:read",
+        "x-concord-read-budget": {
+          "units": "bytes returned",
+          "maximum": 262144
+        },
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repo": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "repo",
+                    "path",
+                    "content",
+                    "bytes"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repos/{repo}/changes": {
+      "put": {
+        "operationId": "put_change",
+        "summary": "Create a changeset from file contents",
+        "x-concord-scope": "repo:changes:write",
+        "x-concord-read-budget": {
+          "units": "repository rows",
+          "maximum": 0
+        },
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "files": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "title",
+                  "files"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "changeId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "draft"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "changeId",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repos/{repo}/issues/ready": {
+      "get": {
+        "operationId": "list_ready_issues",
+        "summary": "List issues currently marked ready",
+        "x-concord-scope": "repo:issues:read",
+        "x-concord-read-budget": {
+          "units": "issue rows",
+          "maximum": 100
+        },
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "issues": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "const": "ready"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "state"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "issues"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+=== CLI help ===
+concord-api <operation> [arguments]
+
+  read_file            GET /v1/repos/{repo}/files/{path}  scope=repo:read read<=262144 bytes returned
+  put_change           PUT /v1/repos/{repo}/changes  scope=repo:changes:write read<=0 repository rows
+  list_ready_issues    GET /v1/repos/{repo}/issues/ready  scope=repo:issues:read read<=100 issue rows
+=== MCP tools/list ===
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read one file from a repository. Scope: repo:read. Read budget: 262144 bytes returned.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "repo",
+            "path",
+            "content",
+            "bytes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "put_change",
+        "description": "Create a changeset from file contents. Scope: repo:changes:write. Read budget: 0 repository rows.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "files": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "repo",
+            "title",
+            "files"
+          ],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "changeId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "draft"
+              ]
+            }
+          },
+          "required": [
+            "changeId",
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_ready_issues",
+        "description": "List issues currently marked ready. Scope: repo:issues:read. Read budget: 100 issue rows.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "repo"
+          ],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "issues": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string",
+                    "const": "ready"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "issues"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}
+$ node --expose-gc spikes/v3/sp-c/bench.ts
+clients=200
+idle_duration_ms=60001
+idle_http_requests=0
+idle_socket_bytes_read=0
+idle_socket_bytes_written=0
+idle_server_timers_scheduled=0
+heap_delta_bytes=9390064
+heap_delta_bytes_per_connection=46950
+resume_expected_seq=1
+resume_received_seq=1
+resume_correct=true
+requests_total_including_upgrades=201
+$ node --input-type=module -e <HTTP route smoke>
+200 {"repo":"demo","path":"README.md","content":"Concord v3 API spike fixture\n","bytes":29}
+200 {"issues":[{"id":"issue-17","title":"Add sequence based event replay","state":"ready"}]}
+200 {"changeId":"change-mv9tllyu-1","status":"draft"}
