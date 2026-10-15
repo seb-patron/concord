@@ -1,0 +1,89 @@
+$ bash spikes/v3/sp-b/land-proto.sh (Concord)
+git version 2.54.0 (Apple Git-157)
+Darwin arm64
+Python 3.14.7
+source=concord-checkout
+fixture_base=52eb118a98ff8221f573542614e5ce836065ef07
+
+[a] create 20 server-side changes (hash-object, temporary index, read-tree, update-index --index-info, write-tree, commit-tree)
+create_elapsed_ms=1788.863
+
+[b-d] merge-tree, CAS landing of 20 concurrent changes (10 disjoint, 10 overlapping)
+01 landed 5 1267.708
+02 landed 2 676.473
+03 landed 3 878.425
+04 landed 7 1577.143
+05 landed 4 1086.686
+06 landed 8 1693.527
+07 landed 1 441.521
+08 landed 0 230.331
+09 landed 10 1832.332
+10 landed 9 1761.458
+11 conflict 7 1534.812
+12 landed 6 1428.706
+13 conflict 7 1547.597
+14 conflict 7 1528.655
+15 conflict 7 1540.336
+16 conflict 7 1506.348
+17 conflict 7 1541.299
+18 conflict 7 1533.565
+19 conflict 7 1535.636
+20 conflict 7 1514.811
+landed=11 conflicts=9 cas_retries=118
+latency_ms_p50=1528.655 latency_ms_p95=1761.458
+
+[e] bisect a landed batch and revert the bad change server-side
+bad_change_index=4 bisect_probes=3 bad_commit=b6a7eff876955f2e66ec894a192edb0d90831a09
+revert_commit=8ae34b060b535123981ac0ebeffa223bae50eb0b restored_blob=345e3c9a50183e7bfded6d60a7b8e7e33415a3b3
+
+[f] git http-backend full clone and incremental fetch
+http_backend_full_clone_ms=295.038
+http_backend_incremental_fetch_ms=237.125
+repo_object_count=578 repo_pack_bytes=5029888
+
+cleanup: temporary repository and HTTP server removed on exit
+
+$ bash spikes/v3/sp-b/land-proto.sh /Users/sebastianpatronsoto/agent-runs/clones/gen-v-decomp
+git version 2.54.0 (Apple Git-157)
+Darwin arm64
+Python 3.14.7
+source=external-checkout
+fixture_base=9807072d4a0f74d627c056c8bc373ac3f40da00a
+
+[a] create 20 server-side changes (hash-object, temporary index, read-tree, update-index --index-info, write-tree, commit-tree)
+create_elapsed_ms=1905.895
+
+[b-d] merge-tree, CAS landing of 20 concurrent changes (10 disjoint, 10 overlapping)
+01 landed 9 1370.634
+02 landed 0 247.856
+03 landed 6 1097.889
+04 landed 3 782.988
+05 landed 8 1294.482
+06 landed 4 889.006
+07 landed 7 1186.525
+08 landed 2 666.558
+09 landed 10 1443.619
+10 landed 5 1013.350
+11 landed 1 473.133
+12 conflict 2 631.996
+13 conflict 2 626.148
+14 conflict 2 626.363
+15 conflict 2 626.651
+16 conflict 2 610.549
+17 conflict 2 622.355
+18 conflict 2 605.492
+19 conflict 2 591.303
+20 conflict 2 618.878
+landed=11 conflicts=9 cas_retries=73
+latency_ms_p50=626.651 latency_ms_p95=1370.634
+
+[e] bisect a landed batch and revert the bad change server-side
+bad_change_index=4 bisect_probes=3 bad_commit=614abaa016f0ad0e6f3d1ad200797a5a98114af2
+revert_commit=272254d320b6b60397565a09c358d6f1cb55a7c8 restored_blob=345e3c9a50183e7bfded6d60a7b8e7e33415a3b3
+
+[f] git http-backend full clone and incremental fetch
+http_backend_full_clone_ms=2343.065
+http_backend_incremental_fetch_ms=306.597
+repo_object_count=746 repo_pack_bytes=123296768
+
+cleanup: temporary repository and HTTP server removed on exit
