@@ -1,0 +1,578 @@
+Declared vs actual worker footprints
+data root: /Users/sebastianpatronsoto/agent-runs
+runs with declared files, prompt and status: 10513
+Diff source: matching agent-runs/clones/<repo> when present, otherwise the run worktree; git diff-tree compares endpoint trees.
+Time interval: recorded start/create through finish/update timestamps, with run-directory birth/ctime and mtime as available fallbacks.
+Scope rule: allowed-files.txt is parsed as nonblank, noncomment lines; exact path matching.
+
+[overall]
+runs analysed: 10513
+skip reasons: commit not diffable locally=394; duplicate archived run directory=1804; invalid status.json=9; no candidate/validated commit SHA=4752; no status.json=85; no work-spec.md or prompt.md=363
+declared files/run: median=2 p90=8
+runs with diffable commit: 5367
+declared file share changed: 74.8% (19814/26494); over-declared share: 25.2% (6680/26494)
+launcher refused-scope runs: 1403 / 10513 (13.3% (1403/10513))
+working interval pairs: 3592610
+overlapping declared-file pairs: 896897 (25.0% (896897/3592610) of interval pairs)
+overlapping actual-change pairs: 66728 (1.9% (66728/3592610) of interval pairs)
+declared overlap examples (up to 5):
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T050544Z-fa89b9e4e9dd2400da3ba61a9c791353: README.md, bin/delegate-issue, config/repos.conf.example, lib/_worker.sh
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260928T102202Z-b5ad4c3a2058afaeb3a95835d20cdc89: tests/run-tests.sh
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-codex-20260930T050628Z-cde91dc1d5030a6c810f135dd74d9442: README.md, lib/_worker.sh
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-codex-20260926T031742Z-8412439e39a67195029d0579c9c2610c: README.md
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T201940Z-216d5bb3742cc8cd22ffe56f149d709e: README.md
+actual overlap examples (up to 5):
+  session3/runs/agent-workflows/29-muse-20260917T190512Z <> session3/runs/agent-workflows/21-muse-20260917T190033Z: tests/run-tests.sh
+  b1-muse/runs/agent-workflows/22-muse-20260917T015034Z <> a2-muse/runs/agent-workflows/18-muse-20260917T014933Z: README.md, lib/_worker.sh, tests/run-tests.sh
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/work-muse-20261008T204748Z-689fa0e96b18160bc5053b6927a461ac: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T203628Z-4f9c65fa81bb3cf7cb9d3ecd7ecff55e: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T201659Z-c6a5c13062268ef4a13a8b9949d0158a: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+refused-scope examples (up to 5):
+  agent-workflows/94-muse-20260922T162956Z: refused-scope
+  sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T202552Z-0a4ea648f18549bd7f65794dae433e14: refused-scope
+  sft-course-267f5ec95cd94ac8fbe441f8/23-muse-20261012T203811Z-fb70d55ab0a34dd1a9ed91cd8568ffb7: refused-scope
+  sft-course-267f5ec95cd94ac8fbe441f8/work-muse-20261008T203557Z-9644da7bfa219004e95a6b6e06b6a1f6: refused-scope
+  gen-v-research-tools/224-muse-20260917T194812Z: refused-scope
+
+[3]
+runs analysed: 12
+skip reasons: no candidate/validated commit SHA=4
+declared files/run: median=1.0 p90=2
+runs with diffable commit: 8
+declared file share changed: 100.0% (9/9); over-declared share: 0.0% (0/9)
+launcher refused-scope runs: 0 / 12 (0.0% (0/12))
+working interval pairs: 1
+overlapping declared-file pairs: 1 (100.0% (1/1) of interval pairs)
+overlapping actual-change pairs: 0 (0.0% (0/1) of interval pairs)
+declared overlap examples (up to 5):
+  eval-routing-v1/runs/3-3d4e030046468662ed997ffc/work-devin-20260923T064806Z-dd47850569858c0d5d67808f6eef0e3e <> eval-routing-v1/runs/3-3d4e030046468662ed997ffc/work-muse-20260923T064803Z-5b71a11b39698e69ea628dc8d1058bce: bin/delegate-issue, tests/start-ack-tests.sh
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+[4]
+runs analysed: 5
+skip reasons: no candidate/validated commit SHA=3
+declared files/run: median=2 p90=2
+runs with diffable commit: 2
+declared file share changed: 100.0% (4/4); over-declared share: 0.0% (0/4)
+launcher refused-scope runs: 0 / 5 (0.0% (0/5))
+working interval pairs: 3
+overlapping declared-file pairs: 3 (100.0% (3/3) of interval pairs)
+overlapping actual-change pairs: 0 (0.0% (0/3) of interval pairs)
+declared overlap examples (up to 5):
+  eval-routing-v1/runs/4-f23e6906c5f9e15e7b63cfe3/work-codex-20260923T064813Z-cda0ae987ae7cfe62c657a6034c568b6 <> eval-routing-v1/runs/4-f23e6906c5f9e15e7b63cfe3/work-muse-20260923T064808Z-a232a95c3ea54dd3f5b050cddec392f5: lib/wall_deadline.py, tests/wall-deadline-tests.py
+  eval-routing-v1/runs/4-f23e6906c5f9e15e7b63cfe3/work-codex-20260923T064813Z-cda0ae987ae7cfe62c657a6034c568b6 <> eval-routing-v1/runs/4-f23e6906c5f9e15e7b63cfe3/work-devin-20260923T064810Z-9628516aa099bbe8d9ab34fa5e56f2b7: lib/wall_deadline.py, tests/wall-deadline-tests.py
+  eval-routing-v1/runs/4-f23e6906c5f9e15e7b63cfe3/work-muse-20260923T064808Z-a232a95c3ea54dd3f5b050cddec392f5 <> eval-routing-v1/runs/4-f23e6906c5f9e15e7b63cfe3/work-devin-20260923T064810Z-9628516aa099bbe8d9ab34fa5e56f2b7: lib/wall_deadline.py, tests/wall-deadline-tests.py
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+[agent-review-evals]
+runs analysed: 138
+skip reasons: no candidate/validated commit SHA=41
+declared files/run: median=3.0 p90=3
+runs with diffable commit: 97
+declared file share changed: 96.3% (260/270); over-declared share: 3.7% (10/270)
+launcher refused-scope runs: 11 / 138 (8.0% (11/138))
+working interval pairs: 4800
+overlapping declared-file pairs: 558 (11.6% (558/4800) of interval pairs)
+overlapping actual-change pairs: 428 (8.9% (428/4800) of interval pairs)
+declared overlap examples (up to 5):
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20260930T233941Z-7d8412b6955ab2f7e41ee0419b905eac <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20261001T035648Z-e344fe49e1fda8f0d65cc2154f2b80b0: (none; review only)
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20260930T233941Z-7d8412b6955ab2f7e41ee0419b905eac <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20261001T002210Z-887ae352ef8076196542111a954128c3: (none; review only)
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20260930T233941Z-7d8412b6955ab2f7e41ee0419b905eac <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20260930T234736Z-63e1c64f304d0c11db9ee38de75cea6d: (none; review only)
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20260930T233941Z-7d8412b6955ab2f7e41ee0419b905eac <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20261001T005536Z-ca14eb469d8a024203dc3697c1f309f9: (none; review only)
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20260930T233941Z-7d8412b6955ab2f7e41ee0419b905eac <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-codex-20261001T064102Z-f4e1285106de26b4b6f8e024b783eeb7: (none; review only)
+actual overlap examples (up to 5):
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T183954Z-5b5f2e910ecb85fb81b78980f6168517 <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T181646Z-2931f688a88e05894032d0ba802db0da: corpus/review/h11-grt-645/case.json
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T183954Z-5b5f2e910ecb85fb81b78980f6168517 <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T181642Z-8016a92a648159a56d47365dde36b69c: corpus/review/h09-mwcc-157/case.json
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T183954Z-5b5f2e910ecb85fb81b78980f6168517 <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-devin-20260927T181640Z-cd4e3a3b8c425b8b0507e56c065d6331: corpus/review/h08-azeron-188/case.json
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T183954Z-5b5f2e910ecb85fb81b78980f6168517 <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T181632Z-47f6e4a54c2b8f4ad2f65b4275c12ef2: corpus/review/h04-grt-505/case.json
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260927T183954Z-5b5f2e910ecb85fb81b78980f6168517 <> agent-review-evals-9c374fe92deb6ea24cc5d203/work-devin-20260927T181635Z-1a133325a8de2a7d02076559537adf0a: corpus/review/h05-rewine-94/case.json
+refused-scope examples (up to 5):
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260929T073324Z-be6b4a07b6651db4b993298b7a42a683: refused-scope
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260929T075737Z-2d11a28e244a098e336d90eaa09ff308: refused-scope
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260929T075800Z-192463d6b36e4929512f94aa773f59a6: refused-scope
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260929T075726Z-40d6154e9704af18d8a494e46995a167: refused-scope
+  agent-review-evals-9c374fe92deb6ea24cc5d203/work-muse-20260929T081630Z-7c684e885454c46b5a45ba10633d03cd: refused-scope
+
+[agent-run-analytics]
+runs analysed: 8
+skip reasons: no candidate/validated commit SHA=5
+declared files/run: median=1.0 p90=4
+runs with diffable commit: 3
+declared file share changed: 100.0% (11/11); over-declared share: 0.0% (0/11)
+launcher refused-scope runs: 0 / 8 (0.0% (0/8))
+working interval pairs: 0
+overlapping declared-file pairs: 0 (n/a of interval pairs)
+overlapping actual-change pairs: 0 (n/a of interval pairs)
+declared overlap examples (up to 5):
+  none
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+[agent-workflows]
+runs analysed: 989
+skip reasons: commit not diffable locally=18; duplicate archived run directory=1804; no candidate/validated commit SHA=459
+declared files/run: median=3 p90=8
+runs with diffable commit: 512
+declared file share changed: 84.7% (2008/2370); over-declared share: 15.3% (362/2370)
+launcher refused-scope runs: 10 / 989 (1.0% (10/989))
+working interval pairs: 194900
+overlapping declared-file pairs: 51766 (26.6% (51766/194900) of interval pairs)
+overlapping actual-change pairs: 14761 (7.6% (14761/194900) of interval pairs)
+declared overlap examples (up to 5):
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T050544Z-fa89b9e4e9dd2400da3ba61a9c791353: README.md, bin/delegate-issue, config/repos.conf.example, lib/_worker.sh
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260928T102202Z-b5ad4c3a2058afaeb3a95835d20cdc89: tests/run-tests.sh
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-codex-20260930T050628Z-cde91dc1d5030a6c810f135dd74d9442: README.md, lib/_worker.sh
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-codex-20260926T031742Z-8412439e39a67195029d0579c9c2610c: README.md
+  agent-workflows/94-muse-20260922T162956Z <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T201940Z-216d5bb3742cc8cd22ffe56f149d709e: README.md
+actual overlap examples (up to 5):
+  session3/runs/agent-workflows/29-muse-20260917T190512Z <> session3/runs/agent-workflows/21-muse-20260917T190033Z: tests/run-tests.sh
+  b1-muse/runs/agent-workflows/22-muse-20260917T015034Z <> a2-muse/runs/agent-workflows/18-muse-20260917T014933Z: README.md, lib/_worker.sh, tests/run-tests.sh
+  agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T050544Z-fa89b9e4e9dd2400da3ba61a9c791353 <> agent-workflows-ae305b54faa7ea270455562e/work-codex-20260930T050628Z-cde91dc1d5030a6c810f135dd74d9442: README.md, lib/_worker.sh
+  agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T050544Z-fa89b9e4e9dd2400da3ba61a9c791353 <> agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T201940Z-216d5bb3742cc8cd22ffe56f149d709e: README.md
+  agent-workflows-ae305b54faa7ea270455562e/work-muse-20260924T050544Z-fa89b9e4e9dd2400da3ba61a9c791353 <> agent-workflows-ae305b54faa7ea270455562e/work-codex-20260927T050811Z-3e71caf05315a798b4a757db3185ab83: README.md
+refused-scope examples (up to 5):
+  agent-workflows/94-muse-20260922T162956Z: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-muse-20260928T102202Z-b5ad4c3a2058afaeb3a95835d20cdc89: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-muse-20260930T154015Z-17ddd173b304342cfe302f8acf93ce82: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20260929T055200Z-77048a5ed877f1e4670821ad13cfc7de: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-muse-20260930T200404Z-76e9f78c37ca2dc4388e711d36b64b47: refused-scope
+
+[antechamber]
+runs analysed: 1
+skip reasons: no candidate/validated commit SHA=1
+declared files/run: median=10 p90=10
+runs with diffable commit: 0
+declared file share changed: n/a; over-declared share: n/a
+launcher refused-scope runs: 0 / 1 (0.0% (0/1))
+working interval pairs: 0
+overlapping declared-file pairs: 0 (n/a of interval pairs)
+overlapping actual-change pairs: 0 (n/a of interval pairs)
+declared overlap examples (up to 5):
+  none
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+[azeron-macos]
+runs analysed: 184
+skip reasons: commit not diffable locally=1; no candidate/validated commit SHA=36
+declared files/run: median=2.0 p90=5
+runs with diffable commit: 147
+declared file share changed: 89.9% (375/417); over-declared share: 10.1% (42/417)
+launcher refused-scope runs: 1 / 184 (0.5% (1/184))
+working interval pairs: 12679
+overlapping declared-file pairs: 1047 (8.3% (1047/12679) of interval pairs)
+overlapping actual-change pairs: 683 (5.4% (683/12679) of interval pairs)
+declared overlap examples (up to 5):
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-devin-20260930T060636Z-0f5b777d71de1d0fa28c0e7ccdc44156 <> azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20260930T162013Z-7a0fcc0723320efdd7c8948c695a07d3: Tests/AzeronCoreTests/AssembledPayloadTests.swift
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-devin-20260930T060636Z-0f5b777d71de1d0fa28c0e7ccdc44156 <> azeron-macos-f2dc0a99ceb4654371ba7534/work-muse-20260930T155806Z-72b0eaa0535f49abab355c85c123d032: Tests/AzeronCoreTests/AssembledPayloadTests.swift
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T005457Z-077e119f94d615e0c1a80cb0e7df0b1f <> azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T011045Z-e6254abd896b4af47d713fec6812d5cc: Tests/AzeronCoreTests/LogicalBindingRecordsTests.swift
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T005457Z-077e119f94d615e0c1a80cb0e7df0b1f <> azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T011650Z-54529f3b2abf3395f9113579a08e9ef3: Tests/AzeronCoreTests/LogicalBindingRecordsTests.swift
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T005457Z-077e119f94d615e0c1a80cb0e7df0b1f <> azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T060808Z-39c66e9439ae114f1a4d00992ddb2f42: Tests/AzeronCoreTests/LogicalBindingRecordsTests.swift
+actual overlap examples (up to 5):
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-devin-20260930T060636Z-0f5b777d71de1d0fa28c0e7ccdc44156 <> azeron-macos-f2dc0a99ceb4654371ba7534/work-muse-20260930T155806Z-72b0eaa0535f49abab355c85c123d032: Tests/AzeronCoreTests/AssembledPayloadTests.swift
+  azeron-macos-f2dc0a99ceb4654371ba7534/112-codex-20260924T124652Z-30a0270c258eacc8b6b1525d278c05cd <> azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20260924T131336Z-c9c46ea00ee9653ea854e6b80b340529: docs/portability/VALIDATION_AND_PACKAGING.md
+  azeron-macos-f2dc0a99ceb4654371ba7534/112-codex-20260924T124652Z-30a0270c258eacc8b6b1525d278c05cd <> azeron-macos-f2dc0a99ceb4654371ba7534/112-muse-20260926T185148Z-ca9d9cae460480f0dc1f3d1fae11bd9e: docs/portability/VALIDATION_AND_PACKAGING.md
+  azeron-macos-f2dc0a99ceb4654371ba7534/112-codex-20260924T124652Z-30a0270c258eacc8b6b1525d278c05cd <> azeron-macos-f2dc0a99ceb4654371ba7534/work-devin-20260927T151439Z-869bf13e34f474960f7d240722a79e60: docs/portability/VALIDATION_AND_PACKAGING.md
+  azeron-macos-f2dc0a99ceb4654371ba7534/112-codex-20260924T124652Z-30a0270c258eacc8b6b1525d278c05cd <> azeron-macos-f2dc0a99ceb4654371ba7534/work-devin-20260927T105358Z-0e168c0d90dd044bc0c95ca591744454: docs/portability/VALIDATION_AND_PACKAGING.md
+refused-scope examples (up to 5):
+  azeron-macos-f2dc0a99ceb4654371ba7534/work-codex-20261001T062821Z-0e31bacb6b17592eccadad15f6157c4e: refused-scope
+
+[azeron-windows-protocol-lab]
+runs analysed: 4
+skip reasons: no candidate/validated commit SHA=2
+declared files/run: median=3.5 p90=4
+runs with diffable commit: 2
+declared file share changed: 100.0% (6/6); over-declared share: 0.0% (0/6)
+launcher refused-scope runs: 2 / 4 (50.0% (2/4))
+working interval pairs: 6
+overlapping declared-file pairs: 6 (100.0% (6/6) of interval pairs)
+overlapping actual-change pairs: 1 (16.7% (1/6) of interval pairs)
+declared overlap examples (up to 5):
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T203954Z-419d3138d255f7693eeb6b17e9f843dd <> azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213943Z-ed9da388bbef59fb35742538a4fd8ac2: (none; review only), docs/reports/2026-09-29-issue80-right-shift-checker/README.md, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/right_shift_check.py, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/test_right_shift_check.py
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T203954Z-419d3138d255f7693eeb6b17e9f843dd <> azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213034Z-be465181efddeaecb2a11f4115a1dad5: docs/reports/2026-09-29-issue80-right-shift-checker/README.md, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/right_shift_check.py, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/test_right_shift_check.py
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T203954Z-419d3138d255f7693eeb6b17e9f843dd <> azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T195504Z-97df04a8002054dec1ef9352fef0662a: docs/reports/2026-09-29-issue80-right-shift-checker/README.md, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/right_shift_check.py, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/test_right_shift_check.py
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213943Z-ed9da388bbef59fb35742538a4fd8ac2 <> azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213034Z-be465181efddeaecb2a11f4115a1dad5: docs/reports/2026-09-29-issue80-right-shift-checker/README.md, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/right_shift_check.py, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/test_right_shift_check.py
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213943Z-ed9da388bbef59fb35742538a4fd8ac2 <> azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T195504Z-97df04a8002054dec1ef9352fef0662a: docs/reports/2026-09-29-issue80-right-shift-checker/README.md, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/right_shift_check.py, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/test_right_shift_check.py
+actual overlap examples (up to 5):
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213034Z-be465181efddeaecb2a11f4115a1dad5 <> azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T195504Z-97df04a8002054dec1ef9352fef0662a: docs/reports/2026-09-29-issue80-right-shift-checker/README.md, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/right_shift_check.py, docs/reports/2026-09-29-issue80-right-shift-checker/scripts/test_right_shift_check.py
+refused-scope examples (up to 5):
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T203954Z-419d3138d255f7693eeb6b17e9f843dd: refused-scope
+  azeron-windows-protocol-lab-fd23a27c898a15c7843618c8/work-devin-20260929T213943Z-ed9da388bbef59fb35742538a4fd8ac2: refused-scope
+
+[concord]
+runs analysed: 1209
+skip reasons: no candidate/validated commit SHA=653
+declared files/run: median=2 p90=17
+runs with diffable commit: 556
+declared file share changed: 65.5% (3511/5361); over-declared share: 34.5% (1850/5361)
+launcher refused-scope runs: 6 / 1209 (0.5% (6/1209))
+working interval pairs: 11096
+overlapping declared-file pairs: 3410 (30.7% (3410/11096) of interval pairs)
+overlapping actual-change pairs: 536 (4.8% (536/11096) of interval pairs)
+declared overlap examples (up to 5):
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T000909Z-09e15362018719a7060591c426f936ed <> concord-c1b87e70add5a86a89981a0a/work-codex-20261012T231645Z-710a6e1d8bb45aff27bc31fbdaa859da: src/contracts.ts, web/api.js, web/app.js
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T000909Z-09e15362018719a7060591c426f936ed <> concord-c1b87e70add5a86a89981a0a/work-codex-20261013T003747Z-786d8ee182eb37c681a391ae86dec442: tests/helpers.ts
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T000909Z-09e15362018719a7060591c426f936ed <> concord-c1b87e70add5a86a89981a0a/work-codex-20261012T231339Z-51e83ea9d3aa4f33a205ac8b5575e14d: src/contracts.ts, web/api.js, web/app.js
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T000909Z-09e15362018719a7060591c426f936ed <> concord-c1b87e70add5a86a89981a0a/work-codex-20261012T224335Z-b8dab52e4fcee3713184cc71226acf20: cli/client.ts, cli/main.ts, docs/cli.md, docs/mcp.md
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T000909Z-09e15362018719a7060591c426f936ed <> concord-c1b87e70add5a86a89981a0a/work-codex-20261012T224428Z-550482f953e9b6b70be5bed3c502f94d: src/contracts.ts, src/features/leases.ts, tests/helpers.ts
+actual overlap examples (up to 5):
+  concord-c1b87e70add5a86a89981a0a/work-devin-20261013T110037Z-3cfa51d7f347479a1822a19cc31e2b57 <> concord-c1b87e70add5a86a89981a0a/work-codex-20261013T110337Z-2d5606b491065b0e55668b8c3c881503: web/api.js, web/app.js
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261014T213658Z-e709423eb5ec73d8241c0a97f8ec2ed1 <> concord-c1b87e70add5a86a89981a0a/work-codex-20261014T213207Z-4e65d17d94bc47ecfec16049a8753767: docs/api-queue.md, src/features/queue.ts, tests/workers/queue.test.ts
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261014T213658Z-e709423eb5ec73d8241c0a97f8ec2ed1 <> concord-c1b87e70add5a86a89981a0a/work-codex-20261014T213040Z-16f0d34febe973198b52d3ac07e1775a: docs/api-leases.md
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261014T213658Z-e709423eb5ec73d8241c0a97f8ec2ed1 <> concord-c1b87e70add5a86a89981a0a/work-codex-20261014T213432Z-41fe20dcd49c76c27431b4396e45bf1f: docs/api-leases.md, src/features/leases.ts, tests/workers/leases.test.ts
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261011T065303Z-90d1040a16850f9e1b7b6e1d8d4ed4dc <> concord-c1b87e70add5a86a89981a0a/work-codex-20261011T080122Z-b5ebd20ec0f8d0bf7e25b428470b94b5: cli/client.ts, docs/cli.md, tests/node/cli.test.ts
+refused-scope examples (up to 5):
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T231519Z-60d1994539f1008f2a6f5b23937f121c: refused-scope
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261011T220854Z-800049074807e13d60b0124931617624: refused-scope
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T231029Z-c4101e93dc9c075f072ee0403b076c45: refused-scope
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261011T220912Z-3fcdab640f540fddf9241974089c148b: refused-scope
+  concord-c1b87e70add5a86a89981a0a/work-codex-20261013T054436Z-e226d47a651ac911a91f95348dff5269: refused-scope
+
+[decomp-learning]
+runs analysed: 13
+skip reasons: no candidate/validated commit SHA=8
+declared files/run: median=1 p90=3
+runs with diffable commit: 5
+declared file share changed: 100.0% (15/15); over-declared share: 0.0% (0/15)
+launcher refused-scope runs: 0 / 13 (0.0% (0/13))
+working interval pairs: 78
+overlapping declared-file pairs: 38 (48.7% (38/78) of interval pairs)
+overlapping actual-change pairs: 10 (12.8% (10/78) of interval pairs)
+declared overlap examples (up to 5):
+  decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T230409Z-ef78af0791e5894746305f4926923a4c <> decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T230255Z-2e491cc39dcc9757632ca7dba18e2da6: README.md
+  decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T230409Z-ef78af0791e5894746305f4926923a4c <> decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T232037Z-60a1f8f232c7813af99e348f99a6caae: README.md
+  decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T230409Z-ef78af0791e5894746305f4926923a4c <> decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T233452Z-b028e9d7bcd968033b87d78b34974a03: README.md
+  decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T230409Z-ef78af0791e5894746305f4926923a4c <> decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261007T001103Z-ef22ac0dd1643b85746c1e3edbecc2e9: README.md
+  decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261006T230409Z-ef78af0791e5894746305f4926923a4c <> decomp-learning-fffe24fcc9135104dc39b635/work-codex-20261007T011238Z-76fa9fa6671ab76ec1b34aea3a834521: README.md
+actual overlap examples (up to 5):
+  decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261006T225308Z-19c214b344470a4f644b8c482f24027e <> decomp-learning-fffe24fcc9135104dc39b635/26-muse-20261006T224007Z-4be517984694e30039afc4cc8bda3124: docs/reports/p1-pipeline-intake.md, tests/test_p1_pipeline_intake.py, tools/p1_pipeline_intake.py
+  decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261006T225308Z-19c214b344470a4f644b8c482f24027e <> decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261007T004746Z-ff2864ea95eb335d3074b7bb8886580b: docs/reports/p1-pipeline-intake.md, tests/test_p1_pipeline_intake.py, tools/p1_pipeline_intake.py
+  decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261006T225308Z-19c214b344470a4f644b8c482f24027e <> decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261006T230928Z-8286db412c04c0cb672c75eb47efa323: docs/reports/p1-pipeline-intake.md, tests/test_p1_pipeline_intake.py, tools/p1_pipeline_intake.py
+  decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261006T225308Z-19c214b344470a4f644b8c482f24027e <> decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261006T232450Z-8ec95cef4d83bb3951ffe44d1affbb25: docs/reports/p1-pipeline-intake.md, tests/test_p1_pipeline_intake.py, tools/p1_pipeline_intake.py
+  decomp-learning-fffe24fcc9135104dc39b635/26-muse-20261006T224007Z-4be517984694e30039afc4cc8bda3124 <> decomp-learning-fffe24fcc9135104dc39b635/work-muse-20261007T004746Z-ff2864ea95eb335d3074b7bb8886580b: docs/reports/p1-pipeline-intake.md, tests/test_p1_pipeline_intake.py, tools/p1_pipeline_intake.py
+refused-scope examples (up to 5):
+  none
+
+[gen-v-decomp]
+runs analysed: 3456
+skip reasons: commit not diffable locally=1; no candidate/validated commit SHA=1920
+declared files/run: median=1.0 p90=5
+runs with diffable commit: 1535
+declared file share changed: 80.8% (4690/5801); over-declared share: 19.2% (1111/5801)
+launcher refused-scope runs: 518 / 3456 (15.0% (518/3456))
+working interval pairs: 2349912
+overlapping declared-file pairs: 609875 (26.0% (609875/2349912) of interval pairs)
+overlapping actual-change pairs: 18791 (0.8% (18791/2349912) of interval pairs)
+declared overlap examples (up to 5):
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-devin-20260923T223052Z-e9da0bab845df49992695dbde1879f55: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-muse-20260923T214804Z-42e43246402163cfb6b3392273f89356: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/154-codex-20260923T223040Z-6f88436dc8a8b75e6cb9701dce7c15d6: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-codex-20260923T204039Z-220b1275c8563242ad0bc8c709dcd809: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-muse-20260923T234618Z-2689d7a9bcc928bfb652993ca786a0cb: notes/2026-09-23-movement-codes.md
+actual overlap examples (up to 5):
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-devin-20260923T223052Z-e9da0bab845df49992695dbde1879f55: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-muse-20260923T214804Z-42e43246402163cfb6b3392273f89356: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/154-codex-20260923T223040Z-6f88436dc8a8b75e6cb9701dce7c15d6: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-codex-20260923T204039Z-220b1275c8563242ad0bc8c709dcd809: notes/2026-09-23-movement-codes.md
+  gen-v-decomp-40ebf993accfacd449c573b3/155-muse-20260923T222926Z-0a07081ed0987b96dda40822cef4837d <> gen-v-decomp-40ebf993accfacd449c573b3/work-muse-20260924T054814Z-60451ab6baa99b1851ea07711bf4da55: notes/2026-09-23-gamedata-anchor-and-vm-vars.md
+refused-scope examples (up to 5):
+  gen-v-decomp-40ebf993accfacd449c573b3/work-codex-20260926T211946Z-b8208ece37a4affdf926287c98cbb165: refused-scope
+  gen-v-decomp-40ebf993accfacd449c573b3/work-codex-20260923T174312Z-52add1b2659dc2f31fb3d10ccd189465: refused-scope
+  gen-v-decomp-40ebf993accfacd449c573b3/work-codex-20260923T201442Z-73a8ce60104e3c195c7af96c5d48f67a: refused-scope
+  gen-v-decomp-40ebf993accfacd449c573b3/work-codex-20260926T025525Z-1249b3c711ed1c05d8af996a767db0ca: refused-scope
+  gen-v-decomp-40ebf993accfacd449c573b3/work-muse-20260926T015600Z-5c48666deb29dba1df4198b08eef9024: refused-scope
+
+[gen-v-map-studio]
+runs analysed: 83
+skip reasons: no candidate/validated commit SHA=7
+declared files/run: median=3 p90=10
+runs with diffable commit: 76
+declared file share changed: 94.3% (415/440); over-declared share: 5.7% (25/440)
+launcher refused-scope runs: 4 / 83 (4.8% (4/83))
+working interval pairs: 3403
+overlapping declared-file pairs: 463 (13.6% (463/3403) of interval pairs)
+overlapping actual-change pairs: 368 (10.8% (368/3403) of interval pairs)
+declared overlap examples (up to 5):
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/96-muse-20260923T062316Z-b0388cb1fba48463551df9920002d72f: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift, Tests/MapStudioCoreTests/ProposalLedgerTests.swift
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/106-muse-20260923T164141Z-5873ca372997b26ad164f8366d837d3f: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Sources/MapStudioCore/ProposalLedger.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T050507Z-c08f6538c0a563b2d5ebdf16c723fd5e: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift, docs/cli-npc.md
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/84-muse-20260923T041346Z-3f893b1b65bb60208d26c0cda1184789: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift, docs/mcp.md
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/work-muse-20260923T235032Z-7e6165ae1f048b65b4364df04d99c459: Tests/MapStudioCoreTests/MCPSurfaceTests.swift, docs/mcp.md
+actual overlap examples (up to 5):
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/96-muse-20260923T062316Z-b0388cb1fba48463551df9920002d72f: Sources/MapStudioCore/MCPSurface.swift, Sources/MapStudioCore/ProposalLedger.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift, Tests/MapStudioCoreTests/ProposalLedgerTests.swift
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/106-muse-20260923T164141Z-5873ca372997b26ad164f8366d837d3f: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift, docs/cli-npc.md
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T050507Z-c08f6538c0a563b2d5ebdf16c723fd5e: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Sources/MapStudioCore/ProposalLedger.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/84-muse-20260923T041346Z-3f893b1b65bb60208d26c0cda1184789: Sources/MapStudioCLI/MapStudioCLI.swift, Sources/MapStudioCore/MCPSurface.swift, Tests/MapStudioCoreTests/MCPSurfaceTests.swift, docs/mcp.md
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T052912Z-fd0a1d340e5d1dddc68ab23128f5ec3f <> gen-v-map-studio-2379a93d18cd6b49d5c9c70d/work-muse-20260923T235032Z-7e6165ae1f048b65b4364df04d99c459: docs/mcp.md
+refused-scope examples (up to 5):
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/work-muse-20260923T165736Z-3d95263c8d787a08e34315779333b8eb: refused-scope
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/96-muse-20260923T062316Z-b0388cb1fba48463551df9920002d72f: refused-scope
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/86-muse-20260923T050507Z-c08f6538c0a563b2d5ebdf16c723fd5e: refused-scope
+  gen-v-map-studio-2379a93d18cd6b49d5c9c70d/work-muse-20260923T225046Z-0bfac96d0787a7af06bd4ed79281378f: refused-scope
+
+[gen-v-research-tools]
+runs analysed: 597
+skip reasons: commit not diffable locally=3; no candidate/validated commit SHA=113
+declared files/run: median=5 p90=7
+runs with diffable commit: 481
+declared file share changed: 88.3% (2069/2342); over-declared share: 11.7% (273/2342)
+launcher refused-scope runs: 17 / 597 (2.8% (17/597))
+working interval pairs: 149687
+overlapping declared-file pairs: 72710 (48.6% (72710/149687) of interval pairs)
+overlapping actual-change pairs: 23074 (15.4% (23074/149687) of interval pairs)
+declared overlap examples (up to 5):
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/400-muse-20260923T021948Z-d1994fb60376bcc97c32a94f73e7d3de: src/gen_v_research_tools/nds.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/400-muse-20260923T014759Z-e37e429adb15f5af2303240493236541: src/gen_v_research_tools/nds.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/360-muse-20260922T210558Z-b541632e6fe26fa0e9cd30eeed736d47: src/gen_v_research_tools/q1_static_verification.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/400-muse-20260923T003846Z-96c86b4dda4f28a251f718b3b132668d: src/gen_v_research_tools/nds.py
+  gen-v-research-tools/359-muse-20260922T202614Z <> gen-v-research-tools/336-muse-20260922T195946Z: trail/INDEX.md
+actual overlap examples (up to 5):
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/400-muse-20260923T021948Z-d1994fb60376bcc97c32a94f73e7d3de: src/gen_v_research_tools/nds.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/400-muse-20260923T014759Z-e37e429adb15f5af2303240493236541: src/gen_v_research_tools/nds.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/360-muse-20260922T210558Z-b541632e6fe26fa0e9cd30eeed736d47: src/gen_v_research_tools/q1_static_verification.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/400-muse-20260923T003846Z-96c86b4dda4f28a251f718b3b132668d: src/gen_v_research_tools/nds.py
+  gen-v-research-tools/150-muse-20260916T225943Z <> gen-v-research-tools-86b1c7530554abf3b10427bf/379-muse-20260923T002619Z-71cffab3fd5e008d5c479accb07bd774: src/gen_v_research_tools/q1_static_verification.py
+refused-scope examples (up to 5):
+  gen-v-research-tools/224-muse-20260917T194812Z: refused-scope
+  gen-v-research-tools/231-muse-20260917T192130Z: refused-scope
+  gen-v-research-tools-86b1c7530554abf3b10427bf/551-muse-20260924T221525Z-2effd418cc77d413f2def28f8d576fc2: refused-scope
+  gen-v-research-tools-86b1c7530554abf3b10427bf/381-muse-20260922T213652Z-11435ad80c7d10a6ce5465c8092b6a91: refused-scope
+  gen-v-research-tools-86b1c7530554abf3b10427bf/work-muse-20260927T150624Z-c65bcdfb8ab462da50b2f2eed8a6e37c: refused-scope
+
+[gen-v-workshop]
+runs analysed: 512
+skip reasons: commit not diffable locally=308; no candidate/validated commit SHA=110
+declared files/run: median=4.0 p90=9
+runs with diffable commit: 94
+declared file share changed: 92.3% (457/495); over-declared share: 7.7% (38/495)
+launcher refused-scope runs: 8 / 512 (1.6% (8/512))
+working interval pairs: 78847
+overlapping declared-file pairs: 7606 (9.6% (7606/78847) of interval pairs)
+overlapping actual-change pairs: 128 (0.2% (128/78847) of interval pairs)
+declared overlap examples (up to 5):
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T073024Z-83faae6d8ec78cc715a84f654a5102a3: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-codex-20261001T093744Z-49b73fe903c24ffb91d9f9c9faaaab96: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-codex-20261001T102308Z-ccf878d700123eed57fbc5ecfc7c8480: Sources/MapStudioCore/CommandRegistryCommands+NPC.swift, Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-codex-20261001T094220Z-16569de472430946a09393514e9b65e1: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-codex-20261001T090054Z-d47a039f1b573c1f2be484ca1be09faf: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+actual overlap examples (up to 5):
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T073024Z-83faae6d8ec78cc715a84f654a5102a3: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-codex-20261001T094220Z-16569de472430946a09393514e9b65e1: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-codex-20261001T092810Z-e7732362d03ce0f70c4ab80b965932bd: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T170809Z-3a2619beca244fad30891a90159f0f4c: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T095358Z-d0792eebeb9850ba3c7efdb93d272a90 <> gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20261001T082904Z-40725cbfc5c5499198baa9f376bb0d24: Tests/MapStudioCoreTests/ZonePlacementValidateTests.swift
+refused-scope examples (up to 5):
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-muse-20260927T115958Z-7e4a01ff27448aa720035587adae4811: refused-scope
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-muse-20260926T020030Z-17bdff1dc88cff14e1a3c84a88f310f2: refused-scope
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-devin-20260927T010822Z-a3ffc9c04fedc9d2be5dff34d055a74b: refused-scope
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-muse-20260927T122659Z-2d77a877086b20f6da255aabedba184a: refused-scope
+  gen-v-workshop-899c4d0ca41386d793d853b1/work-muse-20260927T221946Z-ed37aa1331762c208cb70f4d7101df7b: refused-scope
+
+[mother-base]
+runs analysed: 261
+skip reasons: no candidate/validated commit SHA=158
+declared files/run: median=1 p90=2
+runs with diffable commit: 103
+declared file share changed: 96.1% (198/206); over-declared share: 3.9% (8/206)
+launcher refused-scope runs: 2 / 261 (0.8% (2/261))
+working interval pairs: 24928
+overlapping declared-file pairs: 7456 (29.9% (7456/24928) of interval pairs)
+overlapping actual-change pairs: 117 (0.5% (117/24928) of interval pairs)
+declared overlap examples (up to 5):
+  mother-base-dee119b9ad8007b874be027f/work-devin-20260929T161826Z-52348626b645cd9e1e7fe6ad6983acb4 <> mother-base-dee119b9ad8007b874be027f/work-codex-20260929T182948Z-9283a706eb67f95bd7c483ef8c11a3f3: AGENTS.md
+  mother-base-dee119b9ad8007b874be027f/work-devin-20260929T161826Z-52348626b645cd9e1e7fe6ad6983acb4 <> mother-base-dee119b9ad8007b874be027f/work-devin-20260930T023509Z-e0e2db36024023ed6b0434d596364d5a: AGENTS.md
+  mother-base-dee119b9ad8007b874be027f/work-devin-20260929T161826Z-52348626b645cd9e1e7fe6ad6983acb4 <> mother-base-dee119b9ad8007b874be027f/work-codex-20260929T202648Z-01cb842217bfcc89a85ad9f8168cc278: AGENTS.md
+  mother-base-dee119b9ad8007b874be027f/work-devin-20260929T161826Z-52348626b645cd9e1e7fe6ad6983acb4 <> mother-base-dee119b9ad8007b874be027f/work-codex-20260929T070651Z-fa4194fe2d85de25bfbf86655d1b94ba: AGENTS.md
+  mother-base-dee119b9ad8007b874be027f/work-devin-20260929T161826Z-52348626b645cd9e1e7fe6ad6983acb4 <> mother-base-dee119b9ad8007b874be027f/work-codex-20260927T202110Z-d33e23202914eae1991655f9cd02968b: AGENTS.md
+actual overlap examples (up to 5):
+  mother-base-dee119b9ad8007b874be027f/97-muse-20260929T080235Z-7386f027fe1b05512d6ed7a55b5e701f <> mother-base-dee119b9ad8007b874be027f/work-muse-20260927T233604Z-adf7ed63723eb653127aca0106ffec44: src/mother_base/sources/sec_submissions.py, tests/test_sec_submissions.py
+  mother-base-dee119b9ad8007b874be027f/97-muse-20260929T080235Z-7386f027fe1b05512d6ed7a55b5e701f <> mother-base-dee119b9ad8007b874be027f/80-muse-20260929T032722Z-d8e41beafc30a5eb5858bceed094f30a: tests/test_cli_radar.py
+  mother-base-dee119b9ad8007b874be027f/97-muse-20260929T080235Z-7386f027fe1b05512d6ed7a55b5e701f <> mother-base-dee119b9ad8007b874be027f/74-muse-20260928T062846Z-fc3121b2fdafc8a4c81928fe15a9169b: tests/test_cli_radar.py
+  mother-base-dee119b9ad8007b874be027f/97-muse-20260929T080235Z-7386f027fe1b05512d6ed7a55b5e701f <> mother-base-dee119b9ad8007b874be027f/work-muse-20260928T032000Z-3808916266edc8bcb0f0e50c136e298f: tests/test_radar_sec_events.py
+  mother-base-dee119b9ad8007b874be027f/97-muse-20260929T080235Z-7386f027fe1b05512d6ed7a55b5e701f <> mother-base-dee119b9ad8007b874be027f/work-devin-20260929T033706Z-681029cce463eb667db1e97e53cf265e: tests/test_cli_radar.py
+refused-scope examples (up to 5):
+  mother-base-dee119b9ad8007b874be027f/work-codex-20260927T203256Z-729e31520b1633a4e0237bf2c63ebca2: refused-scope
+  mother-base-dee119b9ad8007b874be027f/work-muse-20260928T023147Z-d3d59fcaf3e6615a6921fd00bcc6e559: refused-scope
+
+[mwcc-rs]
+runs analysed: 1900
+skip reasons: no candidate/validated commit SHA=920
+declared files/run: median=1.0 p90=14
+runs with diffable commit: 980
+declared file share changed: 60.4% (4361/7219); over-declared share: 39.6% (2858/7219)
+launcher refused-scope runs: 742 / 1900 (39.1% (742/1900))
+working interval pairs: 737607
+overlapping declared-file pairs: 139896 (19.0% (139896/737607) of interval pairs)
+overlapping actual-change pairs: 6629 (0.9% (6629/737607) of interval pairs)
+declared overlap examples (up to 5):
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-codex-20261002T035756Z-0be754b51172f63d8c7615513f073148: crates/mwcc-codegen-arm/src/lib.rs
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T222929Z-3ee29bb876f55f7e259ea51d42144492: tests/pins/registry.tsv
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T185655Z-7d31aeee25909a79dae484c62f90e3d7: crates/mwcc-codegen-arm/src/lib.rs, tests/pins/registry.tsv
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261011T051151Z-865af087feb38e42bcbbb313b897600c: crates/mwcc-codegen-arm/src/lib.rs, tests/pins/registry.tsv
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T183404Z-b65b5b0e855ee2177654b06c2317e78e: crates/mwcc-codegen-arm/src/lib.rs, crates/mwcc-codegen-arm/src/mir.rs, crates/mwcc-codegen-arm/tests/mir_verify.rs, tests/pins/registry.tsv
+actual overlap examples (up to 5):
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T183404Z-b65b5b0e855ee2177654b06c2317e78e: crates/mwcc-codegen-arm/src/mir.rs, crates/mwcc-codegen-arm/tests/mir_verify.rs
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/846-muse-20261011T063533Z-64e74bab7ac986f1cf86f4ac8b3aea27: crates/mwcc-codegen-arm/src/mir.rs
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T193814Z-53a060c62fabffe307031e5396b778c5: crates/mwcc-codegen-arm/src/mir.rs, crates/mwcc-codegen-arm/tests/mir_verify.rs
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261011T021534Z-42f2e511d99b91a34e8e4520a7312767: crates/mwcc-codegen-arm/src/mir.rs
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261009T203045Z-37f8dc9c6791232d534ee77807b3224b <> mwcc-rs-0ba5b9511043acd4b2e09ad2/work-muse-20261010T013735Z-15ea0162f1d1b34ffce1ca1223cf17ab: crates/mwcc-codegen-arm/src/mir.rs
+refused-scope examples (up to 5):
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-codex-20260930T013034Z-f7cda79592859e3566b2b02c0cfdbdba: refused-scope
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-codex-20260923T231157Z-d2aed9eb681e1f2fc226f368b442dc41: refused-scope
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-codex-20260926T224130Z-f4bbc8c5441cdc8d329605c28e2f3451: refused-scope
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-codex-20260923T173500Z-628ba4ca2ba67c10128ea6937896937b: refused-scope
+  mwcc-rs-0ba5b9511043acd4b2e09ad2/work-codex-20261012T150354Z-ba2b7a6e377ff24b893f46641e274346: refused-scope
+
+[probe]
+runs analysed: 3
+skip reasons: no candidate/validated commit SHA=1
+declared files/run: median=1 p90=1
+runs with diffable commit: 2
+declared file share changed: 100.0% (2/2); over-declared share: 0.0% (0/2)
+launcher refused-scope runs: 0 / 3 (0.0% (0/3))
+working interval pairs: 1
+overlapping declared-file pairs: 1 (100.0% (1/1) of interval pairs)
+overlapping actual-change pairs: 0 (0.0% (0/1) of interval pairs)
+declared overlap examples (up to 5):
+  live-001/runs-muse/probe/1-muse-20260917T164946Z <> live-001/runs-devin/probe/1-devin-20260917T164943Z: slugify.sh
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+[repo]
+runs analysed: 759
+skip reasons: commit not diffable locally=2; invalid status.json=9; no candidate/validated commit SHA=220
+declared files/run: median=1 p90=1
+runs with diffable commit: 537
+declared file share changed: 90.9% (519/571); over-declared share: 9.1% (52/571)
+launcher refused-scope runs: 78 / 759 (10.3% (78/759))
+working interval pairs: 380
+overlapping declared-file pairs: 359 (94.5% (359/380) of interval pairs)
+overlapping actual-change pairs: 209 (55.0% (209/380) of interval pairs)
+declared overlap examples (up to 5):
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/harness50/run <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case344/repo-c3ecf330c6173bf445635647/work-fake-20261014T111406Z-e8d2bba5fd1d97d21cec5a09f39d05e2: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case346-allowed/repo-c3ecf330c6173bf445635647/work-fake-20261014T111826Z-1e5098f8eb020923c483b9a7dcc6ca70 <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case430/repo-c3ecf330c6173bf445635647/work-fake-20261014T111825Z-89d94400b6a4b89934832df63af158b6: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case12/repo-c3ecf330c6173bf445635647/work-fake-20261014T111050Z-720465c52ef0e3bea00cf42476b6c243 <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case142/repo-c3ecf330c6173bf445635647/work-fake-20261014T111046Z-fba895cc3003f5bb7e3ff785b6fc3758: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case113/repo-c3ecf330c6173bf445635647/work-fake-20261014T111356Z-703cf1689ce41537ccd3ccb3e528971e <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case342/repo-c3ecf330c6173bf445635647/work-fake-20261014T111359Z-b69b8ec98df02013f0cdeb100bb43f66: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case113/repo-c3ecf330c6173bf445635647/work-fake-20261014T111356Z-703cf1689ce41537ccd3ccb3e528971e <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case341-allowed/repo-c3ecf330c6173bf445635647/work-fake-20261014T111354Z-94da9114865dfd94642fc721d1ba68bc: allowed.txt
+actual overlap examples (up to 5):
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/harness50/run <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case344/repo-c3ecf330c6173bf445635647/work-fake-20261014T111406Z-e8d2bba5fd1d97d21cec5a09f39d05e2: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case346-allowed/repo-c3ecf330c6173bf445635647/work-fake-20261014T111826Z-1e5098f8eb020923c483b9a7dcc6ca70 <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case430/repo-c3ecf330c6173bf445635647/work-fake-20261014T111825Z-89d94400b6a4b89934832df63af158b6: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case12/repo-c3ecf330c6173bf445635647/work-fake-20261014T111050Z-720465c52ef0e3bea00cf42476b6c243 <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case142/repo-c3ecf330c6173bf445635647/work-fake-20261014T111046Z-fba895cc3003f5bb7e3ff785b6fc3758: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case141/repo-c3ecf330c6173bf445635647/work-fake-20261014T111442Z-db912119a624fdfd89fa8e89b3e963d4 <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case314/repo-c3ecf330c6173bf445635647/work-fake-20261014T111441Z-9455aeb4d01422e755b9bcf84d1cfcb1: allowed.txt
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case141/repo-c3ecf330c6173bf445635647/work-fake-20261014T111442Z-db912119a624fdfd89fa8e89b3e963d4 <> agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110310Z-ff3917fb970de7c55621b6b30b8e82ba/scratch/tmp/delegate-work-tests.KLeqgN/runs/case315/repo-c3ecf330c6173bf445635647/work-fake-20261014T111445Z-a78a3c122358d3743b5dd1af9c78ec14: allowed.txt
+refused-scope examples (up to 5):
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case113/repo-c3ecf330c6173bf445635647/work-fake-20261014T111356Z-703cf1689ce41537ccd3ccb3e528971e: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case113/repo-c3ecf330c6173bf445635647/work-fake-20261014T111359Z-525bd6d8ef5178037c7a24fca7b924d7: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case317/repo-c3ecf330c6173bf445635647/work-fake-20261014T111909Z-1006cd9a795e7f79d47b3a4bd89b397a: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case360/repo-c3ecf330c6173bf445635647/work-fake-20261014T111914Z-15b7f593efa7a948c494e81443b340b5: refused-scope
+  agent-workflows-ae305b54faa7ea270455562e/work-devin-20261014T110407Z-10609a65427c7c64e8581c2e0c6d6d39/scratch/tmp/delegate-work-tests.Wf510S/runs/case101/repo-c3ecf330c6173bf445635647/work-fake-20261014T111330Z-72f8fc6d538518adccd0c7372674814a: refused-scope
+
+[sft-course]
+runs analysed: 65
+skip reasons: no candidate/validated commit SHA=33
+declared files/run: median=1 p90=7
+runs with diffable commit: 32
+declared file share changed: 95.5% (190/199); over-declared share: 4.5% (9/199)
+launcher refused-scope runs: 3 / 65 (4.6% (3/65))
+working interval pairs: 1247
+overlapping declared-file pairs: 393 (31.5% (393/1247) of interval pairs)
+overlapping actual-change pairs: 74 (5.9% (74/1247) of interval pairs)
+declared overlap examples (up to 5):
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/work-muse-20261008T204748Z-689fa0e96b18160bc5053b6927a461ac: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T202552Z-0a4ea648f18549bd7f65794dae433e14: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T203628Z-4f9c65fa81bb3cf7cb9d3ecd7ecff55e: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T201659Z-c6a5c13062268ef4a13a8b9949d0158a: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/5-muse-20261008T194812Z-66ea65bc0d37fe168c9112f1929f57d7: labs/decomp_to_chat.py, tests/test_decomp_to_chat.py
+actual overlap examples (up to 5):
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/work-muse-20261008T204748Z-689fa0e96b18160bc5053b6927a461ac: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T203628Z-4f9c65fa81bb3cf7cb9d3ecd7ecff55e: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T201659Z-c6a5c13062268ef4a13a8b9949d0158a: content/lessons/11a-compiler-eval.json, labs/decomp_to_chat.py, labs/eval_compile.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/work-codex-20261008T210214Z-18030928cedf9d819ac6364355eec8d7 <> sft-course-267f5ec95cd94ac8fbe441f8/5-muse-20261008T194812Z-66ea65bc0d37fe168c9112f1929f57d7: labs/decomp_to_chat.py, tests/test_decomp_to_chat.py
+  sft-course-267f5ec95cd94ac8fbe441f8/6-muse-20261008T194818Z-934a3b0231fa925ed1bf5a5d6a80ac62 <> sft-course-267f5ec95cd94ac8fbe441f8/14-muse-20261008T201652Z-6409ef7386db47a13ba12b556feb3034: content/course-meta.json
+refused-scope examples (up to 5):
+  sft-course-267f5ec95cd94ac8fbe441f8/15-muse-20261008T202552Z-0a4ea648f18549bd7f65794dae433e14: refused-scope
+  sft-course-267f5ec95cd94ac8fbe441f8/23-muse-20261012T203811Z-fb70d55ab0a34dd1a9ed91cd8568ffb7: refused-scope
+  sft-course-267f5ec95cd94ac8fbe441f8/work-muse-20261008T203557Z-9644da7bfa219004e95a6b6e06b6a1f6: refused-scope
+
+[swiftui-rewine]
+runs analysed: 246
+skip reasons: commit not diffable locally=2; no candidate/validated commit SHA=49
+declared files/run: median=3.0 p90=8
+runs with diffable commit: 195
+declared file share changed: 94.4% (714/756); over-declared share: 5.6% (42/756)
+launcher refused-scope runs: 1 / 246 (0.4% (1/246))
+working interval pairs: 22999
+overlapping declared-file pairs: 1273 (5.5% (1273/22999) of interval pairs)
+overlapping actual-change pairs: 919 (4.0% (919/22999) of interval pairs)
+declared overlap examples (up to 5):
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/work-codex-20260927T001129Z-4be80f987d6537a6c7ee31e5d16588b2: tools/rewine-scenario/Sources/ScenarioRunnerKit/Runner.swift, tools/rewine-scenario/Sources/ScenarioRunnerKit/StepEngine.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/130-muse-20260926T190645Z-f067e7465480ebacd9fcd49e95a8867a: tools/rewine-scenario/Sources/ScenarioRunnerKit/Runner.swift, tools/rewine-scenario/Sources/ScenarioRunnerKit/StepEngine.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/90-muse-20260926T021507Z-dbdac5decb7af23051699d1ed903860b: tools/rewine-scenario/Sources/ScenarioRunnerKit/Accessibility.swift, tools/rewine-scenario/Sources/ScenarioRunnerKit/Runner.swift, tools/rewine-scenario/Sources/ScenarioRunnerKit/StepEngine.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T031528Z-48e341f08eddf3235de0fbb2bd625080: tools/rewine-scenario/Sources/ScenarioRunnerKit/Runner.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T065357Z-28286c862d8c244d8a5ca32fe226652e: tools/rewine-scenario/Sources/ScenarioRunnerKit/Accessibility.swift, tools/rewine-scenario/Sources/ScenarioRunnerKit/StepEngine.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/AccessibilityReaderTests.swift
+actual overlap examples (up to 5):
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/work-codex-20260927T001129Z-4be80f987d6537a6c7ee31e5d16588b2: tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/130-muse-20260926T190645Z-f067e7465480ebacd9fcd49e95a8867a: tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/90-muse-20260926T021507Z-dbdac5decb7af23051699d1ed903860b: tools/rewine-scenario/Sources/ScenarioRunnerKit/Accessibility.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T031528Z-48e341f08eddf3235de0fbb2bd625080: tools/rewine-scenario/Tests/ScenarioRunnerKitTests/GUIRunTests.swift
+  swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T044835Z-5b0865c958d2b915c968e46980b1792d <> swiftui-rewine-532c9d5a01227bc19802195a/work-muse-20260926T065357Z-28286c862d8c244d8a5ca32fe226652e: tools/rewine-scenario/Sources/ScenarioRunnerKit/Accessibility.swift, tools/rewine-scenario/Tests/ScenarioRunnerKitTests/AccessibilityReaderTests.swift
+refused-scope examples (up to 5):
+  swiftui-rewine-532c9d5a01227bc19802195a/work-devin-20260926T022514Z-36d16b9baae036c6f2f7117a444e5abb: refused-scope
+
+[the-big-shell]
+runs analysed: 9
+skip reasons: no candidate/validated commit SHA=9
+declared files/run: median=1 p90=1
+runs with diffable commit: 0
+declared file share changed: n/a; over-declared share: n/a
+launcher refused-scope runs: 0 / 9 (0.0% (0/9))
+working interval pairs: 36
+overlapping declared-file pairs: 36 (100.0% (36/36) of interval pairs)
+overlapping actual-change pairs: 0 (0.0% (0/36) of interval pairs)
+declared overlap examples (up to 5):
+  the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T194150Z-4d7dbb99dba16cdffdc84fe69074f285 <> the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T194124Z-95fc01076b287725dd565d8e7ec9236c: AGENTS.md
+  the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T194150Z-4d7dbb99dba16cdffdc84fe69074f285 <> the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T191654Z-786c2bdc8b4b05a1d9b882615eab84da: AGENTS.md
+  the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T194150Z-4d7dbb99dba16cdffdc84fe69074f285 <> the-big-shell-fd2d0a841816bf7109993133/work-muse-20260927T191704Z-ac6b9b275dafe86e7a4f49a8177a1815: AGENTS.md
+  the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T194150Z-4d7dbb99dba16cdffdc84fe69074f285 <> the-big-shell-fd2d0a841816bf7109993133/work-muse-20260927T194214Z-dee8ba8570ccae1562b26d0ba6b9615b: AGENTS.md
+  the-big-shell-fd2d0a841816bf7109993133/work-codex-20260927T194150Z-4d7dbb99dba16cdffdc84fe69074f285 <> the-big-shell-fd2d0a841816bf7109993133/work-muse-20260927T194202Z-06c0549c0076e0ed88b30bd33afaeb45: AGENTS.md
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+[unknown]
+runs analysed: 59
+skip reasons: commit not diffable locally=59
+declared files/run: median=2 p90=2
+runs with diffable commit: 0
+declared file share changed: n/a; over-declared share: n/a
+launcher refused-scope runs: 0 / 59 (0.0% (0/59))
+working interval pairs: 0
+overlapping declared-file pairs: 0 (n/a of interval pairs)
+overlapping actual-change pairs: 0 (n/a of interval pairs)
+declared overlap examples (up to 5):
+  none
+actual overlap examples (up to 5):
+  none
+refused-scope examples (up to 5):
+  none
+
+Limitations
+- Launcher enforcement rejects out-of-list changes, so actual changed files cannot exceed a declared list in accepted/committed runs; refused-scope states count attempts caught before a commit.
+- Orchestrators wrote the specs and knew the code, so declarations may be informed and are not an independent forecast.
+- This is file-level only: it does not measure symbols, semantic overlap, or whether a declared file needed editing.
+- Missing, malformed, nonlocal or otherwise undiffable history is excluded from diff-based denominators and counted in skip reasons.
+- Time bounds are approximate where only directory metadata is available; overlap means intervals intersect and file paths intersect.
+- Scope refusals are inferred from status state names containing refused-scope/refused_scope; alternate spellings may be missed.
