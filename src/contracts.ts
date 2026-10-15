@@ -64,6 +64,10 @@ export interface Change extends Versioned {
   changeId: Id; repoId: Id; authorId: Id; intentKey: string; intentText: string;
   issueNumber?: number | null;
   authorModel?: string | null;
+  /** Reasoning effort the author reported (principal agent or `agent.effort` on create/publish). */
+  authorEffort?: string | null;
+  /** Harness the author reported (principal agent or `agent.harness` on create/publish). */
+  authorHarness?: string | null;
   authorAgent?: AgentDescriptor & { startedAt: number; name?: string };
   closeReason?: string | null;
   candidateStorageName: string; branch: string; baseOid: Oid | null;
@@ -195,11 +199,15 @@ export interface CreateChangeBody {
   intentKey: string; intentText: string; baseOid: Oid | null; branch: string;
   unitKeys: string[]; dependencyChangeIds: Id[]; attempt?: number;
   issueNumber?: number;
+  /** Self-reported agent; used only when the principal carries no model of its own. */
+  agent?: { model?: string; effort?: string; harness?: string };
 }
 export interface ClaimBody extends MutationBody { changeId: Id; unitKeys: string[]; intentText: string; ttlSeconds?: number }
 export interface PublishBody extends MutationBody {
   baseOid: Oid | null; headOid: Oid; branch: string; unitKeys: string[];
   leaseFences: Record<string, number>;
+  /** Self-reported agent; a new revision may update the change's author model, effort and harness. */
+  agent?: { model?: string; effort?: string; harness?: string };
 }
 export interface EnqueueBody extends MutationBody { changeId: Id; verdictId: Id; leaseFences: Record<string, number> }
 export interface AddFindingBody extends MutationBody {

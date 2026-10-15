@@ -1223,7 +1223,13 @@ describe('repository and change lifecycle', () => {
       expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: ['file:unknown.mjs'], leaseFences: { 'file:unknown.mjs': 1 },
     }, 'unknown-unit', 'local-agent-a'));
     expect(unknownUnit.status).toBe(422);
-    const publishBody = { expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {} };
+    const badAgent = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, {
+      expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {}, agent: { model: 'gpt 6; rm -rf' },
+    }, 'bad-agent', 'local-agent-a'));
+    expect(badAgent.status).toBe(400);
+    expect((await responseBody(badAgent)).error.code).toBe('INVALID_AGENT');
+    // Change 186: a principal without a model records the body's agent on a new revision.
+    const publishBody = { expectedVersion: 2, baseOid: a, headOid: b, branch: input.branch, unitKeys: [], leaseFences: {}, agent: { model: 'gpt-6-luna', effort: 'high' } };
     const publish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, publishBody, 'publish-one', 'local-agent-a'));
     expect(publish.status).toBe(409);
     expect((await responseBody(publish)).error.code).toBe('INVALID_JOB');
@@ -1232,7 +1238,7 @@ describe('repository and change lifecycle', () => {
     expect(firstIntent).toMatchObject({ policyId: 'local-demo' });
     expect('unitPolicy' in firstIntent).toBe(false);
     const detail = await fetchApi(apiRequest(`/v1/repos/publish_case/changes/${change.changeId}`));
-    expect((await responseBody(detail)).data).toMatchObject({ revision: 1, headOid: b, status: 'draft' });
+    expect((await responseBody(detail)).data).toMatchObject({ revision: 1, headOid: b, status: 'draft', authorModel: 'gpt-6-luna', authorEffort: 'high', authorHarness: null });
     const repeatPublish = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-again', 'local-agent-a'));
     expect(repeatPublish.status).toBe(409);
     expect((await responseBody(repeatPublish)).error.code).toBe('INVALID_JOB');
@@ -1248,10 +1254,10 @@ describe('repository and change lifecycle', () => {
       expect(scheduled.status).toBe(202);
       expect(scheduledJob.unitPolicy).toEqual(localFixtureConfig('local').policies['local-demo']);
       expect(await canonicalDigest(jobInput(scheduledJob))).toBe(firstIntent.inputDigest);
-      expect((await responseBody(scheduled)).data).toMatchObject({ revision: 1, authorModel: null });
+      expect((await responseBody(scheduled)).data).toMatchObject({ revision: 1, authorModel: 'gpt-6-luna', authorEffort: 'high' });
       const identical = await fetchApi(mutation(`/v1/repos/publish_case/changes/${change.changeId}/publish`, { ...publishBody, expectedVersion: 3 }, 'publish-identical', 'local-agent-a'));
       expect(identical.status).toBe(200);
-      expect((await responseBody(identical)).data).toMatchObject({ revision: 1, authorModel: null });
+      expect((await responseBody(identical)).data).toMatchObject({ revision: 1, authorModel: 'gpt-6-luna', authorEffort: 'high' });
     } finally {
       runners.hooks['runners.schedule'] = scheduleOriginal;
     }

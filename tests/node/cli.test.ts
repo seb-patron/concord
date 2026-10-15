@@ -38,6 +38,13 @@ it('stops live lease reads at the first terminal row and rejects malformed expir
   expect(leaseRemainingSeconds({ state: 'active' }, 100)).toBe(0);
 });
 
+it('plumbs land --model, --effort and --harness into the land command', async () => {
+  const base = ['land', '--repo', 'demo', '--source', '.', '--commit', 'a'.repeat(40), '--intent-key', 'task', '--intent', 'work', '--allowed-files', 'allowed.txt'];
+  await expect(runCli([...base, '--model', 'gpt 6'])).rejects.toThrow('--model must be 1 to 64 characters');
+  await expect(runCli([...base, '--model', 'gpt-6-luna', '--effort', 'very high'])).rejects.toThrow('--effort must be 1 to 64 characters');
+  await expect(runCli([...base, '--model', 'gpt-6-luna', '--effort', 'high', '--harness', 'h'.repeat(65)])).rejects.toThrow('--harness must be 1 to 64 characters');
+});
+
 describe('Concord authentication profiles', () => {
   it('selects profiles, preserves environment precedence, and rejects unsafe or special files', async () => {
     const dir = await tempDir('profiles');

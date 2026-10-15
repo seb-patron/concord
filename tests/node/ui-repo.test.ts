@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
 const { createRepoPage } = require('../../web/repo.js') as any;
@@ -60,7 +62,9 @@ describe('Repository code page', () => {
 
       const rows = [...root.querySelectorAll('.repo-working-row')];
       expect(rows).toHaveLength(3);
-      expect(rows.map(row => row.querySelector('.repo-working-model')?.textContent)).toEqual(['model-beta', 'model-alpha', 'worker-c']);
+      expect(rows.map(row => row.querySelector('.repo-working-model')?.textContent ?? null)).toEqual(['model-beta', 'model-alpha', null]);
+      // Change 186: without a reported model the holder appears in muted text, never as a model chip.
+      expect(rows[2].querySelector('.repo-working-holder')?.textContent).toBe('worker-c');
       expect(rows.map(row => row.querySelector('.repo-working-title')?.textContent)).toEqual([
         '#22 Beta issue', '#11 Alpha issue', '#33 Gamma issue',
       ]);
@@ -112,6 +116,39 @@ describe('Repository code page', () => {
       const expandedCard = root.querySelector('.repo-working-card')!;
       expect(expandedCard.querySelector('.repo-working-branch')?.textContent).toBe('1');
       expect(expandedCard.textContent).not.toContain('refs/heads/');
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
+  it('shows the reported agent model and effort instead of a delegating principal id', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.repos.changes = [
+        { changeId: 'change-luna', issueNumber: 163, authorId: 'aw-author', authorModel: 'gpt-6-luna', authorEffort: 'high', authorHarness: 'codex',
+          branch: 'refs/heads/land/19db244bb926083d', status: 'draft' },
+        { changeId: 'change-unknown', issueNumber: 164, authorId: 'aw-author', authorModel: null, authorEffort: null,
+          branch: 'refs/heads/land/0000000000000000', status: 'draft' },
+      ];
+      snapshot.data.projections.issues.items = [{ number: 163, title: '185-perf-all' }, { number: 164, title: 'No model yet' }];
+      snapshot.data.projections.leases.items = ['change-luna', 'change-unknown'].map((changeId, index) => ({
+        leaseId: `lease-${index}`, changeId, holderId: 'aw-author', unitKey: `file:${index}`, expiresAt: Date.now() + 120000, state: 'active',
+      }));
+      const root = dom.window.document.getElementById('page')!;
+      createRepoPage(root, { getRepoTree: async () => ({ data: { entries: [] } }), getRepoReadme: async () => ({ data: {} }), getRepoFile: async () => ({ data: {} }) }).show('sample', snapshot);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const rows = [...root.querySelectorAll('.repo-working-card .repo-working-row')];
+      const luna = rows.find(row => row.textContent?.includes('#163'))!;
+      expect(luna.querySelector('.repo-working-model')?.textContent).toBe('gpt-6-luna · high');
+      expect(luna.textContent).not.toContain('aw-author');
+      expect(luna.textContent).not.toContain('refs/heads/');
+      expect(luna.textContent).not.toContain('19db244bb926083d');
+      const unknown = rows.find(row => row.textContent?.includes('#164'))!;
+      expect(unknown.querySelector('.repo-working-model')).toBeNull();
+      expect(unknown.querySelector('.repo-working-holder')?.textContent).toBe('aw-author');
+      const css = readFileSync(join(process.cwd(), 'web/styles.css'), 'utf8');
+      expect(css).toContain('.repo-working-row button{min-height:28px;padding:2px 4px}');
+      expect(css).toMatch(/\.repo-working-row\{[^}]*padding:6px 0;[^}]*font-size:13px/);
+      expect(css).toMatch(/\.repo-working-holder\{[^}]*color:var\(--muted\)/);
     } finally { globalThis.document = previous; dom.window.close(); }
   });
   it('adds internal scrolling to the Working now list at eight rows', async () => {

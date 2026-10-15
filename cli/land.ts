@@ -18,6 +18,7 @@ export type LandOptions = { repo?: string; source?: string; commit?: string; int
   allowedFiles?: string; dependsOn?: string[]; reviewEvidence?: string; mirrorTo?: string; waitSeconds?: number;
   base?: string; awRun?: string; expectedVersion?: number; json?: boolean; emit?: (event: Obj) => void; client?: ConcordClient;
   renewEveryMs?: number; profile?: string; reviewerProfile?: string; tokenStdin?: string;
+  model?: string; effort?: string; harness?: string;
   now?: () => number; sleep?: (ms: number) => Promise<void>; random?: () => number };
 const sha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
@@ -27,6 +28,18 @@ function nextDelay(delay: number, runtime: WaitRuntime): number {
   return Math.min(10_000, Math.round(Math.min(delay, 10_000) * (0.8 + runtime.random() * 0.4)));
 }
 const hash = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+const agentField = /^[A-Za-z0-9._/:-]{1,64}$/;
+/** The agent model, effort and harness sent on change create and publish, so a delegating principal without a model still records who did the work. */
+export function landAgent(options: Pick<LandOptions, 'model' | 'effort' | 'harness'>): { model?: string; effort?: string; harness?: string } | null {
+  const agent: { model?: string; effort?: string; harness?: string } = {};
+  for (const key of ['model', 'effort', 'harness'] as const) {
+    const value = options[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !agentField.test(value)) throw new ConcordError(`--${key} must be 1 to 64 characters of A-Z a-z 0-9 . _ / : -`, 'usage');
+    agent[key] = value;
+  }
+  return Object.keys(agent).length ? agent : null;
+}
 function required(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value) throw new ConcordError(`${name} is required`, 'usage');
   return value;
@@ -261,6 +274,7 @@ export function approvedHead(evidence: string, head: string): boolean {
 }
 async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj> {
   let options = input;
+  const agent = landAgent(input);
   if (input.awRun) {
     if (!input.base) throw new ConcordError('REFUSED: AW run requires an explicit run-start base; supply --base', 'usage');
     const run = await readAwRun(input.awRun);
@@ -313,7 +327,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
   let units = await unitKeys(source, changed.parent, commit, changed.files, policy);
   if (units.length > MAX_NORMALIZED_UNITS) throw new ConcordError(`LAND_TOO_MANY_UNITS: ${unitsOverCapMessage(units.length)}`, 'usage');
   const branch = `refs/heads/land/${hash(intentKey).slice(7, 23)}`;
-  const createBody = { intentKey, intentText: intent, baseOid: repository.observedCanonicalOid, branch, unitKeys: units, dependencyChangeIds: options.dependsOn ?? [] };
+  const createBody = { intentKey, intentText: intent, baseOid: repository.observedCanonicalOid, branch, unitKeys: units, dependencyChangeIds: options.dependsOn ?? [], ...(agent ? { agent } : {}) };
   let started: Obj | undefined;
   let created: Obj;
   try { created = (await api(client, `${root}/changes`, createBody)).data; }
@@ -498,7 +512,7 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         await api(client, `${root}/branches`, { storageName: change.candidateStorageName, ref: change.branch, observedHead: prepared.head, ownerId: change.authorId }, await currentVersion(client, root));
         await assertLeasesLive();
         change = (await api(client, path)).data;
-        await api(client, `${path}/publish`, { baseOid: targetBase, headOid: prepared.head, branch: change.branch, unitKeys: units, leaseFences: fences() }, (await api(client, path)).version);
+        await api(client, `${path}/publish`, { baseOid: targetBase, headOid: prepared.head, branch: change.branch, unitKeys: units, leaseFences: fences(), ...(agent ? { agent } : {}) }, (await api(client, path)).version);
         emit({ state: 'published', changeId, headOid: prepared.head });
         change = (await api(client, path)).data;
         publishedRevision = change.revision;

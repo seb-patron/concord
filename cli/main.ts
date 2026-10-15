@@ -23,8 +23,8 @@ Commands and required fields:
   start --repo ID --intent-key KEY --intent TEXT --allowed-files FILE [--base OID] [--hold 5m] [--json]
   release --repo ID --intent-key KEY
   renew --repo ID --intent-key KEY [--hold 5m] [--every SECONDS [--while-pid PID]] [--json]
-  land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
-  land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL]
+  land --repo ID --source PATH --commit SHA [--base 40_HEX_OID] --intent-key KEY --intent TEXT --allowed-files FILE [--depends-on CHANGE_ID ...] [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL] [--model M] [--effort E] [--harness H]
+  land --repo ID --aw-run RUN_DIR --base 40_HEX_OID [--review-evidence FILE] [--mirror-to HTTPS_GIT_URL] [--model M] [--effort E] [--harness H]
   repo create --name NAME --policy-id ID --profile-id ID [--public true|false]
   repo list [--cursor CURSOR]
   settings get|protect|unprotect --repo ID [--pattern GLOB --level agents|human-approval|human-only --note TEXT]
@@ -136,6 +136,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       mirrorTo: typeof flags['mirror-to'] === 'string' ? flags['mirror-to'] : undefined,
       waitSeconds: flags['wait-seconds'] === undefined ? undefined : numberFlag(flags, 'wait-seconds'),
       expectedVersion: flags['expected-version'] === undefined ? undefined : numberFlag(flags, 'expected-version'),
+      model: typeof flags.model === 'string' ? flags.model : undefined,
+      effort: typeof flags.effort === 'string' ? flags.effort : undefined,
+      harness: typeof flags.harness === 'string' ? flags.harness : undefined,
       awRun: typeof flags['aw-run'] === 'string' ? flags['aw-run'] : undefined, json: values.json === true });
     return;
   }

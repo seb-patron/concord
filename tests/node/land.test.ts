@@ -34,7 +34,7 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
-  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving' | 'stale-main' | 'queue-wait') {
+  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving' | 'stale-main' | 'queue-wait', extra: { model?: string; effort?: string; harness?: string } = {}) {
     const sourceDir = await temp(); await git(sourceDir, 'init', '-q', '-b', 'main');
     await writeFile(join(sourceDir, 'value.txt'), 'before\n');
     await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'base');
@@ -132,11 +132,33 @@ describe('land input and evidence gates', () => {
     }));
     let error: unknown; let result: Awaited<ReturnType<typeof land>> | undefined; const events: Record<string, any>[] = [];
     try { result = await land({ repo: 'demo', source: sourceDir, commit, intentKey: 'task', intent: 'stale base test',
-      allowedFiles, reviewEvidence: evidence, waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never,
+      allowedFiles, reviewEvidence: evidence, waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never, ...extra,
       ...(mode === 'queue-wait' ? { now: () => fakeNow, sleep: async (_ms: number) => { fakeNow += 1000; queueWaitTicks++; }, random: () => 0.5 } : {}),
       emit: event => events.push(event) }); } catch (caught) { error = caught; }
     return { request, events, result, error, enqueues, verdicts, verdictBodies, change, base, queueWaitGets, queueWaitTicks };
   }
+
+  it('sends --model, --effort and --harness as agent fields on change create and every publish', async () => {
+    const outcome = await staleBaseCase('unrelated', { model: 'gpt-6-luna', effort: 'high', harness: 'codex' });
+    expect(outcome.error).toBeUndefined();
+    const bodies = (suffix: RegExp) => outcome.request.mock.calls.filter(([method, path]) => method === 'POST' && suffix.test(path))
+      .map(([, , options]) => (options as { body?: Record<string, any> } | undefined)?.body);
+    const creates = bodies(/\/changes$/); const publishes = bodies(/\/publish$/);
+    expect(creates.length).toBeGreaterThan(0); expect(publishes.length).toBeGreaterThan(1);
+    for (const body of [...creates, ...publishes]) expect(body?.agent).toEqual({ model: 'gpt-6-luna', effort: 'high', harness: 'codex' });
+    const plain = await staleBaseCase('unrelated');
+    const plainBodies = plain.request.mock.calls.filter(([method, path]) => method === 'POST' && /\/(changes|publish)$/.test(path));
+    expect(plainBodies.every(([, , options]) => !('agent' in ((options as { body?: object } | undefined)?.body ?? {})))).toBe(true);
+  });
+
+  it('rejects an invalid --model before any API request', async () => {
+    const request = vi.fn();
+    await expect(land({ repo: 'demo', source: '.', commit: 'a'.repeat(40), intentKey: 'task', intent: 'work', allowedFiles: 'allowed.txt',
+      model: 'gpt 6; rm', client: { request } as never })).rejects.toThrow('--model must be 1 to 64 characters');
+    await expect(land({ repo: 'demo', source: '.', commit: 'a'.repeat(40), intentKey: 'task', intent: 'work', allowedFiles: 'allowed.txt',
+      effort: 'x'.repeat(65), client: { request } as never })).rejects.toThrow('--effort must be 1 to 64 characters');
+    expect(request).not.toHaveBeenCalled();
+  });
 
   it('re-publishes and carries approval after enqueue reports a stale base', async () => {
     const outcome = await staleBaseCase('unrelated');

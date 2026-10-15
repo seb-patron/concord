@@ -36,7 +36,31 @@ const getChange = (context: ModuleContext, changeId: string): Change => {
   const change = list<Change>(context, 'changes').find(item => item.changeId === changeId);
   return change ?? fail(404, 'CHANGE_NOT_FOUND', 'Change not found');
 };
-const changeResponse = (change: Change): Change => ({ ...change, authorModel: change.authorModel ?? null });
+const changeResponse = (change: Change): Change => ({ ...change, authorModel: change.authorModel ?? null,
+  authorEffort: change.authorEffort ?? null, authorHarness: change.authorHarness ?? null });
+type BodyAgent = { model?: string; effort?: string; harness?: string };
+const AGENT_FIELD = /^[A-Za-z0-9._/:-]{1,64}$/;
+/** Validates the optional `agent: {model, effort, harness}` a landing client reports for itself. */
+function bodyAgent(value: unknown): BodyAgent | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) fail(400, 'INVALID_AGENT', 'agent must be an object');
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => key !== 'model' && key !== 'effort' && key !== 'harness')) fail(400, 'INVALID_AGENT', 'agent accepts only model, effort and harness');
+  const agent: BodyAgent = {};
+  for (const key of ['model', 'effort', 'harness'] as const) {
+    const field = input[key];
+    if (field === undefined) continue;
+    if (typeof field !== 'string' || !AGENT_FIELD.test(field)) fail(400, 'INVALID_AGENT', `agent ${key} must be 1 to 64 characters of A-Z a-z 0-9 . _ / : -`);
+    agent[key] = field as string;
+  }
+  return agent;
+}
+/** Author model, effort and harness for a change: a principal's own model always wins; otherwise the body's agent fields (or the prior values) are kept. */
+function authorFields(context: ModuleContext, agent: BodyAgent | null, prior?: Change): Pick<Change, 'authorModel' | 'authorEffort' | 'authorHarness'> {
+  if (context.principal.model) return { authorModel: context.principal.model, authorEffort: context.principal.agent?.effort ?? null, authorHarness: context.principal.agent?.harness ?? null };
+  return { authorModel: agent?.model ?? prior?.authorModel ?? null, authorEffort: agent?.effort ?? prior?.authorEffort ?? null,
+    authorHarness: agent?.harness ?? prior?.authorHarness ?? null };
+}
 function inspectionResponse(context: ModuleContext, change: Change): { jobId: string; revision: number; state: string } | null {
   if (change.status === 'closed') return null;
   const pending = context.state.get<InspectionPending>(`inspection:${change.changeId}`);
@@ -436,6 +460,7 @@ function declaredUnitKeys(raw: unknown, policy: TrustedPolicy, allowUnknown = fa
 
 function changeInput(body: CreateChangeBody, policy: TrustedPolicy) {
   const intentKey = text(body.intentKey, 'intentKey', 128);
+  const agent = bodyAgent(body.agent);
   const intentText = text(body.intentText, 'intentText');
   const baseOid = body.baseOid === null ? null : oid(body.baseOid);
   const ref = branch(body.branch);
@@ -446,7 +471,7 @@ function changeInput(body: CreateChangeBody, policy: TrustedPolicy) {
   if (startScope !== undefined && startScope !== true) fail(400, 'INVALID_INPUT', 'startScope must be true');
   if (body.issueNumber !== undefined && (!Number.isSafeInteger(body.issueNumber) || body.issueNumber < 1)) fail(400, 'INVALID_ISSUE_NUMBER', 'issueNumber must be a positive integer');
   if (!Number.isSafeInteger(attempt) || attempt < 1) fail(400, 'INVALID_ATTEMPT', 'attempt must be a positive integer');
-  return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt, issueNumber: body.issueNumber ?? null, startScope: startScope === true };
+  return { intentKey, intentText, baseOid, branch: ref, unitKeys, dependencyChangeIds, attempt, issueNumber: body.issueNumber ?? null, startScope: startScope === true, agent };
 }
 
 async function authorizeIntentContest(context: ModuleContext, body: Record<string, unknown>): Promise<Response> {
@@ -530,7 +555,7 @@ async function changeCreate(context: ModuleContext, body: CreateChangeBody): Pro
   const candidateStorageName = `concord-f-${changeId}`;
   const requestDigest = await digest({ kind: 'fork', sourceName: repo.canonicalStorageName, storageName: candidateStorageName });
   const change: StartedChange = {
-    changeId, repoId: repo.repoId, authorId: context.principal.principalId, authorModel: context.principal.model ?? null,
+    changeId, repoId: repo.repoId, authorId: context.principal.principalId, ...authorFields(context, input.agent),
     ...(context.principal.agent ? { authorAgent: { ...context.principal.agent, startedAt: context.principal.agentStartedAt ?? context.now(),
       ...(context.principal.agentName ? { name: context.principal.agentName } : {}) } } : {}), intentKey: input.intentKey,
     intentText: input.intentText, candidateStorageName, branch: input.branch, baseOid: input.baseOid,
@@ -700,6 +725,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
   const headOid = oid(body.headOid);
   const ref = branch(body.branch);
   const unitKeys = declaredUnitKeys(body.unitKeys, context.trusted.policies[repo.policyId]);
+  const agent = bodyAgent(body.agent);
   const startScope = (change as StartedChange).startUnitKeys;
   if (startScope) {
     const scopeRegistry = unitRegistry(context.trusted.policies[repo.policyId]);
@@ -759,6 +785,7 @@ async function publish(context: ModuleContext, changeId: string, body: Record<st
     change.unitKeys = unitKeys;
     change.revision = revision;
     change.status = 'draft';
+    Object.assign(change, authorFields(context, agent, change));
     change.version = versioned(context, 'change.published', [changeId], { revision, headOid, baseOid });
     storeChange(context, change);
     context.state.put(`inspection:${changeId}`, { changeId, revision, jobId, inputDigest: job.inputDigest, sourceTreeOid: head!.treeOid, headOid, baseOid: baseOid as string, unitKeys, scheduled: false } satisfies InspectionPending);

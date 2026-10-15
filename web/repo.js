@@ -254,10 +254,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
         }, 'repo-working-disclosure');
         disclosure.setAttribute('aria-expanded', String(expandedChanges.has(group.changeId)));
         disclosure.setAttribute('aria-label', `${expandedChanges.has(group.changeId) ? 'Collapse' : 'Expand'} files for ${group.changeId}`);
-        const model = group.change.authorModel ?? group.leases[0].holderId;
-        const effort = group.change.authorEffort ?? group.change.effort;
-        const modelLabel = effort ? `${model} · ${effort}` : model;
-        const modelChip = element('span', modelLabel, 'repo-working-model');
+        const modelChip = workingAgentLabel(group);
         const title = group.issueNumber != null
           ? `${group.issueTitle ?? ''}`
           : group.change.intentText ?? group.leases[0].intentText ?? group.changeId;
@@ -285,6 +282,20 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     humanDocs.append(element('p', 'Browse docs/ in the file list.', 'repo-empty'));
     aside.append(humanDocs);
     layout.append(primary, aside); root.append(layout);
+  }
+  /** The agent model and effort as a chip; a bare principal id only appears, muted, when no model is known. */
+  function workingAgentLabel(group) {
+    const change = group.change ?? {};
+    const model = change.authorModel || change.authorAgent?.model || null;
+    if (model) {
+      const effort = change.authorEffort || change.authorAgent?.effort || change.effort || null;
+      const chip = element('span', effort ? `${model} · ${effort}` : model, 'repo-working-model');
+      chip.title = [model, effort, change.authorHarness || change.authorAgent?.harness].filter(Boolean).join(' · ');
+      return chip;
+    }
+    const holder = element('span', group.leases[0]?.holderId ?? change.authorId ?? 'unknown agent', 'repo-working-holder');
+    holder.title = 'Agent model not reported';
+    return holder;
   }
   function drawAgent() {
     const layout = element('div', undefined, 'repo-layout');

@@ -61,12 +61,14 @@ a,.tracker-source,.tracker-working-link{color:var(--link)}
 .repo-page,.tracker-view,.milestones-view{background:var(--page);color:var(--text)}
 .repo-working-list{list-style:none;padding:0!important;margin:0!important}
 .repo-working-list-scroll{max-height:20rem;overflow:auto}
-.repo-working-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;padding:6px 0;border-top:1px solid var(--border);overflow-wrap:anywhere;font-size:13px}
+.repo-working-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;padding:6px 0;line-height:1.3;border-top:1px solid var(--border);overflow-wrap:anywhere;font-size:13px}
 .repo-working-row-expanded{flex-wrap:wrap}
 .repo-working-disclosure{flex:none;font-size:16px;font-weight:700;line-height:1}
 .repo-working-model{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border);border-radius:999px;padding:2px 7px;color:var(--muted);font-size:12px}
 .repo-working-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-size:13px;font-weight:700}
 .repo-working-count{flex:none;color:var(--muted);font-size:12px}
+.repo-working-holder{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
+.repo-working-row button{min-height:28px;padding:2px 4px}
 .repo-working-branch{flex-basis:100%;padding-left:24px;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 .repo-working-units{flex-basis:100%;list-style:none;padding:4px 0 0 24px!important;margin:0!important}
 .repo-working-units li{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:3px 0;color:var(--muted);font-size:12px}

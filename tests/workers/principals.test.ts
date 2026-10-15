@@ -179,6 +179,33 @@ describe('delegated principals', () => {
     const expectedAuthor = { ...agent, startedAt: minted.createdAt, name: 'worker' };
     expect(change.authorModel).toBe('m-1');
     expect(change.authorAgent).toEqual(expectedAuthor);
+    // Change 186: a principal's own model always wins over a self-reported body agent.
+    const ignoredResponse = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'descriptor-ignored', intentText: 'descriptor ignored', baseOid: seedOid,
+      branch: 'refs/heads/descriptor-ignored', unitKeys: [], dependencyChangeIds: [], agent: { model: 'gpt-6-luna', effort: 'low', harness: 'other' },
+    }, crypto.randomUUID(), minted.token));
+    expect(ignoredResponse.status).toBe(201);
+    expect((await responseBody(ignoredResponse)).data).toMatchObject({ authorModel: 'm-1', authorEffort: 'high', authorHarness: 'harness-1' });
+    // A delegating principal without a model (like aw-author) records the body's agent model, effort and harness.
+    const delegatingResponse = await mint({ roles: ['agent'], repoIds: [repoId], name: 'aw-author', ttlSeconds: 120 }, crypto.randomUUID(), parentToken);
+    expect(delegatingResponse.status).toBe(201);
+    const delegating = (await responseBody(delegatingResponse)).data;
+    const reportedResponse = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'reported-task', intentText: 'reported task', baseOid: seedOid,
+      branch: 'refs/heads/reported', unitKeys: [], dependencyChangeIds: [], agent: { model: 'gpt-6-luna', effort: 'high', harness: 'codex' },
+    }, crypto.randomUUID(), delegating.token));
+    const reportedEnvelope = await responseBody(reportedResponse);
+    expect(reportedResponse.status, JSON.stringify(reportedEnvelope)).toBe(201);
+    expect(reportedEnvelope.data).toMatchObject({ authorModel: 'gpt-6-luna', authorEffort: 'high', authorHarness: 'codex' });
+    const reportedSnapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos.changes;
+    expect(reportedSnapshot.find((item: { changeId: string }) => item.changeId === reportedEnvelope.data.changeId))
+      .toMatchObject({ authorModel: 'gpt-6-luna', authorEffort: 'high', authorHarness: 'codex' });
+    const invalidAgent = await fetchApi(mutation(`/v1/repos/${repoId}/changes`, {
+      intentKey: 'invalid-agent', intentText: 'invalid agent', baseOid: seedOid,
+      branch: 'refs/heads/invalid-agent', unitKeys: [], dependencyChangeIds: [], agent: { model: 'x'.repeat(65) },
+    }, crypto.randomUUID(), delegating.token));
+    expect(invalidAgent.status).toBe(400);
+    expect((await responseBody(invalidAgent)).error.code).toBe('INVALID_AGENT');
     const listed = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/changes`)))).data.items;
     expect(listed.find((item: { changeId: string }) => item.changeId === change.changeId).authorAgent).toEqual(expectedAuthor);
     const snapshot = (await responseBody(await fetchApi(apiRequest(`/v1/repos/${repoId}/snapshot`)))).data.projections.repos.changes;
@@ -190,6 +217,7 @@ describe('delegated principals', () => {
     expect(plainResponse.status).toBe(201);
     const plain = (await responseBody(plainResponse)).data;
     expect(plain.authorModel).toBeNull();
+    expect(plain).toMatchObject({ authorEffort: null, authorHarness: null });
     expect(plain).not.toHaveProperty('authorAgent');
   });
 
