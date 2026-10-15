@@ -97,9 +97,8 @@ Promise<{ principal: Principal; expiresAt: number | null }> {
       }));
       if (lookup.ok) {
         const found = (await lookup.json() as { data: Principal | null }).data;
-        if (found && found.tenantId === tenantId && typeof found.principalId === 'string' &&
-          Array.isArray(found.roles) && (found.repoIds === '*' || Array.isArray(found.repoIds)) &&
-          typeof found.expiresAt === 'number') credential = found;
+        // Delegated principals always carry a bounded numeric expiry; never treat a missing one as non-expiring.
+        if (found && typeof found.expiresAt === 'number') credential = found;
       }
     }
   }

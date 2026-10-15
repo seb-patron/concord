@@ -107,7 +107,7 @@ Opaque IDs are server-generated except deterministic fixture aliases. Git OIDs i
 | Result / `(jobId, attempt)` | inputDigest, fence, source tree, toolchain/oracle/environment digests, outcome, score, durationMs, bounded log, resultDigest |
 | Promotion / `promotionId` | expectedOldOid, checkedNewOid, queueGeneration, frozen admission snapshot, pending/applied/reconcile/failed |
 | Event / `sequence` | kind, actorId, server timestamp, related IDs, redacted payload; append-only |
-| Metrics rollup / UTC day | event payloads for that day, appended by a SQLite trigger; metrics reads visit one rollup row per requested day |
+| Metrics rollup / (UTC day, 256-event shard) | copies of that shard's events, appended by a SQLite trigger and seeded once from existing events when the table is created; metrics reads visit only the rollup rows of the requested days plus the prior day |
 | Request / `(principalId, route, idempotencyKey)` | requestDigest, response/status; same key with different body returns `409`; rows expire after 24 hours, with at most 64 deletions per recorded mutation. Empty runner polls returning 204 and job heartbeats create no replay row. |
 
 Changes transition `draft -> ready -> queued -> checking -> merged`, with side states `blocked`, `superseded`, and `closed`. A new head increments revision and invalidates queue jobs and any verdict whose manifest no longer matches. Only the queue can set `merged`, after canonical readback. Old revisions, findings, and intent history remain readable.

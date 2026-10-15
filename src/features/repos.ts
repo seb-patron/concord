@@ -11,11 +11,6 @@ import { storedJob, withJobPolicy } from '../jobs/policy';
 import { humanApprovalStatus } from './verdicts';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
-const snapshotHistory = <T>(items: T[], isLive: (item: T) => boolean): T[] => {
-  const terminal = items.filter(item => !isLive(item));
-  const retained = new Set(terminal.slice(-50));
-  return items.filter(item => isLive(item) || retained.has(item));
-};
 const page = <T>(items: T[], request: Request) => {
   const offset = parseCursor(new URL(request.url).searchParams.get('cursor'));
   const selected = items.slice(offset, offset + 100);
@@ -799,8 +794,6 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (!seedRemote || !canonicalRemote) fail(409, 'STORAGE_NOT_READY', 'Storage remote is not ready');
   const existing = context.state.get<BootstrapPending>('bootstrap');
   if (existing) {
-    if (Number.isSafeInteger(body.expectedVersion) && body.expectedVersion !== context.version())
-      throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: context.version() });
     if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName || Boolean(existing.withHistory) !== Boolean(body.withHistory)) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
     if (existing.status === 'requested') {
       const status = context.call('queue.bootstrapStatus');
@@ -827,11 +820,7 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (!existing) {
     const requestDigest = await digest({ kind: 'ensure-repo', storageName: scratchStorageName });
     context.transaction(() => {
-      if (context.state.get<BootstrapPending>('bootstrap')) {
-        if (Number.isSafeInteger(body.expectedVersion) && body.expectedVersion !== context.version())
-          throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: context.version() });
-        fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
-      }
+      if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
       context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, withHistory: body.withHistory === true, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
       saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
     });
@@ -991,7 +980,7 @@ export const repos: FeatureModule = {
   ],
   snapshot: context => ({ repo: context.state.get<Repo>('repo'),
     unitPolicy: context.trusted.policies[context.state.get<Repo>('repo')?.policyId ?? ''],
-    branches: list<Branch>(context, 'branches'), changes: snapshotHistory(list<Change>(context, 'changes'), change => !['merged', 'closed'].includes(change.status)).map(change => ({ ...changeResponse(change), ...(['merged', 'closed'].includes(change.status)
+    branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(change => ({ ...changeResponse(change), ...(['merged', 'closed'].includes(change.status)
       ? { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null }
       : humanApprovalStatus(context, change.changeId, change.revision)) })),
     provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),

@@ -204,10 +204,11 @@ export function getVerdicts(repoId, changeId, cursor = null, fetchImpl) {
     {}, typeof cursor === 'function' ? cursor : fetchImpl);
 }
 
-export function getSnapshot(repoId, fetchImpl, includeHistory = false) {
+/** Share an in-flight read unless the caller needs one that starts after its mutation (shareInflight false). */
+export function getSnapshot(repoId, fetchImpl, includeHistory = false, shareInflight = true) {
   const repoKey = encodeURIComponent(repoId);
   const key = `${repoKey}:${includeHistory ? 'history' : 'bounded'}`;
-  if (snapshotInflight.has(key)) return snapshotInflight.get(key);
+  if (shareInflight && snapshotInflight.has(key)) return snapshotInflight.get(key);
   const cached = snapshotCache.get(key);
   let etag = null;
   const path = `/v1/repos/${repoKey}/snapshot${includeHistory ? '?history=1' : ''}`;

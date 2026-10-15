@@ -339,7 +339,7 @@ function projection(context: ModuleContext, cursor: LeaseCursor | null = null) {
   const position = cursor ? [cursor.createdAt, cursor.createdAt, cursor.leaseId] : [];
   const page: Array<LeaseRow & { live_rank: 0 | 1 }> = [];
   if (cursor?.phase !== 1) {
-    const afterLive = cursor ? 'AND (created_at < ? OR (created_at = ? AND lease_id < ?))' : '';
+    const afterLive = cursor ? 'AND created_at <= ? AND (created_at < ? OR lease_id < ?)' : '';
     const liveArgs: (string | number)[] = [now];
     if (cursor) liveArgs.push(...position);
     liveArgs.push(101);
@@ -350,7 +350,7 @@ function projection(context: ModuleContext, cursor: LeaseCursor | null = null) {
   }
   if (page.length < 101) {
     const terminalAfter = cursor?.phase === 1
-      ? 'AND (created_at < ? OR (created_at = ? AND lease_id < ?))' : '';
+      ? 'AND created_at <= ? AND (created_at < ? OR lease_id < ?)' : '';
     const terminalArgs: (string | number)[] = [maxVersion, serverTime];
     if (terminalAfter) terminalArgs.push(...position);
     terminalArgs.push(101 - page.length);

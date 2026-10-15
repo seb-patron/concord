@@ -247,7 +247,8 @@ async function loadRepo(gen = state.generation, resetSelection = true) {
   if (resetSelection) { $('action-panel').replaceChildren(); $('action-panel').dataset.changeId = ''; }
   render();
   try {
-    const body = await getSnapshot(state.repoId);
+    // A refresh after a mutation must not reuse a read that started before it.
+    const body = await getSnapshot(state.repoId, undefined, false, resetSelection);
     if (gen !== state.generation) return;
     if (!acceptSnapshot(body, state.repoId)) { render(); return false; }
     state.connected = true;

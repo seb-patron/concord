@@ -21,8 +21,9 @@ async function clientFor(input?: ConcordClient): Promise<ConcordClient> {
 async function get(client: ConcordClient, path: string): Promise<Envelope> { return client.request('GET', path); }
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 // A pending queue promotion briefly freezes every repository mutation with 409 PROMOTION_IN_PROGRESS.
-// Retry for about ten seconds, re-reading the coordinator version that the promotion advances.
-async function post(client: ConcordClient, path: string, body: Obj, version?: number, sleep: (ms: number) => Promise<void> = pause): Promise<Envelope> {
+// Retry 19 times, waiting 500 ms and doubling up to 8 s (about two minutes in all), re-reading the
+// coordinator version that the promotion advances.
+export async function post(client: ConcordClient, path: string, body: Obj, version?: number, sleep: (ms: number) => Promise<void> = pause): Promise<Envelope> {
   let delay = 500;
   for (let attempt = 0; ; attempt++) {
     try { return await client.request('POST', path, { body, expectedVersion: version, idempotencyKey: idempotencyKey() }); }
@@ -164,8 +165,8 @@ export async function renewByIntent(input: RenewOptions): Promise<Obj> {
   const { repo, intentKey } = input;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(repo) || !keyPattern.test(intentKey))
     throw new ConcordError('valid --repo and --intent-key are required', 'usage');
-  if (input.every !== undefined && (!Number.isSafeInteger(input.every) || input.every < 1 || input.every > 3600))
-    throw new ConcordError('--every must be an integer from 1 to 3600 seconds', 'usage');
+  if (input.every !== undefined && (!Number.isSafeInteger(input.every) || input.every < 10 || input.every > 3600))
+    throw new ConcordError('--every must be an integer from 10 to 3600 seconds', 'usage');
   if (input.whilePid !== undefined && (!Number.isSafeInteger(input.whilePid) || input.whilePid < 1))
     throw new ConcordError('--while-pid must be a positive process ID', 'usage');
   const ttlSeconds = holdSeconds(input.hold ?? '5m');
@@ -220,7 +221,7 @@ export async function renewByIntent(input: RenewOptions): Promise<Obj> {
         if (!retryable) throw error;
         // A heartbeat can recover from transport failures and promotion freezes on its next round.
       }
-      if (!stopped) await Promise.race([sleep(Math.max(input.every, 10) * 1000), new Promise<void>(resolve => { wake = resolve; })]);
+      if (!stopped) await Promise.race([sleep(input.every * 1000), new Promise<void>(resolve => { wake = resolve; })]);
       wake = undefined;
     }
     return last;

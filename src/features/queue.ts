@@ -442,7 +442,7 @@ function queueProjection(state: QueueState) {
   const stackAdmissionIds = activeRecord?.admissionIds ?? state.ticket?.admissionIds ?? [];
   return {
     generation: state.generation, observedMain: state.observedMain,
-    entries: ordered({ ...state, entries: snapshotQueueEntries(state.entries) }).map(entry => ({ ...entry, stackMember: stackAdmissionIds.includes(entry.entryId) })),
+    entries: ordered(state).map(entry => ({ ...entry, stackMember: stackAdmissionIds.includes(entry.entryId) })),
     contests: state.contests, promotion: state.ticket, bootstrap: state.bootstrap,
     activeStackJobId: state.activeStackJobId, stackMembers: stackIds, diagnosis: state.diagnosis,
     blameConfidence: state.diagnosis?.reason === 'SINGLETON' ? 'reproduced-singleton'
@@ -450,12 +450,6 @@ function queueProjection(state: QueueState) {
     diagnosticResults: state.diagnosticResults, finalCanonicalOid: state.finalCanonicalOid,
     blockedReason: state.blockedReason,
   };
-}
-function snapshotQueueEntries(entries: Entry[]): Entry[] {
-  const liveStates = new Set(['admitted', 'reserved', 'checking']);
-  const terminal = entries.filter(entry => !liveStates.has(entry.state));
-  const recent = new Set(terminal.slice(-50));
-  return entries.filter(entry => liveStates.has(entry.state) || recent.has(entry));
 }
 function protectedQueueProjection(context: ModuleContext) {
   const projection = queueProjection(read(context));

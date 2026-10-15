@@ -33,12 +33,12 @@ function boundedSnapshot(projections: Record<string, any>): Record<string, any> 
   }
   const queueProjection = projections.queue;
   if (queueProjection && Array.isArray(queueProjection.entries)) {
-    const bounded = keepOpenAndRecent(queueProjection.entries, item => ['admitted', 'reserved', 'checking'].includes(item.state));
+    const bounded = keepOpenAndRecent(queueProjection.entries, item => ['admitted', 'reserved', 'checking', 'blocked'].includes(item.state));
     queueProjection.entries = bounded.items; queueProjection.olderEntries = bounded.olderCount;
   }
   const runners = projections.runners;
   if (runners && Array.isArray(runners.jobs)) {
-    const bounded = keepOpenAndRecent(runners.jobs, item => ['pending', 'claimed'].includes(item.state));
+    const bounded = keepOpenAndRecent(runners.jobs, item => ['pending', 'claimed', 'blocked'].includes(item.state));
     runners.jobs = bounded.items; runners.olderJobs = bounded.olderCount;
   }
   const issues = projections.issues;
@@ -322,17 +322,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         return response;
       };
       if (!mutation) return await dispatch();
-      // Run catalog and Artifacts operations outside the exclusive section. Other
-      // handlers remain serialized so their expected-version checks stay atomic.
-      const networkBound = moduleRoute.module.name === 'repos' && (
-        url.pathname === '/v1/repos' || /\/v1\/repos\/[^/]+\/(?:branches|changes|bootstrap|git-token)$/.test(url.pathname) ||
-        /\/v1\/repos\/[^/]+\/changes\/[^/]+\/(?:publish|close)$/.test(url.pathname));
-      const asFailureResponse = (error: unknown) => failure(error instanceof HttpError
-        ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'));
-      if (networkBound) {
-        try { return await dispatch(); }
-        catch (error) { return asFailureResponse(error); }
-      }
+      // Keep the final freeze read and the whole handler exclusive across async yields.
       const result = await this.ctx.blockConcurrencyWhile(async () => {
         const serialize = async (response: Response) => {
           const headers: [string, string][] = [];
@@ -340,7 +330,7 @@ export class RepoCoordinator extends DurableObject<Env> {
           return { status: response.status, headers, body: response.status === 204 ? null : await response.text() };
         };
         try { return await serialize(await dispatch()); }
-        catch (error) { return await serialize(asFailureResponse(error)); }
+        catch (error) { return await serialize(failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'))); }
       });
       return new Response(result.body, { status: result.status, headers: result.headers });
     } catch (error) {
