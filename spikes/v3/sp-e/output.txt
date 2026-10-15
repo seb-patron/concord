@@ -1,0 +1,41 @@
+Method: git diff --unified=0 funcname heading vs tree-sitter enclosing function name
+Parser packages: tree-sitter=0.25.2, tree-sitter-rust=0.24.2, tree-sitter-cpp=0.23.4, tree-sitter-python=0.25.0, tree-sitter-typescript=0.23.2
+TypeScript xfuncname: ^[[:space:]]*(export[[:space:]]+)?function[[:space:]]+[[:alnum:]_]+
+History: up to 300 newest non-merge commits; first parent diff; read-only local clones
+Rates use all hunks as denominator; agreement is also reported over hunks with both names.
+Widened means no Git key, or before/after syntax-tree names absent or changed; file fallback.
+Timing amortizes Git diff plus heading extraction per hunk; tree-sitter includes blob reads, parsing, and lookup.
+repo	language	hunks	agreement/all	agreement/both	widened git	widened tree-sitter	wrong symbol	no symbol	ms/diff git	ms/diff tree-sitter
+
+[concord] commits_walked=263
+concord	rust	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+concord	cpp	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+concord	python	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+concord	typescript	3669	6.759%	30.355%	79.231%	59.962%	15.372%	77.732%	1.1385	9.3073
+
+[mwcc-rs] commits_walked=300
+mwcc-rs	rust	6033	54.964%	83.400%	42.632%	41.356%	9.780%	34.096%	0.8898	5.5787
+mwcc-rs	cpp	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+mwcc-rs	python	841	64.566%	79.853%	25.446%	25.327%	14.863%	19.144%	0.9321	5.0964
+mwcc-rs	typescript	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+
+[gen-v-decomp] commits_walked=300
+gen-v-decomp	rust	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+gen-v-decomp	cpp	15	0.000%	0.000%	100.000%	100.000%	0.000%	100.000%	0.7737	8.0836
+gen-v-decomp	python	2063	50.509%	77.415%	41.348%	41.057%	14.106%	34.755%	1.8523	7.6927
+gen-v-decomp	typescript	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+
+[gen-v-research-tools] commits_walked=282
+gen-v-research-tools	rust	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+gen-v-research-tools	cpp	51	60.784%	88.571%	33.333%	33.333%	7.843%	31.373%	0.6778	9.2331
+gen-v-research-tools	python	3379	54.602%	83.371%	41.403%	41.284%	10.240%	34.507%	0.9171	8.2079
+gen-v-research-tools	typescript	0	0.000%	0.000%	0.000%	0.000%	0.000%	0.000%	0.0000	0.0000
+
+DISAGREEMENT_EXAMPLES
+mwcc-rs	rust	c27af3a8f01a	crates/mwcc-driver/tests/init_r1_checks.rs	expected_rejection_profile	expected_rejection_diagnostics
+gen-v-research-tools	cpp	eef3e9ddafe1	adapter/main.cpp	readProbe	emitRamDigestPage
+mwcc-rs	python	b6df12d8d63a	tests/test_corpus_pipeline.py	fake_scorer	test_score_only_writes_full_tu_budget_list
+concord	typescript	07832bb5577f	src/features/repos.ts	changeInput	changeCreate
+concord	typescript	b02d3ae99eb3	cli/git-token.ts	currentVersion	mintGitToken
+
+Repositories measured: 4; all hunk and timing data above are local observations.
