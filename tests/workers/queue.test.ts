@@ -2062,3 +2062,136 @@ describe('queue state machine', () => {
       .toEqual({ status: 'blocked', reason: 'NON_COMPARABLE_PROFILE' });
   });
 });
+
+describe('queue alarms only for real deadlines', () => {
+  const coordinator = (h: Harness) => env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+  const alarmAt = (h: Harness) => runInDurableObject<RepoCoordinator, number | null>(coordinator(h),
+    (_instance, durable) => durable.storage.getAlarm());
+  // Drives queue.onAlarm on a test clock until nextDeadline stops asking for a wake; returns each delay.
+  const runUntilIdle = (h: Harness, start: number) => runInDurableObject<RepoCoordinator, number[]>(coordinator(h), async instance => {
+    const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+    const context = internal.context('queue', principal, h.repoId);
+    let now = start;
+    Object.defineProperty(context, 'now', { value: () => now });
+    const delays: number[] = [];
+    for (let wake = 0; wake < 200; wake++) {
+      await queue.onAlarm(context);
+      const next = queue.nextDeadline(context);
+      if (next === null) break;
+      delays.push(next - now);
+      now = next;
+    }
+    return delays;
+  });
+  const day = 24 * 60 * 60_000;
+  async function bootstrapSeed(h: Harness): Promise<BootstrapHandoff> {
+    await h.fetch('/queue');
+    await h.seed(`canonical-${h.repoId}`, null);
+    await h.seed(`scratch-${h.repoId}`, null);
+    await h.seed(`seed-${h.repoId}`, null);
+    await h.put(`seed-${h.repoId}`, 'refs/heads/seed', oid('a'));
+    return { seedStorageName: `seed-${h.repoId}`, seedRef: 'refs/heads/seed', headOid: oid('a'),
+      canonicalStorageName: `canonical-${h.repoId}`, scratchStorageName: `scratch-${h.repoId}`,
+      policyId: 'local-demo', profileId: 'local-demo' };
+  }
+
+  it('sets no alarm while a stack job waits for a checker and resumes when a runner posts its result', async () => {
+    const h = await setup('A');
+    expect(await alarmAt(h)).not.toBeNull();
+    await h.tick();
+    expect((await h.state()).activeStackJobId).toBe(h.jobs[0].jobId);
+    expect(await alarmAt(h)).toBeNull();
+    await deliverChecked(h, h.jobs[0], 'PASS');
+    const resumed = await alarmAt(h);
+    expect(resumed).not.toBeNull();
+    expect(resumed!).toBeLessThanOrEqual(Date.now() + 1000);
+    await h.tick(false);
+    const promotion = (await h.state()).promotion;
+    expect(promotion).toMatchObject({ state: 'pending', memberIds: ['A'] });
+    expect(await alarmAt(h)).toBe(promotion.createdAt + 60_000);
+  });
+
+  it('sets no alarm while a bootstrap check waits for a checker', async () => {
+    const h = harness;
+    expect((await h.bootstrap(await bootstrapSeed(h))).status).toBe('eligible');
+    await h.tick();
+    const state = await h.state();
+    expect(state.bootstrap.state).toBe('checking');
+    expect(state.activeStackJobId).toBe(h.jobs[0].jobId);
+    expect(await alarmAt(h)).toBeNull();
+  });
+
+  it('backs off a profile-blocked bootstrap, gives up after a day, and restarts on re-pin', async () => {
+    const h = harness;
+    const seed = await bootstrapSeed(h);
+    expect((await h.bootstrap(seed)).status).toBe('eligible');
+    const config = localFixtureConfig('local');
+    config.profiles['local-demo'].digest = `sha256:${'b'.repeat(64)}`;
+    (env as Env).TRUSTED_CONFIG = JSON.stringify(config);
+    const delays = await runUntilIdle(h, Date.now());
+    expect(delays.slice(0, 6)).toEqual([60_000, 120_000, 240_000, 480_000, 900_000, 900_000]);
+    expect(delays.every(delay => delay <= 900_000)).toBe(true);
+    expect(delays.reduce((total, delay) => total + delay, 0)).toBeGreaterThanOrEqual(day);
+    expect(delays.length).toBeLessThan(110);
+    await h.tick(false);
+    expect(await alarmAt(h)).toBeNull();
+    const blocked = await h.queueData();
+    expect(blocked).toMatchObject({ blockedReason: 'PROFILE_CHANGED', coalesceUntil: null,
+      bootstrap: { state: 'waiting', blockedReason: 'PROFILE_CHANGED' } });
+    expect(blocked.alarmRetry.at).toBeNull();
+    expect((await h.bootstrap({ ...seed, repin: true, jobId: 'repinned-bootstrap' })).status).toBe('eligible');
+    const repinned = await h.queueData();
+    expect(repinned.alarmRetry).toBeUndefined();
+    expect(repinned.coalesceUntil).not.toBeNull();
+    await h.tick(false);
+    expect((await h.state()).bootstrap).toMatchObject({ state: 'checking', jobId: 'repinned-bootstrap' });
+    expect(await alarmAt(h)).toBeNull();
+  });
+
+  it('re-reads main for a reconcile ticket on a bounded backoff and still lands on a later promoter result', async () => {
+    const h = await setup('A');
+    await h.tick(); await h.deliver(h.jobs[0], 'PASS'); await h.tick();
+    expect((await h.state()).promotion.state).toBe('pending');
+    await h.ageTicket(61_000); await h.tick(false);
+    expect((await h.state()).promotion).toMatchObject({ state: 'reconcile', reconciliation: 'AMBIGUOUS_OLD_OID', retryIssued: true });
+    const promotions = h.jobs.filter(job => job.kind === 'promote');
+    expect(promotions.map(job => job.state)).toEqual(['pending', 'pending']);
+    const recheck = (await h.queueData()).recheck;
+    expect(recheck.delayMs).toBe(10_000);
+    expect(await alarmAt(h)).toBe(recheck.at);
+    const delays = await runUntilIdle(h, recheck.at);
+    expect(delays.slice(0, 8)).toEqual([20_000, 40_000, 80_000, 160_000, 320_000, 640_000, 900_000, 900_000]);
+    expect(recheck.at - recheck.since + delays.reduce((total, delay) => total + delay, 0)).toBeGreaterThanOrEqual(day);
+    expect(delays.length).toBeLessThan(110);
+    expect((await h.queueData()).recheck.at).toBeNull();
+    await h.tick(false);
+    expect(await alarmAt(h)).toBeNull();
+    const events = (await h.fetch('/events')).body.data.items;
+    expect(events.filter((event: any) => event.kind === 'queue.blocked' && event.payload.reason === 'RECONCILE_TIMEOUT')).toHaveLength(1);
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', oid('e'), main)).toBe(true);
+    expect((await h.promoteResult(promotions[1], 'APPLIED', oid('e'))).status).toBe('eligible');
+    await h.tick(false);
+    expect((await h.state()).promotion.state).toBe('applied');
+    expect((await h.state()).entries[0].state).toBe('landed');
+  });
+
+  it('skips the canonical ref read when an alarm finds no queue work', async () => {
+    const h = await setup('A');
+    await runInDurableObject<RepoCoordinator, void>(coordinator(h), instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const state = context.state.get<any>('data');
+      state.entries[0].state = 'landed';
+      state.coalesceUntil = null;
+      context.state.put('data', state);
+    });
+    let reads = 0;
+    FakeStorage.prototype.resolveRef = async function (this: FakeStorage, ...args: Parameters<FakeStorage['resolveRef']>) {
+      reads++;
+      return originalStorageResolveRef.apply(this, args);
+    };
+    await h.tick(false);
+    expect(reads).toBe(0);
+    expect(await alarmAt(h)).toBeNull();
+  });
+});

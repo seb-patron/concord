@@ -61,6 +61,24 @@ interface QueueState {
     jobId: Id; memberIds: Id[]; outcome: string; composedOid: string | null; sequence: number;
   }>;
   finalCanonicalOid: string | null; coalesceUntil: number | null; blockedReason: string | null; dispatchCaseId?: string;
+  /** Failing alarm ticks: the only queue wake while set; `at` is null once retries gave up. */
+  alarmRetry?: Backoff | null;
+  /** Bounded canonical main re-reads for a promotion in reconcile. */
+  recheck?: Backoff | null;
+}
+interface Backoff { key: string; since: number; delayMs: number; at: number | null }
+const PROMOTION_TIMEOUT_MS = 60_000;
+const RETRY_FIRST_MS = 10_000;
+const RETRY_MAX_MS = 15 * 60_000;
+const RETRY_GIVE_UP_MS = 24 * 60 * 60_000;
+/** Doubles a time-based retry up to 15 minutes and gives up (at: null) after a day of the same key. */
+function backoff(previous: Backoff | null | undefined, key: string, now: number, firstMs = RETRY_FIRST_MS): Backoff {
+  const same = previous?.key === key ? previous : null;
+  if (!same) return { key, since: now, delayMs: firstMs, at: now + firstMs };
+  if (same.at === null || now < same.at) return same;
+  if (now - same.since >= RETRY_GIVE_UP_MS) return { ...same, at: null };
+  const delayMs = Math.min(same.delayMs * 2, RETRY_MAX_MS);
+  return { ...same, delayMs, at: now + delayMs };
 }
 const empty = (): QueueState => ({
   generation: 0, observedMain: null, entries: [], jobs: [], contests: [], ticket: null, bootstrap: null,
@@ -73,6 +91,8 @@ const storedState = (state: QueueState) => ({
 });
 const alarmStateAtStart = new WeakMap<ModuleContext, string>();
 const save = (context: ModuleContext, state: QueueState) => {
+  // A request that changes the queue (enqueue, withdraw, re-pin, a runner result) restarts any alarm retry.
+  if (!alarmStateAtStart.has(context)) delete state.alarmRetry;
   const stored = storedState(state);
   if (alarmStateAtStart.get(context) === JSON.stringify(stored)) return;
   context.state.put('data', stored);
@@ -602,9 +622,9 @@ function bootstrapHandoff(context: ModuleContext, input: BootstrapHandoff): Gate
       const stackId = crypto.randomUUID();
       state.bootstrap = { input: { ...input, repin: undefined }, stackId, jobId: input.jobId!, createdAt: context.now(),
         state: 'waiting', blockedReason: null, policyDigest: policy.digest, profileDigest: profile.digest };
+      // bump's coalesce deadline is what wakes the alarm to schedule the re-pinned job.
       bump(context, state, 'BOOTSTRAP_REPINNED', [stackId]);
       state.blockedReason = null;
-      state.coalesceUntil = null;
       emit(context, 'repo.bootstrap.repinned', [stackId], { oldJobId: old.jobId, jobId: input.jobId,
         oldPolicyDigest: previous.policyDigest, newPolicyDigest: policy.digest,
         oldProfileDigest: previous.profileDigest, newProfileDigest: profile.digest });
@@ -965,7 +985,7 @@ function reconcileTicket(context: ModuleContext, state: QueueState, observed: st
   if (observed !== ticket.expectedOldOid) {
     ticket.state = 'reconcile'; ticket.reconciliation = 'THIRD_OID';
   } else if (results.some(result => result?.outcome === 'ENV_ERROR' || result?.outcome === 'THIRD_REF')
-    || context.now() - ticket.createdAt >= 60_000) {
+    || context.now() - ticket.createdAt >= PROMOTION_TIMEOUT_MS) {
     ticket.state = 'reconcile'; ticket.reconciliation = 'AMBIGUOUS_OLD_OID';
   }
   if (ticket.state === 'reconcile' && state.blockedReason !== ticket.reconciliation) {
@@ -1043,10 +1063,32 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
   await processStackResult(context, state, record, result, main);
 }
 
+/** Only an operator can move main out of a reconcile, so the ticket re-reads main on a bounded backoff.
+ * Giving up leaves it frozen in reconcile; a promoter result still wakes the queue. */
+function recheckReconcile(context: ModuleContext, state: QueueState): void {
+  const ticket = state.ticket;
+  if (!ticket || ticket.state !== 'reconcile') return;
+  const recheck = backoff(state.recheck, `${ticket.promotionId}:${ticket.reconciliation}`, context.now());
+  if (recheck.at === null && recheck !== state.recheck) {
+    emit(context, 'queue.blocked', ticket.memberIds, { reason: 'RECONCILE_TIMEOUT', promotionId: ticket.promotionId,
+      reconciliation: ticket.reconciliation });
+  }
+  state.recheck = recheck;
+}
+const hasQueueWork = (state: QueueState) => state.coalesceUntil !== null
+  || state.jobs.some(record => record.result && !record.consumed)
+  || !!state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)
+  || !!state.bootstrap && ['waiting', 'checking'].includes(state.bootstrap.state)
+  || state.entries.some(active) || state.contests.some(contest => contest.state === 'open');
+
 async function queueAlarmTick(context: ModuleContext, state: QueueState): Promise<void> {
+  // Another module's alarm with no queue work: skip the billed canonical ref read.
+  if (!hasQueueWork(state)) return;
   const canonicalName = state.ticket?.canonicalStorageName
     ?? state.bootstrap?.input.canonicalStorageName ?? state.entries[0]?.canonicalStorageName;
   if (!canonicalName) return;
+  // A due coalesce deadline is consumed here; whatever this tick decides sets the next one.
+  if (state.coalesceUntil !== null && state.coalesceUntil <= context.now()) state.coalesceUntil = null;
   const main = await context.storage.resolveRef(canonicalName, 'refs/heads/main');
   if (state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)) {
     for (const jobId of state.ticket.jobIds) {
@@ -1062,6 +1104,7 @@ async function queueAlarmTick(context: ModuleContext, state: QueueState): Promis
     }
     reconcileTicket(context, state, main);
     await retryAmbiguousPromotion(context, state, main);
+    recheckReconcile(context, state);
     save(context, state);
     return;
   }
@@ -1076,6 +1119,8 @@ async function queueAlarmTick(context: ModuleContext, state: QueueState): Promis
   const pendingResult = state.jobs.find(record => record.result && !record.consumed);
   if (pendingResult) {
     await processRecordedResult(context, state, pendingResult, main);
+    // A consumed result may free waiting entries; look once more instead of polling.
+    state.coalesceUntil ??= context.now();
     save(context, state);
     return;
   }
@@ -1120,7 +1165,8 @@ async function queueAlarmTick(context: ModuleContext, state: QueueState): Promis
   const comparable = waiting.filter(entry => entry.policyId === anchor.policyId && entry.profileId === anchor.profileId
     && entry.canonicalStorageName === anchor.canonicalStorageName && entry.scratchStorageName === anchor.scratchStorageName);
   const selected = selectStack(comparable, available, STACK_WIDTH);
-  if (selected.length === 0) { state.coalesceUntil = context.now() + 10_000; save(context, state); return; }
+  // Prerequisites are still in flight or need a withdrawal; their result or that request reschedules.
+  if (selected.length === 0) { save(context, state); return; }
   const job = await makeStackJob(context, state, selected, false);
   context.transaction(() => {
     schedule(context, state, job, 'stack', selected);
@@ -1147,31 +1193,34 @@ export const queue: FeatureModule = {
       ? 'unavailable' : 'ready';
     return { status, ...protectedQueueProjection(context) };
   },
+  // Only real time-based work sets a deadline. Waiting on a checker or promoter sets none: their
+  // poll, heartbeat and result requests reschedule the alarm when they act.
   nextDeadline: context => {
     const state = read(context);
+    if (state.alarmRetry) return state.alarmRetry.at;
     if (state.blockedReason && state.coalesceUntil !== null && state.coalesceUntil > context.now()) return state.coalesceUntil;
     if (state.jobs.some(record => record.result && !record.consumed)) return context.now() + 1;
-    if (state.ticket && ['pending', 'reconcile'].includes(state.ticket.state)) return context.now() + 10_000;
-    if (state.contests.some(contest => contest.state === 'open')) {
-      const unscheduled = state.contests.some(contest => contest.state === 'open'
-        && contest.childIds.some(id => !state.jobs.some(record => record.purpose === 'contest'
-          && record.contestId === contest.contestId && record.memberIds[0] === id)));
-      return unscheduled && state.coalesceUntil !== null
-        ? Math.max(context.now() + 1, state.coalesceUntil) : context.now() + 10_000;
+    const ticket = state.ticket;
+    if (ticket && ['pending', 'reconcile'].includes(ticket.state)) {
+      if (ticket.state === 'pending') return ticket.createdAt + PROMOTION_TIMEOUT_MS;
+      return state.recheck?.key === `${ticket.promotionId}:${ticket.reconciliation}` ? state.recheck.at : null;
     }
-    if (state.bootstrap?.state === 'waiting' || state.entries.some(entry => entry.state === 'reserved')) {
-      return state.coalesceUntil !== null
-        ? Math.max(context.now() + 1, state.coalesceUntil) : context.now() + 10_000;
+    if (state.coalesceUntil !== null && (state.bootstrap?.state === 'waiting'
+      || state.entries.some(entry => entry.state === 'reserved') || state.contests.some(contest => contest.state === 'open'))) {
+      return Math.max(context.now() + 1, state.coalesceUntil);
     }
-    if (state.activeStackJobId) return context.now() + 10_000;
     return null;
   },
   onAlarm: async context => {
     const state = read(context);
     alarmStateAtStart.set(context, JSON.stringify(storedState(state)));
     try {
-      try { await queueAlarmTick(context, state); }
-      catch (error) {
+      try {
+        await queueAlarmTick(context, state);
+        // A due (or abandoned) retry ends once a tick gets through.
+        const retry = state.alarmRetry;
+        if (retry && (retry.at === null || retry.at <= context.now())) { delete state.alarmRetry; save(context, state); }
+      } catch (error) {
         const state = read(context);
         const reason = error instanceof HttpError ? error.code : 'QUEUE_ALARM_ERROR';
         if (state.coalesceUntil !== null && state.coalesceUntil > context.now() && state.bootstrap
@@ -1184,7 +1233,10 @@ export const queue: FeatureModule = {
         }
         state.blockedReason = reason;
         if (state.bootstrap && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)) state.bootstrap.blockedReason = reason;
-        state.coalesceUntil = context.now() + (['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason) && state.bootstrap ? 60_000 : 10_000);
+        // Back off and give up after a day; a re-pin, enqueue, withdrawal or runner result restarts it.
+        state.alarmRetry = backoff(state.alarmRetry, reason, context.now(),
+          ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason) && state.bootstrap ? 60_000 : RETRY_FIRST_MS);
+        state.coalesceUntil = state.alarmRetry.at;
         emit(context, 'queue.alarm_deferred', [], { reason, retryAt: state.coalesceUntil });
         save(context, state);
       }
