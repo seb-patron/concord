@@ -15,22 +15,29 @@ const errorCopy = error => error?.status === 404 ? 'Not found on canonical main.
 
 /** Small Markdown subset. Text nodes keep raw HTML inert. */
 function renderSafeMarkdown(target, source) {
+  const doc = target.ownerDocument;
   target.replaceChildren();
   let list = null;
   let code = null;
   for (const line of String(source ?? '').split(/\r?\n/)) {
-    if (line.startsWith('```')) { code = code ? null : target.appendChild(document.createElement('pre')); list = null; continue; }
+    if (line.startsWith('```')) { code = code ? null : target.appendChild(doc.createElement('pre')); list = null; continue; }
     if (code) { code.textContent += `${line}\n`; continue; }
     if (!line.trim()) { list = null; continue; }
     const heading = /^(#{1,3})\s+(.+)$/.exec(line);
-    if (heading) { const h = document.createElement(`h${heading[1].length}`); h.textContent = heading[2]; target.append(h); list = null; continue; }
+    if (heading) { const h = doc.createElement(`h${heading[1].length}`); h.textContent = heading[2]; target.append(h); list = null; continue; }
     const bullet = /^[-*]\s+(.+)$/.exec(line);
-    if (bullet) { if (!list) { list = document.createElement('ul'); target.append(list); } const li = document.createElement('li'); li.textContent = bullet[1]; list.append(li); continue; }
-    const paragraph = document.createElement('p'); paragraph.textContent = line; target.append(paragraph); list = null;
+    if (bullet) { if (!list) { list = doc.createElement('ul'); target.append(list); } const li = doc.createElement('li'); li.textContent = bullet[1]; list.append(li); continue; }
+    const paragraph = doc.createElement('p'); paragraph.textContent = line; target.append(paragraph); list = null;
   }
 }
 
 export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoReadme }, selectChange = null) {
+  const element = (tag, value, className) => {
+    const node = root.ownerDocument.createElement(tag);
+    if (value !== undefined) node.textContent = String(value);
+    if (className) node.className = className;
+    return node;
+  };
   let repoId = null;
   let oid = null;
   let path = '';
@@ -51,6 +58,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
   let cloneOpen = false;
   let cloneTab = 'Git';
   const expandedChanges = new Set();
+  const codeReadCache = new Map();
   const button = (label, action, className) => { const b = element('button', label, className); b.type = 'button'; b.addEventListener('click', action); return b; };
   const card = (title, className = '') => { const section = element('section', undefined, `repo-card ${className}`); section.setAttribute('aria-label', title); section.append(element('h2', title)); return section; };
   const held = () => array(snapshot?.data?.projections?.leases?.heldItems ?? snapshot?.data?.projections?.leases?.items)
@@ -140,18 +148,18 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
       const focusable = [...root.querySelectorAll('.clone-panel button')];
       if (!focusable.length) return;
       const first = focusable[0], last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      if (event.shiftKey && root.ownerDocument.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && root.ownerDocument.activeElement === last) { event.preventDefault(); first.focus(); }
     }
   }
-  document.addEventListener('keydown', onCloneKey);
+  root.ownerDocument.addEventListener('keydown', onCloneKey);
   function draw() {
     root.replaceChildren();
     if (!repoId) { root.append(element('p', 'Choose a repository to view its code.')); return; }
     const top = element('div', undefined, 'repo-toolbar');
     const group = element('div', undefined, 'repo-audience'); group.setAttribute('role', 'group'); group.setAttribute('aria-label', 'Audience');
     for (const [value, label] of [['human', 'For humans'], ['agent', 'For agents']]) {
-      const control = button(label, () => { audience = value; selectedFile = null; draw(); });
+      const control = button(label, () => { audience = value; selectedFile = null; draw(); if (value === 'agent' && !docs.length && repoId) void load(); });
       control.setAttribute('aria-pressed', String(audience === value)); group.append(control);
     }
     top.append(group, element('span', audience === 'human' ? 'README, files and activity, written for humans.' : 'Repository snapshot (GET /snapshot, what repo_context fetches; MCP also redacts registered secrets).', 'repo-note'));
@@ -314,6 +322,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     const readFailure = settled => settled.status === 'rejected' && settled.reason?.status !== 404 ? errorCopy(settled.reason) : null;
     const rootResult = await Promise.allSettled([readWithRetry(() => api.getRepoTree(currentRepo, path, currentOid))]).then(items => items[0]);
     if (run !== generation) return;
+    if (rootResult.status === 'rejected' && rootResult.reason?.status === 404 && path) { path = ''; return load(); }
     if (rootResult.status === 'fulfilled') {
       tree = array(rootResult.value.data.entries);
       unitFiles = rootResult.value.data.unitFiles ?? {};
@@ -321,22 +330,35 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
     } else error = errorCopy(rootResult.reason);
     const resolvedOid = rootResult.status === 'fulfilled' ? rootResult.value.data.oid : currentOid;
     if (resolvedOid) oid = resolvedOid;
-    const result = await Promise.allSettled([
-      readWithRetry(() => api.getRepoReadme(currentRepo, resolvedOid)), readWithRetry(() => api.getRepoTree(currentRepo, 'agents', resolvedOid)), readWithRetry(() => api.getRepoFile(currentRepo, 'AGENTS.md', resolvedOid)),
-    ]);
-    if (run !== generation) return;
-    readme = result[0].status === 'fulfilled' ? result[0].value.data : null;
-    readmeError = readFailure(result[0]);
-    const paths = result[1].status === 'fulfilled' ? array(result[1].value.data.entries).filter(entry => entry.type === 'blob' && entry.name.endsWith('.md')).slice(0, 20).map(entry => `agents/${entry.name}`) : [];
-    docs = result[2].status === 'fulfilled' ? [result[2].value.data] : [];
-    if (result[2].status === 'rejected' && result[2].reason?.status === 404) docs.push({ path: 'AGENTS.md', content: '', missing: true });
-    docsError = readFailure(result[1]) ?? readFailure(result[2]);
-    for (let at = 0; at < paths.length; at += 4) {
-      const found = await Promise.allSettled(paths.slice(at, at + 4).map(doc => readWithRetry(() => api.getRepoFile(currentRepo, doc, resolvedOid))));
+    const cacheKey = `${currentRepo}:${resolvedOid}`;
+    const cached = codeReadCache.get(cacheKey) ?? { docsLoaded: false };
+    if (!path && !cached.readmeLoaded) {
+      const readmeResult = await Promise.allSettled([readWithRetry(() => api.getRepoReadme(currentRepo, resolvedOid))]).then(items => items[0]);
       if (run !== generation) return;
-      docs.push(...found.filter(item => item.status === 'fulfilled').map(item => item.value.data));
-      docsError = docsError ?? found.map(readFailure).find(message => message !== null) ?? null;
+      cached.readme = readmeResult.status === 'fulfilled' ? readmeResult.value.data : null;
+      cached.readmeError = readFailure(readmeResult); cached.readmeLoaded = true;
     }
+    if (audience === 'agent' && !cached.docsLoaded) {
+      const result = await Promise.allSettled([
+        readWithRetry(() => api.getRepoTree(currentRepo, 'agents', resolvedOid)),
+        readWithRetry(() => api.getRepoFile(currentRepo, 'AGENTS.md', resolvedOid)),
+      ]);
+      if (run !== generation) return;
+      const paths = result[0].status === 'fulfilled' ? array(result[0].value.data.entries).filter(entry => entry.type === 'blob' && entry.name.endsWith('.md')).slice(0, 20).map(entry => `agents/${entry.name}`) : [];
+      cached.docs = result[1].status === 'fulfilled' ? [result[1].value.data] : [];
+      if (result[1].status === 'rejected' && result[1].reason?.status === 404) cached.docs.push({ path: 'AGENTS.md', content: '', missing: true });
+      cached.docsError = readFailure(result[0]) ?? readFailure(result[1]);
+      for (let at = 0; at < paths.length; at += 4) {
+        const found = await Promise.allSettled(paths.slice(at, at + 4).map(doc => readWithRetry(() => api.getRepoFile(currentRepo, doc, resolvedOid))));
+        if (run !== generation) return;
+        cached.docs.push(...found.filter(item => item.status === 'fulfilled').map(item => item.value.data));
+        cached.docsError = cached.docsError ?? found.map(readFailure).find(message => message !== null) ?? null;
+      }
+      cached.docsLoaded = true;
+    }
+    codeReadCache.set(cacheKey, cached);
+    readme = cached.readme ?? null; readmeError = cached.readmeError ?? null;
+    docs = cached.docs ?? []; docsError = cached.docsError ?? null;
     draw();
   }
   function navigate(next) { path = next; void load().catch(cause => { error = errorCopy(cause); draw(); }); }
@@ -356,7 +378,7 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
       const nextVersion = nextSnapshot?.version ?? null;
       if (!changed && nextVersion === version && root.childNodes.length) return;
       repoId = nextRepoId; oid = nextOid; snapshot = nextSnapshot; version = nextVersion;
-      if (changed) { path = ''; void load().catch(cause => { error = errorCopy(cause); draw(); }); } else draw();
+      if (changed) { if (repoChanged) path = ''; void load().catch(cause => { error = errorCopy(cause); draw(); }); } else draw();
     },
     hide() { ++generation; cloneOpen = false; repoId = null; oid = null; version = null; root.replaceChildren(); },
   };

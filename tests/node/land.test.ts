@@ -34,7 +34,7 @@ async function source(): Promise<{ dir: string; commit: string; parent: string }
 }
 
 describe('land input and evidence gates', () => {
-  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving' | 'stale-main') {
+  async function staleBaseCase(mode: 'unrelated' | 'conflict' | 'keeps-moving' | 'stale-main' | 'queue-wait') {
     const sourceDir = await temp(); await git(sourceDir, 'init', '-q', '-b', 'main');
     await writeFile(join(sourceDir, 'value.txt'), 'before\n');
     await git(sourceDir, 'add', '.'); await git(sourceDir, 'commit', '-qm', 'base');
@@ -57,7 +57,8 @@ describe('land input and evidence gates', () => {
       provisioning: { state: 'observed' }, candidateStorageName: 'candidate',
       authorId: 'agent', baseOid: base, headOid: null, revision: 0, status: 'draft',
       branch: `refs/heads/land/${createHash('sha256').update('task').digest('hex').slice(0, 16)}`, unitKeys: ['file:value.txt'] };
-    let observedBase = base; let enqueues = 0; let verdicts = 0; const verdictBodies: Record<string, any>[] = [];
+    let observedBase = base; let enqueues = 0; let verdicts = 0; let queueWaitGets = 0; let queueWaitTicks = 0;
+    let fakeNow = 0; const verdictBodies: Record<string, any>[] = [];
     const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, any> }) => {
       if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: observedBase,
         canonicalStorageName: 'canonical', canonicalRemote: `file://${canonical}` }, version: 1 };
@@ -70,13 +71,23 @@ describe('land input and evidence gates', () => {
       }
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/queue') return { data: mode === 'stale-main' && enqueues === 1
+      if (method === 'GET' && path === '/repos/demo/queue') return { data: mode === 'queue-wait' && enqueues > 0
+        ? ++queueWaitGets >= 9
+          ? { entries: [{ changeId: 'change', state: 'landed' }], finalCanonicalOid: observedBase, promotion: {} }
+          : { entries: [{ changeId: 'change', state: 'checking' }] }
+        : mode === 'stale-main' && enqueues === 1
         ? { entries: [{ changeId: 'change', state: 'blocked', blockedReason: 'STALE_MAIN' }] }
         : enqueues > (mode === 'keeps-moving' ? 4 : 1)
           ? { entries: [{ changeId: 'change', state: 'landed' }], finalCanonicalOid: observedBase, promotion: {} }
           : { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'change', state: 'active',
-        unitKey: 'file:value.txt', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [
+        { changeId: 'change', state: 'active', unitKey: 'file:value.txt', leaseId: 'lease', fence: 1,
+          remainingSeconds: 7200, expiresAt: Date.now() + 7_200_000 },
+        { changeId: 'change', state: 'active', unitKey: 'file:value.txt', leaseId: 'lease-2', fence: 2,
+          remainingSeconds: 7200, expiresAt: Date.now() + 7_200_000 },
+        { changeId: 'old', state: 'released', unitKey: 'file:old.txt', leaseId: 'old-lease', fence: 1,
+          remainingSeconds: 0, expiresAt: Date.now() },
+      ], nextCursor: 'terminal-history' }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote:
         options?.body?.storageName === 'canonical' ? `file://${canonical}` : `file://${candidate}`, token: 'local-git-token' }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };
@@ -91,7 +102,7 @@ describe('land input and evidence gates', () => {
           observedBase = await nextBase();
           return { data: { entryId: 'entry' }, version: 1 };
         }
-        if (mode !== 'stale-main' && enqueues <= (mode === 'keeps-moving' ? 4 : 1)) {
+        if (mode !== 'stale-main' && mode !== 'queue-wait' && enqueues <= (mode === 'keeps-moving' ? 4 : 1)) {
           observedBase = await nextBase();
           throw new ConcordError('STALE_BASE', 'conflict', 409, { error: { code: 'STALE_BASE' } });
         }
@@ -105,6 +116,7 @@ describe('land input and evidence gates', () => {
       const method = init?.method ?? 'GET';
       let data: Record<string, any> = {};
       if (method === 'GET' && url.pathname === '/v1/repos/demo') data = {};
+      else if (method === 'GET' && url.pathname.endsWith('/events')) data = { items: [] };
       else if (method === 'GET' && url.pathname.endsWith('/snapshot')) data = { projections: { runners: { jobs: [
         { kind: 'inspect-candidate', changeId: 'change', revision: change.revision, jobId: `job-${change.revision}`, state: 'completed' },
       ] } } };
@@ -121,8 +133,9 @@ describe('land input and evidence gates', () => {
     let error: unknown; let result: Awaited<ReturnType<typeof land>> | undefined; const events: Record<string, any>[] = [];
     try { result = await land({ repo: 'demo', source: sourceDir, commit, intentKey: 'task', intent: 'stale base test',
       allowedFiles, reviewEvidence: evidence, waitSeconds: 10, client: { baseUrl: 'http://127.0.0.1:1234', request } as never,
+      ...(mode === 'queue-wait' ? { now: () => fakeNow, sleep: async (_ms: number) => { fakeNow += 1000; queueWaitTicks++; }, random: () => 0.5 } : {}),
       emit: event => events.push(event) }); } catch (caught) { error = caught; }
-    return { request, events, result, error, enqueues, verdicts, verdictBodies, change, base };
+    return { request, events, result, error, enqueues, verdicts, verdictBodies, change, base, queueWaitGets, queueWaitTicks };
   }
 
   it('re-publishes and carries approval after enqueue reports a stale base', async () => {
@@ -134,6 +147,15 @@ describe('land input and evidence gates', () => {
     expect(outcome.verdictBodies[1].carriedFrom).toMatchObject({ method: 'patch-id' });
     expect(outcome.verdicts).toBe(2);
     expect(outcome.enqueues).toBe(2);
+  });
+  it('does not re-list leases during queue-wait ticks when held leases are far from expiry', async () => {
+    const outcome = await staleBaseCase('queue-wait');
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.result).toMatchObject({ status: 'landed', changeId: 'change' });
+    expect(outcome.queueWaitGets).toBeGreaterThanOrEqual(9);
+    expect(outcome.queueWaitTicks).toBeGreaterThanOrEqual(5);
+    expect(outcome.request.mock.calls.filter(([method, path]) => method === 'GET' && path === '/repos/demo/leases')).toHaveLength(2);
+    expect(outcome.request.mock.calls.some(([method, path]) => method === 'GET' && path.includes('/leases?cursor='))).toBe(false);
   });
 
   it('stops on a rebase conflict without posting another approval', async () => {
@@ -196,7 +218,7 @@ describe('land input and evidence gates', () => {
       branch: 'refs/heads/work', authorId: 'agent', baseOid: parent, headOid: commit, revision: 1,
       unitKeys: [`file:${files[0]}`], status: 'ready' };
     const active = files.map((file, index) => ({ changeId: 'started', state: 'active', unitKey: `file:${file}`,
-      leaseId: `lease-${index}`, fence: 1, remainingSeconds: 7200 }));
+      leaseId: `lease-${index}`, fence: 1, remainingSeconds: 7200, expiresAt: Date.now() + 7_200_000 }));
     const released: string[] = [];
     const tokenKeys: string[] = [];
     let tokenAttempts = 0;
@@ -262,11 +284,11 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: leaseActive ? [{
         changeId: 'started', state: 'active', unitKey: mode === 'expired' ? 'row:families:alpha' : 'file:families.tsv',
-        leaseId: 'lease', fence: 1, remainingSeconds,
+        leaseId: 'lease', fence: 1, remainingSeconds, expiresAt: Date.now() + remainingSeconds * 1000,
       }] : [] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/leases') {
         leaseActive = true; return { data: { leases: [{ changeId: 'started', state: 'active', unitKey: 'row:families:alpha',
-          leaseId: 'lease', fence: 1, remainingSeconds: 300 }] }, version: 1 };
+          leaseId: 'lease', fence: 1, remainingSeconds: 300, expiresAt: Date.now() + 300_000 }] }, version: 1 };
       }
       if (method === 'POST' && path === '/repos/demo/leases/renew-batch') {
         remainingSeconds = 300;
@@ -313,9 +335,10 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: leaseRows }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: leaseRows }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/leases') {
-        const lease = { changeId: 'started', state: 'active', unitKey: 'file:a.txt', leaseId: 'reclaimed', fence: 2, remainingSeconds: 300 };
+        const lease = { changeId: 'started', state: 'active', unitKey: 'file:a.txt', leaseId: 'reclaimed', fence: 2,
+          remainingSeconds: 300, expiresAt: Date.now() + 300_000 };
         leaseRows.push(lease); return { data: { leases: [{ ...lease }] }, version: 1 };
       }
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: {
@@ -397,8 +420,8 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null } };
       if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'started', state: 'active',
-        unitKey: 'file:families.tsv', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [{ changeId: 'started', state: 'active',
+        unitKey: 'file:families.tsv', leaseId: 'lease', fence: 1, remainingSeconds: 7200, expiresAt: Date.now() + 7_200_000 }] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${canonical}`, token: 'local-git-token' }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result') throw new ConcordError('denied', 'auth', 403);
       throw new Error(`unexpected ${method} ${path}`);
@@ -441,8 +464,8 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'started', state: 'active',
-        unitKey: 'file:families.tsv', leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [{ changeId: 'started', state: 'active',
+        unitKey: 'file:families.tsv', leaseId: 'lease', fence: 1, remainingSeconds: 7200, expiresAt: Date.now() + 7_200_000 }] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: {
         remote: options?.body?.storageName === 'canonical' ? `file://${dir}` : `file://${candidate}`, token: 'local-git-token' }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };
@@ -511,13 +534,13 @@ describe('land input and evidence gates', () => {
     expect(sleeps[0]).toBe(2000);
     expect(firstRenewalAt).toBe(2000);
   });
-  it('reads a repository version from repo detail without requesting its snapshot', async () => {
+  it('uses snapshot versions for a structural test client', async () => {
     const request = vi.fn(async (_method: string, path: string) => {
-      if (path !== '/repos/demo') throw new Error(`unexpected ${path}`);
+      if (path !== '/repos/demo/snapshot') throw new Error(`unexpected ${path}`);
       return { data: {}, version: 17 };
     });
     await expect(currentVersion({ request } as never, '/repos/demo')).resolves.toBe(17);
-    expect(request).toHaveBeenCalledExactlyOnceWith('GET', '/repos/demo', {});
+    expect(request).toHaveBeenCalledExactlyOnceWith('GET', '/repos/demo/snapshot');
   });
   it.each([401, 403, 404])('returns awaiting-review for an author-only PASS inspection when result read returns %s', async status => {
     const { dir, commit, parent } = await source();
@@ -534,9 +557,10 @@ describe('land input and evidence gates', () => {
       if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [
         'families.tsv', 'first.txt', 'renamed.tsv'].map((file, index) => ({ changeId: 'change', state: 'active',
-          unitKey: `file:${file}`, leaseId: `lease-${index}`, fence: 1, remainingSeconds: 300 })) }, version: 1 };
+          unitKey: `file:${file}`, leaseId: `lease-${index}`, fence: 1, remainingSeconds: 300,
+          expiresAt: Date.now() + 300_000 })) }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: `file://${dir}`, token: 'local-git-token' }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/jobs/pass-job/result')
         throw new ConcordError('result read denied', 'auth', status);
@@ -600,7 +624,8 @@ describe('land input and evidence gates', () => {
     expect(batchCalls).toBeGreaterThanOrEqual(1);
     expect(request.mock.calls.some(([method, path]) => method === 'POST' && /\/leases\/lease-\d+\/renew$/.test(path))).toBe(false);
   });
-  async function publishHeartbeatCase(loseLease: boolean, unwindConflict = false) {
+  async function publishHeartbeatCase(loseLease: boolean, unwindConflict = false,
+    behavior: { failRenewOnce?: boolean; loseAfterPublish?: boolean; reclaimConflict?: boolean } = {}) {
     const dir = await temp(); await git(dir, 'init', '-q');
     await writeFile(join(dir, 'a.txt'), 'before\n'); await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'base');
     const parent = await git(dir, 'rev-parse', 'HEAD');
@@ -624,6 +649,7 @@ describe('land input and evidence gates', () => {
     const lease = { changeId: 'started', state: 'active', unitKey: 'file:a.txt', leaseId: 'lease', fence: 1,
       remainingSeconds: 300, expiresAt: Date.now() + 300_000 };
     let batches = 0; let publishInFlight = false; let batchDuringPublish = false; let published = false;
+    let failedRenew = false; const events: Record<string, any>[] = [];
     const request = vi.fn(async (method: string, path: string, options?: { body?: Record<string, any> }) => {
       if (method === 'GET' && path === '/repos/demo') return { data: { observedCanonicalOid: conflictCanonicalOid ?? parent,
         canonicalStorageName: 'canonical', canonicalRemote: `file://${conflictCanonical ?? dir}` }, version: 1 };
@@ -631,7 +657,10 @@ describe('land input and evidence gates', () => {
       if (method === 'POST' && path === '/repos/demo/changes') throw new ConcordError('INTENT_CONFLICT', 'conflict', 409,
         { error: { code: 'INTENT_CONFLICT' } });
       if (method === 'GET' && path === '/repos/demo/changes') return { data: { items: [change], nextCursor: null }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/changes/started') return { data: change, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/changes/started') {
+        return { data: change, version: 1 };
+      }
+      if (method === 'GET' && path === '/repos/demo/snapshot') return { data: {}, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [lease] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: {
@@ -642,25 +671,36 @@ describe('land input and evidence gates', () => {
       }
       if (method === 'POST' && path === '/repos/demo/leases/renew-batch') {
         batches++; if (publishInFlight) batchDuringPublish = true;
+        if (behavior.failRenewOnce && !failedRenew) {
+          failedRenew = true;
+          throw new ConcordError('temporary transport failure', 'transport');
+        }
+        if (behavior.loseAfterPublish && published) return { data: { leases: [], reserved: [] }, version: 1 };
         if (unwindConflict) {
           await new Promise(resolve => setTimeout(resolve, 1000));
           throw new ConcordError('Concord transport failed', 'transport');
         }
         return { data: { leases: loseLease ? [] : [lease], reserved: [] }, version: 1 };
       }
+      if (method === 'POST' && path === '/repos/demo/leases') {
+        if (behavior.reclaimConflict) throw new ConcordError('lease conflict', 'conflict', 409,
+          { error: { code: 'LEASE_CONFLICT' } });
+        change.status = 'ready';
+        return { data: { leases: [{ ...lease, leaseId: 'reclaimed', fence: 2, remainingSeconds: 300 }] }, version: 1 };
+      }
       if (method === 'POST' && path === '/repos/demo/changes/started/publish') {
         publishInFlight = true;
         await new Promise(resolve => setTimeout(resolve, 300));
         publishInFlight = false; published = true;
-        change.headOid = options?.body?.headOid; change.revision++; change.status = 'ready';
+        change.headOid = options?.body?.headOid; change.revision++; change.status = behavior.loseAfterPublish ? 'inspecting' : 'ready';
         return { data: change, version: 1 };
       }
       throw new Error(`unexpected ${method} ${path}`);
     });
     const task = land({ repo: 'demo', source: dir, commit, intentKey: 'task', intent: 'work', allowedFiles,
       waitSeconds: 10, renewEveryMs: unwindConflict ? 1 : 20,
-      client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: () => {} });
-    return { task, request, get batches() { return batches; }, get batchDuringPublish() { return batchDuringPublish; }, get published() { return published; } };
+      client: { baseUrl: 'http://127.0.0.1:1234', request } as never, emit: event => events.push(event) });
+    return { task, request, events, get batches() { return batches; }, get batchDuringPublish() { return batchDuringPublish; }, get published() { return published; } };
   }
   it('renews while the candidate publish request is in flight', async () => {
     const outcome = await publishHeartbeatCase(false);
@@ -679,6 +719,23 @@ describe('land input and evidence gates', () => {
     const outcome = await publishHeartbeatCase(false, true);
     await expect(outcome.task).rejects.toMatchObject({ kind: 'conflict', message: expect.stringContaining('MERGE_CONFLICT') });
     expect(outcome.batches).toBeGreaterThanOrEqual(1);
+  });
+  it('reports a failed renewal and retries while inspection is pending', async () => {
+    const outcome = await publishHeartbeatCase(false, false, { failRenewOnce: true, loseAfterPublish: true });
+    await expect(outcome.task).resolves.toMatchObject({ status: 'awaiting-review' });
+    expect(outcome.events.filter(event => event.state === 'lease-renew-failed')).toHaveLength(1);
+    expect(outcome.batches).toBeGreaterThanOrEqual(2);
+  });
+  it('re-claims a lease that lapses after publish during inspection', async () => {
+    const outcome = await publishHeartbeatCase(false, false, { loseAfterPublish: true });
+    await expect(outcome.task).resolves.toMatchObject({ status: 'awaiting-review' });
+    expect(outcome.request.mock.calls.some(([method, path, requestOptions]) => method === 'POST' && path === '/repos/demo/leases' &&
+      requestOptions?.body?.unitKeys?.includes('file:a.txt'))).toBe(true);
+    expect(outcome.events.some(event => event.state === 'lease-reclaimed' && event.unitKeys.includes('file:a.txt'))).toBe(true);
+  });
+  it('reports the conflict when a post-publish lease re-claim is refused', async () => {
+    const outcome = await publishHeartbeatCase(false, false, { loseAfterPublish: true, reclaimConflict: true });
+    await expect(outcome.task).rejects.toMatchObject({ kind: 'conflict', message: expect.stringContaining('LEASE_LOST: file:a.txt lapsed; re-claim refused: LEASE_CONFLICT') });
   });
   it.each([false, true])('republishes a repaired commit with the same intent after a failed inspection (advanced base: %s)', async advanceCanonical => {
     const dir = await temp(); await git(dir, 'init', '-q', '-b', 'main');
@@ -714,8 +771,8 @@ describe('land input and evidence gates', () => {
       if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'change', state: 'active',
-        unitKey: 'file:a.txt', leaseId: 'lease', fence: 1, remainingSeconds: 300 }] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [{ changeId: 'change', state: 'active',
+        unitKey: 'file:a.txt', leaseId: 'lease', fence: 1, remainingSeconds: 300, expiresAt: Date.now() + 300_000 }] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: {
         remote: options?.body?.storageName === 'canonical' ? `file://${canonical}` : `file://${candidate}`,
         token: 'local-git-token' }, version: 1 };
@@ -928,9 +985,10 @@ describe('land input and evidence gates', () => {
       if (method === 'GET' && path === '/repos/demo/snapshot') return { data: { projections: { runners: { jobs: [] } } }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/changes') return { data: original, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [
         'families.tsv', 'first.txt', 'renamed.tsv'].map((file, index) => ({ changeId: 'change', state: 'active',
-          unitKey: `file:${file}`, leaseId: `lease-${index}`, fence: 1, remainingSeconds: 300 })) }, version: 1 };
+          unitKey: `file:${file}`, leaseId: `lease-${index}`, fence: 1, remainingSeconds: 300,
+          expiresAt: Date.now() + 300_000 })) }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote: 'file:///tmp/canonical.git', token: 'local-git-token' }, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') {
         reads++;
@@ -1060,8 +1118,8 @@ describe('land input and evidence gates', () => {
       if (method === 'POST' && path === '/repos/demo/changes') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/changes/change') return { data: change, version: 1 };
       if (method === 'GET' && path === '/repos/demo/queue') return { data: { entries: [] }, version: 1 };
-      if (method === 'GET' && path === '/repos/demo/leases') return { data: { items: [{ changeId: 'change', state: 'active',
-        unitKey: `file:${allowedPath}`, leaseId: 'lease', fence: 1, remainingSeconds: 7200 }] }, version: 1 };
+      if (method === 'GET' && path === '/repos/demo/leases') return { data: { serverTime: Date.now(), items: [{ changeId: 'change', state: 'active',
+        unitKey: `file:${allowedPath}`, leaseId: 'lease', fence: 1, remainingSeconds: 7200, expiresAt: Date.now() + 7_200_000 }] }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/git-token') return { data: { remote:
         options?.body?.storageName === 'canonical' ? `file://${sourceDir}` : `file://${candidateDir}`, token: 'local-git-token' }, version: 1 };
       if (method === 'POST' && path === '/repos/demo/branches') return { data: {}, version: 1 };

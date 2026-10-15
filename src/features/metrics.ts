@@ -111,6 +111,14 @@ function refusedIssueCount(sql: SqlStorage, since: number, until: number): numbe
 
 /** One pass over at most 20,000 indexed window events; no per-event history is retained. */
 export function measureSqlMetrics(sql: SqlStorage, since: number, until: number): RepoMetrics {
+  const lastDay = new Date(until - 1).toISOString().slice(0, 10);
+  const priorDay = new Date(since - DAY).toISOString().slice(0, 10);
+  const rows = sql.exec<{ events: string }>(`SELECT events FROM concord_metrics_daily WHERE day >= ? AND day <= ? ORDER BY day, shard`,
+    priorDay, lastDay).toArray();
+  if (rows.length) {
+    const all = rows.flatMap(row => JSON.parse(row.events) as Event[]).sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence);
+    return measureRollupEvents(all, since, until);
+  }
   // The cutoff also keeps forward-looking refusal waits inside the reported prefix.
   const cutoff = sql.exec<{ timestamp: number; sequence: number }>(`SELECT timestamp, sequence FROM concord_events
     WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp, sequence LIMIT 1 OFFSET ?`,
@@ -185,6 +193,78 @@ export function measureSqlMetrics(sql: SqlStorage, since: number, until: number)
     mainRedTime: { totalMs: redTotal, n: redCount, unresolved: redStart !== null,
       eventKinds: ['queue.diagnosis', 'queue.main_green'] },
     issuesClosedByLand: count(issueCloses, ['issue.closed']),
+  };
+}
+
+function measureRollupEvents(all: Event[], since: number, until: number): RepoMetrics {
+  const window = all.filter(event => event.timestamp >= since && event.timestamp < until).slice(0, METRIC_EVENT_LIMIT);
+  const cutoff = window.length === METRIC_EVENT_LIMIT ? window.at(-1) : undefined;
+  const before = (event: Event, point: Event) => event.timestamp < point.timestamp ||
+    event.timestamp === point.timestamp && event.sequence < point.sequence;
+  const publish = new MetricSample(1); const claim = new MetricSample(2); const review = new MetricSample(3);
+  const queued = new MetricSample(4); const refusedWait = new MetricSample(5); const revisions = new MetricSample(6);
+  let landed = 0; let refused = 0; let rebases = 0; let carried = 0; let rework = 0;
+  let failures = 0; let infrastructureFailures = 0; let blames = 0; let issueCloses = 0;
+  const priorGreen = all.filter(event => event.kind === 'queue.main_green' && event.timestamp < since).at(-1);
+  let redStart = all.find(event => event.kind === 'queue.diagnosis' && event.payload.reason === 'BASE_RED' &&
+    event.payload.baselineVerifiedFail === true && (!priorGreen || !before(event, priorGreen)) && event.timestamp < since)?.timestamp ?? null;
+  let redTotal = 0; let redCount = 0;
+  const getChangeId = (event: Event) => changeId(event);
+  for (const event of window) {
+    if (event.kind === 'queue.promotion_applied') for (const id of event.relatedIds) {
+      landed++;
+      const origins = all.filter(item => before(item, event) && ((['change.published', 'queue.enqueued'].includes(item.kind) && item.relatedIds[0] === id) ||
+        item.kind === 'verdict.created' && item.relatedIds[1] === id || item.kind === 'lease.claimed' && (item.relatedIds[1] === id || item.payload.changeId === id)));
+      const firstPublish = origins.find(item => item.kind === 'change.published');
+      const firstClaim = origins.find(item => item.kind === 'lease.claimed');
+      const firstApproval = origins.find(item => item.kind === 'verdict.created' && item.payload.decision === 'approve');
+      const lastEnqueue = origins.filter(item => item.kind === 'queue.enqueued').at(-1);
+      const published = origins.filter(item => item.kind === 'change.published');
+      const revision = Math.max(0, ...published.map(item => Number(item.payload.revision) || 0));
+      if (firstPublish) publish.add(event.timestamp - firstPublish.timestamp);
+      if (firstClaim) claim.add(event.timestamp - firstClaim.timestamp);
+      if (lastEnqueue) queued.add(event.timestamp - lastEnqueue.timestamp);
+      if (published.length) { revisions.add(revision); rework += Math.max(0, revision - 1); }
+      if (firstApproval && firstPublish && firstApproval.timestamp >= firstPublish.timestamp) review.add(firstApproval.timestamp - firstPublish.timestamp);
+    }
+    if (event.kind === 'lease.refused') {
+      refused++;
+      const keys = Array.isArray(event.payload.keys) ? event.payload.keys : [];
+      const grant = all.find(item => item.kind === 'lease.claimed' && (item.payload.changeId === getChangeId(event) || item.relatedIds[1] === getChangeId(event)) &&
+        (item.timestamp > event.timestamp || item.timestamp === event.timestamp && item.sequence > event.sequence) && item.timestamp < until &&
+        (!cutoff || before(item, cutoff) || item.sequence === cutoff.sequence) && keys.includes(item.payload.unitKey));
+      if (grant) refusedWait.add(grant.timestamp - event.timestamp);
+    }
+    if (['queue.auto_rebased', 'queue.rebased', 'change.auto_rebased'].includes(event.kind)) rebases++;
+    if (event.kind === 'verdict.created' && (event.payload.carriedFrom as { method?: unknown } | null)?.method === 'patch-id') carried++;
+    if (event.kind === 'queue.result_received' && event.payload.purpose === 'stack') {
+      if (['ENV_ERROR', 'TIMEOUT'].includes(String(event.payload.outcome))) infrastructureFailures++;
+      if (['FAIL', 'MISMATCH', 'COMPILE_ERROR', 'UNVERIFIED_TARGET'].includes(String(event.payload.outcome)) && event.payload.bootstrap === false &&
+        typeof event.payload.candidateCount === 'number' && event.payload.candidateCount > 0 && typeof event.payload.composedTreeOid === 'string' &&
+        event.payload.composedTreeOid.length > 0 && event.payload.sourceTreeOid === event.payload.composedTreeOid) failures++;
+    }
+    if (event.kind === 'queue.diagnosis') {
+      if (Array.isArray(event.payload.blame)) blames += event.payload.blame.length;
+      if (event.payload.reason === 'BASE_RED' && event.payload.baselineVerifiedFail === true && redStart === null) redStart = event.timestamp;
+    }
+    if (event.kind === 'queue.main_green' && redStart !== null) { redTotal += event.timestamp - Math.max(redStart, since); redCount++; redStart = null; }
+    if (event.kind === 'issue.closed' && event.payload.closedBy && typeof event.payload.closedBy === 'object') issueCloses++;
+  }
+  const distinctIssues = new Set(window.filter(event => event.kind === 'lease.refused' && typeof event.payload.issueNumber === 'number')
+    .map(event => event.payload.issueNumber)).size;
+  const countValue = (value: number, kinds: string[], n = value): Count => ({ value, n, eventKinds: kinds });
+  return {
+    since: new Date(since).toISOString(), until: new Date(until).toISOString(), truncated: window.length === METRIC_EVENT_LIMIT,
+    changesLanded: countValue(landed, ['queue.promotion_applied']), publishToLand: publish.duration(['change.published', 'queue.promotion_applied']),
+    claimToLand: claim.duration(['lease.claimed', 'queue.promotion_applied']), reviewWait: review.duration(['change.published', 'verdict.created', 'queue.promotion_applied']),
+    queueWait: queued.duration(['queue.enqueued', 'queue.promotion_applied']), leaseClaimsRefused: countValue(refused, ['lease.refused']),
+    distinctIssuesWithRefusedClaims: countValue(distinctIssues, ['lease.refused']), refusalWait: refusedWait.duration(['lease.refused', 'lease.claimed']),
+    automaticRebases: countValue(rebases, ['queue.auto_rebased', 'queue.rebased', 'change.auto_rebased']), approvalsCarriedByPatchId: countValue(carried, ['verdict.created']),
+    revisionsPerLandedChange: { median: revisions.quantile(.5), mean: revisions.n ? revisions.total / revisions.n : 0, n: revisions.n, eventKinds: ['change.published', 'queue.promotion_applied'] },
+    reworkRevisions: countValue(rework, ['change.published', 'queue.promotion_applied'], revisions.n),
+    combinedTreeCheckFailures: countValue(failures, ['queue.result_received']), stackInfrastructureFailures: countValue(infrastructureFailures, ['queue.result_received']),
+    bisectBlames: countValue(blames, ['queue.diagnosis']), mainRedTime: { totalMs: redTotal, n: redCount, unresolved: redStart !== null, eventKinds: ['queue.diagnosis', 'queue.main_green'] },
+    issuesClosedByLand: countValue(issueCloses, ['issue.closed']),
   };
 }
 export function metricsWindow(search: URLSearchParams): { since: number; until: number; sinceIso: string; untilIso: string } {

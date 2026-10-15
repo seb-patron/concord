@@ -100,17 +100,17 @@ describe('fake RepoStorage and module state', () => {
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName('repo:local:migration_case'));
     await runInDurableObject(stub, (_instance, state) => {
       const module: FeatureModule = {
-        name: 'leases', migrations: [{ version: 1, statements: ['CREATE TABLE IF NOT EXISTS leases_test (id TEXT PRIMARY KEY)'] }],
+        name: 'storagecase' as unknown as FeatureModule['name'], migrations: [{ version: 1, statements: ['CREATE TABLE IF NOT EXISTS storagecase_test (id TEXT PRIMARY KEY)'] }],
         routes: [], snapshot: () => ({}), nextDeadline: () => null, onAlarm: () => undefined, hooks: {},
       };
       applyMigrations(state.storage, module);
       applyMigrations(state.storage, module);
-      expect(state.storage.sql.exec<{ version: number }>('SELECT version FROM concord_migrations WHERE namespace = ?', 'leases').toArray()[0].version).toBe(1);
+      expect(state.storage.sql.exec<{ version: number }>('SELECT version FROM concord_migrations WHERE namespace = ?', 'storagecase').toArray()[0].version).toBe(1);
       module.migrations.push({ version: 2, statements: ['CREATE TABLE other_test (id TEXT)'] });
-      expect(() => applyMigrations(state.storage, module)).toThrow('Invalid leases migration namespace');
-      expect(state.storage.sql.exec<{ version: number }>('SELECT version FROM concord_migrations WHERE namespace = ?', 'leases').toArray()[0].version).toBe(1);
-      module.migrations[1].statements = ['CREATE TABLE leases_second (id TEXT); CREATE TABLE other_test (id TEXT)'];
-      expect(() => applyMigrations(state.storage, module)).toThrow('Invalid leases migration statement');
+      expect(() => applyMigrations(state.storage, module)).toThrow('Invalid storagecase migration namespace');
+      expect(state.storage.sql.exec<{ version: number }>('SELECT version FROM concord_migrations WHERE namespace = ?', 'storagecase').toArray()[0].version).toBe(1);
+      module.migrations[1].statements = ['CREATE TABLE storagecase_second (id TEXT); CREATE TABLE other_test (id TEXT)'];
+      expect(() => applyMigrations(state.storage, module)).toThrow('Invalid storagecase migration statement');
     });
   });
 });

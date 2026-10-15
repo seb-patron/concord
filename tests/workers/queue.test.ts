@@ -704,6 +704,85 @@ describe('queue with real lease hooks', () => {
 });
 
 describe('queue state machine', () => {
+  it('does not rewrite queue data on unchanged active stack alarm ticks', async () => {
+    const h = await setup('A');
+    await h.tick();
+    expect((await h.state()).activeStackJobId).toBeTruthy();
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    const writes = await runInDurableObject<RepoCoordinator, number>(stub, async instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const put = context.state.put.bind(context.state);
+      let dataWrites = 0;
+      context.state.put = (key, value) => {
+        if (key === 'data') dataWrites++;
+        return put(key, value);
+      };
+      await queue.onAlarm(context);
+      await queue.onAlarm(context);
+      return dataWrites;
+    });
+    expect(writes).toBe(0);
+  });
+
+  it('writes queue data once when an alarm observes a main ref change', async () => {
+    const h = await setup('A');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    const nextMain = oid('4');
+    await runInDurableObject<RepoCoordinator, void>(stub, instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const state = context.state.get<any>('data');
+      state.entries[0].state = 'landed';
+      state.activeStackJobId = null;
+      state.observedMain = main;
+      context.state.put('data', state);
+    });
+    expect(await h.put(`canonical-${h.repoId}`, 'refs/heads/main', nextMain, main)).toBe(true);
+    const writes = await runInDurableObject<RepoCoordinator, number>(stub, async instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const put = context.state.put.bind(context.state);
+      let dataWrites = 0;
+      context.state.put = (key, value) => {
+        if (key === 'data') dataWrites++;
+        return put(key, value);
+      };
+      await queue.onAlarm(context);
+      return dataWrites;
+    });
+    expect(writes).toBe(1);
+    expect((await h.queueData()).observedMain).toBe(nextMain);
+  });
+
+  it('skips queue data writes on a repeated identical error tick', async () => {
+    const h = await setup('A');
+    const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:${h.repoId}`));
+    const writes = await runInDurableObject<RepoCoordinator, number>(stub, async instance => {
+      const internal = instance as unknown as { context(name: 'queue', actor: Principal, repoId: string): ModuleContext };
+      const context = internal.context('queue', principal, h.repoId);
+      const fixedNow = context.now();
+      Object.defineProperty(context, 'now', { value: () => fixedNow });
+      (context.storage as unknown as { resolveRef: () => Promise<never> }).resolveRef = async () => {
+        throw new Error('storage unavailable');
+      };
+      const put = context.state.put.bind(context.state);
+      let dataWrites = 0;
+      context.state.put = (key, value) => {
+        if (key === 'data') dataWrites++;
+        return put(key, value);
+      };
+      await queue.onAlarm(context);
+      const firstTickWrites = dataWrites;
+      dataWrites = 0;
+      await queue.onAlarm(context);
+      if (firstTickWrites !== 1) return -1;
+      return dataWrites;
+    });
+    expect(writes).toBe(0);
+    expect((await h.queueData()).blockedReason).toBe('QUEUE_ALARM_ERROR');
+  });
+
   it('holds a protected change until an owner decision and then permits landing', async () => {
     const h = harness;
     await h.seed(`canonical-${h.repoId}`);

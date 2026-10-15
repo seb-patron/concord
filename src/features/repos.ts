@@ -11,12 +11,21 @@ import { storedJob, withJobPolicy } from '../jobs/policy';
 import { humanApprovalStatus } from './verdicts';
 
 const list = <T>(context: ModuleContext, key: string): T[] => context.state.get<T[]>(key) ?? [];
+const snapshotHistory = <T>(items: T[], isLive: (item: T) => boolean): T[] => {
+  const terminal = items.filter(item => !isLive(item));
+  const retained = new Set(terminal.slice(-50));
+  return items.filter(item => isLive(item) || retained.has(item));
+};
 const page = <T>(items: T[], request: Request) => {
   const offset = parseCursor(new URL(request.url).searchParams.get('cursor'));
   const selected = items.slice(offset, offset + 100);
   return { items: selected, nextCursor: offset + selected.length < items.length ? encodeCursor(offset + selected.length) : null };
 };
-const respond = <T>(context: ModuleContext, data: T, status = 200) => json(data, context.version(), eventSequence(context.sql), status);
+const respond = <T>(context: ModuleContext, data: T, status = 200, headers?: HeadersInit) => {
+  const response = json(data, context.version(), eventSequence(context.sql), status);
+  if (headers) new Headers(headers).forEach((value, name) => response.headers.set(name, value));
+  return response;
+};
 const jobDigest = async (job: InspectCandidateJob | ValidateStackJob) => {
   const { inputDigest: _digest, state: _state, attempt: _attempt,
     runnerId: _runnerId, fence: _fence, expiresAt: _expiresAt, version: _version, ...input } = job;
@@ -54,6 +63,7 @@ const ownChange = (context: ModuleContext, change: Change) => {
 };
 const intentKey = (kind: 'ensure-repo' | 'fork', storageName: string) => `${kind}:${storageName}`;
 const intents = (context: ModuleContext) => context.state.get<Record<string, ProvisioningIntent>>('provisioning') ?? {};
+const catalogRepoCache = new WeakMap<SqlStorage, { fetchedAt: number; repo: Repo }>();
 interface IntentContest {
   repoId: string; intentKey: string; childAuthorIds: [string, string]; ownerId: string;
 }
@@ -246,7 +256,10 @@ async function catalogCreate(context: ModuleContext, body: CreateRepoBody): Prom
   return respond(context, repo, status === 'ready' ? 201 : 202);
 }
 
-async function catalogRepo(context: ModuleContext): Promise<Repo> {
+async function catalogRepo(context: ModuleContext, maxAgeMs = 0): Promise<Repo> {
+  const cached = catalogRepoCache.get(context.sql);
+  const now = context.now();
+  if (maxAgeMs > 0 && cached && now >= cached.fetchedAt && now - cached.fetchedAt < maxAgeMs) return cached.repo;
   const stub = context.env.TENANT_CATALOG.get(context.env.TENANT_CATALOG.idFromName(`tenant:${context.tenantId}`));
   let cursor: string | null = null;
   for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
@@ -264,7 +277,6 @@ async function catalogRepo(context: ModuleContext): Promise<Repo> {
         && (stored.observedCanonicalOid !== null || catalog.observedCanonicalOid === null)
         ? { ...catalog, observedCanonicalOid: stored.observedCanonicalOid }
         : catalog;
-      context.state.put('repo', repo);
       // The local in-process fake stores objects in each DO's SQLite state.
       // Reconcile its deterministic empty canonical name in the coordinator.
       if (context.env.CONCORD_MODE === 'local' && context.env.STORAGE_BACKEND === 'fake' && repo.status === 'ready') {
@@ -274,6 +286,8 @@ async function catalogRepo(context: ModuleContext): Promise<Repo> {
         }
         context.state.put('fake-canonical-materialized', true);
       }
+      if (stableJson(stored) !== stableJson(repo)) context.state.put('repo', repo);
+      catalogRepoCache.set(context.sql, { fetchedAt: now, repo });
       return repo;
     }
     cursor = envelope.data.nextCursor;
@@ -283,10 +297,13 @@ async function catalogRepo(context: ModuleContext): Promise<Repo> {
 }
 
 async function repoDetail(context: ModuleContext): Promise<Response> {
-  const repo = await catalogRepo(context);
+  const catalog = await catalogRepo(context, 60_000);
+  const repo = { ...catalog };
   if (repo.status === 'ready') {
     repo.observedCanonicalOid = await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
-    context.state.put('repo', repo);
+    if (stableJson(context.state.get<Repo>('repo')) !== stableJson(repo)) context.state.put('repo', repo);
+    const cached = catalogRepoCache.get(context.sql);
+    if (cached) catalogRepoCache.set(context.sql, { ...cached, repo });
   }
   const pending = context.state.get<BootstrapPending>('bootstrap');
   const queue = pending ? context.call('queue.bootstrapStatus') : null;
@@ -353,20 +370,19 @@ function canonicalPath(value: string | null, allowEmpty = false): string {
   return value;
 }
 async function canonicalRead(context: ModuleContext, request: Request, kind: 'tree' | 'file' | 'readme'): Promise<Response> {
-  const repo = await catalogRepo(context);
+  const repo = await catalogRepo(context, 60_000);
   requireReady(repo);
   const params = new URL(request.url).searchParams;
   const requestedOid = params.get('oid');
   // A present OID is validated before touching main, including the empty string.
   const commitOid = requestedOid === null ? null : oid(requestedOid);
   const contentPath = kind === 'tree' ? canonicalPath(params.get('path'), true) : kind === 'readme' ? 'README.md' : canonicalPath(params.get('path'));
-  const knownCanonicalOid = requestedOid === null ? repo.observedCanonicalOid : null;
+  const knownCanonicalOid = requestedOid === null || requestedOid === repo.observedCanonicalOid ? repo.observedCanonicalOid : null;
   const resolvedOid = commitOid ?? knownCanonicalOid ?? await context.storage.resolveRef(repo.canonicalStorageName, 'refs/heads/main');
   if (!resolvedOid) return fail(404, 'MAIN_NOT_FOUND', 'Canonical main is empty');
   const knownCanonicalCommit = knownCanonicalOid === resolvedOid;
-  const commit = knownCanonicalCommit ? null : await context.storage.readCommit(repo.canonicalStorageName, resolvedOid);
-  if (!knownCanonicalCommit && !commit) return fail(404, 'COMMIT_NOT_FOUND', 'Commit not found');
   const cacheKey = canonicalReadCacheKey(repo.canonicalStorageName, resolvedOid, kind, contentPath);
+  const cacheHeaders = requestedOid !== null ? { 'cache-control': 'private, max-age=86400, immutable' } : undefined;
   let unitFiles: Record<string, string> | undefined;
   let rowTables: Record<string, string> | undefined;
   if (kind === 'tree') {
@@ -376,14 +392,16 @@ async function canonicalRead(context: ModuleContext, request: Request, kind: 'tr
     rowTables = Object.fromEntries((policy.tables ?? []).map(table => [table.name, table.file]));
   }
   const cachedData = await canonicalReadCachedData(context, cacheKey);
-  if (cachedData) return respond(context, kind === 'tree' ? { ...cachedData, unitFiles, rowTables } : cachedData);
+  if (cachedData) return respond(context, kind === 'tree' ? { ...cachedData, unitFiles, rowTables } : cachedData, 200, cacheHeaders);
+  const commit = knownCanonicalCommit ? null : await context.storage.readCommit(repo.canonicalStorageName, resolvedOid);
+  if (!knownCanonicalCommit && !commit) return fail(404, 'COMMIT_NOT_FOUND', 'Commit not found');
   if (kind === 'tree') {
     const path = contentPath;
     const allEntries = await context.storage.listTree(repo.canonicalStorageName, resolvedOid, path, commit?.treeOid);
     if (!allEntries) return fail(404, 'TREE_NOT_FOUND', 'Directory not found');
     const data = { oid: resolvedOid, path, entries: allEntries.slice(0, 1000), truncated: allEntries.length > 1000, unitFiles, rowTables };
     await cacheCanonicalReadData(context, cacheKey, data);
-    return respond(context, data);
+    return respond(context, data, 200, cacheHeaders);
   }
   const path = contentPath;
   let bytes: Uint8Array | null;
@@ -401,7 +419,7 @@ async function canonicalRead(context: ModuleContext, request: Request, kind: 'tr
   if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/.test(content)) fail(415, 'BINARY_FILE', 'Binary files cannot be displayed');
   const data = { oid: resolvedOid, path, content, size: bytes.byteLength };
   await cacheCanonicalReadData(context, cacheKey, data);
-  return respond(context, data);
+  return respond(context, data, 200, cacheHeaders);
 }
 
 function declaredUnitKeys(raw: unknown, policy: TrustedPolicy, allowUnknown = false): string[] {
@@ -781,6 +799,8 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (!seedRemote || !canonicalRemote) fail(409, 'STORAGE_NOT_READY', 'Storage remote is not ready');
   const existing = context.state.get<BootstrapPending>('bootstrap');
   if (existing) {
+    if (Number.isSafeInteger(body.expectedVersion) && body.expectedVersion !== context.version())
+      throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: context.version() });
     if (existing.changeId !== change.changeId || existing.headOid !== headOid || existing.seedRef !== seedRef || existing.seedStorageName !== seedStorageName || Boolean(existing.withHistory) !== Boolean(body.withHistory)) fail(409, 'BOOTSTRAP_PENDING', 'Another bootstrap is already requested');
     if (existing.status === 'requested') {
       const status = context.call('queue.bootstrapStatus');
@@ -807,7 +827,11 @@ async function bootstrap(context: ModuleContext, body: BootstrapBody): Promise<R
   if (!existing) {
     const requestDigest = await digest({ kind: 'ensure-repo', storageName: scratchStorageName });
     context.transaction(() => {
-      if (context.state.get<BootstrapPending>('bootstrap')) fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
+      if (context.state.get<BootstrapPending>('bootstrap')) {
+        if (Number.isSafeInteger(body.expectedVersion) && body.expectedVersion !== context.version())
+          throw new HttpError(409, 'STALE_VERSION', 'Object version is stale', { currentVersion: context.version() });
+        fail(409, 'BOOTSTRAP_PENDING', 'A bootstrap is already requested');
+      }
       context.state.put('bootstrap', { changeId: change.changeId, headOid, seedRef, seedStorageName, withHistory: body.withHistory === true, jobId, scratchStorageName, status: 'provisioning' } satisfies BootstrapPending);
       saveIntent(context, { kind: 'ensure-repo', storageName: scratchStorageName, requestDigest, state: 'intent', retryAt: context.now(), polls: 0 });
     });
@@ -954,20 +978,22 @@ export const repos: FeatureModule = {
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/file$/, handle: (context, request) => canonicalRead(context, request, 'file') },
     { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/readme$/, handle: (context, request) => canonicalRead(context, request, 'readme') },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/bootstrap$/, handle: (context, _request, _match, body) => bootstrap(context, body as unknown as BootstrapBody) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Branch>(context, 'branches'), request)); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: async (context, request) => { await catalogRepo(context, 60_000); return respond(context, page(list<Branch>(context, 'branches'), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/branches$/, handle: (context, _request, _match, body) => registerBranch(context, body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/git-token$/, handle: (context, _request, _match, body) => gitToken(context, body as Record<string, unknown>) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context); return respond(context, page(list<Change>(context, 'changes').map(changeResponse), request)); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: async (context, request) => { await catalogRepo(context, 60_000); return respond(context, page(list<Change>(context, 'changes').map(changeResponse), request)); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes$/, handle: (context, _request, _match, body) => changeCreate(context, body as unknown as CreateChangeBody) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/repair-landed$/, handle: context => repairLandedChanges(context) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/intent-contests$/, handle: (context, _request, _match, body) => authorizeIntentContest(context, body as Record<string, unknown>) },
-    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision), inspection: inspectionResponse(context, change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
+    { method: 'GET', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)$/, handle: async (context, _request, match) => { await catalogRepo(context, 60_000); const change = getChange(context, match[2]); return respond(context, { ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision), inspection: inspectionResponse(context, change), provisioning: intents(context)[intentKey('fork', change.candidateStorageName)] }); } },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/publish$/, handle: (context, _request, match, body) => publish(context, match[2], body as Record<string, unknown>) },
     { method: 'POST', pattern: /^\/v1\/repos\/([^/]+)\/changes\/([^/]+)\/close$/, handle: (context, _request, match, body) => close(context, match[2], body as Record<string, unknown>) },
   ],
   snapshot: context => ({ repo: context.state.get<Repo>('repo'),
     unitPolicy: context.trusted.policies[context.state.get<Repo>('repo')?.policyId ?? ''],
-    branches: list<Branch>(context, 'branches'), changes: list<Change>(context, 'changes').map(change => ({ ...changeResponse(change), ...humanApprovalStatus(context, change.changeId, change.revision) })),
+    branches: list<Branch>(context, 'branches'), changes: snapshotHistory(list<Change>(context, 'changes'), change => !['merged', 'closed'].includes(change.status)).map(change => ({ ...changeResponse(change), ...(['merged', 'closed'].includes(change.status)
+      ? { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null }
+      : humanApprovalStatus(context, change.changeId, change.revision)) })),
     provisioning: Object.values(intents(context)), bootstrap: context.state.get<BootstrapPending>('bootstrap') }),
   nextDeadline: context => Object.values(intents(context)).filter(activeProvisioning).reduce<number | null>((earliest, intent) => earliest === null ? intent.retryAt : Math.min(earliest, intent.retryAt), null),
   onAlarm: async context => {

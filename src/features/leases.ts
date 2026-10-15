@@ -48,11 +48,24 @@ function issueFor(context: ModuleContext, changeId: string): { issueNumber: numb
   const issues = sqlState(context.sql).get<Array<{ number: number; title: string }>>('module:issues:items') ?? [];
   return { issueNumber, issueTitle: issues.find(item => item.number === issueNumber)?.title ?? null };
 }
-function asLease(context: ModuleContext, row: LeaseRow): Lease {
+function issueLookup(context: ModuleContext): (changeId: string) => { issueNumber: number | null; issueTitle: string | null } {
+  const changes = new Map<string, Change | null>();
+  let issues: Array<{ number: number; title: string }> | null = null;
+  return changeId => {
+    if (!changes.has(changeId)) changes.set(changeId,
+      sqlState(context.sql).get<Change>(`module:repos:change:${changeId}`));
+    const change = changes.get(changeId);
+    const issueNumber = change?.issueNumber ?? null;
+    issues ??= sqlState(context.sql).get<Array<{ number: number; title: string }>>('module:issues:items') ?? [];
+    return { issueNumber, issueTitle: issues.find(item => item.number === issueNumber)?.title ?? null };
+  };
+}
+function asLease(context: ModuleContext, row: LeaseRow,
+  getIssue: (changeId: string) => { issueNumber: number | null; issueTitle: string | null } = changeId => issueFor(context, changeId)): Lease {
   return {
     leaseId: row.lease_id, unitKey: row.unit_key, holderId: row.holder_id,
     changeId: row.change_id, intentText: row.intent_text, fence: row.fence,
-    expiresAt: row.expires_at, state: row.state, version: row.version, ...issueFor(context, row.change_id),
+    expiresAt: row.expires_at, state: row.state, version: row.version, ...getIssue(row.change_id),
   };
 }
 
@@ -78,6 +91,10 @@ function expireDue(context: ModuleContext, now: number): void {
     context.sql.exec("UPDATE leases_claims SET state = 'expired', version = ?, updated_at = ? WHERE lease_id = ?", version, now, row.lease_id);
     makeEvent(context, row.state === 'reserved' ? 'lease.reservationExpired' : 'lease.expired', row, version);
   }
+  context.sql.exec(`DELETE FROM leases_claims WHERE lease_id IN (
+    SELECT lease_id FROM leases_claims WHERE state NOT IN ('active','reserved') AND updated_at < ?
+    ORDER BY updated_at, lease_id LIMIT 256
+  )`, now - 24 * 60 * 60 * 1000);
 }
 
 function ttl(raw: unknown, maximum = MAX_TTL_SECONDS): number {
@@ -317,26 +334,34 @@ function encodeLeaseCursor(cursor: LeaseCursor): string {
 function projection(context: ModuleContext, cursor: LeaseCursor | null = null) {
   const now = context.now();
   const maxVersion = cursor?.maxVersion ?? context.sql.exec<{ max_version: number }>(
-    'SELECT COALESCE(MAX(version), 0) AS max_version FROM leases_claims').toArray()[0].max_version;
+    'SELECT version AS max_version FROM leases_claims ORDER BY version DESC LIMIT 1').toArray()[0]?.max_version ?? 0;
   const serverTime = cursor?.serverTime ?? now;
-  const after = cursor ? 'AND (created_at < ? OR (created_at = ? AND lease_id < ?))' : '';
-  const query = `WITH ordered AS (
-    SELECT *, CASE WHEN state IN ('active','reserved') AND expires_at > ? THEN 0 ELSE 1 END AS live_rank
-    FROM leases_claims
-  ) SELECT * FROM ordered WHERE
-    (live_rank = 0 ${cursor?.phase === 1 ? 'AND 0' : after}) OR
-    (live_rank = 1 AND version <= ?
-      AND NOT (state IN ('active','reserved') AND expires_at > ?)
-      ${cursor?.phase === 1 ? after : ''})
-    ORDER BY live_rank, created_at DESC, lease_id DESC LIMIT 101`;
   const position = cursor ? [cursor.createdAt, cursor.createdAt, cursor.leaseId] : [];
-  const args: (string | number)[] = [now];
-  if (cursor?.phase === 0) args.push(...position);
-  args.push(maxVersion, serverTime);
-  if (cursor?.phase === 1) args.push(...position);
-  const page = context.sql.exec<LeaseRow & { live_rank: 0 | 1 }>(query, ...args).toArray();
+  const page: Array<LeaseRow & { live_rank: 0 | 1 }> = [];
+  if (cursor?.phase !== 1) {
+    const afterLive = cursor ? 'AND (created_at < ? OR (created_at = ? AND lease_id < ?))' : '';
+    const liveArgs: (string | number)[] = [now];
+    if (cursor) liveArgs.push(...position);
+    liveArgs.push(101);
+    page.push(...context.sql.exec<LeaseRow>(`SELECT * FROM leases_claims
+      WHERE state IN ('active','reserved') AND expires_at > ? ${afterLive}
+      ORDER BY created_at DESC, lease_id DESC LIMIT ?`, ...liveArgs).toArray()
+      .map(row => ({ ...row, live_rank: 0 as const })));
+  }
+  if (page.length < 101) {
+    const terminalAfter = cursor?.phase === 1
+      ? 'AND (created_at < ? OR (created_at = ? AND lease_id < ?))' : '';
+    const terminalArgs: (string | number)[] = [maxVersion, serverTime];
+    if (terminalAfter) terminalArgs.push(...position);
+    terminalArgs.push(101 - page.length);
+    page.push(...context.sql.exec<LeaseRow>(`SELECT * FROM leases_claims
+      WHERE version <= ? AND NOT (state IN ('active','reserved') AND expires_at > ?) ${terminalAfter}
+      ORDER BY created_at DESC, lease_id DESC LIMIT ?`, ...terminalArgs).toArray()
+      .map(row => ({ ...row, live_rank: 1 as const })));
+  }
+  const getIssue = issueLookup(context);
   const items = page.slice(0, 100)
-    .map(row => ({ ...asLease(context, row),
+    .map(row => ({ ...asLease(context, row, getIssue),
       state: row.expires_at <= now && (row.state === 'active' || row.state === 'reserved') ? 'expired' : row.state,
       remainingSeconds: row.state === 'active' || row.state === 'reserved' ?
         Math.max(0, Math.ceil((row.expires_at - now) / 1000)) : 0 }));
@@ -527,6 +552,11 @@ export const leases: FeatureModule = {
     'CREATE TABLE IF NOT EXISTS leases_fences (unit_key TEXT PRIMARY KEY, fence INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS leases_refusals (id INTEGER PRIMARY KEY AUTOINCREMENT, change_id TEXT NOT NULL, requester_id TEXT NOT NULL, intent_text TEXT NOT NULL, keys TEXT NOT NULL, conflicts TEXT NOT NULL, created_at INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS leases_claims_live ON leases_claims(state, expires_at)',
+  ] }, { version: 2, statements: [
+    'CREATE INDEX IF NOT EXISTS leases_claims_version ON leases_claims(version)',
+    'CREATE INDEX IF NOT EXISTS leases_claims_terminal ON leases_claims(created_at DESC, lease_id DESC, version)',
+    "CREATE INDEX IF NOT EXISTS leases_claims_retention ON leases_claims(updated_at, lease_id) WHERE state NOT IN ('active','reserved')",
+    'CREATE INDEX IF NOT EXISTS leases_claims_change ON leases_claims(change_id, state)',
   ] }],
   routes: [
     { method: 'GET', pattern: collection, handle: (context, request) => json(projection(context,
@@ -536,7 +566,10 @@ export const leases: FeatureModule = {
     { method: 'POST', pattern: leaseAction, handle: (context, _request, match, body) => match[2] === 'renew' ? renew(context, match[1], body) : release(context, match[1], body) },
     { method: 'POST', pattern: forceReleasePath, handle: (context, _request, match, body) => forceRelease(context, match[1], body) },
   ],
-  snapshot: context => ({ ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row)) }),
+  snapshot: context => {
+    const getIssue = issueLookup(context);
+    return { ...projection(context), heldItems: activeRows(context, context.now()).map(row => asLease(context, row, getIssue)) };
+  },
   nextDeadline: context => context.sql.exec<{ deadline: number | null }>("SELECT MIN(expires_at) AS deadline FROM leases_claims WHERE state IN ('active','reserved')").toArray()[0]?.deadline ?? null,
   onAlarm: context => context.transaction(() => expireDue(context, context.now())),
   hooks: { 'leases.reserve': reserve, 'leases.reservationLive': reservationLive, 'leases.releaseReservation': releaseReservation,

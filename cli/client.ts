@@ -24,6 +24,7 @@ export interface ConcordClientOptions {
   token?: string;
   fetch?: typeof globalThis.fetch;
   sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
 }
 
 export interface RequestOptions {
@@ -113,6 +114,7 @@ export class ConcordClient {
   private readonly options: ConcordClientOptions;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random: () => number;
 
   constructor(options: ConcordClientOptions) {
     this.options = options;
@@ -121,6 +123,7 @@ export class ConcordClient {
     catch { throw new ConcordError('CONCORD_URL must be a valid absolute URL', 'usage'); }
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.sleep = options.sleep ?? delay;
+    this.random = options.random ?? Math.random;
   }
 
   async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
@@ -172,7 +175,7 @@ export class ConcordClient {
         rememberCredentialsIn(payload);
         if (response.ok) return payload as T;
         if (retryable && options.retryMode !== 'transport-only' && attempt < 2 && (response.status === 429 || response.status >= 500)) {
-          const wait = this.retryDelay(response.headers.get('retry-after'), attempt);
+          const wait = this.retryDelay(response.headers.get('retry-after'));
           await this.sleep(wait);
           continue;
         }
@@ -197,21 +200,30 @@ export class ConcordClient {
         if (receivedResponse && options.retryMode === 'transport-only') throw new ConcordError('Concord response could not be read', 'server', responseStatus);
         lastError = error;
         if (!retryable || attempt >= 2) break;
-        await this.sleep(250 * (2 ** attempt));
+        await this.sleep(this.jitteredDelay(1000 * (2 ** attempt)));
       }
     }
     if (url.pathname.endsWith('/git-token')) throw new ConcordError('Git token request failed during transport', 'transport');
     throw new ConcordError(`Concord transport failed: ${safeMessage(lastError)}`, 'transport', undefined, { message: safeMessage(lastError) });
   }
 
-  private retryDelay(value: string | null, attempt: number): number {
+  private retryDelay(value: string | null): number {
+    let base = 1000;
     if (value) {
       const seconds = Number(value);
-      if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000);
-      const date = Date.parse(value);
-      if (Number.isFinite(date)) return Math.max(0, Math.min(date - Date.now(), 30_000));
+      if (Number.isFinite(seconds) && seconds >= 0) base = Math.max(base, seconds * 1000);
+      else {
+        const date = Date.parse(value);
+        if (Number.isFinite(date)) base = Math.max(base, date - Date.now());
+      }
     }
-    return 250 * (2 ** attempt);
+    return this.jitteredDelay(base);
+  }
+
+  private jitteredDelay(base: number): number {
+    const random = this.random();
+    const factor = 1 + (Number.isFinite(random) ? Math.max(0, Math.min(random, 1 - Number.EPSILON)) : 0) * 0.5;
+    return Math.min(Math.floor(base * factor), 30_000);
   }
 }
 

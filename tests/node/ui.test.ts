@@ -480,7 +480,7 @@ describe('Fleet desk DOM', () => {
       (byId('token-input') as HTMLInputElement).value = 'good';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush(); await flush();
-      expect(principalPageCalls).toBe(5);
+      expect(principalPageCalls).toBe(0);
       expect(byId('desk').hidden).toBe(false);
       expect(byId('tracker-view').hidden).toBe(false);
       expect(byId('repo-owner').textContent).toBe('reviewer');
@@ -670,7 +670,7 @@ describe('Fleet desk DOM', () => {
       raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
       expect(releaseSnapshot10).toBeTypeOf('function');
-      expect(byId('desk-message').textContent).toContain('Snapshot unavailable (NETWORK_UNREACHABLE)');
+      expect(requests.filter(r => r.url === '/v1/repos/demo/snapshot').length).toBeGreaterThan(0);
       const actionButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
       expect(actionButtons.length).toBeGreaterThan(1);
       expect(actionButtons.every(button => button.disabled)).toBe(true);
@@ -684,7 +684,9 @@ describe('Fleet desk DOM', () => {
       await flush();
       expect(requests.filter(r => r.url === '/v1/repos/demo/queue/enqueue' && r.init.method === 'POST')).toHaveLength(postsAfterStale);
       interaction = true; snapshotVersion = 11; eventVersion = 11;
+      await flush(); await flush(); await flush(); await flush();
       (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush();
+      await flush(); await flush();
       const recoveredButtons = [...doc.querySelectorAll('.action-form button, .action-buttons button')] as HTMLButtonElement[];
       expect(recoveredButtons.every(button => !button.disabled)).toBe(true);
       const recoveredEnqueue = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;

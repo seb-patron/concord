@@ -20,7 +20,19 @@ export function initialize(sql: SqlStorage): void {
     CREATE INDEX IF NOT EXISTS concord_events_metric_second ON concord_events(json_extract(related_ids, '$[1]'), timestamp, sequence);
     CREATE INDEX IF NOT EXISTS concord_events_metric_claim ON concord_events(json_extract(payload, '$.changeId'), timestamp, sequence) WHERE kind = 'lease.claimed';
     CREATE INDEX IF NOT EXISTS concord_events_metric_red ON concord_events(timestamp, sequence) WHERE kind = 'queue.diagnosis' AND json_extract(payload, '$.reason') = 'BASE_RED';
-    CREATE TABLE IF NOT EXISTS concord_requests (principal_id TEXT NOT NULL, route TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(principal_id, route, idempotency_key));`);
+    CREATE TABLE IF NOT EXISTS concord_metrics_daily (day TEXT NOT NULL, shard INTEGER NOT NULL, events TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(day, shard));
+    CREATE TRIGGER IF NOT EXISTS concord_events_metrics_insert AFTER INSERT ON concord_events BEGIN
+      INSERT INTO concord_metrics_daily(day, shard, events) VALUES(date(NEW.timestamp / 1000, 'unixepoch'), CAST((NEW.sequence - 1) / 256 AS INTEGER),
+        json_array(json_object('sequence', NEW.sequence, 'kind', NEW.kind, 'actorId', NEW.actor_id,
+          'timestamp', NEW.timestamp, 'version', NEW.version, 'relatedIds', json(NEW.related_ids), 'payload', json(NEW.payload))))
+      ON CONFLICT(day, shard) DO UPDATE SET events = json_insert(concord_metrics_daily.events, '$[#]',
+        json_object('sequence', NEW.sequence, 'kind', NEW.kind, 'actorId', NEW.actor_id,
+          'timestamp', NEW.timestamp, 'version', NEW.version, 'relatedIds', json(NEW.related_ids), 'payload', json(NEW.payload)));
+    END;
+    CREATE TABLE IF NOT EXISTS concord_requests (principal_id TEXT NOT NULL, route TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(principal_id, route, idempotency_key));`);
+  const columns = sql.exec<{ name: string }>('PRAGMA table_info(concord_requests)').toArray();
+  if (!columns.some(column => column.name === 'created_at')) sql.exec('ALTER TABLE concord_requests ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
+  sql.exec('CREATE INDEX IF NOT EXISTS concord_requests_created ON concord_requests(created_at)');
 }
 
 export function applyMigrations(storage: DurableObjectStorage, module: FeatureModule): void {

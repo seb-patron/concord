@@ -147,7 +147,7 @@ describe('Repository code page', () => {
       });
       page.show('sample', current);
       await new Promise(resolve => setTimeout(resolve, 0));
-      expect(calls).toEqual(['b'.repeat(40), 'b'.repeat(40)]);
+      expect(calls).toEqual(['b'.repeat(40)]);
       expect(dom.window.document.getElementById('page')?.textContent).toContain('Main');
     } finally { globalThis.document = previous; }
   });
@@ -179,6 +179,7 @@ describe('Repository code page', () => {
       expect(root.textContent).toContain('2 claimed');
       const agents = [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')! as HTMLButtonElement;
       agents.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
       expect(agents.isConnected).toBe(false);
       expect(root.textContent).toContain('AGENTS.md');
       expect(root.textContent).toContain('agents/rules.md');
@@ -206,6 +207,7 @@ describe('Repository code page', () => {
       page.show('sample', snapshot);
       await new Promise(resolve => setTimeout(resolve, 0));
       ([...root.querySelectorAll('button')].find(button => button.textContent === 'For agents') as HTMLButtonElement).click();
+      await new Promise(resolve => setTimeout(resolve, 0));
       const shown = root.querySelector('pre')?.textContent ?? '';
       expect(shown).toContain('[REDACTED]');
       expect(shown).not.toContain('sample-token');
@@ -250,6 +252,7 @@ describe('Repository code page', () => {
       expect(root.textContent).toContain('Could not load');
       expect(root.textContent).not.toContain('README.md is unavailable');
       forAgents(root);
+      await settle();
       expect(root.textContent).toContain('Could not load');
       expect(root.textContent).not.toContain('No agent docs');
     } finally { globalThis.document = previous; }
@@ -268,6 +271,7 @@ describe('Repository code page', () => {
       expect(root.textContent).toContain('README.md is unavailable');
       expect(root.textContent).not.toContain('Could not load');
       forAgents(root);
+      await settle();
       expect(root.textContent).toContain('not present');
       expect(root.textContent).not.toContain('Could not load');
     } finally { globalThis.document = previous; }
@@ -378,13 +382,13 @@ describe('Repository code page', () => {
       };
       const page = createRepoPage(root, api);
       page.show('many-docs', fixture);
+      const toggle = [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')! as HTMLButtonElement;
+      toggle.click();
       let readTimeout!: ReturnType<typeof setTimeout>;
       const readTimeoutElapsed = new Promise<never>((_, reject) => { readTimeout = setTimeout(() => reject(new Error('agent document reads did not finish')), 1000); });
       try { await Promise.race([allReadsComplete, readTimeoutElapsed]); }
       finally { clearTimeout(readTimeout); }
-      const toggle = [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')! as HTMLButtonElement;
-      expect(toggle.getAttribute('aria-pressed')).toBe('false');
-      toggle.click();
+      expect(root.querySelector('[aria-pressed="true"]')?.textContent).toBe('For agents');
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(agentReads).toBe(20);
       expect(maximum).toBeLessThanOrEqual(4);
@@ -408,6 +412,7 @@ describe('Repository code page', () => {
       page.show('missing-agents', snapshot);
       await new Promise(resolve => setTimeout(resolve, 0));
       [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
       expect(root.textContent).toContain('AGENTS.md');
       expect(root.textContent).toContain('not present');
       const json = root.querySelector('pre')?.textContent ?? '';
@@ -422,8 +427,9 @@ describe('Repository code page', () => {
     try {
       const root = dom.window.document.getElementById('page')!;
       let agentsContent: string | null = 'not present';
+      let mainOid = 'f'.repeat(40);
       const page = createRepoPage(root, {
-        getRepoTree: async () => ({ data: { oid: 'f'.repeat(40), entries: [] } }),
+        getRepoTree: async () => ({ data: { oid: mainOid, entries: [] } }),
         getRepoReadme: async () => { throw { status: 404 }; },
         getRepoFile: async (_repo: string, path: string) => {
           if (path !== 'AGENTS.md' || agentsContent === null) throw { status: 404 };
@@ -436,15 +442,19 @@ describe('Repository code page', () => {
       await new Promise(resolve => setTimeout(resolve, 0));
       const toggle = [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')! as HTMLButtonElement;
       toggle.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
       const badge = root.querySelector('.repo-doc-list li span')!;
       expect(badge.textContent).toMatch(/estimated tokens/);
       expect(badge.textContent).not.toBe('not present');
 
       page.hide();
       agentsContent = null;
+      mainOid = 'e'.repeat(40);
+      snapshot.data.projections.repos.repo.observedCanonicalOid = mainOid;
       page.show('agent-doc-label', snapshot);
       await new Promise(resolve => setTimeout(resolve, 0));
       [...root.querySelectorAll('button')].find(button => button.textContent === 'For agents')!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
       expect(root.querySelector('.repo-doc-list li span')?.textContent).toBe('not present');
     } finally { globalThis.document = previous; }
   });

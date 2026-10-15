@@ -25,6 +25,7 @@ const state = { generation: 0, repoId: null, repos: [], principals: [], identity
   inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
   awaitingFreshSnapshot: false, accessSignIn: false, metrics: null, metricsFetchedAt: 0,
   publicRead: false, publicPollAt: 0, publicRequestTimes: [], lastPollAt: 0, lastLifecycleRefreshAt: 0 };
+state.refreshRequested = false;
 // Keep anonymous traffic below the Worker's shared authentication limit.
 function publicRequestAvailable() {
   if (!state.publicRead) return true;
@@ -195,7 +196,6 @@ async function signIn(token, preferredRepo, accessSession = null) {
     const page = await listRepos();
     if (gen !== state.generation) return;
     state.identity = identity;
-    void refreshPrincipals(gen);
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
     const requestedRepo = preferredRepo ?? new URLSearchParams(window.location.search).get('repo');
     state.repoId = state.repos.find(r => r.repoId === requestedRepo)?.repoId ?? state.repos[0]?.repoId ?? null;
@@ -273,10 +273,9 @@ function observeVersion(repoId, version) {
 function acceptSnapshot(body, repoId) {
   if (!Number.isSafeInteger(body?.version) || body.version < (state.observedVersions.get(repoId) ?? 0)) return false;
   observeVersion(repoId, body.version);
-  verdictLoader.request([], list(body?.data?.projections?.repos?.changes)
-    .filter(change => change?.status === 'merged').map(change => change.changeId));
   verdictLoader.advanceVersion(body.version);
   state.snapshot = body; state.version = body.version;
+  if (state.seq === 0 && Number.isSafeInteger(body.eventSeq)) state.seq = Math.max(0, body.eventSeq - 100);
   state.awaitingFreshSnapshot = false;
   return true;
 }
@@ -292,7 +291,9 @@ async function refreshVerdicts(gen = state.generation) {
   if (gen === state.generation) verdictLoader.request(ids, terminal);
 }
 async function poll(gen = state.generation, force = false) {
-  if (!state.repoId || gen !== state.generation || state.busy) return;
+  if (!state.repoId || gen !== state.generation) return;
+  if (state.busy) { if (force) state.refreshRequested = true; return; }
+  if (document.visibilityState === 'hidden') return;
   if (state.publicRead) {
     if (!force && Date.now() - state.publicPollAt < 60_000) return;
     state.publicPollAt = Date.now();
@@ -301,7 +302,7 @@ async function poll(gen = state.generation, force = false) {
   render();
   try {
     let page;
-    for (let i = 0; i < (state.publicRead ? 1 : 20); i++) {
+    for (let i = 0; i < 1; i++) {
       const repoId = state.repoId;
       page = await getEvents(repoId, state.seq);
       if (gen !== state.generation) return;
@@ -321,7 +322,7 @@ async function poll(gen = state.generation, force = false) {
       if (gen !== state.generation || !acceptSnapshot(body, repoId)) return;
       await refreshVerdicts(gen);
     }
-    if (Date.now() - state.metricsFetchedAt >= 60_000) {
+    if (state.tab === 'fleet' && Date.now() - state.metricsFetchedAt >= 60_000) {
       const day = new Date().toISOString().slice(0, 10);
       const since = `${day}T00:00:00.000Z`;
       const until = new Date(Date.parse(since) + 86_400_000).toISOString();
@@ -346,7 +347,10 @@ async function poll(gen = state.generation, force = false) {
     state.connected = false;
     state.deskMessage = error.status === 403 ? 'Your token cannot see this repository.' : 'Disconnected. Showing the last known state.';
     render();
-  } finally { state.busy = false; render(); }
+  } finally {
+    state.busy = false; render();
+    if (state.refreshRequested) { state.refreshRequested = false; void poll(gen, true); }
+  }
 }
 function relativeUpdateTime() {
   if (!state.lastPollAt) return 'Updated —';
@@ -783,12 +787,21 @@ function renderTabs() {
   for (const pane of document.querySelectorAll('[data-pane]')) pane.classList.toggle('active-pane',pane.dataset.pane===state.tab);
 }
 function render() {
+  if (typeof document === 'undefined' || !document.body) return;
   preserve(()=>{
     showSession();
     const refresh = $('refresh-button');
     refresh.disabled = state.busy;
     refresh.textContent = state.busy ? 'Refreshing…' : 'Refresh';
     $('refresh-status').textContent = relativeUpdateTime();
+    const olderButton = $('load-older-history');
+    if (olderButton) {
+      const projections = state.snapshot?.data?.projections ?? {};
+      const older = (projections.repos?.olderChanges ?? 0) + (projections.queue?.olderEntries ?? 0) +
+        (projections.runners?.olderJobs ?? 0) + (projections.issues?.olderItems ?? 0);
+      olderButton.hidden = !older || !!state.snapshot?.data?.historyLoaded;
+      olderButton.disabled = state.busy;
+    }
     if (!canRender({ token: hasToken(), identity: state.identity, publicRead: state.publicRead }) || !state.identity) return;
     $('desk').dataset.mainViewActive = state.view;
     const mainOid = projections().repos?.repo?.observedCanonicalOid;
@@ -983,10 +996,29 @@ function boot() {
     themeToggle.setAttribute('aria-label', next === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
   });
   $('refresh-button').addEventListener('click',()=>void poll(state.generation,true));
+  const olderButton = document.createElement('button');
+  olderButton.id = 'load-older-history'; olderButton.type = 'button'; olderButton.textContent = 'Load older';
+  olderButton.hidden = true;
+  $('refresh-button').insertAdjacentElement('afterend', olderButton);
+  olderButton.addEventListener('click', async () => {
+    if (!state.repoId || document.visibilityState === 'hidden') return;
+    const gen = state.generation;
+    olderButton.disabled = true;
+    try {
+      const body = await getSnapshot(state.repoId, undefined, true);
+      if (gen !== state.generation) return;
+      if (body?.data) body.data.historyLoaded = true;
+      if (acceptSnapshot(body, state.repoId)) render();
+    } catch (error) { state.deskMessage = `Older history unavailable (${redactError(error)}).`; render(); }
+    finally { olderButton.disabled = false; }
+  });
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
   $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
   $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});
-  for(const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click',()=>{state.tab=b.dataset.tab;renderTabs();});
+  for(const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click',()=>{
+    state.tab=b.dataset.tab;renderTabs();
+    if (state.tab === 'fleet') { void refreshPrincipals(state.generation); void poll(state.generation, true); }
+  });
   $('work-board').addEventListener('keydown',e=>{
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter'].includes(e.key))return;
     const cards=[...document.querySelectorAll('.work-card')];

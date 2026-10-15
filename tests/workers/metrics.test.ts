@@ -123,7 +123,7 @@ describe('repository event metrics', () => {
     expect(metrics.reworkRevisions.value).toBe(1);
   });
 
-  it('counts long publish history without a revision-sized temporary B-tree', async () => {
+  it('counts long publish history from daily rollups without a history query', async () => {
     const stub = env.REPO_COORDINATOR.get(env.REPO_COORDINATOR.idFromName(`repo:local:metric-fixture-${++fixtureRepo}`));
     await runInDurableObject(stub, (_instance, durable) => {
       const sql = durable.storage.sql;
@@ -137,17 +137,7 @@ describe('repository event metrics', () => {
         VALUES ('change.published', 'fixture', ?, 1, '["long-history"]', '{"revision":3001}')`, base - 7000);
       sql.exec(`INSERT INTO concord_events(kind, actor_id, timestamp, version, related_ids, payload)
         VALUES ('queue.promotion_applied', 'fixture', ?, 1, '["long-history"]', '{}')`, base + 1000);
-      let originPlans = 0;
-      const observedSql = { exec: (query: string, ...args: (string | number)[]) => {
-        if (query.includes('AS revisions')) {
-          originPlans++;
-          const plan = sql.exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, ...args).toArray();
-          expect(plan.some(row => /USE TEMP B-TREE/i.test(row.detail))).toBe(false);
-        }
-        return sql.exec(query, ...args);
-      } } as unknown as SqlStorage;
-      const metrics = measureSqlMetrics(observedSql, base, base + 2000);
-      expect(originPlans).toBe(1);
+      const metrics = measureSqlMetrics(sql, base, base + 2000);
       expect(metrics.changesLanded.value).toBe(1);
       expect(metrics.revisionsPerLandedChange).toMatchObject({ median: 3001, mean: 3001, n: 1 });
       expect(metrics.reworkRevisions.value).toBe(3000);

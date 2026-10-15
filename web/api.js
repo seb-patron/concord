@@ -18,6 +18,7 @@
 let sessionToken = null;
 let anonymousReadBudget = null;
 const snapshotCache = new Map();
+const snapshotInflight = new Map();
 
 /** Set a shared request budget for credentialless repository reads. */
 export function setAnonymousReadBudget(available) {
@@ -27,7 +28,7 @@ export function setAnonymousReadBudget(available) {
 /** Store the session token in memory. Pass null/'' to forget it. */
 export function setSessionToken(token) {
   const next = typeof token === 'string' && token.length > 0 ? token : null;
-  if (sessionToken !== next) snapshotCache.clear();
+  if (sessionToken !== next) { snapshotCache.clear(); snapshotInflight.clear(); }
   sessionToken = next;
 }
 
@@ -35,6 +36,7 @@ export function setSessionToken(token) {
 export function clearSessionToken() {
   sessionToken = null;
   snapshotCache.clear();
+  snapshotInflight.clear();
 }
 
 /** True when a session token is present in memory. */
@@ -202,16 +204,25 @@ export function getVerdicts(repoId, changeId, cursor = null, fetchImpl) {
     {}, typeof cursor === 'function' ? cursor : fetchImpl);
 }
 
-export function getSnapshot(repoId, fetchImpl) {
-  const key = encodeURIComponent(repoId);
+export function getSnapshot(repoId, fetchImpl, includeHistory = false) {
+  const repoKey = encodeURIComponent(repoId);
+  const key = `${repoKey}:${includeHistory ? 'history' : 'bounded'}`;
+  if (snapshotInflight.has(key)) return snapshotInflight.get(key);
   const cached = snapshotCache.get(key);
   let etag = null;
-  return apiFetch(`/v1/repos/${key}/snapshot`, { ifNoneMatch: cached?.etag, allowNotModified: true,
+  const path = `/v1/repos/${repoKey}/snapshot${includeHistory ? '?history=1' : ''}`;
+  const request = apiFetch(path, { ifNoneMatch: cached?.etag, allowNotModified: true,
     onResponse: response => { etag = response.headers.get('etag'); } }, fetchImpl).then(result => {
-    if (result?.notModified) return cached?.body ?? apiFetch(`/v1/repos/${key}/snapshot`, {}, fetchImpl);
+    if (result?.notModified && cached?.body) return cached.body;
+    if (result?.notModified) return apiFetch(path, {}, fetchImpl).then(body => {
+      if (etag) snapshotCache.set(key, { etag, body });
+      return body;
+    });
     if (result && typeof result === 'object' && etag) snapshotCache.set(key, { etag, body: result });
     return result;
-  });
+  }).finally(() => { if (snapshotInflight.get(key) === request) snapshotInflight.delete(key); });
+  snapshotInflight.set(key, request);
+  return request;
 }
 
 export function getSettings(repoId, fetchImpl) {

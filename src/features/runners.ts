@@ -319,11 +319,11 @@ function poll(c: ModuleContext, body: RunnerPollBody): Response {
 function heartbeat(c: ModuleContext, id: string, body: JobHeartbeatBody): Response {
   return c.transaction(() => {
     const row = current(c, id, body);
-    row.job = { ...row.job, expiresAt: c.now() + claimMs(c), version: c.nextVersion() };
+    row.job = { ...row.job, expiresAt: c.now() + claimMs(c) };
     save(c, row);
     const assigned = runner(c, row.job.runnerId!);
     if (assigned) saveRunner(c, row.job.runnerId!, { ...assigned, lastSeenAt: c.now() });
-    return json({ expiresAt: row.job.expiresAt }, row.job.version);
+    return json({ expiresAt: row.job.expiresAt }, c.version());
   });
 }
 
@@ -547,7 +547,7 @@ export const runners: FeatureModule = {
         return !record || c.now() - record.lastSeenAt > CLAIM_MS ? 'offline' : record.activeJobId ? 'claimed' : 'idle';
       })() })) };
   },
-  nextDeadline: c => { const values = ids(c).map(id => load(c, id)?.job.expiresAt).filter((n): n is number => n !== null && n !== undefined); return values.length ? Math.min(...values) : null; },
+  nextDeadline: c => { const values = (c.state.get<JobIndexEntry[]>(CLAIMED_IDS) ?? []).map(({ id }) => load(c, id)?.job.expiresAt).filter((n): n is number => n !== null && n !== undefined); return values.length ? Math.min(...values) : null; },
   onAlarm: c => c.transaction(() => expire(c)),
   hooks: { 'runners.schedule': schedule, 'runners.cancelBootstrap': cancelBootstrap },
 };

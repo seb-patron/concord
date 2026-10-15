@@ -20,6 +20,35 @@ import { measureSqlMetrics, metricsWindow, type RepoMetrics } from './features/m
 export const modules: FeatureModule[] = [repos, leases, queue, runners, findings, verdicts, issuesFeature, settings];
 const SNAPSHOT_TIME_BUCKET_MS = 15_000;
 
+function boundedSnapshot(projections: Record<string, any>): Record<string, any> {
+  const keepOpenAndRecent = (items: any[], live: (item: any) => boolean) => {
+    const terminal = items.filter(item => !live(item));
+    const retained = new Set(terminal.slice(-50));
+    return { items: items.filter(item => live(item) || retained.has(item)), olderCount: Math.max(0, terminal.length - retained.size) };
+  };
+  const repos = projections.repos;
+  if (repos && Array.isArray(repos.changes)) {
+    const bounded = keepOpenAndRecent(repos.changes, item => !['merged', 'closed', 'landed'].includes(item.status));
+    repos.changes = bounded.items; repos.olderChanges = bounded.olderCount;
+  }
+  const queueProjection = projections.queue;
+  if (queueProjection && Array.isArray(queueProjection.entries)) {
+    const bounded = keepOpenAndRecent(queueProjection.entries, item => ['admitted', 'reserved', 'checking'].includes(item.state));
+    queueProjection.entries = bounded.items; queueProjection.olderEntries = bounded.olderCount;
+  }
+  const runners = projections.runners;
+  if (runners && Array.isArray(runners.jobs)) {
+    const bounded = keepOpenAndRecent(runners.jobs, item => ['pending', 'claimed'].includes(item.state));
+    runners.jobs = bounded.items; runners.olderJobs = bounded.olderCount;
+  }
+  const issues = projections.issues;
+  if (issues && Array.isArray(issues.items)) {
+    const bounded = keepOpenAndRecent(issues.items, item => item.state === 'open');
+    issues.items = bounded.items; issues.olderItems = bounded.olderCount;
+  }
+  return projections;
+}
+
 export function selectStorage(env: Env, sql: SqlStorage, now: () => number): RepoStorage {
   if (env.CONCORD_MODE === 'local' && env.STORAGE_BACKEND === 'fake') return new FakeStorage(sqlState(sql), now);
   if (env.CONCORD_MODE === 'local' && env.STORAGE_BACKEND === 'bridge' && env.BRIDGE_URL?.startsWith('http://127.0.0.1:')) return bridgeStorage(env.BRIDGE_URL);
@@ -30,6 +59,7 @@ export function selectStorage(env: Env, sql: SqlStorage, now: () => number): Rep
 export class RepoCoordinator extends DurableObject<Env> {
   private readonly now: () => number;
   private readonly metricsCache = new Map<string, { expiresAt: number; data: RepoMetrics }>();
+  private readonly transientEmptyPolls = new Map<string, { digest: string; expiresAt: number }>();
   private snapshotCacheVersion: number | null = null;
   private readonly snapshotCache = new Map<string, { timeBucket: number; body: string }>();
   constructor(ctx: DurableObjectState, env: Env) {
@@ -139,6 +169,7 @@ export class RepoCoordinator extends DurableObject<Env> {
         return json(cached.data, version, eventSequence(core.sql));
       }
       if (request.method === 'GET' && url.pathname === `/v1/repos/${repoId}/snapshot`) {
+        const includeHistory = url.searchParams.get('history') === '1';
         const visibility = principal.roles.includes('owner') ? 'owner'
           : principal.roles.includes('reviewer') ? 'reviewer' : 'viewer';
         if (this.snapshotCacheVersion !== version) {
@@ -146,13 +177,15 @@ export class RepoCoordinator extends DurableObject<Env> {
           this.snapshotCacheVersion = version;
         }
         const timeBucket = Math.floor(this.now() / SNAPSHOT_TIME_BUCKET_MS);
-        let cached = this.snapshotCache.get(visibility);
+        const cacheKey = `${visibility}:${includeHistory ? 'history' : 'current'}`;
+        let cached = this.snapshotCache.get(cacheKey);
         if (!cached || cached.timeBucket !== timeBucket) {
-          const projections = Object.fromEntries(modules.map(module => [module.name, module.snapshot(this.context(module.name, principal, repoId))]));
+          const allProjections = Object.fromEntries(modules.map(module => [module.name, module.snapshot(this.context(module.name, principal, repoId))]));
+          const projections = includeHistory ? allProjections : boundedSnapshot(allProjections);
           cached = { timeBucket, body: JSON.stringify({ data: { repoId, projections }, version, eventSeq: eventSequence(core.sql) }) };
-          this.snapshotCache.set(visibility, cached);
+          this.snapshotCache.set(cacheKey, cached);
         }
-        const etag = `"v${version}-${visibility}-t${timeBucket}"`;
+        const etag = `"v${version}-${visibility}${includeHistory ? '-history' : ''}-t${timeBucket}"`;
         const responseHeaders = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', etag };
         const ifNoneMatch = request.headers.get('if-none-match');
         if (ifNoneMatch?.split(',').some(value => value.trim() === '*' || value.trim() === etag)) {
@@ -248,6 +281,17 @@ export class RepoCoordinator extends DurableObject<Env> {
       }
       const dispatch = async (): Promise<Response> => {
         if (mutation) await checkFreeze();
+        const emptyPollRoute = request.method === 'POST' && url.pathname === `/v1/repos/${repoId}/runner/poll`;
+        const replayKey = emptyPollRoute && key ? `${principal.principalId}:${url.pathname}:${key}` : null;
+        if (replayKey && requestDigest) {
+          const now = this.now();
+          for (const [oldKey, value] of this.transientEmptyPolls) if (value.expiresAt <= now) this.transientEmptyPolls.delete(oldKey);
+          const cached = this.transientEmptyPolls.get(replayKey);
+          if (cached) {
+            if (cached.digest !== requestDigest) throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency key was used with another body');
+            return new Response(null, { status: 204 });
+          }
+        }
         if (key && requestDigest) {
           const previous = core.sql.exec<{ request_digest: string; status: number; body: string }>(
             'SELECT request_digest, status, body FROM concord_requests WHERE principal_id = ? AND route = ? AND idempotency_key = ?',
@@ -261,16 +305,34 @@ export class RepoCoordinator extends DurableObject<Env> {
         const context = this.context(moduleRoute.module.name, principal, repoId);
         if (body && requiresExpectedVersion(request.method, url.pathname)) expectVersion(body, context.version());
         const response = await moduleRoute.route.handle(context, request, url.pathname.match(moduleRoute.route.pattern)!, body);
-        if (key && requestDigest) {
+        const skipReplayRow = request.method === 'POST' &&
+          (/^\/v1\/repos\/[^/]+\/jobs\/[^/]+\/heartbeat$/.test(url.pathname) ||
+            url.pathname === `/v1/repos/${repoId}/runner/poll` && response.status === 204);
+        if (replayKey && requestDigest && response.status === 204) {
+          while (this.transientEmptyPolls.size >= 256) this.transientEmptyPolls.delete(this.transientEmptyPolls.keys().next().value!);
+          this.transientEmptyPolls.set(replayKey, { digest: requestDigest, expiresAt: this.now() + 24 * 60 * 60 * 1000 });
+        }
+        if (key && requestDigest && !skipReplayRow) {
           const responseBody = await response.clone().text();
-          core.sql.exec('INSERT INTO concord_requests(principal_id, route, idempotency_key, request_digest, status, body) VALUES(?, ?, ?, ?, ?, ?)',
-            principal.principalId, `${request.method} ${url.pathname}`, key, requestDigest, response.status, responseBody);
+          core.sql.exec('INSERT INTO concord_requests(principal_id, route, idempotency_key, request_digest, status, body, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)',
+            principal.principalId, `${request.method} ${url.pathname}`, key, requestDigest, response.status, responseBody, this.now());
+          core.sql.exec('DELETE FROM concord_requests WHERE rowid IN (SELECT rowid FROM concord_requests WHERE created_at < ? ORDER BY created_at LIMIT 64)', this.now() - 24 * 60 * 60 * 1000);
         }
         if (mutation) await this.scheduleNextAlarm(principal, repoId);
         return response;
       };
       if (!mutation) return await dispatch();
-      // Keep the final freeze read and the whole handler exclusive across async yields.
+      // Run catalog and Artifacts operations outside the exclusive section. Other
+      // handlers remain serialized so their expected-version checks stay atomic.
+      const networkBound = moduleRoute.module.name === 'repos' && (
+        url.pathname === '/v1/repos' || /\/v1\/repos\/[^/]+\/(?:branches|changes|bootstrap|git-token)$/.test(url.pathname) ||
+        /\/v1\/repos\/[^/]+\/changes\/[^/]+\/(?:publish|close)$/.test(url.pathname));
+      const asFailureResponse = (error: unknown) => failure(error instanceof HttpError
+        ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'));
+      if (networkBound) {
+        try { return await dispatch(); }
+        catch (error) { return asFailureResponse(error); }
+      }
       const result = await this.ctx.blockConcurrencyWhile(async () => {
         const serialize = async (response: Response) => {
           const headers: [string, string][] = [];
@@ -278,7 +340,7 @@ export class RepoCoordinator extends DurableObject<Env> {
           return { status: response.status, headers, body: response.status === 204 ? null : await response.text() };
         };
         try { return await serialize(await dispatch()); }
-        catch (error) { return await serialize(failure(error instanceof HttpError ? error : new HttpError(503, 'PLATFORM_UNAVAILABLE', 'Platform component unavailable'))); }
+        catch (error) { return await serialize(asFailureResponse(error)); }
       });
       return new Response(result.body, { status: result.status, headers: result.headers });
     } catch (error) {

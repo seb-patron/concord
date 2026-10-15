@@ -396,6 +396,35 @@ describe('durable runner protocol', () => {
     expect(f.calls).toEqual([]);
   });
 
+  it('extends a claim with heartbeats without advancing the repository version', async () => {
+    const f = await fixture();
+    runners.hooks['runners.schedule']!(f.context, f.job);
+    const claimed = await f.route('runner/poll', { runnerId: 'one', role: 'checker', supportedProfileDigests: [pin] });
+    expect(claimed.status).toBe(200);
+    const job = (await claimed.json() as { data: { job: Job } }).data.job;
+    const repoVersion = f.context.version();
+    let previousExpiry = job.expiresAt!;
+
+    for (let heartbeat = 0; heartbeat < 3; heartbeat++) {
+      f.advance(10_000);
+      const response = await f.route('jobs/job1/heartbeat', {
+        attempt: job.attempt, fence: job.fence, inputDigest: job.inputDigest,
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json() as { data: { expiresAt: number }; version: number };
+      expect(body.data.expiresAt).toBeGreaterThan(previousExpiry);
+      expect(body.version).toBe(repoVersion);
+      expect(f.context.version()).toBe(repoVersion);
+      previousExpiry = body.data.expiresAt;
+    }
+
+    const stale = await f.route('jobs/job1/heartbeat', {
+      attempt: job.attempt, fence: job.fence + 1, inputDigest: job.inputDigest,
+    });
+    expect(stale.status).toBe(409);
+    expect((await stale.json() as { error: { code: string } }).error.code).toBe('STALE_JOB');
+  });
+
   it('accepts one matching result and its retransmission, rejects conflicting and stale evidence', async () => {
     const f = await fixture();
     runners.hooks['runners.schedule']!(f.context, f.job);

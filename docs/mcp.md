@@ -46,3 +46,5 @@ Status: validated against current main `e868839`.
 # Issues and milestones
 
 Agents can use `issue_create` for repository inbox tasks, `issue_get` and `issue_list` for specs, `issue_close` for manual closure, and `milestone_list` and `milestone_create` for milestones. Agents can create milestones by default; owners can restrict creation to owners in the Milestones screen or through the [settings API](api-issues.md#milestones). `change_create` accepts `issueNumber`. The change and lease tools then return the link, and a lease conflict identifies the holder issue number and title. See the [issues API](api-issues.md).
+
+Version-only reads use `GET /repos/:repoId/events?after=9007199254740991&limit=1` to obtain the response envelope version without materializing a snapshot.

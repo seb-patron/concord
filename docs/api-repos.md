@@ -201,4 +201,6 @@ Bootstrap records the validation request and provisions a scratch repository bef
 Queue admission must also recheck the candidate's current registered ref and revision, consult the repos module's queue generation after a head change, and mark admitted/promoting changes frozen so `close` cannot bypass that state.
 # Related task records
 
+Canonical tree, file, and README requests with an explicit valid `oid` return `Cache-Control: private, max-age=86400, immutable`. Requests without an explicit OID remain `no-store`.
+
 `change create` accepts optional `issueNumber` to link the candidate to an open Concord issue. The change response and subsequent change views expose that number. See the [issues and milestones API](api-issues.md) for task specs, progress, and automatic closure on land.

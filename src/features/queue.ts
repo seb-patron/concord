@@ -68,9 +68,15 @@ const empty = (): QueueState => ({
   coalesceUntil: null, blockedReason: null,
 });
 const read = (context: ModuleContext): QueueState => context.state.get<QueueState>('data') ?? empty();
-const save = (context: ModuleContext, state: QueueState) => context.state.put('data', {
+const storedState = (state: QueueState) => ({
   ...state, jobs: state.jobs.map(record => ({ ...record, job: storedJob(record.job) })),
 });
+const alarmStateAtStart = new WeakMap<ModuleContext, string>();
+const save = (context: ModuleContext, state: QueueState) => {
+  const stored = storedState(state);
+  if (alarmStateAtStart.get(context) === JSON.stringify(stored)) return;
+  context.state.put('data', stored);
+};
 const eligible = <T>(context: ModuleContext, value: T, ids: Id[] = []): Gate<T> => ({ status: 'eligible', version: context.version(), evidenceIds: ids, value });
 const blocked = (context: ModuleContext, code: string, reason: string): Gate<never> => ({ status: 'blocked', version: context.version(), code, reason, evidenceIds: [] });
 function requireGate<T>(gate: Gate<T>): T {
@@ -436,7 +442,7 @@ function queueProjection(state: QueueState) {
   const stackAdmissionIds = activeRecord?.admissionIds ?? state.ticket?.admissionIds ?? [];
   return {
     generation: state.generation, observedMain: state.observedMain,
-    entries: ordered(state).map(entry => ({ ...entry, stackMember: stackAdmissionIds.includes(entry.entryId) })),
+    entries: ordered({ ...state, entries: snapshotQueueEntries(state.entries) }).map(entry => ({ ...entry, stackMember: stackAdmissionIds.includes(entry.entryId) })),
     contests: state.contests, promotion: state.ticket, bootstrap: state.bootstrap,
     activeStackJobId: state.activeStackJobId, stackMembers: stackIds, diagnosis: state.diagnosis,
     blameConfidence: state.diagnosis?.reason === 'SINGLETON' ? 'reproduced-singleton'
@@ -444,6 +450,12 @@ function queueProjection(state: QueueState) {
     diagnosticResults: state.diagnosticResults, finalCanonicalOid: state.finalCanonicalOid,
     blockedReason: state.blockedReason,
   };
+}
+function snapshotQueueEntries(entries: Entry[]): Entry[] {
+  const liveStates = new Set(['admitted', 'reserved', 'checking']);
+  const terminal = entries.filter(entry => !liveStates.has(entry.state));
+  const recent = new Set(terminal.slice(-50));
+  return entries.filter(entry => liveStates.has(entry.state) || recent.has(entry));
 }
 function protectedQueueProjection(context: ModuleContext) {
   const projection = queueProjection(read(context));
@@ -1037,8 +1049,7 @@ async function processRecordedResult(context: ModuleContext, state: QueueState, 
   await processStackResult(context, state, record, result, main);
 }
 
-async function queueAlarm(context: ModuleContext): Promise<void> {
-  const state = read(context);
+async function queueAlarmTick(context: ModuleContext, state: QueueState): Promise<void> {
   const canonicalName = state.ticket?.canonicalStorageName
     ?? state.bootstrap?.input.canonicalStorageName ?? state.entries[0]?.canonicalStorageName;
   if (!canonicalName) return;
@@ -1162,24 +1173,28 @@ export const queue: FeatureModule = {
     return null;
   },
   onAlarm: async context => {
-    try { await queueAlarm(context); }
-    catch (error) {
-      const state = read(context);
-      const reason = error instanceof HttpError ? error.code : 'QUEUE_ALARM_ERROR';
-      if (state.coalesceUntil !== null && state.coalesceUntil > context.now() && state.bootstrap
-        && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)
-        && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(state.blockedReason ?? '')) {
+    const state = read(context);
+    alarmStateAtStart.set(context, JSON.stringify(storedState(state)));
+    try {
+      try { await queueAlarmTick(context, state); }
+      catch (error) {
+        const state = read(context);
+        const reason = error instanceof HttpError ? error.code : 'QUEUE_ALARM_ERROR';
+        if (state.coalesceUntil !== null && state.coalesceUntil > context.now() && state.bootstrap
+          && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)
+          && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(state.blockedReason ?? '')) {
+          state.blockedReason = reason;
+          state.bootstrap.blockedReason = reason;
+          save(context, state);
+          return;
+        }
         state.blockedReason = reason;
-        state.bootstrap.blockedReason = reason;
+        if (state.bootstrap && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)) state.bootstrap.blockedReason = reason;
+        state.coalesceUntil = context.now() + (['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason) && state.bootstrap ? 60_000 : 10_000);
+        emit(context, 'queue.alarm_deferred', [], { reason, retryAt: state.coalesceUntil });
         save(context, state);
-        return;
       }
-      state.blockedReason = reason;
-      if (state.bootstrap && ['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason)) state.bootstrap.blockedReason = reason;
-      state.coalesceUntil = context.now() + (['PROFILE_CHANGED', 'INVALID_JOB'].includes(reason) && state.bootstrap ? 60_000 : 10_000);
-      emit(context, 'queue.alarm_deferred', [], { reason, retryAt: state.coalesceUntil });
-      save(context, state);
-    }
+    } finally { alarmStateAtStart.delete(context); }
   },
   hooks: { 'queue.onResult': onResult, 'queue.bootstrapStatus': context => {
     if (!context?.state?.get || !context?.version)

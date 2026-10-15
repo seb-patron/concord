@@ -9,7 +9,7 @@ import { importRepo } from './import.ts';
 import { land } from './land.ts';
 import { mintGitToken } from './git-token.ts';
 import { addProfileRejectionContext, resolveCredential } from './profile.ts';
-import { releaseByIntent, renewByIntent, start } from './start.ts';
+import { liveLeasePages, releaseByIntent, renewByIntent, start } from './start.ts';
 
 const HELP = `Concord agent CLI
 
@@ -312,22 +312,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       if (!cursor) break;
       if (page === pages - 1) truncated = true;
     }
+    const { items: leaseItems, truncated: liveLeaseCountTruncated } = await liveLeasePages(client, root, 50);
     const liveLeases = new Map<string, number>();
-    let leaseCursor: string | undefined;
-    let liveLeaseCountTruncated = false;
-    for (let page = 0; page < 50; page++) {
-      const leasePage = unwrap(await send('GET', `${root}/leases${query({ cursor: leaseCursor })}`)) as { items?: unknown; nextCursor?: unknown };
-      if (!Array.isArray(leasePage.items)) throw new ConcordError('Concord returned an invalid leases page', 'server');
-      for (const lease of leasePage.items) {
-        if (!lease || typeof lease !== 'object') continue;
-        const item = lease as Record<string, unknown>;
-        if (typeof item.changeId !== 'string' || !['active', 'reserved'].includes(String(item.state)) ||
-          typeof item.expiresAt !== 'number' || item.expiresAt <= Date.now()) continue;
-        liveLeases.set(item.changeId, (liveLeases.get(item.changeId) ?? 0) + 1);
-      }
-      leaseCursor = typeof leasePage.nextCursor === 'string' && leasePage.nextCursor ? leasePage.nextCursor : undefined;
-      if (!leaseCursor) break;
-      if (page === 49) liveLeaseCountTruncated = true;
+    for (const item of leaseItems) {
+      if (typeof item.changeId !== 'string') continue;
+      liveLeases.set(item.changeId, (liveLeases.get(item.changeId) ?? 0) + 1);
     }
     const items = changes.map(change => {
       const updatedAt = typeof change.updatedAt === 'string' ? Date.parse(change.updatedAt) : NaN;

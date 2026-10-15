@@ -99,7 +99,7 @@ Each moved lease gets a new version and one `lease.renewed` event. An unchanged 
 
 `POST /v1/repos/:repoId/leases/:leaseId/renew` takes `{ "expectedVersion": 3, "fence": 7, "ttlSeconds": 120 }`. The current holder keeps the same fence; renewal moves only the expiry, computed from server time. Renew near the 40-second guidance. A fence changes only on a new grant (claim) or an owner force-release.
 
-`POST /v1/repos/:repoId/leases/:leaseId/release` takes `{ "expectedVersion": 4, "fence": 8 }`. Only the current holder with the current fence can release an active, unexpired lease. An expired, released, or reserved lease, or a stale fence, returns `409 LEASE_STALE`. Expiry is checked during requests, so a delayed alarm cannot extend exclusivity. Alarm replay does not duplicate expiry events. Released and expired rows remain readable.
+`POST /v1/repos/:repoId/leases/:leaseId/release` takes `{ "expectedVersion": 4, "fence": 8 }`. Only the current holder with the current fence can release an active, unexpired lease. An expired, released, or reserved lease, or a stale fence, returns `409 LEASE_STALE`. Expiry is checked during requests, so a delayed alarm cannot extend exclusivity. Alarm replay does not duplicate expiry events. Terminal lease rows are retained for 24 hours after their last update; expiry and mutation sweeps delete at most 256 eligible rows per call. Lease history remains available in `concord_events` after the row is removed.
 
 Closing an unfrozen draft or ready change releases every active or reserved lease whose `changeId` matches that change. Each row is versioned and emits `lease.released` with reason `change-closed`; the close response remains the ordinary change response. Other changes' leases are unaffected.
 

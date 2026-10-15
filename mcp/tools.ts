@@ -3,6 +3,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ConcordClient, ConcordError, idempotencyKey, redactOutput, rememberCredentialsIn } from '../cli/client.ts';
 import { assertCommit, assertHeadBasedOn, git, rejectCanonicalTarget, resolveHead, validateRemote } from '../cli/git.ts';
+import { repoVersion } from '../cli/version.ts';
 
 type Args = Record<string, unknown>;
 type Shape = Record<string, Record<string, unknown>>;
@@ -78,7 +79,7 @@ function mutation(client: ConcordClient, url: string, body: Args, expectedVersio
   return client.request('POST', url, { body, expectedVersion, idempotencyKey: idempotencyKey(typeof key === 'string' ? key : undefined) });
 }
 async function currentVersion(client: ConcordClient, args: Args): Promise<number> {
-  return version(await client.request('GET', `${root(args)}/snapshot`));
+  return repoVersion(client, root(args));
 }
 async function gitAccess(client: ConcordClient, args: Args, storageName: string, scope: 'read' | 'write', repoVersion: number): Promise<{ remote: string; token: string }> {
   const access = data(await mutation(client, `${root(args)}/git-token`, { storageName, scope, ttlSeconds: 300 }, repoVersion));

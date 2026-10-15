@@ -1,4 +1,5 @@
 import { ConcordClient, ConcordError, idempotencyKey } from './client.ts';
+import { repoVersion } from './version.ts';
 
 type Envelope<T> = { data: T; version?: number };
 
@@ -11,18 +12,8 @@ export interface GitTokenOptions {
 
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-function currentVersion(value: unknown): number {
-  if (value && typeof value === 'object') {
-    const envelope = value as { version?: unknown; data?: { version?: unknown } };
-    const version = envelope.version ?? envelope.data?.version;
-    if (Number.isSafeInteger(version)) return version as number;
-  }
-  throw new ConcordError('Concord response lacks repository version', 'server');
-}
-
 export async function mintGitToken<T = unknown>(client: ConcordClient, options: GitTokenOptions): Promise<T> {
   const pinned = options.expectedVersion !== undefined;
-  const repoId = options.repoPath.replace(/^\/repos\//, '').split('/')[0];
   const promotionStartedAt = Date.now();
   let promotionDelay = 1_000;
   let promotionError: ConcordError | undefined;
@@ -30,7 +21,7 @@ export async function mintGitToken<T = unknown>(client: ConcordClient, options: 
   while (true) {
     if (promotionError && Date.now() - promotionStartedAt >= 120_000) throw promotionError;
     let version = options.expectedVersion;
-    if (!pinned) version = currentVersion(await client.request('GET', `/repos/${repoId}`));
+    if (!pinned) version = await repoVersion(client, options.repoPath.replace(/\/+$/, ''));
     try {
       return await client.request<T>('POST', `${options.repoPath}/git-token`, {
         body: { storageName: options.storageName, scope: options.scope, ttlSeconds: 300 },

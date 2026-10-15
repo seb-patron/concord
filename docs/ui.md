@@ -61,3 +61,7 @@ Owners see a Path protection settings panel in the desk. Add a relative file pat
 ## Issues panel
 
 The read-only Issues panel lists open Concord issues for the selected repository. It shows each issue's milestone, linked change status, and live held leases. The panel reads the coordinator snapshot's complete `leases.heldItems` projection (the paged `leases.items` list can stop at 100 records) and renders task text as plain text.
+
+The Code view loads the directory tree when its path changes. README and agent-document responses are cached per repository and commit; agent documents are fetched only after “For agents” is first selected. A new main commit retains the selected path and falls back to the root only if that path returns 404.
+
+Snapshot reads share an in-flight request. The default snapshot includes live changes, queue entries, jobs and issues plus the newest 50 terminal records in each collection. Older records are available through the explicit “Load older” control, which requests the history snapshot only after a click. On a fresh snapshot with an event sequence, the UI begins at most 100 events before the tip and reads one events page per poll. Hidden tabs do not poll on focus, visibility changes, or refresh. Refresh probes events first and requests a snapshot only when the repository version has moved. Metrics and principal data load when the Fleet tab is opened and refresh while that tab is visible.

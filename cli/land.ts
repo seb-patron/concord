@@ -7,9 +7,10 @@ import { git, gitBytes, patchId, rejectCanonicalTarget, validateRemote } from '.
 import { mirrorGit } from '../deploy/mirror.ts';
 import { readAwRun } from './aw-run.ts';
 import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
-import { changeByIntent, leaseCovers } from './start.ts';
+import { changeByIntent, leaseCovers, liveLeasePages } from './start.ts';
 import { mintGitToken } from './git-token.ts';
 import { addProfileRejectionContext, loadProfile, resolveCredential, reviewerProfileName, type ProfileCredential } from './profile.ts';
+import { repoVersion } from './version.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
@@ -39,14 +40,14 @@ async function api(client: ConcordClient, path: string, body?: Obj, expectedVers
         (error.payload as Obj)?.error?.code === 'STALE_VERSION';
       if (stale && attempt < 5) {
         const repo = /^\/repos\/([^/]+)/.exec(path)?.[1];
-        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}`)).version; await pause(20 * (attempt + 1)); continue; }
+        if (repo) { version = await repoVersion(client, `/repos/${repo}`); await pause(20 * (attempt + 1)); continue; }
       }
       const promotion = error instanceof ConcordError && body && version !== undefined &&
         (path.endsWith('/verdicts') || path.endsWith('/queue/enqueue')) &&
         (error.payload as Obj)?.error?.code === 'PROMOTION_IN_PROGRESS';
       if (promotion && attempt < 19) {
         const repo = /^\/repos\/([^/]+)/.exec(path)?.[1];
-        if (repo) { version = (await client.request<Envelope>('GET', `/repos/${repo}`)).version; await pause(500); continue; }
+        if (repo) { version = await repoVersion(client, `/repos/${repo}`); await pause(500); continue; }
       }
       if (error instanceof ConcordError) error.message = `${error.message} at ${body ? 'POST' : 'GET'} ${path}`;
       throw error;
@@ -60,20 +61,20 @@ function safeRemote(remote: string, client: ConcordClient): string {
   validateRemote(remote);
   return remote;
 }
+export function leaseRemainingSeconds(item: Obj, now: number): number {
+  if (typeof item.expiresAt === 'number' && Number.isFinite(item.expiresAt)) return (item.expiresAt - now) / 1000;
+  const remaining = Number(item.remainingSeconds);
+  return Number.isFinite(remaining) ? remaining : 0;
+}
 async function access(client: ConcordClient, root: string, repository: Obj, scope: 'read' | 'write', storageName: string, expectedVersion?: number): Promise<{ remote: string; token: string }> {
   const response = (await mintGitToken<Envelope>(client, { repoPath: root, storageName, scope, expectedVersion })).data;
   const token = required(response.secret ?? response.token ?? response.plaintext, 'Git token');
   rememberCredential(token);
   return { remote: safeRemote(required(response.remote, 'Git remote'), client), token };
 }
-export async function currentVersion(client: ConcordClient, root: string): Promise<number> { return (await api(client, root)).version; }
+export async function currentVersion(client: ConcordClient, root: string): Promise<number> { return repoVersion(client, root); }
 async function leases(client: ConcordClient, root: string): Promise<Obj[]> {
-  const result: Obj[] = []; let cursor: string | null = null;
-  do {
-    const page: Obj = (await api(client, `${root}/leases${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
-    result.push(...(page.items ?? [])); cursor = page.nextCursor ?? null;
-  } while (cursor);
-  return result;
+  return (await liveLeasePages(client, root)).items;
 }
 export async function filesChanged(source: string, commit: string, base?: string): Promise<{ parent: string; files: string[] }> {
   if (base !== undefined) {
@@ -365,18 +366,27 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
   };
   const lostLeaseUnits = new Set<string>();
   let renewInFlight: Promise<void> | undefined;
+  let renewRetryRequired = false;
+  let publishedRevision: number | undefined;
+  let reclaimEnabled = false;
+  const renewFailure = (error: unknown) => {
+    const payload = error instanceof ConcordError ? error.payload as Obj | undefined : undefined;
+    const code = typeof payload?.error?.code === 'string' ? payload.error.code : error instanceof ConcordError ? error.kind.toUpperCase() : 'UNKNOWN';
+    emit({ state: 'lease-renew-failed', code: redactOutput(code), message: redactOutput(error instanceof Error ? error.message : String(error)) });
+  };
   const renew = (force = false): Promise<void> => {
     if (renewInFlight) return renewInFlight;
     renewInFlight = (async () => {
       const previouslyHeld = [...held];
-      await refresh();
-      if (!force && !held.some(item => Number(item.remainingSeconds ?? (item.expiresAt - Date.now()) / 1000) <= 120)) return;
+      if (!force && !held.some(item => leaseRemainingSeconds(item, Date.now()) <= 120)) return;
       const response = (await api(client, `${root}/leases/renew-batch`, { changeId, ttlSeconds: 300 })).data;
       const renewed: Obj[] = response.leases ?? [];
       const reserved: Obj[] = response.reserved ?? [];
       const returned = [...renewed, ...reserved];
+      const missing = previouslyHeld.filter(item => !returned.some(value => value.leaseId === item.leaseId));
+      for (const item of missing) lostLeaseUnits.add(item.unitKey);
+      if (missing.length) await refresh();
       for (const item of [...new Map([...previouslyHeld, ...held].map(item => [item.leaseId, item])).values()]) {
-        if (!returned.some(value => value.leaseId === item.leaseId)) lostLeaseUnits.add(item.unitKey);
         const updated = renewed.find(value => value.leaseId === item.leaseId);
         if (updated) Object.assign(item, updated);
       }
@@ -387,14 +397,33 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
   };
   const assertLeasesLive = async () => {
     if (renewInFlight) await renewInFlight.catch(() => {});
-    if (lostLeaseUnits.size) throw new ConcordError(`LEASE_LOST: ${[...lostLeaseUnits].sort().join(', ')} lapsed; re-run land to claim them again`, 'conflict');
+    if (!lostLeaseUnits.size) return;
+    const unitsToReclaim = [...lostLeaseUnits].sort();
+    if (reclaimEnabled && publishedRevision !== undefined) {
+      try {
+        const result = (await api(client, `${root}/leases`, { changeId, unitKeys: unitsToReclaim, intentText: intent, ttlSeconds: 300 }, await currentVersion(client, root))).data;
+        const reclaimed: Obj[] = result.leases ?? [];
+        if (unitsToReclaim.some(unit => !reclaimed.some(item => item.unitKey === unit))) throw new ConcordError('LEASE_CONFLICT', 'conflict', 409, { error: { code: 'LEASE_CONFLICT' } });
+        held = [...held.filter(item => !unitsToReclaim.includes(item.unitKey)), ...reclaimed];
+        owned = [...owned.filter(item => !unitsToReclaim.includes(item.unitKey)), ...reclaimed];
+        unitsToReclaim.forEach(unit => lostLeaseUnits.delete(unit));
+        emit({ state: 'lease-reclaimed', unitKeys: unitsToReclaim });
+        return;
+      } catch (error) {
+        const payload = error instanceof ConcordError ? error.payload as Obj | undefined : undefined;
+        const code = typeof payload?.error?.code === 'string' ? payload.error.code : error instanceof ConcordError ? error.kind.toUpperCase() : 'UNKNOWN';
+        throw new ConcordError(`LEASE_LOST: ${unitsToReclaim.join(', ')} lapsed; re-claim refused: ${redactOutput(code)}`, 'conflict');
+      }
+    }
+    throw new ConcordError(`LEASE_LOST: ${unitsToReclaim.join(', ')} lapsed; re-run land to claim them again`, 'conflict');
   };
-  const keepLeasesAlive = async () => { await renew(); await assertLeasesLive(); };
+  const attemptRenew = async (force: boolean) => { try { await renew(force); renewRetryRequired = false; } catch (error) { renewRetryRequired = true; renewFailure(error); } };
+  const keepLeasesAlive = async () => { await attemptRenew(renewRetryRequired); await assertLeasesLive(); };
   let renewTimer: ReturnType<typeof setInterval> | undefined;
   const startRenewTimer = () => {
     if (renewTimer || alreadyQueued) return;
     renewTimer = setInterval(() => {
-      void renew(true).catch(() => {});
+      void attemptRenew(true);
     }, options.renewEveryMs ?? 100_000);
   };
   const fences = () => Object.fromEntries(held.map(item => [item.unitKey, item.fence]));
@@ -472,16 +501,19 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
         await api(client, `${path}/publish`, { baseOid: targetBase, headOid: prepared.head, branch: change.branch, unitKeys: units, leaseFences: fences() }, (await api(client, path)).version);
         emit({ state: 'published', changeId, headOid: prepared.head });
         change = (await api(client, path)).data;
+        publishedRevision = change.revision;
+        reclaimEnabled = true;
       }
-      const publishedRevision = change.revision;
+      if (change.headOid === prepared.head && publishedRevision === undefined) { publishedRevision = change.revision; reclaimEnabled = true; }
+      const currentPublishedRevision = publishedRevision ?? change.revision;
       const requirePublishedChange = (current: Obj) => {
-        if (current.headOid !== prepared.head || current.baseOid !== targetBase || current.revision !== publishedRevision)
+        if (current.headOid !== prepared.head || current.baseOid !== targetBase || current.revision !== currentPublishedRevision)
           throw new ConcordError('PUBLISHED_HEAD_MISMATCH: change head, base, or revision changed during land', 'conflict');
       };
       change = await waitChange(client, path, deadline, emit, alreadyQueued ? async () => {} : keepLeasesAlive, inspector, runtime);
       if (!['ready', 'queued', 'checking', 'landed', 'merged'].includes(change.status)) throw new ConcordError(`INSPECTION_FAILED: ${change.status}`, 'server');
       requirePublishedChange(change);
-      if (!alreadyQueued) await renew();
+      if (!alreadyQueued) await attemptRenew(renewRetryRequired);
       const queue = (await api(client, `${root}/queue`)).data;
       let entry = [...(queue.entries ?? [])].reverse().find((item: Obj) => item.changeId === changeId && !['blocked', 'failed', 'withdrawn'].includes(item.state));
       if (!entry) {
@@ -533,9 +565,10 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
           ...(carriedFromOid ? { carriedFrom: { sourceOid: carriedFromOid, method: 'patch-id' } } : {}) }, await currentVersion(reviewer, root))).data;
         if (carriedFromOid) emit({ state: 'review-carried', sourceOid: carriedFromOid, publishedOid: prepared.head });
         emit({ state: 'reviewed', verdictId: verdict.verdictId, headOid: prepared.head });
-        await renew();
+        await attemptRenew(renewRetryRequired);
         await assertLeasesLive();
         try {
+          reclaimEnabled = false;
           entry = (await api(client, `${root}/queue/enqueue`, { changeId, verdictId: verdict.verdictId, leaseFences: fences() }, await currentVersion(client, root))).data;
         } catch (error) {
           const staleBase = error instanceof ConcordError && (error.payload as Obj)?.error?.code === 'STALE_BASE';
@@ -553,8 +586,8 @@ async function landAttempt(input: LandOptions, staleBaseRounds = 0): Promise<Obj
       }
       const completedQueueWait = await waitQueue(client, root, changeId, deadline,
         (_state, currentEntry) => emit({ state: 'queue', queueState: currentEntry?.state, reason: currentEntry?.blockedReason }),
-        () => renew(), () => {
-          const remaining = held.map(item => Number(item.remainingSeconds ?? (item.expiresAt - runtime.now()) / 1000))
+        async () => { await attemptRenew(renewRetryRequired); await assertLeasesLive(); }, () => {
+          const remaining = held.map(item => leaseRemainingSeconds(item, runtime.now()))
             .filter(Number.isFinite).reduce((minimum, seconds) => Math.min(minimum, seconds), Infinity);
           return Math.max(0, (remaining - 120) * 1000);
         }, runtime);

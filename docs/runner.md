@@ -6,7 +6,7 @@ Poll, heartbeat, credential, and result HTTP calls share one transient classific
 
 ## Poll resilience
 
-The coordinator keeps `ids` for complete job listings and two ordered indexes for polling: `pending-ids` contains claimable jobs and `claimed-ids` contains live claims. Each index entry retains the job's position in scheduling order, so an expired earlier job returns ahead of later pending work. Scheduling, claiming, expiry, policy blocking, bootstrap cancellation, and result completion update the indexes. Polling checks only pending jobs, while expiry checks only claimed jobs, so completed and blocked job history does not increase the work per poll. Repositories created before these indexes existed rebuild them from `ids` and job rows in the first poll transaction; subsequent polls use the indexes directly. Snapshot and list views continue to include historical jobs.
+The coordinator keeps `ids` for complete job listings and two ordered indexes for polling: `pending-ids` contains claimable jobs and `claimed-ids` contains live claims. Each index entry retains the job's position in scheduling order, so an expired earlier job returns ahead of later pending work. Scheduling, claiming, expiry, policy blocking, bootstrap cancellation, and result completion update the indexes. Polling checks only pending jobs, while expiry checks only claimed jobs, so completed and blocked job history does not increase the work per poll. Repositories created before these indexes existed rebuild them from `ids` and job rows in the first poll transaction; subsequent polls use the indexes directly. Snapshot and list views continue to include historical jobs. Heartbeats extend the claim expiry and update runner activity without advancing the repository version.
 
 An empty poll records runner activity at most once every 60 seconds. The runner status view uses `lastSeenAt` to mark a runner offline after 60 seconds, so this keeps status current without writing the runner row on every idle poll. Polls that claim a job still record activity immediately.
 
@@ -129,3 +129,5 @@ The promoter fetches the checked scratch commit, confirms the scratch ref and an
 Git runs with ambient global/system config and hooks disabled. The supervisor holds short-lived Git credentials; checker subprocesses receive a filtered environment with no Concord token. Published logs are capped at 16 KB and known credentials are redacted. A timeout kills the process group and the temporary work directory is removed when execution ends.
 
 If a job is blocked after three expired attempts, inspect the job snapshot and events, repair the local runner or profile, and schedule a new authorized job through the owning feature. Do not edit queue state or force-push main manually.
+
+The next runner alarm deadline reads only the ordered claimed-job index. Runner poll retries honor `Retry-After` on 429 and 503 responses, bounded by the configured idle maximum delay.

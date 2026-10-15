@@ -4,6 +4,7 @@ import { ConcordClient, ConcordError, idempotencyKey } from './client.ts';
 import { parseAllowed } from './land.ts';
 import { MAX_NORMALIZED_UNITS, unitsOverCapMessage } from '../src/leases/units.ts';
 import { addProfileRejectionContext, resolveCredential } from './profile.ts';
+import { repoVersion } from './version.ts';
 
 type Obj = Record<string, any>;
 type Envelope = { data: Obj; version: number };
@@ -22,13 +23,15 @@ const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 // A pending queue promotion briefly freezes every repository mutation with 409 PROMOTION_IN_PROGRESS.
 // Retry for about ten seconds, re-reading the coordinator version that the promotion advances.
 async function post(client: ConcordClient, path: string, body: Obj, version?: number, sleep: (ms: number) => Promise<void> = pause): Promise<Envelope> {
+  let delay = 500;
   for (let attempt = 0; ; attempt++) {
     try { return await client.request('POST', path, { body, expectedVersion: version, idempotencyKey: idempotencyKey() }); }
     catch (error) {
       if (!(error instanceof ConcordError) || (error.payload as Obj)?.error?.code !== 'PROMOTION_IN_PROGRESS' || attempt >= 19) throw error;
-      await sleep(500);
+      await sleep(delay);
+      delay = Math.min(delay * 2, 8000);
       const root = /^\/repos\/[^/]+/.exec(path)?.[0];
-      if (version !== undefined && root) version = (await get(client, `${root}/snapshot`)).version;
+      if (version !== undefined && root) version = await repoVersion(client, root);
     }
   }
 }
@@ -47,12 +50,27 @@ async function pages(client: ConcordClient, root: string, kind: 'changes' | 'lea
   } while (cursor);
   return items;
 }
+export async function liveLeasePages(client: ConcordClient, root: string, pageLimit = Infinity): Promise<{ items: Obj[]; truncated: boolean }> {
+  const items: Obj[] = []; let cursor: string | null = null;
+  for (let pageNumber = 0; pageNumber < pageLimit; pageNumber++) {
+    const page: Obj = (await get(client, `${root}/leases${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`)).data;
+    if (!Array.isArray(page.items)) throw new ConcordError('Concord returned an invalid leases page', 'server');
+    const serverTime = typeof page.serverTime === 'number' ? page.serverTime : Date.now();
+    const rows: Obj[] = page.items;
+    const live = rows.filter(item => ['active', 'reserved'].includes(item.state) &&
+      typeof item.expiresAt === 'number' && item.expiresAt > serverTime);
+    items.push(...live);
+    cursor = typeof page.nextCursor === 'string' && page.nextCursor ? page.nextCursor : null;
+    if (live.length !== rows.length || !cursor) return { items, truncated: false };
+  }
+  return { items, truncated: !!cursor };
+}
 export async function changeByIntent(client: ConcordClient, root: string, intentKey: string, includeTerminal = false): Promise<Obj | undefined> {
   return (await pages(client, root, 'changes')).find(item => item.intentKey === intentKey &&
     (includeTerminal || !['landed', 'closed', 'failed'].includes(item.status)));
 }
 export async function liveLeases(client: ConcordClient, root: string, changeId: string): Promise<Obj[]> {
-  return (await pages(client, root, 'leases')).filter(item => item.changeId === changeId && item.state === 'active' && item.expiresAt > Date.now());
+  return (await liveLeasePages(client, root)).items.filter(item => item.changeId === changeId && item.state === 'active');
 }
 export function leaseCovers(claim: string, unit: string, policy?: Obj): boolean {
   if (claim === unit) return true;
@@ -102,7 +120,7 @@ export async function start(input: StartOptions): Promise<Obj> {
     needed.some(unit => leaseCovers(item.unitKey, unit, policy)));
   const missing = needed.filter(unit => !held.some(item => leaseCovers(item.unitKey, unit, policy)));
   if (missing.length) {
-    const version = (await get(client, `${root}/snapshot`)).version;
+    const version = await repoVersion(client, root);
     const claim = (await post(client, `${root}/leases`, { changeId: change.changeId, unitKeys: missing,
       intentText: input.intent, ttlSeconds }, version)).data;
     held.push(...claim.leases);
@@ -134,7 +152,7 @@ export async function releaseByIntent(repo: string, intentKey: string, clientInp
     throw new ConcordError('INTENT_CONFLICT: change changed during release', 'conflict');
   const held = await liveLeases(client, root, change.changeId);
   for (const item of held) {
-    const version = (await get(client, `${root}/snapshot`)).version;
+    const version = await repoVersion(client, root);
     await post(client, `${root}/leases/${encodeURIComponent(item.leaseId)}/release`, { fence: item.fence }, version);
   }
   return { changeId: change.changeId, released: held.map(item => item.unitKey) };
@@ -146,8 +164,8 @@ export async function renewByIntent(input: RenewOptions): Promise<Obj> {
   const { repo, intentKey } = input;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(repo) || !keyPattern.test(intentKey))
     throw new ConcordError('valid --repo and --intent-key are required', 'usage');
-  if (input.every !== undefined && (!Number.isSafeInteger(input.every) || input.every < 10 || input.every > 3600))
-    throw new ConcordError('--every must be an integer from 10 to 3600 seconds', 'usage');
+  if (input.every !== undefined && (!Number.isSafeInteger(input.every) || input.every < 1 || input.every > 3600))
+    throw new ConcordError('--every must be an integer from 1 to 3600 seconds', 'usage');
   if (input.whilePid !== undefined && (!Number.isSafeInteger(input.whilePid) || input.whilePid < 1))
     throw new ConcordError('--while-pid must be a positive process ID', 'usage');
   const ttlSeconds = holdSeconds(input.hold ?? '5m');
@@ -202,7 +220,7 @@ export async function renewByIntent(input: RenewOptions): Promise<Obj> {
         if (!retryable) throw error;
         // A heartbeat can recover from transport failures and promotion freezes on its next round.
       }
-      if (!stopped) await Promise.race([sleep(input.every * 1000), new Promise<void>(resolve => { wake = resolve; })]);
+      if (!stopped) await Promise.race([sleep(Math.max(input.every, 10) * 1000), new Promise<void>(resolve => { wake = resolve; })]);
       wake = undefined;
     }
     return last;

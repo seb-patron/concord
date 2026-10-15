@@ -15,10 +15,12 @@ export function json<T>(data: T, version = 0, eventSeq = 0, status = 200): Respo
 export function failure(error: HttpError, requestId = crypto.randomUUID()): Response {
   const payload: ApiFailure = { error: { code: error.code, message: error.message }, requestId };
   if (error.details !== undefined) payload.error.details = error.details;
-  return new Response(JSON.stringify(payload), {
+  const response = new Response(JSON.stringify(payload), {
     status: error.status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   });
+  if (error.status === 503) response.headers.set('Retry-After', '5');
+  return response;
 }
 
 export async function readJson(request: Request): Promise<Record<string, unknown>> {
