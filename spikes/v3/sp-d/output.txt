@@ -1,0 +1,10 @@
+Concord v3 ready-set backlog simulation
+source=spikes/v3/sp-d/issues.json
+issues=1 open=1 closed=0
+dependency_edges=0 missing_references=none
+cycles=none
+dispatch_cap=10 scheduling_model=unit-duration deterministic issue-number order
+file_paths=explicit path-like/code-formatted names in title/body; no inferred ownership
+schedule:
+  tick 1: agent-1 START #53 files=(no explicit file path)
+  tick 1: DONE #53
