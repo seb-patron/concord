@@ -1601,3 +1601,346 @@ Liveness: `decision-status.tsv` has one row per ID: `id  check  argument  expect
 - **Decision:** Feature freeze at 2:00 pm CT Wed 10-14 (was 12:00 pm in D-FILM-PLAN). Fixes only after 2 pm. Other D-FILM-PLAN times unchanged unless Seb says.
 - **Status:** active.
 - **Source:** Concord chat 10-14 7:16 am.
+
+## D-SYMBOL-LEASES — symbol leases alongside file leases, from git's own function rules, as a milestone project
+
+- **Date:** 2026-10-14, ~11:45 am CT.
+- **Owner words:** "ok agree on , build symbol leases alongside file leases, using git's own function rules and no per-language code. With the whats holding us back, lets properly spec out everything needed. i say this whole thing gets its own milestones and issues. i can authroize some claude agents if it would be faster. but first i want the login and ui working so i can track the progress on this."
+- **Decision:** Q-UNIT-SYMBOL a. Agents keep file leases and may also lease `symbol:path#name`; symbols come from git's built-in funcname (userdiff) rules plus config regexes, with no per-language code in Concord. Spec every blocker (verifier proof, declare-before-edit, identical key derivation in CLI/runner/server, the open Q-UNIT questions) as issues in a dedicated Concord milestone. Order: login (Cloudflare Access) and UI first so Seb can track it; then Q-UNIT questions one at a time with background; then the milestone, issues and specs. Claude agents are offered by Seb if faster (not yet used).
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UNIT-1-EXCLUSIVE — a lease stays an exclusive lock, now at symbol size
+
+- **Date:** 2026-10-14, ~11:50 am CT.
+- **Owner words:** "Q-UNIT-1:a".
+- **Decision:** A lease remains an exclusive write lock on its unit (file or, with D-SYMBOL-LEASES, symbol). Shared intent / hybrid modes wait for a land-time merge (Q-UNIT-4).
+- **Status:** active (symbol units in progress under D-SYMBOL-LEASES).
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-LEASE-QUEUE-AUTO — a refused lease request is queued automatically and tells the agent who holds it and the expected wait
+
+- **Date:** 2026-10-14, ~11:50 am CT.
+- **Owner words:** "also do we have plans for a lease queue? seems useful so that way a rejected lease request could get auto queued and the agent maybe even gets a note on estimated wait time (current lease expiration barring renewal, what agent has the lease, what the work is, what issue, etc)?"
+- **Decision:** Follow-up on spec 116 (lease wait v2): a refused claim is queued automatically (agent path default, opt-out allowed), and the refusal/queue status carries the advisory wait estimate (holder lease expiry, barring renewal), holder agent, its intent text and issue.
+- **Status:** decided; spec after 116 lands.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UNIT-4-STRUCT-MERGE — add a structure-aware merge step at land (milestone issue, after symbol core)
+
+- **Date:** 2026-10-14, ~11:55 am CT.
+- **Owner words:** "Q-UNIT-4: b".
+- **Decision:** The checker gains an opt-in, sandboxed structure-aware merge step (Mergiraf-class) with fallback to git's line merge; the full suite still runs on the result. Language knowledge lives only in the merge tool, never in lease identity. Built as an issue in the symbol-lease milestone after the core symbol leases land. Conflict records (option c) go to the post-submission "is git the problem" spike.
+- **Status:** decided; in the symbol-lease milestone.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UNIT-6-REGEN — generated files are rebuilt at land; exclusive lock only where the generator can't run on the checker
+
+- **Date:** 2026-10-14, ~12:00 pm CT.
+- **Owner words:** "Q-UNIT-6: b with c as a fallback for a generator that can't run on the checker."
+- **Decision:** Generated outputs are regenerated at land (#9, s9); a generator that cannot run on the checker (e.g. decomp generators that need the ROM) falls back to an exclusive lease on its outputs.
+- **Status:** #9 approved, landing; fallback to spec in the symbol-lease milestone.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UNIT-7-DRAFTS — close #8 (replaced by symbol leases); #11 waits for its spike
+
+- **Date:** 2026-10-14, ~12:05 pm CT.
+- **Owner words:** "Q-UNIT-7: a, the tsv i think is bc the decomp and mwcc-rs repos use it for tracking work but i think concord could replace this with a built in system potentially lets see what the spike says".
+- **Decision:** Close #8 (Markdown section units): symbol leases from git funcname rules cover Markdown headings. #11 (keyed lines) waits for the keyed-data spike; Seb leans toward a Concord built-in tracking system replacing work-tracking TSVs in decomp and mwcc-rs.
+- **Status:** active.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-LANDING-SPIKE — spike why landing is slow and whether disjoint changes can land in parallel
+
+- **Date:** 2026-10-14, ~12:05 pm CT.
+- **Owner words:** "we need to spike this landing issue, the tests suite exploded and i thought we had worked to improve it and reduce how long it takes? is there no way to do parrallel landings for things that dont touch each other? is this possible? feels slow for swarm work?"
+- **Decision:** Research spike on landing throughput: serial promotion, full-suite checks per land, suite growth, parallel landing of disjoint changes, test selection, sharding, checker capacity.
+- **Status:** spike running.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-LAND-FIX-NOW — an admission no longer cancels the running landing check; land before the 1 pm swarm
+
+- **Date:** 2026-10-14, ~12:20 pm CT.
+- **Owner words:** "yes spec the fix to the slow landing and lets fix before the 1pm swarm".
+- **Note:** the fix deadline is "before the Mother Base swarm"; the swarm itself later moved to no earlier than 2 pm CT (D-FREEZE-3PM), and still waits for this fix.
+- **Decision:** Spec and land, before the 1 pm Mother Base swarm, the fix for src/features/queue.ts:416 (`bump(..., 'ADMITTED')` resets the in-flight stack on every admission). Other landing causes (lease loss during review, STALE_MAIN churn, test tiers, speculative stacks) become issues in a landing milestone.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-CFEXP-R2 — one more repair for the containers experiment
+
+- **Date:** 2026-10-14, ~12:20 pm CT.
+- **Owner words:** "Q-CFEXP: a".
+- **Decision:** One extra repair (beyond the one-shot rule) for the capped containers experiment: reject oversized request bodies while reading (16 KiB cap enforced during the stream) and split timeout timing by phase.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UI-CONCORD-V2-ONLY — Seb's UI shows only concord-v2 and opens on it
+
+- **Date:** 2026-10-14, ~12:35 pm CT.
+- **Owner words:** "dont show these other repos and open to concord v2 each time".
+- **Decision:** Seb's Access login maps to repoIds ["concord-v2"] (trusted config humans entry), so the repo picker lists only concord-v2 and the UI opens on it. Other repos stay reachable for agents and tokens.
+- **Status:** superseded by D-UI-WORK-PROTOTYPES (Seb ~12:45 pm: "yes i want motherbase visible as well"): the login now maps to repoIds ["concord-v2","mother-base-v2"] and still opens on concord-v2.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UI-WORK-PROTOTYPES — the UI follows the approved Work UI prototypes (GitHub-like, light), not the Synthesis desk
+
+- **Date:** 2026-10-14, ~12:45 pm CT.
+- **Owner words:** "also i wnat the light mode and toggle able dark mode. some decisions were lost. the recommended synthesis looks like some kids toy. i had approved a code ui that looked more like github with an agent tab to see what agetns get. it had an issues and milestones tab, pls a view of what was in glight. somehow this got lost. now i need you to either find it or recreate it. this is ridiculous" and "yes i want motherbase visible as well".
+- **Decision:** Rebuild the web UI shell to the "Concord Work UI prototypes" canvas (RN5EetGqopPCvZBU1uDaak, 10-12): light theme by default with a dark-mode toggle; GitHub-like header and tabs (Code with For humans / For agents, Tracker/Issues, Plan, Milestones) plus an In flight view (work in progress, fleet, leases, queue). Seb's login sees concord-v2 and mother-base-v2, opening on concord-v2; this supersedes the single-repo login scope of D-UI-CONCORD-V2-ONLY. Supersedes the Synthesis dark fleet desk as the main look (D-UI-FLEET-DESK).
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-UI-PROFILE-MENU — Work UI prototypes approved; add a GitHub-style profile menu and inbox at top right
+
+- **Date:** 2026-10-14, ~12:50 pm CT.
+- **Owner words:** "YES!! great!!! awesome!! i love it! one more tweak: github has a little profile section on the rop right along with an inbox. can we do that as well? the inbox can be a placeholder just when a human needs to be alerted (ie planning, or landing issue, etc) plus having the user profile pic would be huge. here is mine. it doesnt need all the options maybe just placeholders + working links to the repos here later we can respike what it should look like (post competition i think its worth investigating if concord is a self host tool or something we host for others like github. Also we can tie in the sign out to the acutal cloud flare sign up".
+- **Decision:** The Work UI prototypes (RN5EetGqopPCvZBU1uDaak) are confirmed as the UI (spec 121). Follow-up spec 123: top-right inbox icon with a count of things a human must handle (planning, landing problems) opening the Inbox, and a profile avatar menu (avatar from an optional avatarUrl on the human mapping, initials fallback; name; links to the viewer's repos; placeholder items; theme toggle; Sign out = Cloudflare Access logout). Post-competition spike: self-hosted tool vs hosted service (D-HOSTING-SPIKE-LATER).
+- **Status:** 121 building; 123 after 121 lands.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-HOSTING-SPIKE-LATER — after the competition, spike whether Concord is a self-hosted tool or a hosted service
+
+- **Date:** 2026-10-14, ~12:50 pm CT.
+- **Owner words:** "post competition i think its worth investigating if concord is a self host tool or something we host for others like github".
+- **Decision:** No change before submission. After the competition, run a spike comparing Concord as a self-hosted tool against a hosted service for others (like GitHub).
+- **Status:** deferred until after submission.
+- **Source:** Concord chat 10-14 7:16 am.
+
+## D-FREEZE-3PM — feature freeze moves from 2 pm to 3 pm CT; Mother Base swarm at 2 pm
+
+- **Date:** 2026-10-14, ~12:50 pm CT.
+- **Owner words:** "tell moterbase to delay swarm to 2pm, we are delaying code freeze until 3pm".
+- **Decision:** Feature freeze at 3:00 pm CT Wed 10-14 (was 2 pm, D-FREEZE-2PM). The Mother Base swarm starts no earlier than 2 pm CT (and still only after the landing fix 118 is live).
+- **Status:** active.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-CFEXP-R3 — one more repair for the containers experiment's alarm/run race
+
+- **Date:** 2026-10-14, ~12:50 pm CT.
+- **Owner words:** "Q-CFEXP-R3:: a".
+- **Decision:** One more repair of cfexp-checker: when the 15-minute alarm has already finished a run, /run returns the persisted alarm result (no contradicting pass or 500), with a test of the in-flight response and stored status.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-SYMBOL-TIMING — build symbol leases now; land what is ready by the 3 pm freeze, the rest before submission
+
+- **Date:** 2026-10-14, ~12:55 pm CT.
+- **Owner words:** "Q-SYMBOL-TIMING: a".
+- **Decision:** Launch the symbol-lease specs (#91 keys, #89 units, #90 verify at land, #92 start/grow) in dependency order as soon as each is checked against main. Changes done by the 3 pm freeze land then; the rest land after filming and before submission.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-PILOT-OPENROUTER — run an OpenRouter pilot (3-5 small Concord tasks) on DeepSeek-v4-flash
+
+- **Date:** 2026-10-14, ~1:15 pm CT.
+- **Owner words:** "Q-PILOT: yes".
+- **Decision:** Run 3-5 small, non-critical Concord tasks on openrouter/deepseek/deepseek-v4-flash through the AW launcher (caps $1/run, $10/day shared with decomp); Luna reviews; run dirs go to the AW chat for the pilot report.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-UI-POLISH-FREEZE — UI polish spec 130 may land after the 3 pm freeze
+
+- **Date:** 2026-10-14, ~1:45 pm CT.
+- **Owner words:** "Q-UI-POLISH-FREEZE: a".
+- **Decision:** Freeze exception for spec 130 only (GitHub-style owner/repo header without the dropdown, Code view details, clone panel with git / Concord / GitHub mirror options, signed-in UI never hits the anonymous rate limit), because it is the UI the video shows. It builds after 123 and lands before filming.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-POLL-SPIKE — spike live UI updates (#110) before building any polling change
+
+- **Date:** 2026-10-14, ~2:00 pm CT.
+- **Owner words:** "i thought we had fixed the constant polling? or is this a different issue? why every 5 seconds when active? can we spike this to get the better long term solution i want to make sure you arent just responding without thinking. Make 110 spiked first."
+- **Decision:** Spec 132 (adaptive 5 s -> 30 s polling) is held. A Sol spike researches the long-term design (long-poll, SSE, hibernatable WebSockets, one shared event stream, snapshot row-read cost) with measured Cloudflare usage; implementation specs come from it.
+- **Status:** spike running.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-FREEZE-4PM — feature freeze at 4 pm CT
+
+- **Date:** 2026-10-14, ~2:05 pm CT.
+- **Owner words:** "Q-SCHEDULE: freeze at 4pm".
+- **Decision:** Feature freeze moves to 4:00 pm CT (was 3 pm, D-FREEZE-3PM); filming after the freeze; D-UI-POLISH-FREEZE (spec 130 may land after the freeze) still applies.
+- **Status:** active.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-CHANGE-LIMIT-64 — raise the active-change limit to 64 per repo and clean up stale changes automatically
+
+- **Date:** 2026-10-14, ~2:35 pm CT.
+- **Owner words:** "let's increase changes to 64. we need better cleanup of the change count this keeps happening".
+- **Decision:** trusted config costLimits.maxActiveChangesPerRepo = 64 (live after install-trusted.sh); #60 gets a spec for automatic cleanup so stale drafts, superseded and orphaned changes stop counting against the limit.
+- **Status:** config written; needs install-trusted.sh; cleanup spec in the throughput spec spike.
+- **Source:** Concord chat 10-14 12:42 pm.
+
+## D-POLL-FIX-FIRST — stop constant Durable Object polling; the fix lands first
+
+- **Date:** 2026-10-14, ~2:50-2:58 pm CT.
+- **Owner words:** "why did we engineer the durable object to be constantly polled this makes no sense"; "we need to get this fix to the front of the line asap"; "then force land the fix for constant durable object polling".
+- **Decision:** web UI stops background polling and loads on demand (page load, tab focus, navigation, Refresh button) = Q-LIVE-UPDATES option a (spec 141, #110); `concord land` waits back off to 10 s and read version without the snapshot (spec 142, #75). Both jump the queue. WebSocket push stays after submission.
+- **Status:** 141 and 142 building (Luna).
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-FORCE-LAND — owner-only, audited force land (Q-FORCE-LAND a)
+
+- **Date:** 2026-10-14, ~3:05 pm CT.
+- **Owner words:** "yes build now rn the video wouldn't work bc of these issues" (to Q-FORCE-LAND, recommendation a); earlier "can we force land those 4 changes that were approved"; 10-13 3:52 pm "not ok. fucking force it".
+- **Decision:** a: owner token may force-land an approved change (still needs a clean rebase); skips only the stack validation; audited ('queue.forced' event, "Forced by owner" badge). Spec 143, Concord #59.
+- **Status:** building.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-FORCE-MAIN-1014 — outage: canonical main force-updated outside the queue
+
+- **Date:** 2026-10-14, ~3:20-3:35 pm CT.
+- **Owner words:** "bro just overwrite the main codebase ... this is an outage now it needs to be force fixed"; "ok the apply and push the copy of main"; "manual mode go".
+- **Decision:** coordinator composed 118, 124, 121, 128, cfexp, 139, 141 (polling fix; conflict with 121 resolved by hand), 140 onto 98a3611; typecheck clean, full suite 45/45 files passed; pushed to canonical concord-r-0898953c... main 98a3611 -> 5d0707a (force-with-lease). Workers Builds deployed it (live app.js has the Refresh button, 3:36 pm).
+- **Status:** done; Concord queue/change records still show those changes unlanded (reconcile); GitHub mirror push denied by Seb's permission prompt.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-FREEZE-5PM — feature freeze moves to 5:00 pm CT
+
+- **Date:** 2026-10-14, ~3:58 pm CT.
+- **Owner words:** "im extending the freee to 5pm but then we really need to have this ready for submission".
+- **Decision:** freeze 5 pm CT (was 4 pm, D-FREEZE-4PM); submission readiness right after.
+- **Status:** active.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-PUSH-AFTER-SUBMISSION — runners and UI move from polling to WebSocket push after submission
+
+- **Date:** 2026-10-14, ~4:20 pm CT.
+- **Owner words:** "it’s not the number of checkers it then constantly polling? ... i pick the websocket push after submission".
+- **Decision:** after submission, checkers/promoters and the web UI get live work and updates over hibernatable WebSockets from the repo DO (option a); tonight only 144 (cheap polls) and fewer runners.
+- **Status:** active (post-submission).
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-UI-FIXES-PAST-FREEZE — UI fixes may land after the 5 pm freeze
+
+- **Date:** 2026-10-14, ~4:50 pm CT.
+- **Owner words:** "allow the ui fixes past the freeze."
+- **Decision:** UI fixes (130 polish, 145 nav/logo colors, 146 Code view read limit, and similar UI bug fixes) may land after the 5 pm freeze, before filming/submission.
+- **Status:** active.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-OPUS-SUBAGENTS-1014 — Opus 5.5 subagents for the call audit and the video
+
+- **Date:** 2026-10-14, ~4:50 pm CT.
+- **Owner words:** "i want an opus 5.5 subagent to investigate, find them all, and put them into a milestone and issue to fix"; "can we can an opus 5.5 subagent to also read the script and work on finalizing it ... would love opus to help with video".
+- **Decision:** two Claude Opus 5.5 subagents (owner override of the light-mode no-subagent default): (1) excessive polling/reads/calls audit -> Concord milestone + issues; (2) video script finalization + recording list + what Opus can produce itself.
+- **Status:** running.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-CFEXP-HOLD — no container checker experiment before submission
+
+- **Date:** 2026-10-14, ~4:58 pm CT.
+- **Owner words:** "lets hold off on the experiment worker rn bc we are too close to 5pm. can we stop the container stuff as well?"
+- **Decision:** do not deploy or run the checker-exp Worker / Cloudflare Container tonight (Q-CFEXP-RUN b); nothing was deployed (script 404); cancelled the pending secret prompt.
+- **Status:** active.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-FREEZE-5PM-FINAL — 5 pm: no new work launched; already-queued work finishes
+
+- **Date:** 2026-10-14, ~5:00 pm CT.
+- **Owner words:** "5pm launch no new work but everything already queued let finish".
+- **Decision:** from 5 pm no new specs/launches; everything already launched or queued (rebases, repairs, publishes, landings, the two Opus subagents) may finish and land.
+- **Status:** active.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-WORKING-NOW-AND-PERF — grouped Working-now panel and load-time fixes after 5 pm
+
+- **Date:** 2026-10-14, ~5:05 pm CT.
+- **Owner words:** "yes build the panel group now we need it for the video ..."; "also need to fix super slow load times for readme files, tracker, everything loads too slow".
+- **Decision:** Q-WORKING-NOW a (147 grouped panel, #124) plus load-time fixes 148 (canonical read cache, #125) and 149 (snapshot memo + ETag, #126) launched after 5 pm as owner-approved exceptions to D-FREEZE-5PM-FINAL.
+- **Status:** building.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-AUDIT-P0-TONIGHT — launch call-audit P0s after Working now is ready
+
+- **Date:** 2026-10-14, ~5:25 pm CT.
+- **Owner words:** "Q-AUDIT-P0: a, launch them once the working now shows the agents actually working ...".
+- **Decision:** call-audit P0s #127-#131 launch after 147 (grouped Working now) lands.
+- **Status:** queued.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-HIDE-DEMO-REPOS — hide demo repos and open on concord-v2
+
+- **Date:** 2026-10-14, ~5:25 pm CT.
+- **Owner words:** "can we hide all these demo repos ... and start the first page load on concord-v2 not a demo".
+- **Decision:** spec 150 hides demo repos and defaults to concord-v2 (after 130 lands). Video shows Concord developed on Concord.
+- **Status:** queued.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-FORCE-BATCH-B — force-batch the validated UI and speed fixes
+
+- **Date:** 2026-10-14, ~5:30 pm CT.
+- **Owner words:** "Q-FORCE-BATCH:b".
+- **Decision:** compose 146, 148, 144, 145, 130 (validated, tests passing) onto main, full suite once, push to canonical main; queue/lease logic changes (133, 138, 137, 129, 131) and 122 keep normal review.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-VIDEO-REMAKE — footage-first video after UI and speed fixes land
+
+- **Date:** 2026-10-14, ~5:45 pm CT.
+- **Owner words:** "video feels too much like a slide show. lets remake once the ui fixes and speed up are all in, with footage actually of the app, showing how it works. i feel like some of thesee things can pop up over using the app?"
+- **Decision:** remake: real app + terminal footage (Opus may record scripted read-only browser footage), slides become pop-up overlays; low-volume royalty-free music.
+- **Status:** preparing.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-VIDEO-KEEP-REVISE — keep cut and revise script (supersedes D-VIDEO-REMAKE)
+
+- **Date:** 2026-10-14, ~5:47 pm CT.
+- **Owner words:** "actually just keep it and tell me where to film over using the app. also we dont mention symbol leases? can we revise to include that ... how humans drive the issue, milestones, planning, and resolving conflicts or reviews that need a human, and that this can be configured on a per file basis".
+- **Decision:** keep the 7:03 cut; add a film-over table (app footage under slide segments, slides as pop-ups); revise script for symbol leases, human-driven planning/review/conflict resolution, per-file protection levels.
+- **Status:** in progress (Opus video agent).
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-VIDEO-FACECAM-NOLIMITS — no limitations in form or video; facecam intro (2026-10-14)
+- **Date:** 2026-10-14, ~5:55-6:15 pm CT.
+- **Owner words:** "dont mention what the prototype cant do yet" (submission answers); "i need to do the intro with face cam so they know its a human ... ill do the rest of the voiceover however you want".
+- **Decision:** form answers and video mention no limitations; S24 "honest limits" rewritten to a no-caveat line; a ~20 s facecam intro opens the video and replaces the S02 title card.
+- **Status:** in progress (video helper chat; Opus prep agent building a minimum timeline, safety-net MP4 and 10 pm runbook).
+- **Source:** Video helper chat 10-14.
+
+## D-10PM-PERFECT — everything fixed by 10 pm; Seb submits at 10 pm
+
+- **Date:** 2026-10-14, ~6:25 pm CT.
+- **Owner words:** "i now will come back at 10pm to submit. i need all ui and speed fixes done by then. i want all the excessive calls and polling fixed by then. i need this to be perfect for the demo, i want no more issues. fix all the outtage issues asap. put my profile pic into the app like i asked several times. remove the demo repos like ia sked. make sure nothing slips".
+- **Decision:** by 10 pm CT: all UI fixes, speed fixes, call-efficiency milestone (7312ba8a) fixes, outage/queue fixes landed and live; avatar = the brown Snoopy image Seb sent (6:25 pm); demo repos hidden, open on concord-v2.
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-VIDEO-SCRIPT-V3 — revise full script and animatic (2026-10-14)
+- **Date:** 2026-10-14, ~6:20 pm CT.
+- **Owner words:** "at 9pm redo the script. no mentions of what isnt working. mention the symbol lease. redo the initial video as well. update the script. make it sound less like a sales pitch and more in my voice. make it so it explains the problems clearly up front. mention how this is meant for swarms of agents"
+- **Decision:** at ~9 pm CT, rewrite the full script and re-render the animatic: problems first, symbol leases in, swarm framing, Seb's plain voice, no limitations. Seb records at 10 pm CT.
+- **Status:** scheduled (video helper chat, one-shot 8:57 pm CT).
+- **Source:** Video helper chat 10-14.
+
+## D-GITHUB-UI — Issues/Milestones like GitHub; Settings replaces In flight; GitHub-replaceable UI milestone
+
+- **Date:** 2026-10-14, ~6:40 pm CT.
+- **Owner words:** "this milestones ui is still trash, and it should be issues/milestones ..."; "get rid of inflight. we need a repo settings menu up there instead"; "the issues needs a more github esque ui ... with assigned to, tags ... searchable ... add that as a milestone to fix the full ui and make it more github replaceable".
+- **Decision:** milestone "GitHub-replaceable UI" (a3c7b110-3e6d-445d-b0cd-e4a12d262047) with specs 172 (nav+Settings, #152), 173 (Issues list, #153), 174 (Milestones list, #154); assignee = agent(s) holding leases for the issue.
+- **Status:** building.
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-AGENT-FIRST-HUMAN-CONTROLS — GitHub-replaceable but agent-first; human control surface
+
+- **Date:** 2026-10-14, ~6:40 pm CT.
+- **Owner words:** "github replaceable but agent first. humans are not allowed to open changes for landing. they should have a good ui for managing issues/milestones, tracking planning, bumping changes queued for landing, cancelling work to release leases, and locking files for human review only, and also a way to apply a human review. maybe some rules too that can be configured like ui changes need a human approval to land always, rules that can be configured but dont configure them for this repo".
+- **Decision:** UI milestone a3c7b110 scope: humans manage issues/milestones/planning, bump queued changes, cancel work (release leases), lock paths for human review, apply human reviews; configurable landing rules (e.g. UI paths need human approval) exist but are NOT configured on concord-v2; humans never open changes for landing.
+- **Status:** to spec (successor).
+- **Source:** Concord chat 10-14 2:39 pm.
+
+## D-LEASE-BOTTLENECK-ASAP — fix lease serialization of landing now (Seb AFK until 10 pm)
+
+- **Date:** 2026-10-14, ~6:58 pm CT.
+- **Owner words:** "bro i'm afk i wont be back until 10. why didn't you raise this earlier? it needs to be fixed asap the point of concord is it multi agents this blocks concords usefulness".
+- **Decision:** top priority tonight: published changes must stop blocking other agents' publishes on the same files for their whole check/review/queue lifetime (file leases serialize multi-agent work). Spec + land through the queue now; no manual-mode force batch is possible before 10 pm (Seb AFK).
+- **Status:** in progress.
+- **Source:** Concord chat 10-14 6:35 pm.
+
+## D-BOTTLENECK-FIRST — order: lease bottleneck, then excess calls (DO usage), then everything else
+
+- **Date:** 2026-10-14, ~7:08 pm CT.
+- **Owner words:** "fix the bottleneck first before trying to land anything else. don't let this bottleneck pile up. then fix all the excess calls bc we are at my durable storage usage and im about ti pay for usage. then fix everything else".
+- **Decision:** pause publishing/landing of every other change until the lease-bottleneck fix (spec 181) lands; then the call-efficiency milestone (7312ba8a) lands first; then UI and the rest. Cut Concord DO traffic now (fewer checkers, no idle chain polling).
+- **Status:** active.
+- **Source:** Concord chat 10-14 6:35 pm.

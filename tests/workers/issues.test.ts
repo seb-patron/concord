@@ -56,14 +56,19 @@ describe('Concord issues and milestones', () => {
   it('creates sequential issues, filters and pages, and rejects stale edits', async () => {
     const repo = 'issue_crud_case'; await setup(repo);
     const first = await post(repo, '/issues', { title: 'First task', body: '## Spec', labels: ['needs-review'] }, 'i1', 'local-agent-a');
-    expect(first.status).toBe(201); expect(first.body.data).toMatchObject({ number: 1, authorId: 'agent-a', state: 'open' });
+    expect(first.status).toBe(201); expect(first.body.data).toMatchObject({ number: 1, authorId: 'agent-a', state: 'open', closedAt: null });
+    expect(first.body.data.createdAt).toEqual(expect.any(Number));
+    expect(first.body.data.updatedAt).toBe(first.body.data.createdAt);
     const second = await post(repo, '/issues', { title: 'Second task', body: '', labels: [] }, 'i2');
     expect(second.body.data.number).toBe(2);
     const page = await get(repo, '/issues?limit=1');
     expect(page.body.data.items.map((item: { number: number }) => item.number)).toEqual([1]);
     expect((await get(repo, `/issues?cursor=${page.body.data.nextCursor}`)).body.data.items[0].number).toBe(2);
     expect((await get(repo, '/issues?label=needs-review')).body.data.items).toHaveLength(1);
-    expect((await patch(repo, '/issues/1', { expectedVersion: first.body.data.version, title: 'Revised' }, 'edit', 'local-agent-a')).body.data.title).toBe('Revised');
+    const edited = (await patch(repo, '/issues/1', { expectedVersion: first.body.data.version, title: 'Revised' }, 'edit', 'local-agent-a')).body.data;
+    expect(edited.title).toBe('Revised');
+    expect(edited.updatedAt).toEqual(expect.any(Number));
+    expect(edited.updatedAt).toBeGreaterThanOrEqual(first.body.data.createdAt);
     expect((await patch(repo, '/issues/1', { expectedVersion: first.body.data.version, title: 'Stale' }, 'stale', 'local-agent-a')).body.error.code).toBe('STALE_VERSION');
     expect((await patch(repo, '/issues/1', { expectedVersion: first.body.data.version, title: 'Other' }, 'other', 'local-agent-b')).status).toBe(403);
     expect((await post(repo, '/issues', { title: 'Denied', body: '' }, 'denied', 'local-reviewer')).status).toBe(403);
@@ -71,8 +76,15 @@ describe('Concord issues and milestones', () => {
     const revised = (await get(repo, '/issues/1')).body.data;
     const closed = await post(repo, '/issues/1/close', { expectedVersion: revised.version, reason: 'Done' }, 'close', 'local-agent-a');
     expect(closed.body.data.state).toBe('closed');
+    expect(closed.body.data.closedAt).toEqual(expect.any(Number));
+    expect(closed.body.data.updatedAt).toBe(closed.body.data.closedAt);
+    expect((await get(repo, '/snapshot')).body.data.projections.issues.items[0]).toMatchObject({
+      createdAt: first.body.data.createdAt, updatedAt: closed.body.data.updatedAt, closedAt: closed.body.data.closedAt,
+    });
     const reopened = await post(repo, '/issues/1/reopen', { expectedVersion: closed.body.data.version, reason: 'More work' }, 'reopen', 'local-agent-a');
     expect(reopened.body.data.state).toBe('open');
+    expect(reopened.body.data.closedAt).toBeNull();
+    expect(reopened.body.data.updatedAt).toEqual(expect.any(Number));
     expect((await get(repo, '/events')).body.data.items.map((event: { kind: string }) => event.kind)).toContain('issue.reopened');
   });
 
@@ -107,7 +119,7 @@ describe('Concord issues and milestones', () => {
       const principal = { tenantId: 'local', principalId: 'system', roles: [], repoIds: '*', expiresAt: Number.MAX_SAFE_INTEGER };
       expect(coordinator.context('issues', principal, repo).call('issues.land', 'linked-change', 'a'.repeat(40)).status).toBe('eligible');
     });
-    expect((await get(repo, '/issues/1')).body.data).toMatchObject({ state: 'closed', closedBy: { changeId: 'linked-change', canonicalOid: 'a'.repeat(40) } });
+    expect((await get(repo, '/issues/1')).body.data).toMatchObject({ state: 'closed', closedAt: expect.any(Number), updatedAt: expect.any(Number), closedBy: { changeId: 'linked-change', canonicalOid: 'a'.repeat(40) } });
     expect((await get(repo, `/milestones/${milestoneId}`)).body.data.progress).toEqual({ openIssues: 0, closedIssues: 1, landedChanges: 1 });
     expect((await post(repo, `/milestones/${milestoneId}/close`, { expectedVersion: created.body.data.version }, 'stale-milestone')).body.error.code).toBe('STALE_VERSION');
     const milestone = (await get(repo, `/milestones/${milestoneId}`)).body.data;

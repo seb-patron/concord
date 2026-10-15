@@ -304,6 +304,18 @@ export function withdrawChange(repoId, body, idempotencyKey, fetchImpl) {
   return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/queue/withdraw`, { method: 'POST', body, idempotencyKey }, fetchImpl);
 }
 
+/** POST /v1/repos/:r/changes/:c/close — requires expectedVersion. */
+export function closeChange(repoId, changeId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/changes/${encodeURIComponent(changeId)}/close`,
+    { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
+/** POST /v1/repos/:r/leases/:id/force-release — owner-only, requires a reason and expectedVersion. */
+export function forceReleaseLease(repoId, leaseId, body, idempotencyKey, fetchImpl) {
+  return apiFetch(`/v1/repos/${encodeURIComponent(repoId)}/leases/${encodeURIComponent(leaseId)}/force-release`,
+    { method: 'POST', body, idempotencyKey }, fetchImpl);
+}
+
 /** POST /v1/repos/:r/changes/:c/verdicts — reviewer role, requires expectedVersion. */
 export function submitVerdict(repoId, changeId, body, idempotencyKey, fetchImpl) {
   return apiFetch(

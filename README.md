@@ -1,5 +1,9 @@
 # Concord
 
+## Live demo
+
+[Open the live demo](https://concord.sebastian-patrones.workers.dev) or browse the [GitHub mirror](https://github.com/seb-patron/concord).
+
 Git conflicts on lines. Agents collide on meaning. Concord is a Git platform for agents working concurrently on one repository: an owner-defined unit policy lets them reserve semantic work, publish real commits to isolated forks, and earn a checked place in canonical history. The local demo uses a Cloudflare Worker with a fake Git bridge and an original retry-policy fixture.
 
 ## What is novel
@@ -22,19 +26,30 @@ flowchart LR
   R --> W
 ```
 
+## Agent quick start
+
+Start a task to create or reuse its change and claim the allowed files. Work only within the returned leases, commit the result, then land that commit with the same intent key:
+
+```sh
+npm run concord -- start --repo ID --intent-key KEY --intent TEXT --allowed-files FILE --json
+# Edit only the files covered by the returned leases, then create a Git commit.
+npm run concord -- land --repo ID --source PATH --commit SHA --intent-key KEY --intent TEXT --allowed-files FILE
+```
+
+The command forms and required options are defined in [`cli/main.ts`](cli/main.ts). Configure `CONCORD_URL` and `CONCORD_TOKEN` for the repository before running them.
+
 ## Five-minute local start
 
-Prerequisites: Node 22+, npm, and native Git. In a clean clone, install the pinned dependencies first. Start from the clone's directory:
+Prerequisites: Node 22+, npm, and native Git. From the root of a clean clone, install the pinned dependencies and run the configured type check and test suite:
 
-Run `cd "$(pwd -P)"` because macOS `/tmp` is a symlink and Wrangler rejects `..` paths through symlinked checkouts.
-
-<!-- verified-by: 12c -->
 ```sh
 cd "$(pwd -P)"
 npm ci
+npm run typecheck
+npm test
 ```
 
-Use four terminals for the remaining commands. The bridge and demo share one temporary run directory. Wrangler stores its local state in `.wrangler/state/` inside the clone; `.wrangler/` is gitignored. Its directory name is derived from the absolute run path, so a fresh run directory gets separate Worker state. No Cloudflare account or paid model is needed for this local path.
+To run the local demo, use four terminals from the clone root. The bridge and demo share one temporary run directory. Wrangler stores its local state in `.wrangler/state/` inside the clone; `.wrangler/` is gitignored. Its directory name is derived from the absolute run path, so a fresh run directory gets separate Worker state. No Cloudflare account or paid model is needed for this local path.
 
 Terminal 1, preflight:
 
@@ -85,7 +100,7 @@ npm run demo -- scene stack --run demo-01 --state-dir "$CONCORD_RUN_DIR" --pump-
 npm run demo -- inspect --run demo-01 --state-dir "$CONCORD_RUN_DIR" --json
 ```
 
-`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The rows scene in the demo guide captures plain Git append conflict and Concord checked composition. The docs-command test executes these exact blocks and checks their state barriers.
+`seed` creates a real Git commit through the bridge. The context scene labels owner-reported aggregates; leases shows one overlapping claim refused while distinct rows remain active; stack publishes and checks actual candidate commits. `--pump-local` runs bounded checker and promoter jobs. Stop the foreground servers when finished. The rows scene in the demo guide captures plain Git append conflict and Concord checked composition. The README command test checks npm script references and agent CLI forms.
 
 ## Status and safety
 

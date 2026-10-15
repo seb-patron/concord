@@ -14,6 +14,8 @@ The verdict service reads the current change through `readChange`, the finding s
 
 Any authenticated principal whose scope includes the repository may read verdict history, including the change author. Owners and reviewers receive the full stored verdict. Other readers receive only `verdictId`, `changeId`, `reviewerId`, `revision`, `decision`, and `parentVerdictId`, which are available from verdict events; the response excludes review manifest paths, byte digests, evidence digests, and other private review evidence. Posting verdicts and requesting carry remain reviewer-only.
 
+`POST /v1/repos/:repoId/changes/:changeId/human-approval` lets an owner record `approve` or `reject` for any currently inspected revision, even when no `human-approval` protection rule matches. The request uses the current `revision`, `reviewManifestDigest`, and an `evidenceDigest`; it may include an optional `note` trimmed to 1–2000 characters. `GET` on the same path returns the owner-only review history, including notes. The current change and snapshot expose `humanReview` as `{ decision, ownerId, revision, note }` when the review matches the current inspected revision, head, and manifest, or `null` otherwise. Rule-based `awaitingHumanApproval` continues to use only matching protection rules and approvals for those rules. A current `reject` blocks `verdicts.gate` with `HUMAN_CHANGES_REQUESTED` until an owner approves that revision or a new revision is inspected. Human-review event payloads include the note when present; `evidenceDigest` remains hidden from non-owners.
+
 ```json
 {
   "expectedVersion": 12,

@@ -5,24 +5,34 @@ import {
 } from './api.js';
 import {
   avatarInitials, boardStage, canRender, deriveInbox, environmentBadge, inboxCount, leaseCountdown, mutationEvidence, pickTheme, signOutTarget,
-  liveLeaseHolders, normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance,
+  chooseInitialRepo, isDemoRepo, liveLeaseHolders, normalizeDiagnosis, openIssueRows, panelCopy, projectionItems, repairStatus, safeText, snapshotCollections, verdictProvenance, visibleRepos,
 } from './views.js';
 import { createRepoPage } from './repo.js';
 import { appendObservedEvents, createTracker, observedDailyCount } from './tracker.js';
 import { createVerdictLoader } from './verdicts.js';
-import { renderMilestones } from './milestones.js';
+import { renderMilestones, renderMilestoneSettings } from './milestones.js';
+import { renderIssues as renderIssueBrowser } from './issues.js';
 
 const $ = id => document.getElementById(id);
 let initialTheme = 'light';
 try { initialTheme = pickTheme(window.localStorage.getItem('concord-theme')); } catch { initialTheme = 'light'; }
+const readPreference = key => { try { return window.localStorage.getItem(key); } catch { return null; } };
+const writePreference = (key, value) => { try { window.localStorage.setItem(key, value); } catch {} };
+let showDemoRepos = readPreference('concord-show-demo-repos') === 'true';
 document.documentElement.dataset.theme = initialTheme;
 const repoPage = createRepoPage($('code-view'), undefined, changeId => {
-  state.view = 'desk';
+  state.view = 'tracker';
+  updateViewUrl();
   selectChange(changeId);
 });
+const requestedView = new URLSearchParams(window.location.search).get('view');
+const legacyMilestones = requestedView === 'milestones';
+const viewAliases = { inflight: 'tracker', milestones: 'issues' };
+const initialView = Object.hasOwn(viewAliases, requestedView) ? viewAliases[requestedView] :
+  (['issues', 'tracker', 'code', 'settings'].includes(requestedView) ? requestedView : 'tracker');
 const state = { generation: 0, repoId: null, repos: [], principals: [], identity: null, snapshot: null,
   events: [], seq: 0, version: 0, observedVersions: new Map(), verdicts: {}, verdictErrors: {}, selected: null,
-  inboxSelected: null, view: 'tracker', tab: 'work', connected: true, busy: false, deskMessage: null,
+  inboxSelected: null, view: initialView, issuesTab: legacyMilestones ? 'milestones' : 'issues', tab: 'work', connected: true, busy: false, deskMessage: null,
   awaitingFreshSnapshot: false, accessSignIn: false, metrics: null, metricsFetchedAt: 0,
   publicRead: false, publicPollAt: 0, publicRequestTimes: [], lastPollAt: 0, lastLifecycleRefreshAt: 0 };
 state.refreshRequested = false;
@@ -59,8 +69,11 @@ const tracker = createTracker($('tracker-view'), {
 });
 const views = {
   code: { render: () => repoPage.show(state.repoId, state.snapshot) },
-  tracker: { render: context => tracker.render(context) },
+  // The Issues tab shows the GitHub-style list (173) above the issue lanes (172).
+  tracker: { render: context => { renderIssueBrowser($('issues-content'), context); tracker.render(context); } },
   milestones: { render: context => renderMilestones(context) },
+  issues: { render: () => {} },
+  settings: { render: () => {} },
   desk: { render: () => {} },
   inbox: { render: () => {} },
 };
@@ -105,6 +118,25 @@ function setProfileMenuOpen(open) {
   $('profile-toggle').setAttribute('aria-expanded', String(open));
 }
 function closeProfileMenu() { setProfileMenuOpen(false); }
+function rememberRepo(repoId) { writePreference('concord-last-repo', repoId); }
+function appendDemoToggle(container, asListItem = false) {
+  const demos = state.repos.filter(isDemoRepo);
+  if (!demos.length) return;
+  const label = showDemoRepos ? 'Hide demo repos' : `Show ${demos.length} demo repos`;
+  const toggle = node('button', label, asListItem ? 'repository-choice demo-repo-toggle' : 'profile-menu-item');
+  toggle.type = 'button';
+  if (!asListItem) toggle.setAttribute('role', 'menuitem');
+  toggle.setAttribute('aria-expanded', String(showDemoRepos));
+  toggle.addEventListener('click', () => {
+    showDemoRepos = !showDemoRepos;
+    writePreference('concord-show-demo-repos', String(showDemoRepos));
+    showSession();
+    render();
+  });
+  if (asListItem) {
+    const item = node('li'); item.append(toggle); container.append(item);
+  } else container.append(toggle);
+}
 function showSession() {
   const publicMode = state.publicRead && !!state.identity && !!state.repoId;
   const signedIn = canRender({ token: hasToken(), identity: state.identity, publicRead: publicMode }) && !!state.identity;
@@ -142,26 +174,26 @@ function showSession() {
   const avatar = $('profile-avatar');
   avatar.alt = name;
   $('profile-initials').textContent = avatarInitials(name);
-  if (state.identity?.avatarUrl) {
-    avatar.src = state.identity.avatarUrl;
-    avatar.hidden = false;
-    $('profile-initials').hidden = true;
-    avatar.onerror = () => { avatar.hidden = true; $('profile-initials').hidden = false; };
-  } else {
-    avatar.removeAttribute('src'); avatar.hidden = true;
-    $('profile-initials').hidden = false;
-  }
+  const initials = $('profile-initials');
+  avatar.hidden = true;
+  initials.hidden = false;
+  avatar.onload = () => { avatar.hidden = false; initials.hidden = true; };
+  avatar.onerror = () => { avatar.hidden = true; initials.hidden = false; };
+  const avatarUrl = state.identity?.avatarUrl ?? `/avatars/${encodeURIComponent(state.identity?.principalId ?? '')}.jpeg`;
+  if (state.identity?.avatarUrl || state.identity?.principalId) avatar.src = avatarUrl;
+  else avatar.removeAttribute('src');
   const repoList = $('profile-repos'); repoList.replaceChildren();
-  for (const repo of state.repos) {
+  for (const repo of visibleRepos(state.repos, showDemoRepos)) {
     const button = node('button', repo.displayName ?? repo.repoId, 'profile-menu-item');
     button.type = 'button'; button.setAttribute('role', 'menuitem');
     button.setAttribute('aria-current', String(repo.repoId === state.repoId));
     button.addEventListener('click', () => {
-      state.repoId = repo.repoId; state.view = 'tracker';
+      state.repoId = repo.repoId; rememberRepo(repo.repoId); state.view = 'tracker';
       closeProfileMenu(); ++state.generation; void loadRepo();
     });
     repoList.append(button);
   }
+  appendDemoToggle(repoList);
 }
 function signOut(message) {
   ++state.generation; clearSessionToken();
@@ -197,8 +229,10 @@ async function signIn(token, preferredRepo, accessSession = null) {
     if (gen !== state.generation) return;
     state.identity = identity;
     state.repos = list(page?.data?.items).filter(repo => !Array.isArray(identity.repoIds) || identity.repoIds.includes(repo.repoId));
-    const requestedRepo = preferredRepo ?? new URLSearchParams(window.location.search).get('repo');
-    state.repoId = state.repos.find(r => r.repoId === requestedRepo)?.repoId ?? state.repos[0]?.repoId ?? null;
+    const requestedRepo = new URLSearchParams(window.location.search).get('repo');
+    const lastRepo = readPreference('concord-last-repo');
+    state.repoId = chooseInitialRepo(state.repos, requestedRepo, lastRepo, preferredRepo);
+    if (state.repoId) rememberRepo(state.repoId);
     showSession();
     if (state.repoId) await loadRepo(gen);
     else { state.deskMessage = 'No repositories yet. Create one with concord repo create or the MCP tool.'; render(); }
@@ -283,7 +317,7 @@ function acceptSnapshot(body, repoId) {
 async function refreshVerdicts(gen = state.generation) {
   const ids = [];
   const terminal = [];
-  if (state.view === 'desk' && state.selected) ids.push(state.selected);
+  if (state.view === 'tracker' && state.selected) ids.push(state.selected);
   if (state.view === 'inbox' && state.inboxSelected) {
     const item = deriveInbox(state.snapshot).find(i => i.id === state.inboxSelected);
     if (item?.changeId) ids.push(item.changeId);
@@ -776,7 +810,7 @@ function renderInbox() {
     const approval=node('div'); approval.append(node('h3','Approval history'));
     const records=node('div'); approval.append(records); renderVerdicts(c.changeId,records); content.append(approval);
     const open=node('button','Open change details'); open.type='button';
-    open.addEventListener('click',()=>{state.view='desk';selectChange(c.changeId);$('detail-heading').focus();});
+    open.addEventListener('click',()=>{state.view='tracker';updateViewUrl();selectChange(c.changeId);$('detail-heading').focus();});
     content.append(open);
     const actionPanel=sameItem ? detail.querySelector('.inbox-actions') ?? node('div',null,'inbox-actions') : node('div',null,'inbox-actions');
     if (!sameItem || !actionPanel.isConnected) detail.append(actionPanel);
@@ -807,20 +841,25 @@ function render() {
     $('desk').dataset.mainViewActive = state.view;
     const mainOid = projections().repos?.repo?.observedCanonicalOid;
     $('env-badge').textContent = `${state.connected ? 'Live' : 'Offline'} · main ${mainOid ? String(mainOid).slice(0, 7) : '—'}`;
-    const sections = { code: $('code-view'), repositories: $('repositories-view'), tracker: $('tracker-view'), milestones: $('milestones-view'), desk: $('desk-view'), inbox: $('inbox-view') };
+    const sections = { code: $('code-view'), repositories: $('repositories-view'), issues: $('issues-view'), settings: $('settings-view'), tracker: $('desk-view'), inbox: $('inbox-view') };
     for (const [name, section] of Object.entries(sections)) section.hidden = state.view !== name;
-    $('stat-strip').hidden = state.view !== 'desk';
+    $('tracker-view').hidden = state.view !== 'issues' || state.issuesTab !== 'issues';
+    $('issues-list-view').hidden = state.view !== 'issues' || state.issuesTab !== 'issues';
+    $('milestones-view').hidden = state.view !== 'issues' || state.issuesTab !== 'milestones';
+    $('stat-strip').hidden = state.view !== 'tracker';
     $('inbox-alert').hidden = state.view === 'inbox' || inboxCount(state.snapshot) === 0;
     for (const button of document.querySelectorAll('[data-main-view]')) button.setAttribute('aria-current', String(button.dataset.mainView === state.view));
+    for (const button of document.querySelectorAll('[data-issues-tab]')) button.setAttribute('aria-current', String(button.dataset.issuesTab === state.issuesTab));
     if (state.view !== 'code') repoPage.hide();
     if (state.view === 'repositories') renderRepositories();
-    views[state.view]?.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
+    const pageView = state.view === 'issues' ? (state.issuesTab === 'milestones' ? 'milestones' : 'tracker') : state.view === 'tracker' ? 'desk' : state.view;
+    views[pageView]?.render({ repoId: state.repoId, snapshot: state.snapshot, events: state.events,
       identity: state.identity, principals: state.principals, roles: roles(),
       verdicts: state.verdicts, verdictErrors: state.verdictErrors, message: state.deskMessage,
       refresh: async () => { await loadRepo(state.generation, false); return state.snapshot; } });
     $('desk-message').hidden = !state.deskMessage;
     $('desk-message').textContent = state.deskMessage ?? '';
-    $('desk-view').hidden=state.view!=='desk'; $('inbox-view').hidden=state.view!=='inbox';
+    $('desk-view').hidden=state.view!=='tracker'; $('inbox-view').hidden=state.view!=='inbox';
     if (!state.snapshot) {
       renderInbox();
       if (!state.repoId) {
@@ -828,32 +867,53 @@ function render() {
       }
       return;
     }
-    renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderSettings();renderTabs();
+    renderStats();renderBoard();renderFleet();renderRunners();renderIssues();renderLeases();renderQueue();renderDetail();renderInbox();renderSettings();renderMilestoneSettings({ repoId: state.repoId, snapshot: state.snapshot, roles: roles(), refresh: async () => { await loadRepo(state.generation, false); return state.snapshot; } });renderRepositoryInfo();renderTabs();
   });
+}
+function updateViewUrl() {
+  if (!['code', 'issues', 'tracker', 'settings'].includes(state.view)) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set('view', state.view === 'issues' && state.issuesTab === 'milestones' ? 'milestones' : state.view);
+  window.history?.replaceState?.({}, '', `${url.pathname}${url.search}${url.hash}`);
+}
+function renderRepositoryInfo() {
+  const target = $('repository-info');
+  if (!target) return;
+  const oid = projections().repos?.repo?.observedCanonicalOid ?? 'Not observed';
+  const mirror = state.repoId === 'concord-v2' ? 'https://github.com/seb-patron/concord' : 'No mirror configured';
+  target.replaceChildren();
+  for (const [label, value] of [['Repository ID', state.repoId ?? '—'], ['Canonical main OID', oid], ['GitHub mirror', mirror]]) {
+    target.append(node('dt', label), node('dd', value));
+  }
 }
 function renderRepositories() {
   const target = $('repositories-list');
   target.replaceChildren();
   if (!state.repos.length) { target.append(node('li', 'No repositories yet.')); return; }
-  for (const repo of state.repos) {
+  for (const repo of visibleRepos(state.repos, showDemoRepos)) {
     const item = node('li');
     const choice = node('button', repo.displayName ?? repo.repoId, 'repository-choice');
     choice.type = 'button';
     choice.setAttribute('aria-current', String(repo.repoId === state.repoId));
     choice.addEventListener('click', () => {
-      state.repoId = repo.repoId; state.view = 'code'; ++state.generation;
-      window.history?.replaceState?.({}, '', `?repo=${encodeURIComponent(repo.repoId)}#code`);
+      state.repoId = repo.repoId; rememberRepo(repo.repoId); state.view = 'code'; ++state.generation;
+      const url = new URL(window.location.href);
+      url.searchParams.set('repo', repo.repoId); url.searchParams.set('view', 'code');
+      window.history?.replaceState?.({}, '', `${url.pathname}${url.search}${url.hash}`);
       showSession(); void loadRepo();
     });
     item.append(choice, node('code', repo.repoId)); target.append(item);
   }
+  appendDemoToggle(target, true);
 }
 function renderSettings() {
   const panel=$('settings-panel');
-  panel.hidden=!roles().includes('owner') || !state.repoId;
-  if (panel.hidden) return;
+  const owner = roles().includes('owner');
+  panel.hidden=state.view!=='settings' || !state.repoId;
+  $('settings-view').querySelector('[data-owner-hint]').hidden = owner;
+  for (const control of panel.querySelectorAll('input,select,form button')) control.disabled = !owner;
   const rules=list(projections().settings?.protectedPaths);
-  const signature=JSON.stringify(rules);
+  const signature=JSON.stringify({rules,owner});
   const target=$('settings-list');
   if (target.dataset.signature===signature) return;
   target.dataset.signature=signature;
@@ -862,6 +922,7 @@ function renderSettings() {
     const row=node('div',null,'settings-rule');
     row.append(node('strong',rule.pattern),node('span',` · ${rule.level}${rule.note ? ` · ${rule.note}` : ''}`));
     const remove=node('button','Remove'); remove.type='button';
+    remove.disabled=!owner;
     remove.addEventListener('click',()=>void saveSettings(rules.filter(item=>item.pattern!==rule.pattern)));
     row.append(remove); target.append(row);
   }
@@ -933,6 +994,7 @@ function doVerdict(change,decision,manifest,evidenceDigest) {
   void mutate('Verdict',()=>submitVerdict(state.repoId,change.changeId,{expectedVersion:state.snapshot.version,revision:evidence.revision,reviewManifestDigest:manifest.trim(),findingSetVersion:evidence.findingSetVersion,decision,evidenceDigest:evidenceDigest.trim()},newIdempotencyKey()));
 }
 function boot() {
+  if (requestedView === 'inflight') updateViewUrl();
   $('settings-form').addEventListener('submit',event=>{
     event.preventDefault();
     const data=new FormData(event.currentTarget);
@@ -948,7 +1010,15 @@ function boot() {
     const tab = event.target.closest('[data-main-view]');
     if (!tab || !Object.hasOwn(views, tab.dataset.mainView)) return;
     state.view = tab.dataset.mainView;
+    if (state.view === 'issues' && !['issues', 'milestones'].includes(state.issuesTab)) state.issuesTab = 'issues';
+    updateViewUrl();
     render();
+  });
+  $('desk').addEventListener('click', event => {
+    const tab = event.target.closest('[data-issues-tab]');
+    if (!tab) return;
+    state.view = 'issues'; state.issuesTab = tab.dataset.issuesTab;
+    updateViewUrl(); render();
   });
   const accessSignin = node('a', 'Sign in with Cloudflare Access', 'primary');
   accessSignin.id = 'access-signin'; accessSignin.href = '/v1/session/signin'; accessSignin.hidden = true;
@@ -974,7 +1044,7 @@ function boot() {
   });
   $('repo-link').addEventListener('click', event => {
     if (!state.repoId) return;
-    event.preventDefault(); state.view = 'code'; render();
+    event.preventDefault(); state.view = 'code'; updateViewUrl(); render();
   });
   $('inbox-button').addEventListener('click', () => { state.view = 'inbox'; render(); });
   document.addEventListener('keydown', event => {
@@ -1014,7 +1084,7 @@ function boot() {
     finally { olderButton.disabled = false; }
   });
   $('inbox-alert').addEventListener('click',()=>{state.view='inbox';render();});
-  $('back-desk').addEventListener('click',()=>{state.view='desk';render();});
+  $('back-desk').addEventListener('click',()=>{state.view='tracker';updateViewUrl();render();});
   $('detail-close').addEventListener('click',()=>{const id=state.selected;state.selected=null;render();if(id)$(`work-${id}`)?.focus();});
   for(const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click',()=>{
     state.tab=b.dataset.tab;renderTabs();

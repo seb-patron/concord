@@ -4,7 +4,8 @@ import { eventSequence, sqlState } from '../state';
 
 type Issue = { number: number; title: string; body: string; labels: string[]; milestoneId: string | null;
   allowedFiles: string[] | null; state: 'open' | 'closed'; authorId: string; version: number;
-  reason: string | null; closedBy: { changeId: string; canonicalOid: string } | null };
+  reason: string | null; closedBy: { changeId: string; canonicalOid: string } | null;
+  createdAt: number; updatedAt: number; closedAt: number | null };
 type Milestone = { milestoneId: string; title: string; description: string; dueDate: string | null;
   state: 'open' | 'closed'; version: number };
 type MilestoneSettings = { create: 'agents' | 'owners'; version: number };
@@ -97,8 +98,10 @@ export const issuesFeature: FeatureModule = {
       if (milestoneId) milestone(c, milestoneId);
       const allowedFiles = body.allowedFiles == null ? null : listStrings(body.allowedFiles, 'allowedFiles');
       const number = (c.state.get<number>('nextNumber') ?? 0) + 1;
+      const now = c.now();
       const item: Issue = { number, title, body: text, labels, milestoneId, allowedFiles, state: 'open', authorId: c.principal.principalId,
-        version: event(c, 'issue.created', [String(number)], { number, title }), reason: null, closedBy: null };
+        version: event(c, 'issue.created', [String(number)], { number, title }), reason: null, closedBy: null,
+        createdAt: now, updatedAt: now, closedAt: null };
       c.state.put('nextNumber', number); c.state.put('items', [...issues(c), item]); milestoneAdvanced(c, milestoneId, number); return response(c, issueView(item, issueViews(c)), 201);
     } },
     { method: 'GET', pattern: /^\/v1\/repos\/[^/]+\/issues$/, handle: (c, request) => {
@@ -119,7 +122,8 @@ export const issuesFeature: FeatureModule = {
       const milestoneId = body.milestoneId === undefined ? old.milestoneId : body.milestoneId === null ? null : string(body.milestoneId, 'milestoneId', 64);
       if (milestoneId) milestone(c, milestoneId);
       const allowedFiles = body.allowedFiles === undefined ? old.allowedFiles : body.allowedFiles === null ? null : listStrings(body.allowedFiles, 'allowedFiles');
-      const item = { ...old, title, body: text, labels, milestoneId, allowedFiles, version: event(c, 'issue.updated', [String(old.number)], { number: old.number }) };
+      const item = { ...old, title, body: text, labels, milestoneId, allowedFiles, updatedAt: c.now(),
+        version: event(c, 'issue.updated', [String(old.number)], { number: old.number }) };
       c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
       if (old.milestoneId !== milestoneId) { milestoneAdvanced(c, old.milestoneId, old.number); milestoneAdvanced(c, milestoneId, old.number); }
       return response(c, issueView(item, issueViews(c)));
@@ -130,7 +134,9 @@ export const issuesFeature: FeatureModule = {
       checkVersion(body, old.version); const reason = string(body.reason, 'reason', 2000);
       const state = match[2] === 'close' ? 'closed' : 'open';
       if (old.state === state) error(409, 'ISSUE_STATE_CONFLICT', 'Issue already in requested state');
-      const item: Issue = { ...old, state, reason, closedBy: null, version: event(c, `issue.${state === 'closed' ? 'closed' : 'reopened'}`, [String(old.number)], { number: old.number, reason }) };
+      const now = c.now();
+      const item: Issue = { ...old, state, reason, closedBy: null, closedAt: state === 'closed' ? now : null, updatedAt: now,
+        version: event(c, `issue.${state === 'closed' ? 'closed' : 'reopened'}`, [String(old.number)], { number: old.number, reason }) };
       c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
       milestoneAdvanced(c, old.milestoneId, old.number); return response(c, issueView(item, issueViews(c)));
     } },
@@ -166,7 +172,8 @@ export const issuesFeature: FeatureModule = {
       const old = issues(c).find(item => item.number === change?.issueNumber);
       if (!old || old.state === 'closed') return { status: 'eligible', version: c.version(), evidenceIds: [], value: undefined };
       const closedBy = { changeId, canonicalOid };
-      const item: Issue = { ...old, state: 'closed', reason: 'Landed change', closedBy,
+      const now = c.now();
+      const item: Issue = { ...old, state: 'closed', reason: 'Landed change', closedBy, closedAt: now, updatedAt: now,
         version: event(c, 'issue.closed', [String(old.number), changeId], { number: old.number, closedBy }) };
       c.state.put('items', issues(c).map(candidate => candidate.number === old.number ? item : candidate));
       milestoneAdvanced(c, old.milestoneId, old.number);

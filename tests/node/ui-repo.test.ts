@@ -64,9 +64,8 @@ describe('Repository code page', () => {
       expect(rows.map(row => row.querySelector('.repo-working-title')?.textContent)).toEqual([
         '#22 Beta issue', '#11 Alpha issue', '#33 Gamma issue',
       ]);
-      expect(rows.map(row => row.querySelector('.repo-working-branch')?.textContent)).toEqual([
-        'feature/beta', 'feature/alpha', 'feature/gamma',
-      ]);
+      // Change 157: branch refs stay hidden until a row is expanded.
+      expect(rows.every(row => row.querySelector('.repo-working-branch') === null)).toBe(true);
       expect(rows.map(row => row.querySelector('.repo-working-count')?.textContent)).toEqual(['5 files', '2 files', '1 file']);
       expect(rows.every(row => row.querySelector('.repo-working-units') === null)).toBe(true);
       const agentsNow = [...root.querySelectorAll('.repo-stats dt')].find(label => label.textContent === 'Agents now');
@@ -78,6 +77,58 @@ describe('Repository code page', () => {
       expect(expanded.querySelector('.repo-working-units')?.textContent).toContain('file:alpha-0.ts');
       expect(expanded.querySelector('.repo-working-units')?.textContent).toContain('3 min left');
       expect(expanded.querySelector('.repo-working-disclosure')?.getAttribute('aria-expanded')).toBe('true');
+      expect(expanded.querySelector('.repo-working-branch')?.textContent).toBe('alpha');
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
+  it('renders compact Working now rows with the model first and hides branch refs until expanded', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.repos.changes = [1, 2, 3].map(number => ({
+        changeId: `change-${number}`, issueNumber: number, authorModel: `gpt-${number}`, authorEffort: 'high',
+        branch: `refs/heads/land/${number}`, status: 'ready',
+      }));
+      snapshot.data.projections.issues.items = [1, 2, 3].map(number => ({ number, title: `Compact task ${number}` }));
+      snapshot.data.projections.leases.items = [1, 2, 3].map(number => ({
+        leaseId: `lease-${number}`, changeId: `change-${number}`, holderId: `agent-${number}`,
+        unitKey: `file:${number}`, expiresAt: Date.now() + 120000, state: 'active',
+      }));
+      const root = dom.window.document.getElementById('page')!;
+      createRepoPage(root, { getRepoTree: async () => ({ data: { entries: [] } }), getRepoReadme: async () => ({ data: {} }), getRepoFile: async () => ({ data: {} }) }).show('sample', snapshot);
+      const card = root.querySelector('.repo-working-card')!;
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(root.querySelector('.repo-working-card h2')?.textContent).toBe('Working now · 3 agents');
+      const rows = [...card.querySelectorAll('.repo-working-row')];
+      expect(rows).toHaveLength(3);
+      expect(rows[0].children[1].classList.contains('repo-working-model')).toBe(true);
+      expect(rows[0].children[1].textContent).toBe('gpt-1 · high');
+      expect(rows[0].children[2].textContent).toBe('#1 Compact task 1');
+      expect(rows[0].children[2].getAttribute('title')).toBe('#1 Compact task 1');
+      expect(rows[0].children[3].textContent).toBe('1 file');
+      expect(card.textContent).not.toContain('refs/heads/');
+      (rows[0].querySelector('.repo-working-disclosure') as HTMLButtonElement).click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const expandedCard = root.querySelector('.repo-working-card')!;
+      expect(expandedCard.querySelector('.repo-working-branch')?.textContent).toBe('1');
+      expect(expandedCard.textContent).not.toContain('refs/heads/');
+    } finally { globalThis.document = previous; dom.window.close(); }
+  });
+  it('adds internal scrolling to the Working now list at eight rows', async () => {
+    const dom = new JSDOM('<main id="page"></main>');
+    const previous = globalThis.document; globalThis.document = dom.window.document;
+    try {
+      const snapshot = structuredClone(fixture) as any;
+      snapshot.data.projections.repos.changes = Array.from({ length: 8 }, (_, index) => ({ changeId: `change-${index}`, authorModel: 'model' }));
+      snapshot.data.projections.leases.items = Array.from({ length: 8 }, (_, index) => ({
+        leaseId: `lease-${index}`, changeId: `change-${index}`, holderId: `agent-${index}`,
+        unitKey: `file:${index}`, expiresAt: Date.now() + 120000, state: 'active',
+      }));
+      const root = dom.window.document.getElementById('page')!;
+      createRepoPage(root, { getRepoTree: async () => ({ data: { entries: [] } }), getRepoReadme: async () => ({ data: {} }), getRepoFile: async () => ({ data: {} }) }).show('sample', snapshot);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(root.querySelector('.repo-working-list')?.classList.contains('repo-working-list-scroll')).toBe(true);
+      expect(root.querySelector('.repo-working-card h2')?.textContent).toBe('Working now · 8 agents');
     } finally { globalThis.document = previous; dom.window.close(); }
   });
   it('shows Code details and an accessible Git, Concord, and mirror clone panel', async () => {

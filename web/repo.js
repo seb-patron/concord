@@ -241,13 +241,12 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
       const cell = element('div'); cell.append(element('dt', label), element('dd', value)); stats.append(cell);
     }
     about.append(stats); aside.append(about);
-    const working = card('Working now');
+    const working = card(`Working now · ${groups.length} agents`, 'repo-working-card');
     if (!groups.length) working.append(element('p', 'No agents hold a live claim.', 'repo-empty'));
     else {
-      const list = element('ul', undefined, 'repo-working-list');
+      const list = element('ul', undefined, `repo-working-list${groups.length >= 8 ? ' repo-working-list-scroll' : ''}`);
       for (const group of groups) {
-        const row = element('li', undefined, 'repo-working-row');
-        const heading = element('div', undefined, 'repo-working-heading');
+        const row = element('li', undefined, `repo-working-row${expandedChanges.has(group.changeId) ? ' repo-working-row-expanded' : ''}`);
         const disclosure = button(expandedChanges.has(group.changeId) ? '▾' : '▸', () => {
           if (expandedChanges.has(group.changeId)) expandedChanges.delete(group.changeId);
           else expandedChanges.add(group.changeId);
@@ -255,16 +254,21 @@ export function createRepoPage(root, api = { getRepoTree, getRepoFile, getRepoRe
         }, 'repo-working-disclosure');
         disclosure.setAttribute('aria-expanded', String(expandedChanges.has(group.changeId)));
         disclosure.setAttribute('aria-label', `${expandedChanges.has(group.changeId) ? 'Collapse' : 'Expand'} files for ${group.changeId}`);
+        const model = group.change.authorModel ?? group.leases[0].holderId;
+        const effort = group.change.authorEffort ?? group.change.effort;
+        const modelLabel = effort ? `${model} · ${effort}` : model;
+        const modelChip = element('span', modelLabel, 'repo-working-model');
         const title = group.issueNumber != null
-          ? `#${group.issueNumber}${group.issueTitle ? ` ${group.issueTitle}` : ''}`
+          ? `${group.issueTitle ?? ''}`
           : group.change.intentText ?? group.leases[0].intentText ?? group.changeId;
-        const titleButton = button(title, () => selectChange?.(group.changeId), 'repo-working-title');
-        heading.append(disclosure, titleButton);
-        row.append(heading);
-        row.append(element('p', group.change.authorModel ?? group.leases[0].holderId, 'repo-working-model'));
-        row.append(element('p', group.change.branch ?? 'Branch unavailable', 'repo-working-branch'));
-        row.append(element('p', `${group.leases.length} ${group.leases.length === 1 ? 'file' : 'files'}`, 'repo-working-count'));
+        const shortTitle = group.issueNumber != null ? `#${group.issueNumber}${title ? ` ${title}` : ''}` : title;
+        const titleButton = button(shortTitle, () => selectChange?.(group.changeId), 'repo-working-title');
+        titleButton.title = shortTitle;
+        const count = element('span', `${group.leases.length} ${group.leases.length === 1 ? 'file' : 'files'}`, 'repo-working-count');
+        row.append(disclosure, modelChip, titleButton, count);
         if (expandedChanges.has(group.changeId)) {
+          const branch = String(group.change.branch ?? 'Branch unavailable').split('/').at(-1);
+          row.append(element('div', branch, 'repo-working-branch'));
           const units = element('ul', undefined, 'repo-working-units');
           for (const lease of group.leases) {
             const unit = element('li'); unit.append(element('code', lease.unitKey), element('span', timeLeft(lease)));

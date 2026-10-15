@@ -145,4 +145,47 @@ D-STRANDED-1014	manual	stranded items 7 dispositions	in progress	Spike #11 and #
 D-RUNNER-PIN-GO	manual	#6 runner pin repaired and landed	in progress	Repair and land #6.
 D-CF-CHECKER-GO	manual	capped containers checker experiment	in progress	Spec and run the capped experiment; Seb deploys.
 D-LEASE-WAIT-V2	manual	new wait queue spec and land	in progress	Close #16; spec spike; implement.
-D-FREEZE-2PM	manual	freeze at 2 pm CT	active	None.
+D-FREEZE-2PM	manual	freeze at 2 pm CT	superseded	See D-FREEZE-3PM.
+D-SYMBOL-LEASES	manual	symbol leases milestone + issues	in progress	Login+UI first; Q-UNIT one by one; then milestone, issues, specs.
+D-UNIT-1-EXCLUSIVE	manual	exclusive leases at symbol size	active	None.
+D-LEASE-QUEUE-AUTO	manual	auto-queue refused claims with holder and ETA	decided	Spec after 116 lands.
+D-UNIT-4-STRUCT-MERGE	manual	structure-aware merge step at land	decided	Milestone issue after symbol core.
+D-UNIT-6-REGEN	manual	regenerate at land, exclusive fallback	in progress	Land #9; spec exclusive fallback in milestone.
+D-UNIT-7-DRAFTS	manual	#8 closed, #11 waits for spike	active	Close #8; read keyed-data spike.
+D-LANDING-SPIKE	manual	landing throughput spike	spike running	Read the spike; decide.
+D-LAND-FIX-NOW	manual	admission does not cancel running stack	in progress	Land spec 118 before the swarm.
+D-CFEXP-R2	manual	cfexp second repair	in progress	Land cfexp after r2.
+D-UI-CONCORD-V2-ONLY	manual	Seb login scoped to concord-v2	superseded	See D-UI-WORK-PROTOTYPES (concord-v2 + mother-base-v2).
+D-UI-WORK-PROTOTYPES	manual	UI matches Work UI prototypes, light + dark toggle	in progress	Land spec 121 before filming.
+D-UI-PROFILE-MENU	manual	profile menu + inbox icon top right	decided	Spec 123 after 121 lands.
+D-HOSTING-SPIKE-LATER	manual	self-host vs hosted spike	deferred	After submission.
+D-FREEZE-3PM	manual	freeze at 3 pm CT, swarm at 2 pm	superseded	See D-FREEZE-4PM.
+D-CFEXP-R3	manual	cfexp third repair (alarm/run race)	in progress	Land cfexp after r3.
+D-SYMBOL-TIMING	manual	build symbol leases now, land by freeze or before submission	in progress	Land 124-127 in order.
+D-PILOT-OPENROUTER	manual	OpenRouter pilot, 3-5 small Concord tasks	in progress	Run pilot tasks; send run dirs to AW.
+D-UI-POLISH-FREEZE	manual	UI polish 130 may land after the freeze	in progress	Spec 130 after 123; land before filming.
+D-POLL-SPIKE	manual	spike live UI updates before building	spike running	Read spike s-110; spec from it.
+D-FREEZE-4PM	manual	freeze at 4 pm CT	active	None.
+D-CHANGE-LIMIT-64	manual	active change limit 64 + automatic stale cleanup	config written	Seb runs install-trusted.sh; spec #60 cleanup.
+D-POLL-FIX-FIRST	manual	web loads on demand, land waits back off; lands first	building	141 (#110), 142 (#75).
+D-FORCE-LAND	manual	owner-only audited force land (Q-FORCE-LAND a)	building	spec 143 (#59).
+D-FORCE-MAIN-1014	manual	canonical main force-updated to 5d0707a (8 changes) during DO outage	done	reconcile queue records; GitHub mirror pending.
+D-FREEZE-5PM	manual	freeze at 5 pm CT	active	None.
+D-PUSH-AFTER-SUBMISSION	manual	WebSocket push for runners + UI after submission	active	spec after submission.
+D-UI-FIXES-PAST-FREEZE	manual	UI fixes may land after the 5 pm freeze	active	None.
+D-OPUS-SUBAGENTS-1014	manual	Opus subagents: call audit -> milestone/issues; video script	running	None.
+D-CFEXP-HOLD	manual	no container experiment before submission (Q-CFEXP-RUN b)	active	None.
+D-FREEZE-5PM-FINAL	manual	5 pm: no new launches; queued work finishes	active	None.
+D-WORKING-NOW-AND-PERF	manual	147 grouped panel + 148/149 load-time fixes after 5 pm	building	None.
+D-AUDIT-P0-TONIGHT	manual	P0 call fixes #127-#131 after 147 lands (Q-AUDIT-P0 a)	queued	specs 151-155.
+D-HIDE-DEMO-REPOS	manual	hide demo repos, open on concord-v2	queued	spec 150 after 130.
+D-FORCE-BATCH-B	manual	force-batch validated UI + speed fixes (146,148,144,145,130)	done 02512b5	GitHub mirror by Seb; 146 retry test fix pending.
+D-VIDEO-REMAKE	manual	footage-first remake with overlays after fixes land	preparing	None.
+D-VIDEO-KEEP-REVISE	manual	keep cut + film-over table + script additions (supersedes D-VIDEO-REMAKE)	in progress	None.
+D-10PM-PERFECT	manual	all UI/speed/call-efficiency/outage fixes + avatar + hide demo repos live by 10 pm	in progress	Seb submits 10 pm.
+D-GITHUB-UI	manual	GitHub-style Issues/Milestones, Settings replaces In flight	building	specs 172-174.
+D-AGENT-FIRST-HUMAN-CONTROLS	manual	agent-first; human controls (issues, bump queue, cancel/release, lock paths, human review, configurable rules not enabled here)	building	specs 175-180 (#155-#160); lock paths + rules already on main (settings.ts).
+D-LEASE-BOTTLENECK-ASAP	manual	fix lease serialization of landing asap (multi-agent is the point)	done 4fa4064 (181)	182 land survives renew failures after 151.
+D-BOTTLENECK-FIRST	manual	order: lease bottleneck (181) -> excess calls (7312ba8a) -> everything else; pause other lands	active	None.
+D-VIDEO-FACECAM-NOLIMITS	manual	no limitations in answers/video; facecam intro	in progress	Seb records the facecam intro.
+D-VIDEO-SCRIPT-V3	manual	full script and animatic revision: problems first, symbol leases, swarm framing	scheduled	Rewrite at 9 pm; Seb records at 10 pm.

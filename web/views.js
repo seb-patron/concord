@@ -19,6 +19,35 @@ export function pickTheme(stored) {
   return stored === 'dark' ? 'dark' : 'light';
 }
 
+/** Demo repositories stay available, but are hidden from repo pickers by default. */
+export function isDemoRepo(repo) {
+  return [repo?.repoId, repo?.displayName].some(value => {
+    const name = safeText(value);
+    return /(^|[_-])demo([_-]|\d|$)/i.test(name) || /demo$/i.test(name);
+  });
+}
+
+/** Put regular repositories first without changing the order within either group. */
+export function orderedRepos(repos) {
+  return [...(Array.isArray(repos) ? repos : [])].sort((a, b) => Number(isDemoRepo(a)) - Number(isDemoRepo(b)));
+}
+
+/** Apply the shared demo visibility rule used by each repository picker. */
+export function visibleRepos(repos, showDemos = false) {
+  return orderedRepos(repos).filter(repo => showDemos || !isDemoRepo(repo));
+}
+
+/** Select a permitted repo in URL, remembered, explicitly preferred, and safe-default order. */
+export function chooseInitialRepo(repos, requestedRepo, lastRepo, preferredRepo) {
+  const available = Array.isArray(repos) ? repos : [];
+  const requested = [requestedRepo, lastRepo, preferredRepo, 'concord-v2'];
+  for (const repoId of requested) {
+    const match = available.find(repo => repo?.repoId === repoId);
+    if (match) return match.repoId;
+  }
+  return orderedRepos(available).find(repo => !isDemoRepo(repo))?.repoId ?? available[0]?.repoId ?? null;
+}
+
 /** Initials used when a profile has no usable avatar image. */
 export function avatarInitials(name) {
   const parts = safeText(name).trim().split(/\s+/).filter(Boolean);

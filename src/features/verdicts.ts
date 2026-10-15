@@ -25,25 +25,28 @@ const isId = (value: unknown): value is Id => typeof value === 'string' && /^[A-
 const view = (context: ModuleContext, changeId: Id) => context.readChange?.(changeId) ?? reject(context, 'MODULE_UNAVAILABLE', 'Trusted change view unavailable');
 const storedVerdict = (context: ModuleContext, id: Id) => context.state.get<Verdict>(`verdict:${id}`);
 const ids = (context: ModuleContext, changeId: Id) => context.state.get<Id[]>(`list:${changeId}`) ?? [];
-interface HumanApproval { revision: number; headOid: string; manifestDigest: Digest; evidenceDigest: Digest; ownerId: Id; decision: 'approve' | 'reject'; version: number; patterns: string[] }
+interface HumanApproval { revision: number; headOid: string; manifestDigest: Digest; evidenceDigest: Digest; ownerId: Id; decision: 'approve' | 'reject'; version: number; patterns: string[]; note?: string }
 export function humanApprovalStatus(context: ModuleContext, changeId: Id, revision: number) {
   const record = sqlState(context.sql).get<InspectedRevision>(`module:verdicts:inspection:${changeId}`);
-  if (!record || record.revision !== revision) return { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null };
+  if (!record || record.revision !== revision) return { awaitingHumanApproval: [], protectedFiles: [], protectedDiffSummary: [], reviewManifestDigest: null, humanReview: null };
   const settings = repoSettings(context);
   const rules = matchingProtections(context, record.reviewManifest, 'human-approval', settings);
   const humanOnlyPatterns = matchingProtections(context, record.reviewManifest, 'human-only', settings).map(rule => rule.pattern);
   const paths = record.reviewManifest.changedUnits.flatMap(unit => [unit.beforePath, unit.afterPath])
     .filter((path): path is string => !!path && protectionFor(context, path, settings)?.level === 'human-approval');
   const approval = sqlState(context.sql).get<HumanApproval>(`module:verdicts:human:${changeId}`);
-  const valid = approval?.decision === 'approve' && approval.revision === revision &&
-    approval.headOid === record.candidate.headOid && approval.manifestDigest === record.reviewManifestDigest &&
-    JSON.stringify(approval.patterns) === JSON.stringify(rules.map(rule => rule.pattern));
+  const currentApproval = approval && approval.revision === revision &&
+    approval.headOid === record.candidate.headOid && approval.manifestDigest === record.reviewManifestDigest ? approval : null;
+  const valid = currentApproval?.decision === 'approve' &&
+    JSON.stringify(currentApproval.patterns) === JSON.stringify(rules.map(rule => rule.pattern));
   const protectedDiffSummary = record.reviewManifest.changedUnits.filter(unit =>
     [unit.beforePath, unit.afterPath].some(path => !!path && protectionFor(context, path, settings)?.level === 'human-approval'))
     .map(unit => ({ beforePath: unit.beforePath, afterPath: unit.afterPath, beforeMode: unit.beforeMode, afterMode: unit.afterMode,
       beforeDigest: unit.beforeDigest, afterDigest: unit.afterDigest }));
   return { awaitingHumanApproval: valid ? [] : rules.map(rule => rule.pattern), protectedFiles: [...new Set(paths)].sort(),
-    protectedDiffSummary, reviewManifestDigest: record.reviewManifestDigest, humanOnlyPatterns };
+    protectedDiffSummary, reviewManifestDigest: record.reviewManifestDigest, humanOnlyPatterns,
+    humanReview: currentApproval ? { decision: currentApproval.decision, ownerId: currentApproval.ownerId,
+      revision: currentApproval.revision, note: currentApproval.note ?? null } : null };
 }
 
 function inspection(context: ModuleContext, changeId: Id): Gate<{ record: InspectedRevision; policy: TrustedPolicy; profile: TrustedProfile }> {
@@ -87,14 +90,17 @@ function gate(context: ModuleContext, changeId: Id, revision: number): Gate<{ ve
   const change = view(context, changeId);
   if (change.status === 'blocked') return change;
   if (change.value.revision !== revision || !change.value.headOid) return reject(context, 'REVIEW_REQUIRED', 'Active revision or head changed');
+  const current = inspection(context, changeId);
+  if (current.status === 'blocked') return current;
+  if (humanApprovalStatus(context, changeId, revision).humanReview?.decision === 'reject') {
+    return reject(context, 'HUMAN_CHANGES_REQUESTED', 'Owner requested changes on this revision');
+  }
   const activeId = context.state.get<Id>(`active:${changeId}`);
   const verdict = activeId ? storedVerdict(context, activeId) : null;
   if (!verdict || verdict.decision !== 'approve' || verdict.revision !== revision) return reject(context, 'REVIEW_REQUIRED', 'No approval for active revision');
   const evidence = context.state.get<ActiveEvidence>(`active-evidence:${verdict.verdictId}`);
   if (!evidence || evidence.revision !== revision || evidence.headOid !== change.value.headOid || evidence.manifestDigest !== verdict.reviewManifestDigest) return reject(context, 'REVIEW_REQUIRED', 'Approved content is no longer active');
   if (verdict.reviewerId === change.value.authorId) return reject(context, 'REVIEW_REQUIRED', 'Approval is not independent of author');
-  const current = inspection(context, changeId);
-  if (current.status === 'blocked') return current;
   if (current.value.record.reviewManifestDigest !== verdict.reviewManifestDigest ||
     current.value.policy.digest !== verdict.policyDigest || current.value.policy.checkerDigest !== verdict.checkerDigest ||
     current.value.profile.oracleDigest !== verdict.oracleDigest || current.value.profile.toolchainDigest !== verdict.toolchainDigest ||
@@ -289,17 +295,22 @@ export const verdicts: FeatureModule = {
       if (body?.revision !== current.value.record.revision || !['approve', 'reject'].includes(body?.decision as string) ||
         body?.reviewManifestDigest !== current.value.record.reviewManifestDigest || !isDigest(body?.evidenceDigest))
         throw new HttpError(422, 'INVALID_HUMAN_APPROVAL', 'Current revision, manifest, decision and evidence digest required');
+      let note: string | undefined;
+      if (body.note !== undefined) {
+        if (typeof body.note !== 'string' || body.note.trim().length < 1 || body.note.trim().length > 2000)
+          throw new HttpError(422, 'INVALID_HUMAN_APPROVAL', 'Note must contain 1 to 2000 characters');
+        note = body.note.trim();
+      }
       const matching = matchingProtections(context, current.value.record.reviewManifest, 'human-approval');
-      if (!matching.length) throw new HttpError(409, 'NO_HUMAN_APPROVAL_REQUIRED', 'No protected path needs owner approval');
       const version = context.nextVersion();
       const approval: HumanApproval = { revision: current.value.record.revision, headOid: current.value.record.candidate.headOid,
         manifestDigest: current.value.record.reviewManifestDigest, evidenceDigest: body.evidenceDigest as Digest,
         ownerId: context.principal.principalId,
-        decision: body.decision as 'approve' | 'reject', version, patterns: matching.map(rule => rule.pattern) };
+        decision: body.decision as 'approve' | 'reject', version, patterns: matching.map(rule => rule.pattern), ...(note ? { note } : {}) };
       context.state.put(`human:${changeId}`, approval);
       context.state.put(`human-history:${changeId}`, [...(context.state.get<HumanApproval[]>(`human-history:${changeId}`) ?? []), approval]);
       const event = context.appendEvent('verdict.human_approval', [changeId], { decision: approval.decision,
-        revision: approval.revision, patterns: approval.patterns }, version);
+        revision: approval.revision, patterns: approval.patterns, ...(approval.note ? { note: approval.note } : {}) }, version);
       return json(approval, version, event.sequence, 201);
     } },
     { method: 'GET', pattern: verdictPath, handle: (context, request, match) => {

@@ -230,6 +230,12 @@ describe('Repository tracker', () => {
     expect(hint).not.toContain('Checked on main');
     expect(hint).toMatch(/inspection|review/i);
   });
+  it('names the real CLI command in one sentence in the Ready to claim lane hint', () => {
+    const model = trackerModel(data, events, null, 'm', now);
+    const hint = model.lanes.find((lane: any) => lane[0] === 'Ready to claim')?.[1];
+    expect(hint).toContain('concord start');
+    expect(hint).toMatch(/^[^.!?]*[.!?]$/);
+  });
   it('labels failed runner results by the job kind recorded in the snapshot', () => {
     const snapshot = structuredClone(data) as any;
     snapshot.data.projections.runners = { jobs: [

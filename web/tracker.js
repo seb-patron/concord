@@ -1,8 +1,9 @@
 import { createFrictionIssue, newIdempotencyKey, redactError, updateIssue } from './api.js';
+import { ownerControls } from './owner-controls.js';
 import { liveLeaseHolders, trackerLaneForIssue, trackerLaneNames } from './views.js';
 
 const laneHints = new Map([
-  ['Ready to claim', 'Open issues whose units are free. `concord next` hands these out.'],
+  ['Ready to claim', 'Use `concord start` to claim open issues with free units.'],
   ['Claimed', 'An agent holds the units. Nobody else can edit them.'],
   ['Checking & review', 'Inspection or independent review is in progress.'],
   ['Queued', 'Approved and waiting for Concord to check or land it.'],
@@ -305,6 +306,8 @@ export function createTracker(root, callbacks) {
       }
       if (historyIds.some(id => context.verdicts?.[id]?.olderNotLoaded)) approvalHistory.append(el('p', 'Older approvals not loaded.'));
       drawer.append(approvalHistory);
+      const controls = ownerControls(picked, context, { ...callbacks, render: () => render(context) });
+      if (controls) drawer.append(controls);
       const link = keyed(el('a', issueOpen ? 'Close issue' : 'Open issue', 'tracker-open'), `issue-${picked.issue.number}`);
       link.href = `#tracker-issue-${picked.issue.number}`;
       link.addEventListener('click', event => { event.preventDefault(); issueOpen = !issueOpen; render(context); }); drawer.append(link);

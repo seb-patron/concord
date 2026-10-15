@@ -46,6 +46,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
   let activeManifest = initial;
   let trustedProfile = profile;
   const jobs: DeltaCheckJob[] = [];
+  const events: Array<{ kind: string; payload: Record<string, unknown> }> = [];
   const candidate = (): CandidateInput => ({ changeId: 'change', revision, baseOid: base, headOid: head, storageName: 'candidate', ref: 'refs/heads/work' });
   const installInspection = (override?: Partial<InspectedRevision>) => {
     const record: InspectedRevision = { changeId: 'change', revision, candidate: candidate(), canonicalStorageName: 'canonical',
@@ -66,7 +67,10 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
       return value === undefined ? [] : [{ value: JSON.stringify(value) }];
     } }) },
     version: () => version, nextVersion: () => ++version,
-    appendEvent: (_kind: string, _ids: string[], _payload: Record<string, unknown>, eventVersion: number) => ({ sequence: eventVersion }),
+    appendEvent: (kind: string, _ids: string[], payload: Record<string, unknown>, eventVersion: number) => {
+      events.push({ kind, payload });
+      return { sequence: eventVersion };
+    },
     readChange: () => ({ status: 'eligible', version, evidenceIds: ['change'], value: { authorId: author, headOid: head, revision, status: 'ready', unitKeys: [unitKey], frozen } }),
     call: (name: string, ...args: unknown[]) => {
       if (name === 'findings.gate') return { status: 'eligible', version, evidenceIds: [], value: { findingSetVersion: findingVersion, unresolvedIds, pendingRound: null } };
@@ -99,7 +103,7 @@ function harness(unitKey = 'row:alpha', initial = manifest(unitKey)) {
     };
     return { ...preimage, resultDigest: hashCanonical(preimage) };
   };
-  return { context, state, jobs, route, approve, advance, carry, result, installInspection, settingsReads: () => settingsReads,
+  return { context, state, jobs, events, route, approve, advance, carry, result, installInspection, settingsReads: () => settingsReads,
     gate: () => verdicts.hooks['verdicts.gate']!(context, 'change', revision),
     evaluate: (value: DeltaResult) => verdicts.hooks['verdicts.evaluateCarry']!(context, value),
     setAuthor: (value: string) => { author = value; },
@@ -144,6 +148,49 @@ describe('content-bound verdicts', () => {
     expect((await h.carry(parent)).status).toBe(202);
     expect(h.evaluate(h.result()).status).toBe('eligible');
     expect(humanApprovalStatus(h.context, 'change', 2).awaitingHumanApproval).toEqual([]);
+  });
+  it('records owner reviews without rules and blocks a rejected revision until approval or advance', async () => {
+    const h = harness();
+    const parent = await h.approve();
+    h.context.principal.principalId = 'owner';
+    h.context.principal.roles = ['owner'];
+    const approved = await h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'approve', evidenceDigest: d('owner-approve') });
+    expect(approved.status).toBe(201);
+    expect(humanApprovalStatus(h.context, 'change', 1).humanReview).toMatchObject({ decision: 'approve', ownerId: 'owner', revision: 1 });
+
+    const rejected = await h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'reject', evidenceDigest: d('owner-reject'), note: ' please split ' });
+    expect(rejected.status).toBe(201);
+    expect(humanApprovalStatus(h.context, 'change', 1).humanReview).toMatchObject({ decision: 'reject', note: 'please split' });
+    expect((await h.route('GET', 'human-approval')).payload.data.items.at(-1)).toMatchObject({ note: 'please split' });
+    expect(h.events.at(-1)).toMatchObject({ kind: 'verdict.human_approval', payload: { note: 'please split' } });
+    expect(h.gate()).toMatchObject({ status: 'blocked', code: 'HUMAN_CHANGES_REQUESTED' });
+
+    const reapproved = await h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'approve', evidenceDigest: d('owner-reapprove') });
+    expect(reapproved.status).toBe(201);
+    expect(h.gate().status).toBe('eligible');
+
+    await h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'reject', evidenceDigest: d('owner-reject-again') });
+    h.advance();
+    expect(h.gate()).toMatchObject({ status: 'blocked', code: 'REVIEW_REQUIRED' });
+    expect(humanApprovalStatus(h.context, 'change', 2).humanReview).toBeNull();
+  });
+  it('validates owner review notes and keeps the route owner-only', async () => {
+    const h = harness();
+    const parent = await h.approve();
+    h.context.principal.principalId = 'owner';
+    h.context.principal.roles = ['owner'];
+    await expect(h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'approve', evidenceDigest: d('owner-evidence'), note: 'x'.repeat(2001) }))
+      .rejects.toMatchObject({ status: 422, code: 'INVALID_HUMAN_APPROVAL' });
+    h.context.principal.principalId = 'reviewer';
+    h.context.principal.roles = ['reviewer'];
+    await expect(h.route('POST', 'human-approval', { revision: 1,
+      reviewManifestDigest: parent.reviewManifestDigest, decision: 'approve', evidenceDigest: d('owner-evidence') }))
+      .rejects.toMatchObject({ status: 403 });
   });
   it('stores carry jobs without copies, fills old copies from config, and blocks missing pins', async () => {
     const makePending = async () => {

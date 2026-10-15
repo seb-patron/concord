@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom') as any;
-const { avatarInitials, canRender, deriveInbox, inboxCount, normalizeDiagnosis, pickTheme, signOutTarget, trackerLaneForIssue, trackerLaneNames, projectionItems, snapshotCollections, mutationEvidence,
+const { avatarInitials, canRender, chooseInitialRepo, deriveInbox, inboxCount, isDemoRepo, normalizeDiagnosis, orderedRepos, visibleRepos, pickTheme, signOutTarget, trackerLaneForIssue, trackerLaneNames, projectionItems, snapshotCollections, mutationEvidence,
   leaseCountdown, environmentBadge, verdictProvenance, repairStatus, openIssueRows, liveLeaseHolders, changeNextAction } = require('../../web/views.js') as any;
 const { apiFetch, clearSessionToken, setSessionToken, redactError, allowedActions, getSettings, getSnapshot, putSettings, submitHumanApproval } = require('../../web/api.js') as any;
 
@@ -31,7 +31,13 @@ describe('Work UI theme and tracker lanes', () => {
       for (const token of ['--page:', '--text:', '--card:', '--border:', '--header:']) expect(block).toContain(token);
     }
     const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
-    for (const label of ['Code', 'Tracker', 'Milestones', 'In flight']) expect(html).toContain(`>${label}</button>`);
+    for (const label of ['Code', 'Issues', 'Tracker', 'Settings']) expect(html).toContain(`>${label}</button>`);
+    expect([...html.matchAll(/data-main-view="([^"]+)"/g)].map(([, view]) => view)).toEqual(['code', 'issues', 'tracker', 'settings']);
+    expect(html).not.toContain('data-main-view="desk"');
+    expect(html).toContain('id="milestone-settings-content"');
+    expect(html).toContain('Path protection</h2>');
+    expect(html).toContain('id="repository-info"');
+    expect(html).toContain('id="back-desk" class="quiet">← Back</button>');
     expect(html).toMatch(/id="theme-toggle"[^>]*aria-label="[^"]+"/);
     expect(html).toContain('id="repo-owner"');
     expect(html).toContain('id="repo-link"');
@@ -64,6 +70,44 @@ describe('Work UI theme and tracker lanes', () => {
     expect(selected).toMatchObject({ background: 'var(--hex-2a2e37)', color: '#fff', 'font-weight': '600' });
     expect(selected.background).not.toBe(selected.color);
   });
+  it('keeps Inbox text at WCAG AA contrast in the light theme', () => {
+    const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selector, body]) => ({
+      selectors: selector.split(',').map(value => value.trim()), body,
+    }));
+    const root = rules.find(rule => rule.selectors.includes(':root'))!.body;
+    const tokens = Object.fromEntries([...root.matchAll(/(--[\w-]+):([^;]+);/g)].map(([, name, value]) => [name, value]));
+    const declaration = (selector: string, property: string) => {
+      const rule = rules.filter(item => item.selectors.includes(selector)).pop();
+      expect(rule, `CSS rule for ${selector}`).toBeTruthy();
+      return rule!.body.match(new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`))?.[1].trim().replace(/\s*!important$/, '');
+    };
+    const resolve = (value: string | undefined) => {
+      const token = value?.match(/^var\((--[\w-]+)\)$/)?.[1];
+      return token ? tokens[token] : value;
+    };
+    const luminance = (value: string | undefined) => {
+      expect(value).toMatch(/^#[\da-f]{6}$/i);
+      const channels = [1, 3, 5].map(index => parseInt(value!.slice(index, index + 2), 16) / 255)
+        .map(channel => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    };
+    const pairs = [
+      ['.inbox-item[aria-current=true]', '--text', '--lane'],
+      ['.inbox-detail .evidence', '--text', '--lane'],
+      ['.inbox-heading .quiet', '--text', '--card'],
+      ['.inbox-detail .action-form button.primary', '--text', '--card'],
+      ['.inbox-detail .action-form input', '--text', '--card'],
+      ['.inbox-detail .action-form select', '--text', '--card'],
+    ];
+    for (const [selector, foreground, background] of pairs) {
+      expect(resolve(declaration(selector, 'color'))).toBe(tokens[foreground]);
+      expect(resolve(declaration(selector, 'background'))).toBe(tokens[background]);
+      const light = luminance(tokens[foreground]);
+      const dark = luminance(tokens[background]);
+      expect((Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05), selector).toBeGreaterThanOrEqual(4.5);
+    }
+  });
   it('keeps five ordered lanes and badges exceptional states in their work lane', () => {
     expect(trackerLaneNames).toEqual(['Ready to claim', 'Claimed', 'Checking & review', 'Queued', 'Landed']);
     expect(trackerLaneForIssue({ status: 'blocked', hasLease: true })).toEqual({ lane: 'Claimed', badge: 'blocked' });
@@ -72,6 +116,17 @@ describe('Work UI theme and tracker lanes', () => {
 });
 
 describe('profile and inbox helpers', () => {
+  it('classifies demo repositories and keeps regular repositories first in stable order', () => {
+    const repos: Array<{ repoId: string; displayName?: string }> = [{ repoId: 'dispatch_demo-01' }, { repoId: 'dispatch_demo-02' }, { repoId: 'concord-v2' },
+      { repoId: 'mother-base-v2' }, { repoId: 'other', displayName: 'landdemo' }];
+    expect(isDemoRepo(repos[4])).toBe(true);
+    expect(orderedRepos(repos).map((repo: { repoId: string }) => repo.repoId)).toEqual(['concord-v2', 'mother-base-v2', 'dispatch_demo-01', 'dispatch_demo-02', 'other']);
+    expect(visibleRepos(repos).map((repo: { repoId: string }) => repo.repoId)).toEqual(['concord-v2', 'mother-base-v2']);
+    expect(visibleRepos(repos, true)).toHaveLength(5);
+    expect(chooseInitialRepo(repos, 'dispatch_demo-02', 'mother-base-v2')).toBe('dispatch_demo-02');
+    expect(chooseInitialRepo(repos, null, 'mother-base-v2')).toBe('mother-base-v2');
+    expect(chooseInitialRepo(repos, null, 'missing')).toBe('concord-v2');
+  });
   it('counts actionable inbox items and adds exposed planning problems', () => {
     expect(inboxCount(fixture)).toBe(3);
     const blocked = { data: { projections: { queue: { blockedReason: 'PROMOTION_FAILED', contests: [
@@ -85,6 +140,55 @@ describe('profile and inbox helpers', () => {
     expect(avatarInitials('')).toBe('?');
     expect(signOutTarget({ authMethod: 'access', logoutUrl: '/v1/session/signout' })).toBe('/v1/session/signout');
     expect(signOutTarget({ principalId: 'token-user' })).toBeNull();
+  });
+
+  it('uses a static principal avatar, keeps initials visible until load, and prefers trusted avatar URLs', async () => {
+    for (const [identity, expectedSrc] of [
+      [{ principalId: 'seb', name: 'Seb Patron Soto' }, '/avatars/seb.jpeg'],
+      [{ principalId: 'seb', name: 'Seb Patron Soto', avatarUrl: 'https://avatars.example.com/seb.png' }, 'https://avatars.example.com/seb.png'],
+    ] as const) {
+      clearSessionToken();
+      const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/' });
+      const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+      Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+      dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+      dom.window.scrollTo = () => {};
+      dom.window.setInterval = (() => 1) as any;
+      globalThis.fetch = (async (url: string) => {
+        if (url === '/health') return Response.json({ data: { accessSignIn: true } });
+        if (url === '/v1/session') return Response.json({ data: { principalId: 'seb', roles: ['owner'], authMethod: 'access', expiresAt: Date.now() + 60_000 } });
+        if (url === '/v1/me') return Response.json({ data: { ...identity, roles: ['owner'], repoIds: '*' } });
+        if (url === '/v1/repos') return Response.json({ data: { items: [] } });
+        return Response.json({ data: {} });
+      }) as any;
+      try {
+        if (expectedSrc.startsWith('/avatars/')) {
+          // @ts-expect-error Browser JS is intentionally untyped.
+          await import('../../web/app.js?profile-avatar-static');
+        } else {
+          // @ts-expect-error Browser JS is intentionally untyped.
+          await import('../../web/app.js?profile-avatar-trusted');
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const doc = dom.window.document;
+        const avatar = doc.getElementById('profile-avatar') as HTMLImageElement;
+        const initials = doc.getElementById('profile-initials')!;
+        expect(avatar.getAttribute('src')).toBe(expectedSrc);
+        expect(avatar.hidden).toBe(true);
+        expect(initials.hidden).toBe(false);
+        avatar.onload?.(new dom.window.Event('load') as any);
+        expect(avatar.hidden).toBe(false);
+        expect(initials.hidden).toBe(true);
+        avatar.onerror?.(new dom.window.Event('error') as any);
+        expect(avatar.hidden).toBe(true);
+        expect(initials.hidden).toBe(false);
+        expect(initials.textContent).toBe('SS');
+      } finally {
+        Object.assign(globalThis, previous);
+        dom.window.close();
+        clearSessionToken();
+      }
+    }
   });
 });
 
@@ -228,6 +332,57 @@ describe('Fleet desk derivation', () => {
 });
 
 describe('Fleet desk DOM', () => {
+  it('hides demo repos by default and chooses the requested, remembered, or concord repo', async () => {
+    const repos: Array<{ repoId: string; displayName?: string }> = [{ repoId: 'dispatch_demo-01' }, { repoId: 'dispatch_demo-02' }, { repoId: 'concord-v2' }, { repoId: 'mother-base-v2' }];
+    const mount = async (url: string, storedRepo?: string, brokenStorage = false) => {
+      clearSessionToken();
+      const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url });
+      if (brokenStorage) Object.defineProperty(dom.window, 'localStorage', { configurable: true, get() { throw new Error('storage denied'); } });
+      else if (storedRepo) dom.window.localStorage.setItem('concord-last-repo', storedRepo);
+      const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
+      Object.assign(globalThis, { document: dom.window.document, window: dom.window });
+      dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+      dom.window.setInterval = (() => 1) as any;
+      globalThis.fetch = (async (path: string) => {
+        if (path === '/v1/session') return new Response('', { status: 401 });
+        if (path === '/health') return Response.json({ data: {} });
+        if (path === '/v1/me') return Response.json({ data: { principalId: 'owner', roles: ['owner'], repoIds: repos.map(repo => repo.repoId) } });
+        if (path === '/v1/repos') return Response.json({ data: { items: repos } });
+        if (path.endsWith('/snapshot')) return Response.json({ data: { projections: {} }, version: 0, eventSeq: 0 });
+        if (path.includes('/events?')) return Response.json({ data: { items: [] }, version: 0, eventSeq: 0 });
+        if (path.startsWith('/v1/principals')) return Response.json({ data: { items: [], nextCursor: null } });
+        return new Response('', { status: 404 });
+      }) as any;
+      try {
+        vi.resetModules();
+        // @ts-expect-error Browser JS is intentionally untyped.
+        await import('../../web/app.js');
+        const doc = dom.window.document;
+        (doc.getElementById('token-input') as HTMLInputElement).value = 'demo-test-token';
+        doc.getElementById('token-form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0));
+        return { dom, doc, restore: () => Object.assign(globalThis, previous) };
+      } catch (error) { Object.assign(globalThis, previous); dom.window.close(); throw error; }
+    };
+    const first = await mount('http://localhost/', undefined, true);
+    try {
+      expect(first.doc.getElementById('repo-link')?.textContent).toBe('concord-v2');
+      first.doc.getElementById('profile-toggle')!.dispatchEvent(new first.dom.window.Event('click', { bubbles: true }));
+      expect(first.doc.getElementById('profile-repos')?.textContent).toContain('concord-v2');
+      expect(first.doc.getElementById('profile-repos')?.textContent).toContain('mother-base-v2');
+      expect(first.doc.getElementById('profile-repos')?.textContent).not.toContain('dispatch_demo');
+      const toggle = [...first.doc.querySelectorAll('#profile-repos button')].find(button => button.textContent === 'Show 2 demo repos') as HTMLButtonElement;
+      expect(toggle).toBeTruthy(); toggle.click();
+      expect(first.doc.getElementById('profile-repos')?.textContent).toContain('dispatch_demo-01');
+      ([...first.doc.querySelectorAll('#profile-repos button')].find(button => button.textContent === 'Hide demo repos') as HTMLButtonElement).click();
+      first.doc.getElementById('repo-owner')!.dispatchEvent(new first.dom.window.Event('click', { bubbles: true, cancelable: true }));
+      expect(first.doc.getElementById('repositories-list')?.textContent).not.toContain('dispatch_demo');
+      expect(first.doc.getElementById('repositories-list')?.textContent).toContain('Show 2 demo repos');
+      first.doc.getElementById('token-clear')!.click();
+    } finally { first.restore(); first.dom.window.close(); }
+
+    clearSessionToken();
+  });
   it('uses an Access session on load and leaves the token form for anonymous visitors', async () => {
     for (const [access, enabled] of [[true, true], [false, true], [false, false]]) {
       clearSessionToken();
@@ -284,19 +439,26 @@ describe('Fleet desk DOM', () => {
           expect(doc.getElementById('profile-menu')!.hidden).toBe(true);
           (doc.getElementById('inbox-button') as HTMLButtonElement).click();
           expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe('inbox');
-          (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
+          (doc.querySelector('[data-main-view="issues"]') as HTMLButtonElement).click();
           expect(requests.every(request => request.authorization === null)).toBe(true);
           expect(doc.getElementById('tracker-view')!.hidden).toBe(false);
-          for (const view of ['code', 'tracker', 'milestones', 'desk']) {
+          for (const view of ['code', 'issues', 'tracker', 'settings']) {
             (doc.querySelector(`[data-main-view="${view}"]`) as HTMLButtonElement).click();
             expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe(view);
             expect(doc.querySelector(`[data-main-view="${view}"]`)!.getAttribute('aria-current')).toBe('true');
-            const visibleSection = view === 'desk' ? 'desk-view' : `${view}-view`;
+            const visibleSection = view === 'issues' ? 'issues-view' : view === 'tracker' ? 'desk-view' : `${view}-view`;
             expect(doc.getElementById(visibleSection)!.hidden).toBe(false);
+            expect(doc.getElementById('settings-panel')!.hidden).toBe(view !== 'settings');
           }
+          (doc.querySelector('[data-issues-tab="milestones"]') as HTMLButtonElement).click();
+          expect(doc.getElementById('milestones-view')!.hidden).toBe(false);
+          expect(new URL(doc.location.href).searchParams.get('view')).toBe('milestones');
+          (doc.querySelector('[data-issues-tab="issues"]') as HTMLButtonElement).click();
+          expect(doc.getElementById('tracker-view')!.hidden).toBe(false);
           (doc.getElementById('inbox-alert') as HTMLButtonElement).click();
           expect(doc.getElementById('desk')!.dataset.mainViewActive).toBe('inbox');
           expect(doc.getElementById('inbox-view')!.hidden).toBe(false);
+          expect(doc.getElementById('settings-panel')!.hidden).toBe(true);
         }
       } finally {
         Object.assign(globalThis, previous);
@@ -349,6 +511,7 @@ describe('Fleet desk DOM', () => {
   it('shows first run on 401, then renders the desk, inbox and verdict route', async () => {
     clearSessionToken();
     const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/' });
+    dom.window.localStorage.setItem('concord-last-repo', 'demo');
     const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
     Object.assign(globalThis, { document: dom.window.document, window: dom.window });
     dom.window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -482,15 +645,28 @@ describe('Fleet desk DOM', () => {
       await flush(); await flush(); await flush();
       expect(principalPageCalls).toBe(0);
       expect(byId('desk').hidden).toBe(false);
-      expect(byId('tracker-view').hidden).toBe(false);
+      expect(byId('desk-view').hidden).toBe(false);
       expect(byId('repo-owner').textContent).toBe('reviewer');
       expect(byId('repo-link').textContent).toBe('demo');
       expect(doc.querySelector('#repo-select')).toBeNull();
+      (doc.querySelector('[data-main-view="issues"]') as HTMLButtonElement).click();
       expect(byId('tracker-view').textContent).toContain('#1 <task>');
       expect(byId('tracker-view').querySelector('task')).toBeNull();
-      expect([...doc.querySelectorAll('[data-main-view]')].map((button: any) => button.textContent)).toEqual(['Code', 'Tracker', 'Milestones', 'In flight']);
+      expect([...doc.querySelectorAll('[data-main-view]')].map((button: any) => button.textContent)).toEqual(['Code', 'Issues', 'Tracker', 'Settings']);
+      expect(doc.querySelector('[data-main-view="inflight"]')).toBeNull();
+      (doc.querySelector('[data-main-view="issues"]') as HTMLButtonElement).click();
+      expect(byId('tracker-view').hidden).toBe(false);
+      (doc.querySelector('[data-main-view="settings"]') as HTMLButtonElement).click();
+      expect(byId('settings-view').textContent).toContain('Path protection');
+      expect(byId('settings-view').textContent).toContain('Who can create milestones:');
+      expect(byId('settings-view').textContent).toContain('Repository ID');
+      expect(byId('settings-view').textContent).toContain('demo');
+      expect((byId('settings-form').querySelector('input') as HTMLInputElement).disabled).toBe(true);
+      expect(byId('settings-view').textContent).toContain('Only repository owners can change path protection.');
+      expect((byId('milestone-settings-content').querySelector('select') as HTMLSelectElement).disabled).toBe(true);
+      (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
       expect(byId('inbox-alert').hidden).toBe(false);
-      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
       expect(byId('desk-view').hidden).toBe(false);
       expect(byId('stat-strip').textContent).toContain('Agents working2');
       expect(byId('stat-strip').textContent).toContain('live lease holders');
@@ -546,7 +722,7 @@ describe('Fleet desk DOM', () => {
       byId('detail-close').click();
       expect(byId('change-detail').hidden).toBe(true);
       byId('back-desk').click();
-      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      (byId('work-board').querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       await flush();
       expect(byId('verdict-list').textContent).toContain('Direct approve');
       expect(byId('verdict-list').textContent).toContain('Parent review: v1');
@@ -575,8 +751,8 @@ describe('Fleet desk DOM', () => {
       (byId('token-input') as HTMLInputElement).value = 'good';
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
-      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
-      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
+      (byId('work-board').querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       await flush(); await flush();
       expect(byId('verdict-list').textContent).toContain('Approval history is visible to reviewers');
       expect(byId('inbox-list').textContent).toContain('Review requested');
@@ -585,7 +761,7 @@ describe('Fleet desk DOM', () => {
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
       expect(byId('principal').textContent).toContain('role unverified');
-      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      (byId('work-board').querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       expect(byId('action-panel').textContent).toContain('Enqueue');
       expect(byId('action-panel').textContent).toContain('Claim');
       const claimForm = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Claim'))!;
@@ -604,7 +780,7 @@ describe('Fleet desk DOM', () => {
       await flush(); await flush();
       expect(byId('mutation-status').textContent).toContain('Holder: agent-a; intent: Protect retry path; expires:');
       claimConflict = false;
-      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      (byId('work-board').querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       const enqueueForm = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
       (enqueueForm.querySelector('[name="verdictId"]') as HTMLInputElement).value = 'v101';
       enqueueForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
@@ -641,7 +817,7 @@ describe('Fleet desk DOM', () => {
       byId('token-form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
       await flush(); await flush();
       snapshotVersion = 8; mutationVersion = 9;
-      (doc.querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
+      (byId('work-board').querySelector('[data-change-id="x"]') as HTMLButtonElement).click();
       const raceEnqueue = [...byId('action-panel').querySelectorAll('form')].find(form => form.textContent?.includes('Enqueue'))!;
       (raceEnqueue.querySelector('[name="verdictId"]') as HTMLInputElement).value = 'v101';
       raceEnqueue.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
@@ -702,7 +878,7 @@ describe('Fleet desk DOM', () => {
       const historyRequests = requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts').length;
       changeStatus = 'merged'; snapshotVersion = 12; eventVersion = 12;
       (byId('refresh-button') as HTMLButtonElement).click(); await flush(); await flush();
-      expect(requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts')).toHaveLength(historyRequests);
+      expect(requests.filter(request => request.url === '/v1/repos/demo/changes/x/verdicts')).toHaveLength(historyRequests + 1);
       expect(byId('detail-body').textContent).toContain('Status: merged');
       expect(byId('action-panel').textContent).not.toContain('Claim');
       expect(byId('action-panel').textContent).not.toContain('Enqueue');
@@ -721,7 +897,7 @@ describe('Fleet desk DOM', () => {
       expect(verdictRequests).not.toContain('m0');
       for (let index = 0; index < 8; index++) expect(verdictRequests).not.toContain(`r${index}`);
       expect(verdictMaxInflight).toBeLessThanOrEqual(4);
-      (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
+      (doc.querySelector('[data-main-view="issues"]') as HTMLButtonElement).click();
       const landedCard = [...byId('tracker-view').querySelectorAll('.tracker-card')]
         .find(card => card.textContent?.includes('#50')) as HTMLButtonElement;
       landedCard.click(); await flush(); await flush(); await flush();
@@ -734,7 +910,7 @@ describe('Fleet desk DOM', () => {
       expect(byId('event-log').textContent).not.toContain('stale.event');
 
       (byId('inbox-alert') as HTMLButtonElement).click();
-      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      (doc.querySelector('[data-main-view="tracker"]') as HTMLButtonElement).click();
       expect(byId('repo-link').textContent).toBe('demo');
       expect(doc.querySelector('#repo-select')).toBeNull();
       (byId('repo-owner') as HTMLAnchorElement).click();
@@ -742,10 +918,10 @@ describe('Fleet desk DOM', () => {
         .find(button => button.textContent === 'Second') as HTMLButtonElement;
       secondRepo.click();
       expect(byId('repo-link').textContent).toBe('second');
-      expect(dom.window.location.search).toBe('?repo=second');
+      expect(dom.window.location.search).toBe('?view=code&repo=second');
       expect(byId('inbox-alert').hidden).toBe(true);
       expect(byId('alert-count').textContent).toContain('0 decisions');
-      releaseSecondSnapshot?.(); await flush(); await flush();
+      releaseSecondSnapshot?.(); await flush(); await flush(); await flush(); await flush(); await flush();
     } finally {
       releaseSnapshot10?.();
       releaseSecondSnapshot?.();
@@ -755,9 +931,9 @@ describe('Fleet desk DOM', () => {
     }
   }, 20_000);
 
-  async function publicDom(repoId: string, isPublic: boolean, readyCount = 1) {
+  async function publicDom(repoId: string, isPublic: boolean, readyCount = 1, view?: string) {
     clearSessionToken();
-    const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: 'http://localhost/?repo=' + repoId });
+    const dom = new JSDOM(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), { url: `http://localhost/?repo=${repoId}${view ? `&view=${view}` : ''}` });
     const previous = { document: globalThis.document, window: globalThis.window, fetch: globalThis.fetch };
     Object.assign(globalThis, { document: dom.window.document, window: dom.window });
     dom.window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -792,13 +968,33 @@ describe('Fleet desk DOM', () => {
     return { dom, doc, byId, flush, requests, previous };
   }
 
+  it('opens the legacy milestones deep link on the Issues Milestones tab', async () => {
+    const { dom, doc, flush, previous } = await publicDom('milestone-link', true, 1, 'milestones');
+    try {
+      vi.resetModules();
+      // @ts-expect-error Browser JS is intentionally untyped.
+      await import('../../web/app.js?milestones-deep-link');
+      await flush(); await flush(); await flush();
+      expect(doc.getElementById('issues-view')!.hidden).toBe(false);
+      expect(doc.getElementById('milestones-view')!.hidden).toBe(false);
+      expect(doc.querySelector('[data-main-view="issues"]')!.getAttribute('aria-current')).toBe('true');
+      expect(doc.querySelector('[data-issues-tab="milestones"]')!.getAttribute('aria-current')).toBe('true');
+    } finally {
+      await flush(); await flush(); await flush();
+      clearSessionToken();
+      Object.assign(globalThis, previous);
+      dom.window.close();
+    }
+  });
+
   it('opens public URL reads without a token and labels the view read-only', async () => {
-    const { dom, byId, flush, requests, previous } = await publicDom('public-demo', true);
+    const { dom, doc, byId, flush, requests, previous } = await publicDom('public-demo', true);
     try {
       vi.resetModules();
       // @ts-expect-error Browser JS is intentionally untyped.
       await import('../../web/app.js');
       await flush(); await flush(); await flush(); await flush();
+      (doc.querySelector('[data-main-view="issues"]') as HTMLButtonElement).click();
       expect(byId('desk').hidden).toBe(false);
       expect(byId('signed-out').hidden).toBe(true);
       expect(byId('principal').textContent).toBe('Public, read-only');
@@ -880,7 +1076,7 @@ describe('Fleet desk DOM', () => {
       // @ts-expect-error Browser JS is intentionally untyped.
       await import('../../web/app.js');
       await flush(); await flush(); await flush(); await flush();
-      (doc.querySelector('[data-main-view="desk"]') as HTMLButtonElement).click();
+      (doc.querySelector('[data-main-view="issues"]') as HTMLButtonElement).click();
       for (let index = 0; index < 19; index++) {
         const changeId = index === 0 ? 'x' : 'ready-' + (index - 1);
         (doc.querySelector('[data-change-id="' + changeId + '"]') as HTMLElement)?.click();
