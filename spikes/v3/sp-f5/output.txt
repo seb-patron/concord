@@ -1,0 +1,137 @@
+SP-F5 lock-scheme replay
+Read-only inputs: GitHub merged-PR metadata via gh; local clone objects; missing PR head objects fetched only to a temporary bare mirror.
+Sample: deterministic SHA-256 rank of (repository, PR numbers), capped at 30 overlapping pairs per repository; repository is the stratum.
+Pair universe: 7594; sampled: 150; evaluated: 150; merge-tree conflicts: 6.
+Missing PR heads fetched to temporary bare mirrors: 11.
+Tree-sitter parser fallback cases (file widening): 4733.
+Exact metadata command: gh api --paginate repos/OWNER/REPO/pulls?state=closed&per_page=100 --jq '[.[] | select(.merged_at != null) | {number,created_at,merged_at,head:{sha:.head.sha},base:{sha:.base.sha},title,html_url}]'
+Exact merge command: git --git-dir=TEMP_BARE_MIRROR merge-tree --write-tree --merge-base=BASE HEAD_A HEAD_B
+The required --write-tree operation writes result objects only to the temporary mirror, which reads clone objects through an alternate; clone refs and objects remain unchanged.
+Full per-pair merge-tree transcripts stay in task scratch; this output includes result hashes and up to five representative raw stdout snippets.
+
+repo | merged PRs | all overlapping pairs | sampled | evaluated | missing heads fetched
+seb-patron/concord | 49 | 104 | 30 | 30 | 0
+seb-patron/agent-workflows | 340 | 790 | 30 | 30 | 10
+seb-patron/gen-v-research-tools | 436 | 1170 | 30 | 30 | 1
+seb-patron/mwcc-rs | 587 | 1247 | 30 | 30 | 0
+seb-patron/gen-v-decomp | 1310 | 4283 | 30 | 30 | 0
+
+scheme | blocked pairs | needless blocks | missed conflicts | pairwise serial delay (hours)
+no lock | 0 | 0 | 6 | 0.00
+file | 20 | 14 | 0 | 243.89
+git funcname | 20 | 14 | 0 | 243.89
+tree-sitter node | 19 | 13 | 0 | 242.94
+interface exclusive / body shared | 20 | 14 | 0 | 243.89
+hunk line range | 8 | 2 | 0 | 203.45
+file + policy-exclusive | 20 | 14 | 0 | 243.89
+adaptive | 6 | 2 | 2 | 6.46
+
+Mergiraf installed: yes; conflicted content files tested: 7; reported resolved: 1.
+Pair examples: PR URLs and paths are real sampled pull requests; conflict paths come from merge-tree.
+no lock / needless: 0 example(s)
+no lock / missed: 5 example(s)
+  seb-patron/gen-v-research-tools#193+#197 | 193 https://github.com/seb-patron/gen-v-research-tools/pull/193 | 197 https://github.com/seb-patron/gen-v-research-tools/pull/197 | paths: LAB_READING_TRAIL.md, research/2026-09-17-n06-rng-state-control-spike.md | pair delay: 125.56h
+  seb-patron/gen-v-research-tools#225+#230 | 225 https://github.com/seb-patron/gen-v-research-tools/pull/225 | 230 https://github.com/seb-patron/gen-v-research-tools/pull/230 | paths: scripts/run_npc_tile_lookup.py, src/gen_v_research_tools/npc_tile_lookup.py, tests/test_npc_tile_lookup.py | pair delay: 71.92h
+  seb-patron/gen-v-research-tools#346+#350 | 346 https://github.com/seb-patron/gen-v-research-tools/pull/346 | 350 https://github.com/seb-patron/gen-v-research-tools/pull/350 | paths: LAB_READING_TRAIL.md, trail/INDEX.md | pair delay: 0.04h
+  seb-patron/gen-v-research-tools#295+#351 | 295 https://github.com/seb-patron/gen-v-research-tools/pull/295 | 351 https://github.com/seb-patron/gen-v-research-tools/pull/351 | paths: LAB_READING_TRAIL.md, trail/INDEX.md | pair delay: 0.84h
+  seb-patron/gen-v-research-tools#299+#353 | 299 https://github.com/seb-patron/gen-v-research-tools/pull/299 | 353 https://github.com/seb-patron/gen-v-research-tools/pull/353 | paths: LAB_READING_TRAIL.md, trail/INDEX.md | pair delay: 0.46h
+file / needless: 5 example(s)
+  seb-patron/concord#28+#35 | 28 https://github.com/seb-patron/concord/pull/28 | 35 https://github.com/seb-patron/concord/pull/35 | paths: tests/node/docs.test.ts | pair delay: 0.95h
+  seb-patron/concord#25+#36 | 25 https://github.com/seb-patron/concord/pull/25 | 36 https://github.com/seb-patron/concord/pull/36 | paths: cli/main.ts, docs/cli.md | pair delay: 0.00h
+  seb-patron/agent-workflows#40+#41 | 40 https://github.com/seb-patron/agent-workflows/pull/40 | 41 https://github.com/seb-patron/agent-workflows/pull/41 | paths: README.md, lib/_worker.sh, tests/run-tests.sh | pair delay: 0.55h
+  seb-patron/agent-workflows#118+#130 | 118 https://github.com/seb-patron/agent-workflows/pull/118 | 130 https://github.com/seb-patron/agent-workflows/pull/130 | paths: README.md, bin/delegate-issue, skills/delegate/SKILL.md, tests/run-tests.sh | pair delay: 9.38h
+  seb-patron/agent-workflows#171+#172 | 171 https://github.com/seb-patron/agent-workflows/pull/171 | 172 https://github.com/seb-patron/agent-workflows/pull/172 | paths: README.md, bin/delegate-issue | pair delay: 1.49h
+file / missed: 0 example(s)
+git funcname / needless: 5 example(s)
+  seb-patron/concord#28+#35 | 28 https://github.com/seb-patron/concord/pull/28 | 35 https://github.com/seb-patron/concord/pull/35 | paths: tests/node/docs.test.ts | pair delay: 0.95h
+  seb-patron/concord#25+#36 | 25 https://github.com/seb-patron/concord/pull/25 | 36 https://github.com/seb-patron/concord/pull/36 | paths: cli/main.ts, docs/cli.md | pair delay: 0.00h
+  seb-patron/agent-workflows#40+#41 | 40 https://github.com/seb-patron/agent-workflows/pull/40 | 41 https://github.com/seb-patron/agent-workflows/pull/41 | paths: README.md, lib/_worker.sh, tests/run-tests.sh | pair delay: 0.55h
+  seb-patron/agent-workflows#118+#130 | 118 https://github.com/seb-patron/agent-workflows/pull/118 | 130 https://github.com/seb-patron/agent-workflows/pull/130 | paths: README.md, bin/delegate-issue, skills/delegate/SKILL.md, tests/run-tests.sh | pair delay: 9.38h
+  seb-patron/agent-workflows#171+#172 | 171 https://github.com/seb-patron/agent-workflows/pull/171 | 172 https://github.com/seb-patron/agent-workflows/pull/172 | paths: README.md, bin/delegate-issue | pair delay: 1.49h
+git funcname / missed: 0 example(s)
+tree-sitter node / needless: 5 example(s)
+  seb-patron/concord#25+#36 | 25 https://github.com/seb-patron/concord/pull/25 | 36 https://github.com/seb-patron/concord/pull/36 | paths: cli/main.ts, docs/cli.md | pair delay: 0.00h
+  seb-patron/agent-workflows#40+#41 | 40 https://github.com/seb-patron/agent-workflows/pull/40 | 41 https://github.com/seb-patron/agent-workflows/pull/41 | paths: README.md, lib/_worker.sh, tests/run-tests.sh | pair delay: 0.55h
+  seb-patron/agent-workflows#118+#130 | 118 https://github.com/seb-patron/agent-workflows/pull/118 | 130 https://github.com/seb-patron/agent-workflows/pull/130 | paths: README.md, bin/delegate-issue, skills/delegate/SKILL.md, tests/run-tests.sh | pair delay: 9.38h
+  seb-patron/agent-workflows#171+#172 | 171 https://github.com/seb-patron/agent-workflows/pull/171 | 172 https://github.com/seb-patron/agent-workflows/pull/172 | paths: README.md, bin/delegate-issue | pair delay: 1.49h
+  seb-patron/agent-workflows#214+#217 | 214 https://github.com/seb-patron/agent-workflows/pull/214 | 217 https://github.com/seb-patron/agent-workflows/pull/217 | paths: README.md, skills/delegate/SKILL.md | pair delay: 18.22h
+tree-sitter node / missed: 0 example(s)
+interface exclusive / body shared / needless: 5 example(s)
+  seb-patron/concord#28+#35 | 28 https://github.com/seb-patron/concord/pull/28 | 35 https://github.com/seb-patron/concord/pull/35 | paths: tests/node/docs.test.ts | pair delay: 0.95h
+  seb-patron/concord#25+#36 | 25 https://github.com/seb-patron/concord/pull/25 | 36 https://github.com/seb-patron/concord/pull/36 | paths: cli/main.ts, docs/cli.md | pair delay: 0.00h
+  seb-patron/agent-workflows#40+#41 | 40 https://github.com/seb-patron/agent-workflows/pull/40 | 41 https://github.com/seb-patron/agent-workflows/pull/41 | paths: README.md, lib/_worker.sh, tests/run-tests.sh | pair delay: 0.55h
+  seb-patron/agent-workflows#118+#130 | 118 https://github.com/seb-patron/agent-workflows/pull/118 | 130 https://github.com/seb-patron/agent-workflows/pull/130 | paths: README.md, bin/delegate-issue, skills/delegate/SKILL.md, tests/run-tests.sh | pair delay: 9.38h
+  seb-patron/agent-workflows#171+#172 | 171 https://github.com/seb-patron/agent-workflows/pull/171 | 172 https://github.com/seb-patron/agent-workflows/pull/172 | paths: README.md, bin/delegate-issue | pair delay: 1.49h
+interface exclusive / body shared / missed: 0 example(s)
+hunk line range / needless: 2 example(s)
+  seb-patron/concord#25+#36 | 25 https://github.com/seb-patron/concord/pull/25 | 36 https://github.com/seb-patron/concord/pull/36 | paths: cli/main.ts, docs/cli.md | pair delay: 0.00h
+  seb-patron/gen-v-research-tools#175+#194 | 175 https://github.com/seb-patron/gen-v-research-tools/pull/175 | 194 https://github.com/seb-patron/gen-v-research-tools/pull/194 | paths: src/gen_v_research_tools/narc.py, src/gen_v_research_tools/nds.py, src/gen_v_research_tools/q1_static_verification.py, tests/test_parser_fuzz.py | pair delay: 0.76h
+hunk line range / missed: 0 example(s)
+file + policy-exclusive / needless: 5 example(s)
+  seb-patron/concord#28+#35 | 28 https://github.com/seb-patron/concord/pull/28 | 35 https://github.com/seb-patron/concord/pull/35 | paths: tests/node/docs.test.ts | pair delay: 0.95h
+  seb-patron/concord#25+#36 | 25 https://github.com/seb-patron/concord/pull/25 | 36 https://github.com/seb-patron/concord/pull/36 | paths: cli/main.ts, docs/cli.md | pair delay: 0.00h
+  seb-patron/agent-workflows#40+#41 | 40 https://github.com/seb-patron/agent-workflows/pull/40 | 41 https://github.com/seb-patron/agent-workflows/pull/41 | paths: README.md, lib/_worker.sh, tests/run-tests.sh | pair delay: 0.55h
+  seb-patron/agent-workflows#118+#130 | 118 https://github.com/seb-patron/agent-workflows/pull/118 | 130 https://github.com/seb-patron/agent-workflows/pull/130 | paths: README.md, bin/delegate-issue, skills/delegate/SKILL.md, tests/run-tests.sh | pair delay: 9.38h
+  seb-patron/agent-workflows#171+#172 | 171 https://github.com/seb-patron/agent-workflows/pull/171 | 172 https://github.com/seb-patron/agent-workflows/pull/172 | paths: README.md, bin/delegate-issue | pair delay: 1.49h
+file + policy-exclusive / missed: 0 example(s)
+adaptive / needless: 2 example(s)
+  seb-patron/gen-v-research-tools#347+#348 | 347 https://github.com/seb-patron/gen-v-research-tools/pull/347 | 348 https://github.com/seb-patron/gen-v-research-tools/pull/348 | paths: LAB_READING_TRAIL.md, trail/INDEX.md | pair delay: 0.06h
+  seb-patron/gen-v-research-tools#807+#808 | 807 https://github.com/seb-patron/gen-v-research-tools/pull/807 | 808 https://github.com/seb-patron/gen-v-research-tools/pull/808 | paths: trail/INDEX.md | pair delay: 1.20h
+adaptive / missed: 2 example(s)
+  seb-patron/gen-v-research-tools#193+#197 | 193 https://github.com/seb-patron/gen-v-research-tools/pull/193 | 197 https://github.com/seb-patron/gen-v-research-tools/pull/197 | paths: LAB_READING_TRAIL.md, research/2026-09-17-n06-rng-state-control-spike.md | pair delay: 125.56h
+  seb-patron/gen-v-research-tools#225+#230 | 225 https://github.com/seb-patron/gen-v-research-tools/pull/225 | 230 https://github.com/seb-patron/gen-v-research-tools/pull/230 | paths: scripts/run_npc_tile_lookup.py, src/gen_v_research_tools/npc_tile_lookup.py, tests/test_npc_tile_lookup.py | pair delay: 71.92h
+
+Representative raw merge-tree output (up to five sampled conflicts):
+$ git --git-dir /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n/gen-v-research-tools.git merge-tree --write-tree --merge-base=ea18c10d1d394c9143ed2218d2670ba63b6945a6 4469b2c315ea0d1b352ad7f771e260ce3da03ce8 b5ebd1bfa3e0585feff8ee00759e89a3d67a65f6
+  640a53a81271c2c1aba6383e9c367e8166d7b29d
+  100644 e2785f5cf9544911a21db133016228798aa973a5 1	LAB_READING_TRAIL.md
+  100644 53dcafc1146c5436b84994ee6f102744b2921f12 2	LAB_READING_TRAIL.md
+  100644 924266e8e1349c3a1c4d71ccc83b8f70501ee91e 3	LAB_READING_TRAIL.md
+  
+  Auto-merging LAB_READING_TRAIL.md
+  CONFLICT (content): Merge conflict in LAB_READING_TRAIL.md
+$ git --git-dir /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n/gen-v-research-tools.git merge-tree --write-tree --merge-base=5fd7e1ac9265aa9f2d6852f31eadb22ec435cbd2 f898407c698af8964d6456665fa1b5a03029a0ca a15422702ef8037eeafc8a3907ce71fa34267184
+  016a39475cf35c1a93d938f9d17c9595340418f0
+  100644 eb97194596c771a09306b815b1a52767eeb894ba 2	scripts/run_npc_tile_lookup.py
+  100644 1948b3e66d6de4816b0481e6f8973fe9a1b4ed3b 3	scripts/run_npc_tile_lookup.py
+  100644 bc064a992aba02cffd7f08cf55a089bd16d70d73 2	tests/test_npc_tile_lookup.py
+  100644 95ccd515cedef6e1a223853d122d8ceb692db1a5 3	tests/test_npc_tile_lookup.py
+  
+  Auto-merging scripts/run_npc_tile_lookup.py
+  CONFLICT (add/add): Merge conflict in scripts/run_npc_tile_lookup.py
+  Auto-merging tests/test_npc_tile_lookup.py
+  CONFLICT (add/add): Merge conflict in tests/test_npc_tile_lookup.py
+$ git --git-dir /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n/gen-v-research-tools.git merge-tree --write-tree --merge-base=cad8bf32c305a181b2cd4ba98e51d75ca082704a 6f194627133cd10e5cf4190f9d284dada55f1dde e455bf25db3d258b588350325ab0a6d33d40162c
+  7323179af39f43a0bc35b2f7790b3b46384cf79c
+  100644 f8214b176885d29950ecb297b5d0140af89b64a8 1	trail/INDEX.md
+  100644 1a3c299ade8c13eb9ab92e2895c64af7eafb51fa 2	trail/INDEX.md
+  100644 e8fc26cd02fb931ac8f5fdaf5c976d985c939aea 3	trail/INDEX.md
+  
+  Auto-merging LAB_READING_TRAIL.md
+  Auto-merging trail/INDEX.md
+  CONFLICT (content): Merge conflict in trail/INDEX.md
+$ git --git-dir /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n/gen-v-research-tools.git merge-tree --write-tree --merge-base=f59941f0291f4843462debf88bb3c3bbc4059102 b19259dba280e994cdb893ae3a6f84346b28eb93 cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+  b35fd7a31550a53c29831c2e6076b9fa094b3deb
+  100644 fbffdebf9095d628d1c9f7c183d7f019e9be05ce 1	LAB_READING_TRAIL.md
+  100644 d13112a55e0fcfc27083ff64c213b0ecfb3343c9 2	LAB_READING_TRAIL.md
+  100644 626a5ceea8b7bc7bd0f0d82f8e88f8facfb2ecf5 3	LAB_READING_TRAIL.md
+  
+  Auto-merging LAB_READING_TRAIL.md
+  CONFLICT (content): Merge conflict in LAB_READING_TRAIL.md
+  Auto-merging trail/INDEX.md
+$ git --git-dir /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n/gen-v-research-tools.git merge-tree --write-tree --merge-base=f59941f0291f4843462debf88bb3c3bbc4059102 e84fe222e34671a32c2808959bb7e3d71f8d57b0 eedc97a515153f6e9cad5854e181f46401aa07cb
+  ec3af7085c6597d44d3329bc4ae91ff2e91a2793
+  100644 fbffdebf9095d628d1c9f7c183d7f019e9be05ce 1	LAB_READING_TRAIL.md
+  100644 8602fff3183aa8f0ef4ba41f6149922aecf2c4a1 2	LAB_READING_TRAIL.md
+  100644 4cd9b493ee272e896be4339cc02b7827fd0f9b6a 3	LAB_READING_TRAIL.md
+  100644 f1917128367ecda3c9ae8aa345ae62db991eff25 1	trail/INDEX.md
+  100644 f32ed803753c677b093c702179d5e1cc1f3c537a 2	trail/INDEX.md
+  100644 2131b8047cec501e8cba4a71369ca927e7ef677e 3	trail/INDEX.md
+  
+  Auto-merging LAB_READING_TRAIL.md
+  CONFLICT (content): Merge conflict in LAB_READING_TRAIL.md
+  Auto-merging trail/INDEX.md
+  CONFLICT (content): Merge conflict in trail/INDEX.md
+
+Raw record file (scratch only): /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n/pair-results.json
+Raw merge-tree transcripts (scratch only): /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T203047Z-320d46521f400dc9ee70a76731bf9f4a/scratch/sp-f5-raw-m8qcd50n
