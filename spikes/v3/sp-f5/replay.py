@@ -25,10 +25,11 @@ REPOS = [
     ("seb-patron/mwcc-rs", "mwcc-rs"),
     ("seb-patron/gen-v-decomp", "gen-v-decomp"),
 ]
-PAIR_CAP = 30
+PAIR_CAP = 300
 SCHEMES = ["no lock", "file", "git funcname", "tree-sitter node",
            "interface exclusive / body shared", "hunk line range",
-           "file + policy-exclusive", "adaptive"]
+           "file + policy-exclusive", "adaptive",
+           "union merge for append-only index files", "mergiraf at land"]
 TS_RULE = r"^[[:space:]]*(export[[:space:]]+)?function[[:space:]]+[[:alnum:]_]+"
 LANGUAGES = {
     ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
@@ -36,27 +37,33 @@ LANGUAGES = {
     ".mjs": "javascript", ".cjs": "javascript", ".ts": "typescript", ".tsx": "tsx",
     ".py": "python", ".rs": "rust", ".rb": "ruby", ".php": "php", ".sh": "bash",
     ".swift": "swift", ".kt": "kotlin", ".kts": "kotlin", ".scala": "scala", ".lua": "lua",
-    ".html": "html", ".css": "css", ".json": "json", ".toml": "toml", ".yaml": "yaml",
-    ".yml": "yaml", ".md": "markdown", ".sql": "sql", ".xml": "xml",
+    ".html": "html", ".css": "css", ".sql": "sql", ".xml": "xml",
 }
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: ?(.*))?$")
+TREE_FALLBACKS = Counter()
+TREE_LANGUAGES_USED = set()
 TREE_QUERY = r'''import json,sys
 from tree_sitter_language_pack import PackConfig,configure,get_parser
-configure(PackConfig(cache_dir=sys.argv[2]))
-parser=get_parser(sys.argv[1]); source=sys.stdin.buffer.read(); tree=parser.parse(source)
-result=[]
-for start,end in json.loads(sys.argv[3]):
- lo=max(0,start-1); hi=max(0,end-1); node=tree.root_node.descendant_for_point_range((lo,0),(lo,0)); found=None
- while node is not None:
-  body=node.child_by_field_name("body")
-  if node.is_named and body is not None and node.end_point.row>=hi:
-   sig=b" ".join(source[node.start_byte:body.start_byte].split()).decode("utf-8","replace")
-   found=[node.type,sig,node.start_point.row,body.start_point.row,node.end_byte-node.start_byte]; break
-  node=node.parent
- result.append(found)
-print(json.dumps(result))
+configure(PackConfig(cache_dir=sys.argv[2])); parser=get_parser(sys.argv[1])
+request=json.load(sys.stdin)
+def query(source,hunks):
+ if source is None: return [None]*len(hunks)
+ source=bytes.fromhex(source); tree=parser.parse(source)
+ if tree.root_node.has_error: raise ValueError("syntax tree contains errors")
+ results=[]
+ for start,end in hunks:
+  lo=max(0,start-1); hi=max(0,end-1); node=tree.root_node.descendant_for_point_range((lo,0),(lo,0)); found=None
+  while node is not None:
+   body=node.child_by_field_name("body")
+   if node.is_named and body is not None and node.end_point.row>=hi:
+    sig=b" ".join(source[node.start_byte:body.start_byte].split()).decode("utf-8","replace")
+    found=[node.type,sig,node.start_point.row,body.start_point.row,node.end_byte-node.start_byte]; break
+   node=node.parent
+  results.append(found)
+ return results
+print(json.dumps([query(request["before"],request["before_hunks"]),
+                  query(request["after"],request["after_hunks"])]))
 '''
-TREE_QUERY_FAILURES = 0
 
 
 def run(args, *, cwd=None, env=None, check=False, input_text=None):
@@ -183,26 +190,35 @@ def is_overlap(a, b):
     return max(a0, b0) < min(a1, b1)
 
 
-def query_tree_units(source, language, hunks):
-    global TREE_QUERY_FAILURES
-    if source is None or language is None:
-        TREE_QUERY_FAILURES += 1
-        return [None] * len(hunks)
+def query_tree_pair(before, after, language, before_hunks, after_hunks, ext):
+    if language is not None:
+        TREE_LANGUAGES_USED.add(language)
+    if language is None:
+        TREE_FALLBACKS[(ext, "grammar unavailable")] += len(before_hunks) + len(after_hunks)
+        return [None] * len(before_hunks), [None] * len(after_hunks)
+    if before is None:
+        TREE_FALLBACKS[(ext, "missing file side")] += len(before_hunks)
+    if after is None:
+        TREE_FALLBACKS[(ext, "missing file side")] += len(after_hunks)
     scratch = Path(os.environ.get("DELEGATE_SCRATCH_DIR", tempfile.gettempdir()))
     cache = scratch / "sp-f5-tree-sitter-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    lines = [[start, end] for start, end in hunks]
-    p = subprocess.run([sys.executable, "-c", TREE_QUERY, language, str(cache), json.dumps(lines)],
-                       input=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       env=os.environ.copy())
-    if p.returncode:
-        TREE_QUERY_FAILURES += 1
-        return [None] * len(hunks)
     try:
+        request = {"before": before.hex() if before is not None else None,
+                   "after": after.hex() if after is not None else None,
+                   "before_hunks": before_hunks, "after_hunks": after_hunks}
+        p = subprocess.run([sys.executable, "-c", TREE_QUERY, language, str(cache)],
+                           input=json.dumps(request), text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, env=os.environ.copy())
+        if p.returncode:
+            reason = "grammar unavailable" if "not found" in p.stderr.lower() else "parse/query error"
+            TREE_FALLBACKS[(ext, reason)] += len(before_hunks) + len(after_hunks)
+            return [None] * len(before_hunks), [None] * len(after_hunks)
         return json.loads(p.stdout)
-    except (ValueError, TypeError):
-        TREE_QUERY_FAILURES += 1
-        return [None] * len(hunks)
+    except Exception as exc:
+        reason = "grammar unavailable" if "not found" in str(exc).lower() else "parse/query error"
+        TREE_FALLBACKS[(ext, reason)] += len(before_hunks) + len(after_hunks)
+        return [None] * len(before_hunks), [None] * len(after_hunks)
 
 
 def ranges_for_pr(clone, base, head, path, env, ts_attributes):
@@ -213,20 +229,29 @@ def ranges_for_pr(clone, base, head, path, env, ts_attributes):
     before, after = blob(clone, base, path, env), blob(clone, head, path, env)
     classes = policy_class(path, before, after)
     if before is not None and b"\0" in before or after is not None and b"\0" in after:
-        return {"binary": True, "hunks": [], "func": [], "tree": [], "interface": [], "policy": classes}
+        return {"binary": True, "class": classify_file(path, before, after), "hunks": [], "func": [], "tree": [], "interface": [], "policy": classes}
     if not hunks:
-        return {"binary": False, "hunks": [], "func": [], "tree": [], "interface": [], "policy": classes}
+        return {"binary": False, "class": classify_file(path, before, after), "hunks": [], "func": [], "tree": [], "interface": [], "policy": classes}
+    file_class = classify_file(path, before, after)
     driver_args = []
     if path.endswith((".ts", ".tsx")) and clone.name == "concord":
         driver_args = ["-c", f"core.attributesFile={ts_attributes}",
                        "-c", f"diff.typescript.xfuncname={TS_RULE}"]
-    funcs = git(clone, [*driver_args, "diff", f"--attr-source={base}", "--no-ext-diff", "--no-renames",
-                        "--function-context", "--unified=0", base, head, "--", path], env)
-    headers = [m.group(5).strip() if m.group(5) else "" for ln in funcs.stdout.splitlines() if (m := HUNK.match(ln))]
+    if file_class == "code":
+        funcs = git(clone, [*driver_args, "diff", f"--attr-source={base}", "--no-ext-diff", "--no-renames",
+                            "--function-context", "--unified=0", base, head, "--", path], env)
+        headers = [m.group(5).strip() if m.group(5) else "" for ln in funcs.stdout.splitlines() if (m := HUNK.match(ln))]
+    else:
+        headers = []
     ext = Path(path).suffix.lower()
     language = LANGUAGES.get(ext)
-    before_tree = query_tree_units(before, language, [(x[0], x[1]) for x in hunks])
-    after_tree = query_tree_units(after, language, [(x[2], x[3]) for x in hunks])
+    if file_class == "code":
+        ext = Path(path).suffix.lower() or "<none>"
+        before_tree, after_tree = query_tree_pair(before, after, language,
+            [(x[0], x[1]) for x in hunks], [(x[2], x[3]) for x in hunks], ext)
+    else:
+        before_tree = [None] * len(hunks)
+        after_tree = [None] * len(hunks)
     func_units, tree_units, interface_units = [], [], []
     policy_units = list(classes)
     for index, (old_start, old_end, new_start, new_end) in enumerate(hunks):
@@ -245,7 +270,7 @@ def ranges_for_pr(clone, base, head, path, env, ts_attributes):
                 interface_units.append(("interface", *identity))
             else:
                 interface_units.append(("body", *identity))
-    return {"binary": False, "hunks": [(x[0], x[1]) for x in hunks],
+    return {"binary": False, "class": file_class, "hunks": [(x[0], x[1]) for x in hunks],
             "func": func_units, "tree": tree_units, "interface": interface_units,
             "policy": list(set(policy_units))}
 
@@ -267,13 +292,35 @@ def policy_class(path, before, after):
     return classes
 
 
+def classify_file(path, before=None, after=None):
+    name = path.lower().rsplit("/", 1)[-1]
+    if (before is not None and b"\0" in before) or (after is not None and b"\0" in after):
+        return "lockfiles/generated/binary"
+    if (name in {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock",
+                 "poetry.lock", "pipfile.lock", "gemfile.lock", "composer.lock", "go.sum", "bun.lockb", "bun.lock"}
+            or name.endswith(".lock") or name.endswith((".generated.cs", ".g.cs", ".pb.go", "_generated.py"))
+            or any(part in {"generated", "gen", "vendor", "dist"} for part in path.lower().split("/"))):
+        return "lockfiles/generated/binary"
+    if (name.endswith(("_index.md", "_trail.md", "index.md", "trail.md", "changelog", "changes.md"))
+            or name.startswith("changelog")):
+        return "append-only index/log"
+    if Path(path).suffix.lower() in {".md", ".markdown", ".mdx"}:
+        return "docs/markdown"
+    if Path(path).suffix.lower() in LANGUAGES:
+        return "code"
+    if Path(path).suffix.lower() in {".json", ".yaml", ".yml", ".toml", ".txt", ".text"}:
+        return "non-code data"
+    return "other"
+
+
 def diff_data(clone, base, head, env, ts_attributes):
     paths = changed_paths(clone, base, head, env)
     data = {"files": set(), "func": set(), "tree": set(), "interface": set(),
-            "policy": set(), "hunks": defaultdict(list)}
+            "policy": set(), "hunks": defaultdict(list), "classes": defaultdict(set)}
     for path in paths:
         data["files"].add(path)
         details = ranges_for_pr(clone, base, head, path, env, ts_attributes)
+        data["classes"][(details or {}).get("class", classify_file(path))].add(path)
         if details is None:
             continue
         data["func"].update(details["func"])
@@ -321,9 +368,11 @@ def overlaps_units(scheme, left, right):
 
 
 def merge_result(clone, mirror, a, b, env, mirror_env):
-    base = git(clone, ["merge-base", a["head"], b["head"]], env)
+    base = git(clone, ["merge-base", a["head"], b["head"]], mirror_env)
     if base.returncode:
-        return {"conflict": True, "base": "", "raw": base.stderr, "command": "git merge-base"}
+        reason = base.stderr.strip() or f"git merge-base exited {base.returncode}"
+        return {"conflict": True, "base": "", "raw": base.stderr,
+                "command": "git merge-base", "reason": reason}
     base_sha = base.stdout.strip()
     args = ["git", "--git-dir", str(mirror), "merge-tree", "--write-tree", f"--merge-base={base_sha}", a["head"], b["head"]]
     p = run(args, env=mirror_env)
@@ -370,8 +419,80 @@ def stable_sample(pairs, repo):
         f"{repo}:{pair[0]['number']}:{pair[1]['number']}".encode()).hexdigest())[:PAIR_CAP]
 
 
+def pair_rank(pair, repo):
+    return hashlib.sha256(
+        f"{repo}:{pair[0]['number']}:{pair[1]['number']}".encode()).hexdigest()
+
+
 def fmt_pr(pr):
     return f"{pr['number']} {pr['url']}"
+
+
+FILE_CLASSES = ["code", "docs/markdown", "append-only index/log",
+                "lockfiles/generated/binary", "non-code data", "other"]
+
+
+def wilson(successes, trials):
+    if not trials:
+        return "n/a"
+    z = 1.959963984540054
+    p = successes / trials
+    denominator = 1 + z * z / trials
+    center = (p + z * z / (2 * trials)) / denominator
+    margin = z * ((p * (1 - p) / trials + z * z / (4 * trials * trials)) ** 0.5) / denominator
+    return f"{100 * p:.2f}% [{100 * max(0, center - margin):.2f}%, {100 * min(1, center + margin):.2f}%]"
+
+
+def empty_metrics():
+    return {scheme: Counter() for scheme in SCHEMES}
+
+
+def append_union(clone, base, left, right, path, env, tempdir):
+    old, ours, theirs = (blob(clone, rev, path, env) for rev in (base, left, right))
+    if old is None or ours is None or theirs is None or any(b"\0" in x for x in (old, ours, theirs)):
+        return False
+    folder = Path(tempdir) / hashlib.sha256(f"union:{path}{left}{right}".encode()).hexdigest()
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = [folder / name for name in ("base", "ours", "theirs")]
+    for destination, content in zip(paths, (old, ours, theirs)):
+        destination.write_bytes(content)
+    p = run(["git", "merge-file", "--union", str(paths[1]), str(paths[0]), str(paths[2])])
+    return p.returncode == 0
+
+
+def conflict_file(pathline):
+    if " in " in pathline:
+        return pathline.rsplit(" in ", 1)[-1]
+    return None
+
+
+def filtered_data(data, file_class):
+    selected = data["classes"].get(file_class, set())
+    out = {key: set() for key in ("files", "func", "tree", "interface", "policy")}
+    out["files"] = selected.copy()
+    for key in ("func", "tree", "interface"):
+        out[key] = {unit for unit in data[key] if len(unit) > 1 and unit[1] in selected}
+    out["policy"] = {unit for unit in data["policy"] if unit[0] == "policy" and unit[1] == file_class}
+    out["hunks"] = defaultdict(list, {path: spans for path, spans in data["hunks"].items() if path in selected})
+    out["classes"] = defaultdict(set, {file_class: selected})
+    return out
+
+
+def file_class_from_data(path, *data):
+    for item in data:
+        for file_class, paths in item["classes"].items():
+            if path in paths:
+                return file_class
+    return classify_file(path)
+
+
+def render_metrics(lines, title, metrics):
+    lines += ["", title, "scheme | sampled pairs | blocked | needless | missed conflicts | pairwise serial delay (hours) | residual conflict rate (95% Wilson)"]
+    for scheme in SCHEMES:
+        row = metrics[scheme]
+        allowed = row["pairs"] - row["blocked"]
+        rate = wilson(row["missed"], allowed)
+        lines.append(f"{scheme} | {row['pairs']} | {row['blocked']} | {row['needless']} | {row['missed']} | {row['delay']:.2f} | {rate}")
 
 
 def main():
@@ -391,9 +512,11 @@ def main():
     ts_attributes = scratch / "sp-f5-concord.gitattributes"
     ts_attributes.write_text("*.ts diff=typescript\n*.tsx diff=typescript\n")
     pair_cache = {}
-    totals = {name: {"blocked": 0, "needless": 0, "missed": 0, "delay": 0.0} for name in SCHEMES}
+    overall_metrics = empty_metrics()
+    repo_metrics = defaultdict(empty_metrics)
+    class_metrics = defaultdict(empty_metrics)
     examples = {name: {"needless": [], "missed": []} for name in SCHEMES}
-    repo_stats, pair_records = [], []
+    repo_stats, pair_records, all_unevaluable = [], [], []
     total_pairs = total_sampled = merge_conflicts = merge_resolved = merge_tested_files = missing_heads = 0
     mergiraf_available = bool(shutil.which("mergiraf") or
         (scratch / "mergiraf-root/bin/mergiraf").exists())
@@ -405,36 +528,81 @@ def main():
             raise RuntimeError(f"required local clone is missing: {clone}")
         prs = gh_prs(repo)
         all_pairs = overlaps(prs)
-        sample = stable_sample(all_pairs, repo)
-        sample.sort(key=lambda pair: (max(iso(pair[0]["created_at"]), iso(pair[1]["created_at"])),
-                                      pair[0]["number"], pair[1]["number"]))
+        target = min(len(all_pairs), PAIR_CAP)
+        ranked_pairs = sorted(all_pairs, key=lambda pair: pair_rank(pair, repo))
         total_pairs += len(all_pairs)
-        total_sampled += len(sample)
         mirror = raw_dir / (dirname + ".git")
         env = os.environ.copy()
-        sampled_prs = {p["number"]: p for pair in sample for p in pair}
-        fetched, mirror_env = ensure_objects(clone, repo, list(sampled_prs.values()), mirror, env)
-        missing_heads += fetched
-        print(f"{repo}: {len(sample)} pairs selected; evaluating", file=sys.stderr, flush=True)
-        evaluated = 0
-        for a, b in sample:
-            result = merge_result(clone, mirror, a, b, env, mirror_env)
+        mirror_env = env
+        seen_heads, sample, unevaluable = set(), [], []
+        attempted = repo_fetched = 0
+        print(f"{repo}: target {target} evaluated pairs; ranking candidates", file=sys.stderr, flush=True)
+        for a, b in ranked_pairs:
+            attempted += 1
+            new_prs = [pr for pr in (a, b) if pr["head"] not in seen_heads]
+            seen_heads.update(pr["head"] for pr in new_prs)
+            if new_prs:
+                try:
+                    fetched, mirror_env = ensure_objects(clone, repo, new_prs, mirror, env)
+                except RuntimeError as exc:
+                    reason = str(exc)
+                    if reason.startswith(("could not fetch PR #", "fetched PR #")):
+                        unevaluable.append((repo, a["number"], b["number"], reason))
+                        continue
+                    raise
+                repo_fetched += fetched
+                missing_heads += fetched
+            result = merge_result(clone, mirror, a, b, mirror_env, mirror_env)
             if not result["base"]:
+                unevaluable.append((repo, a["number"], b["number"], result["reason"]))
                 continue
+            sample.append((a, b, result))
+            if len(sample) == target:
+                break
+        if len(sample) != target:
+            raise RuntimeError(f"{repo}: evaluated only {len(sample)} of {target} required pairs after {attempted} candidate attempts")
+        sample.sort(key=lambda item: (max(iso(item[0]["created_at"]), iso(item[1]["created_at"])),
+                                     item[0]["number"], item[1]["number"]))
+        total_sampled += attempted
+        print(f"{repo}: {len(sample)} evaluable pairs selected from {attempted} ranked candidates", file=sys.stderr, flush=True)
+        evaluated = 0
+        for a, b, result in sample:
             merge_conflicts += int(result["conflict"])
             key = (result["base"], a["head"], b["head"])
             left = pair_cache.get((dirname, result["base"], a["head"]))
             if left is None:
-                left = diff_data(clone, result["base"], a["head"], env, ts_attributes)
+                left = diff_data(clone, result["base"], a["head"], mirror_env, ts_attributes)
                 pair_cache[(dirname, result["base"], a["head"])] = left
             right = pair_cache.get((dirname, result["base"], b["head"]))
             if right is None:
-                right = diff_data(clone, result["base"], b["head"], env, ts_attributes)
+                right = diff_data(clone, result["base"], b["head"], mirror_env, ts_attributes)
                 pair_cache[(dirname, result["base"], b["head"])] = right
             pair_id = f"{repo}#{a['number']}+#{b['number']}"
             delay_pr = a if iso(a["created_at"]) <= iso(b["created_at"]) else b
             later = b if delay_pr is a else a
             delay = max(0.0, (iso(delay_pr["merged_at"]) - iso(later["created_at"])).total_seconds() / 3600)
+            # Merge-at-land schemes change the observed conflict set, not lock decisions.
+            union_resolved, mergiraf_resolved_paths = set(), set()
+            conflict_paths = [path for line in result["conflict_paths"] if (path := conflict_file(line))]
+            conflict_lines = {conflict_file(line): line for line in result["conflict_paths"] if conflict_file(line)}
+            for path in conflict_paths:
+                cls = file_class_from_data(path, left, right)
+                if (conflict_lines[path].startswith("CONFLICT (content):")
+                        and cls == "append-only index/log"
+                        and append_union(clone, result["base"], a["head"], b["head"], path, mirror_env, raw_dir / "union")):
+                    union_resolved.add(path)
+                if conflict_lines[path].startswith("CONFLICT (content):"):
+                    mr = mergiraf_result(clone, result["base"], a, b, [path], mirror_env, raw_dir / "mergiraf")
+                    if mr:
+                        mergiraf_available = True
+                        merge_tested_files += mr["tested_files"]
+                        merge_resolved += mr["resolved_files"]
+                        if mr["resolved_files"]:
+                            mergiraf_resolved_paths.add(path)
+            union_conflicts = [line for line in result["conflict_paths"]
+                               if conflict_file(line) not in union_resolved]
+            mergiraf_conflicts = [line for line in result["conflict_paths"]
+                                  if conflict_file(line) not in mergiraf_resolved_paths]
             blocked = {}
             for scheme in SCHEMES:
                 if scheme == "adaptive":
@@ -442,33 +610,55 @@ def main():
                     is_blocked = bool((left["files"] & right["files"]) & active)
                 else:
                     is_blocked = overlaps_units(scheme, left, right)
+                effective_conflict = (bool(union_conflicts) if scheme == "union merge for append-only index files"
+                                      else bool(mergiraf_conflicts) if scheme == "mergiraf at land"
+                                      else result["conflict"])
+                if scheme in {"union merge for append-only index files", "mergiraf at land"}:
+                    is_blocked = False
                 blocked[scheme] = is_blocked
-                totals[scheme]["blocked"] += int(is_blocked)
-                totals[scheme]["delay"] += delay if is_blocked else 0
-                needless = is_blocked and not result["conflict"]
-                missed = not is_blocked and result["conflict"]
-                totals[scheme]["needless"] += int(needless)
-                totals[scheme]["missed"] += int(missed)
+                needless = is_blocked and not effective_conflict
+                missed = not is_blocked and effective_conflict
+                for metrics in (overall_metrics, repo_metrics[repo]):
+                    metrics[scheme]["pairs"] += 1
+                    metrics[scheme]["blocked"] += int(is_blocked)
+                    metrics[scheme]["needless"] += int(needless)
+                    metrics[scheme]["missed"] += int(missed)
+                    metrics[scheme]["delay"] += delay if is_blocked else 0
                 category = "needless" if needless else "missed" if missed else None
                 if category and len(examples[scheme][category]) < 5:
                     examples[scheme][category].append({"id": pair_id, "left": a, "right": b,
                         "paths": sorted(left["files"] & right["files"]),
                         "conflicts": result["conflict_paths"], "delay": delay})
+            classes_in_pair = set(left["classes"]) | set(right["classes"])
+            conflict_classes = {file_class_from_data(path, left, right)
+                                for path in (conflict_file(line) for line in result["conflict_paths"]) if path}
+            for cls in classes_in_pair | conflict_classes:
+                lclass, rclass = filtered_data(left, cls), filtered_data(right, cls)
+                relevant = bool(lclass["files"] & rclass["files"]) or cls in conflict_classes
+                if not relevant:
+                    continue
+                class_metrics[cls]
+                for scheme in SCHEMES:
+                    class_blocked = overlaps_units(scheme, lclass, rclass) if scheme not in {"adaptive", "union merge for append-only index files", "mergiraf at land"} else False
+                    if scheme == "adaptive":
+                        class_blocked = bool((lclass["files"] & rclass["files"]) & adaptive_active[dirname])
+                    cls_conflict = any(classify_file(conflict_file(line) or "") == cls for line in
+                                       (union_conflicts if scheme == "union merge for append-only index files" else
+                                        mergiraf_conflicts if scheme == "mergiraf at land" else result["conflict_paths"]))
+                    class_metrics[cls][scheme]["pairs"] += 1
+                    class_metrics[cls][scheme]["blocked"] += int(class_blocked)
+                    class_metrics[cls][scheme]["needless"] += int(class_blocked and not cls_conflict)
+                    class_metrics[cls][scheme]["missed"] += int(not class_blocked and cls_conflict)
+                    class_metrics[cls][scheme]["delay"] += delay if class_blocked else 0
             if result["conflict"]:
                 for pathline in result["conflict_paths"]:
                     if pathline.startswith("CONFLICT ") and " in " in pathline:
                         adaptive_active[dirname].add(pathline.rsplit(" in ", 1)[-1])
-                for pathline in result["conflict_paths"]:
-                    if pathline.startswith("CONFLICT (content):"):
-                        conflict_path = pathline.rsplit(" in ", 1)[-1]
-                        mr = mergiraf_result(clone, result["base"], a, b, [conflict_path], env, raw_dir / "mergiraf")
-                        if mr:
-                            mergiraf_available = True
-                            merge_tested_files += mr["tested_files"]
-                            merge_resolved += int(mr["resolved_files"] > 0)
             record = {"pair": pair_id, "heads": [a["head"], b["head"]], "base": result["base"],
                       "merge_tree_exit_conflict": result["conflict"], "merge_tree_tree": result["tree"],
                       "merge_tree_conflict_paths": result["conflict_paths"],
+                      "union_resolved_paths": sorted(union_resolved),
+                      "mergiraf_resolved_paths": sorted(mergiraf_resolved_paths),
                       "blocked": blocked, "raw_sha256": hashlib.sha256(result["raw"].encode()).hexdigest(),
                       "merge_tree_command": result["command"]}
             raw_path = raw_dir / "merge-tree"
@@ -480,30 +670,45 @@ def main():
             evaluated += 1
             if evaluated % 25 == 0:
                 print(f"{repo}: evaluated {evaluated}/{len(sample)}", file=sys.stderr, flush=True)
-        repo_stats.append((repo, len(prs), len(all_pairs), len(sample), evaluated, fetched))
-    if len(pair_records) < 30:
-        print(f"Only {len(pair_records)} overlapping PR pairs could be evaluated; required minimum is 30.", file=sys.stderr)
-        raise SystemExit(2)
+        repo_stats.append((repo, len(prs), len(all_pairs), attempted, evaluated, repo_fetched))
+        if evaluated != target:
+            raise RuntimeError(f"{repo}: evaluated {evaluated} of {target} required pairs")
+        all_unevaluable.extend(unevaluable)
     (raw_dir / "pair-results.json").write_text(json.dumps(pair_records, indent=2) + "\n")
     lines = [
         "SP-F5 lock-scheme replay",
         "Read-only inputs: GitHub merged-PR metadata via gh; local clone objects; missing PR head objects fetched only to a temporary bare mirror.",
-        f"Sample: deterministic SHA-256 rank of (repository, PR numbers), capped at {PAIR_CAP} overlapping pairs per repository; repository is the stratum.",
-        f"Pair universe: {total_pairs}; sampled: {total_sampled}; evaluated: {len(pair_records)}; merge-tree conflicts: {merge_conflicts}.",
+        f"Sample: deterministic SHA-256 rank of (repository, PR numbers); replace unevaluable candidates with the next rank until min(all overlapping pairs, {PAIR_CAP}) are evaluated per repository.",
+        f"Pair universe: {total_pairs}; candidate attempts: {total_sampled}; evaluated: {len(pair_records)}; merge-tree conflicts: {merge_conflicts}.",
         f"Missing PR heads fetched to temporary bare mirrors: {missing_heads}.",
-        f"Tree-sitter parser fallback cases (file widening): {TREE_QUERY_FAILURES}.",
-        "Exact metadata command: gh api --paginate repos/OWNER/REPO/pulls?state=closed&per_page=100 --jq '[.[] | select(.merged_at != null) | {number,created_at,merged_at,head:{sha:.head.sha},base:{sha:.base.sha},title,html_url}]'",
+        f"Tree-sitter fallback cases (file widening), excluding non-code files: {sum(TREE_FALLBACKS.values())}.",
+        f"Tree-sitter grammars invoked for code: {', '.join(sorted(TREE_LANGUAGES_USED)) or 'none'}.",
+        "Exact metadata commands (one per repository):",
+        *[f"gh api --paginate repos/{repo}/pulls?state=closed&per_page=100 --jq '[.[] | select(.merged_at != null) | {{number,created_at,merged_at,head:{{sha:.head.sha}},base:{{sha:.base.sha}},title,html_url}}]'" for repo, _ in REPOS],
         "Exact merge command: git --git-dir=TEMP_BARE_MIRROR merge-tree --write-tree --merge-base=BASE HEAD_A HEAD_B",
+        "Append-only conflict command: git merge-file --union OURS BASE THEIRS (temporary content copies; remaining paths retain merge-tree conflicts).",
+        "Mergiraf conflict command: mergiraf merge --path-name PATH --output TEMP_OUTPUT BASE LEFT RIGHT.",
         "The required --write-tree operation writes result objects only to the temporary mirror, which reads clone objects through an alternate; clone refs and objects remain unchanged.",
         "Full per-pair merge-tree transcripts stay in task scratch; this output includes result hashes and up to five representative raw stdout snippets.",
         "",
-        "repo | merged PRs | all overlapping pairs | sampled | evaluated | missing heads fetched",
+        "repo | merged PRs | all overlapping pairs | candidates attempted | evaluated | missing heads fetched",
     ]
     lines.extend(" | ".join(map(str, row)) for row in repo_stats)
-    lines += ["", "scheme | blocked pairs | needless blocks | missed conflicts | pairwise serial delay (hours)"]
-    lines.extend(f"{s} | {totals[s]['blocked']} | {totals[s]['needless']} | {totals[s]['missed']} | {totals[s]['delay']:.2f}" for s in SCHEMES)
-    lines += ["", f"Mergiraf installed: {'yes' if mergiraf_available else 'no'}; conflicted content files tested: {merge_tested_files}; reported resolved: {merge_resolved}.",
+    lines += ["", "Unevaluable pairs (each replaced by the next deterministic rank):", "repo | PR pair | reason"]
+    if all_unevaluable:
+        lines.extend(f"{repo} | #{left} + #{right} | {reason}" for repo, left, right, reason in all_unevaluable)
+    else:
+        lines.append("none")
+    lines += ["", "Tree-sitter fallback cases by extension, grammar language, and reason:", "extension | language | reason | count"]
+    lines.extend(f"{ext} | {LANGUAGES.get(ext, 'unmapped')} | {reason} | {count}"
+                 for (ext, reason), count in sorted(TREE_FALLBACKS.items()))
+    lines += ["", f"Mergiraf installed: {'yes' if mergiraf_available else 'no'}; conflicted content files tested: {merge_tested_files}; files resolved: {merge_resolved}.",
               "Pair examples: PR URLs and paths are real sampled pull requests; conflict paths come from merge-tree."]
+    render_metrics(lines, "Overall results", overall_metrics)
+    for repo, *_ in repo_stats:
+        render_metrics(lines, f"Repository: {repo}", repo_metrics[repo])
+    for cls in FILE_CLASSES:
+        render_metrics(lines, f"File class: {cls}", class_metrics[cls])
     for scheme in SCHEMES:
         for category in ("needless", "missed"):
             items = examples[scheme][category]
