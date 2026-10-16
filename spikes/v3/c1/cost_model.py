@@ -1,4 +1,4 @@
-"""Read local run history and reproduce the C1 waiting-versus-repair model.
+"""Read local run history and reproduce the claim waiting versus repair model.
 
 Only output.txt and breakeven.csv are written. No network, Git mutation, or
 third-party packages are used. Run with PYTHONDONTWRITEBYTECODE=1.
@@ -19,7 +19,7 @@ from pathlib import Path
 HISTORY = Path("/Users/sebastianpatronsoto/agent-runs/")
 OUT = Path("spikes/v3/c1")
 CUTOFF = datetime(2026, 10, 16, tzinfo=timezone.utc)
-# SP-F5, 2026-10-15: overlapping merged-PR pairs, file-blocked pairs,
+# Merged pull-request conflict replay: pairs, file-blocked pairs,
 # textual-conflict pairs. They are not task-arrival or claim-wait rates.
 REPLAY = {
     "concord": (104, 18, 0),
@@ -28,7 +28,7 @@ REPLAY = {
     "mwcc-rs": (300, 19, 0),
     "gen-v-decomp": (300, 25, 0),
 }
-# S5 2026-10-15, status-state counts. Scope refusal is distinct from a
+# Declared-footprint study, status-state counts. Scope refusal is distinct from a
 # lease refusal; the denominator includes undiffable and failed runs.
 SCOPE = {
     "concord": (1209, 6),
@@ -37,7 +37,16 @@ SCOPE = {
     "mwcc-rs": (1900, 742),
     "gen-v-decomp": (3456, 518),
 }
-REPAIR_WORDS = re.compile(r"\b(repair|rebase|address review|review fix|fix review|retry)\b", re.I)
+# Approximate changed-file/declared-file encounter ratios from the footprint
+# study's interval pairs. Different missingness prevents treating them as rates.
+FOOTPRINT_RATIO = {
+    "concord": 536 / 3410, "agent-workflows": 14761 / 51766,
+    "gen-v-research-tools": 23074 / 72710, "mwcc-rs": 6629 / 139896,
+    "gen-v-decomp": 18791 / 609875,
+}
+REPAIR_WORDS = re.compile(r"\b(repair|rebase|address[ -]review|review[ -]fix(?:es)?|fix[ -]review|retry)\b", re.I)
+REBASE_WORD = re.compile(r"\b(rebase|merge[ -]conflict|conflict)\b", re.I)
+REVIEW_FIX_WORDS = re.compile(r"\b(address[ -]review|review[ -]fix(?:es)?|fix[ -]review)\b", re.I)
 
 
 def parse_time(value: object) -> datetime | None:
@@ -87,12 +96,14 @@ def collect(repo: str) -> dict:
     result: dict = {
         "runs": 0, "state": Counter(), "days": Counter(), "dur": [],
         "repair_dur": [], "repair_runs": 0, "retry_of": 0,
+        "repair_kind": Counter(), "rebase_dur": [], "no_usage": 0,
         "input": [], "cached": [], "output": [], "dollars": [],
-        "held": [], "usage_files": 0, "bad": 0,
+        "held": [], "usage_files": 0, "tariff_null": 0, "bad": 0,
     }
-    # Direct children only: avoids nested test fixtures, archived copies and
-    # other repositories. This is a bounded, explicit sample of five repos.
-    for path in sorted(HISTORY.glob(f"{repo}-*/*/status.json")):
+    # Both current repo-hash/run and older repo/run layouts; no recursive scan.
+    paths = set(HISTORY.glob(f"{repo}-*/*/status.json"))
+    paths.update(HISTORY.glob(f"{repo}/*/status.json"))
+    for path in sorted(paths):
         status = read_json(path)
         if not status or status.get("repo") != f"seb-patron/{repo}":
             result["bad"] += 1
@@ -110,18 +121,29 @@ def collect(repo: str) -> dict:
         if status.get("retry_of"):
             result["retry_of"] += 1
         label = " ".join(str(status.get(k) or "") for k in ("work_label", "kind"))
-        repair = bool(status.get("target_pr_url") or REPAIR_WORDS.search(label))
+        # A read-only review of a rebase is not a repair session.
+        review_only = re.match(r"\s*review\b", str(status.get("work_label") or ""), re.I)
+        repair = not review_only and bool(status.get("target_pr_url") or REPAIR_WORDS.search(label))
         if repair:
             result["repair_runs"] += 1
+            kind = ("rebase/conflict" if REBASE_WORD.search(label) else
+                    "review fix" if REVIEW_FIX_WORDS.search(label) else
+                    "retry" if re.search(r"\bretry\b", label, re.I) else "other/target pull request")
+            result["repair_kind"][kind] += 1
         usage = read_json(path.parent / "usage.json")
         if not usage:
+            result["no_usage"] += 1
             continue
+        if usage.get("tariff") is None:
+            result["tariff_null"] += 1
         start, end = parse_time(usage.get("started_at")), parse_time(usage.get("ended_at"))
         if start and end and start < CUTOFF and 0 <= (end - start).total_seconds() <= 86400:
             minutes = (end - start).total_seconds() / 60
             result["dur"].append(minutes)
             if repair:
                 result["repair_dur"].append(minutes)
+                if kind == "rebase/conflict":
+                    result["rebase_dur"].append(minutes)
         if usage.get("usage_status") != "complete":
             continue
         tokens = usage.get("usage") or {}
@@ -136,36 +158,40 @@ def collect(repo: str) -> dict:
         cost = usage.get("provider_cost")
         if isinstance(cost, (int, float)) and cost >= 0:
             result["dollars"].append(cost)
+        elif isinstance(cost, dict) and cost.get("unit") == "USD" and isinstance(cost.get("value"), (int, float)) and cost["value"] >= 0:
+            result["dollars"].append(cost["value"])
     return result
 
 
-def model(p: float, wait: float, conflict: float, repair: float, failure: float, base: float) -> tuple[float, float, float]:
-    """Minutes per dispatched task; failure incurs a fresh base run.
+def model(p_claim: float, p_change: float, wait: float, conflict: float,
+          repair: float, failure: float, base: float,
+          exclusive_repair: float = 0.0) -> tuple[float, float, float]:
+    """Idealized agent minutes per dispatch; exclusive_repair is per task.
 
-    p is the probability that a task meets overlapping work; conflict is
-    conditional on that overlap. Repair includes the attempted fix. Assumes
-    one overlapping predecessor and at most one failed repair/restart.
+    p_claim and p_change are distinct scenario probabilities. Neither the
+    footprint pair ratios nor the merged-PR conflict fraction calibrate them.
     """
-    exclusive = base + p * wait
-    optimistic = base + p * conflict * (repair + failure * base)
+    exclusive = base + p_claim * wait + exclusive_repair
+    optimistic = base + p_change * conflict * (repair + failure * base)
     return exclusive, optimistic, exclusive - optimistic
 
 
 def main() -> None:
     rows = []
     lines = [
-        "C1 cost model — local evidence cutoff 2026-10-15 UTC",
+        "Claim cost model — local evidence cutoff 2026-10-15 UTC",
         "Command: PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c1/cost_model.py",
-        "Inputs: direct-child status.json and usage.json in five local agent-runs repo directories; S5 and SP-F5 constants cited in script.",
-        "Formula minutes/task: exclusive=B+p*W; optimistic=B+p*c*(R+f*B); positive exclusive-optimistic favors optimistic.",
-        "p=task overlap probability (scenario); W=wait minutes if overlapped; c=textual conflict conditional on file-blocked sampled PR pair (proxy); R=repair minutes (repair-labeled run median proxy); f=repair failure probability (scenario); B=all worker-session median minutes.",
-        "Assumptions: one predecessor, one repair, failed repair requires one fresh base run; equal queue/check costs; agent-active capacity, no alternate useful task while waiting; no human or compute price assigned.",
-        "Neither the PR replay nor S5 measured p, W, R for actual conflicts, f, or changes in accepted land quality. Zero conflicts is a point estimate, not proof of zero risk.",
-        "SP-F5 pairwise serial delay is PR-open-to-merge accounting, not claim wait; excluded from W.",
-        "S5 printed 3,592,610 interval pairs, while its prose says 3,800,963; denominators and undiffable endpoints differ. Neither supplies p.",
+        "Inputs: direct-child run records in five repositories, the declared-footprint study, and the merged-pull-request conflict replay.",
+        "Idealized minutes/dispatch: exclusive=B+p_claim*W+A_exclusive; parallel=B+p_change*c*(R+f*B). A_exclusive is residual post-publication repair per task.",
+        "p_claim and p_change are separate task encounter rates; W is unproductive claim wait; c is replay textual-conflict fraction among file-blocked pairs (proxy); R is mixed repair-label duration (proxy); f is unmeasured repair-failure chance; B is mixed-session median (proxy).",
+        "Assumptions: one predecessor, one repair and at most one failed-repair restart; equal queue/check costs; no alternate useful task during wait; no human/compute prices. Zero A_exclusive is an idealization, not current-policy evidence.",
+        "Neither study measured task encounter rates, claim wait, actual conflict repair, repair failure, or accepted land quality. A zero conflict count is not zero risk.",
+        "The replay's pairwise serial delay is from the later request's creation to the earlier request's merge, not their intersection or agent wait.",
+        "The footprint study printed 3,592,610 interval pairs while its prose says 3,800,963; changed-path coverage differs from declared-path coverage. Its ratio is sensitivity only.",
+        "A negative break-even wait in the CSV means parallel work wins in that scenario even with zero claim waiting; it is not a negative observed wait.",
         "",
     ]
-    header = ["repository", "sample_pairs", "file_blocked_pairs", "textual_conflicts", "conflict_case", "conditional_conflict_proxy", "task_overlap_scenario", "wait_min_scenario", "repair_min_proxy", "failure_scenario", "base_min_median", "exclusive_min_task", "optimistic_min_task", "gain_min_task", "gain_tasks_per_agent_hour", "breakeven_wait_min"]
+    header = ["repository", "sample_pairs", "file_blocked_pairs", "textual_conflicts", "conflict_case", "conditional_conflict_proxy", "claim_encounter_scenario", "changed_encounter_scenario", "changed_to_claim_ratio_case", "wait_min_scenario", "repair_min_proxy", "failure_scenario", "base_min_proxy", "exclusive_residual_repair_min_task_scenario", "exclusive_min_task", "parallel_min_task", "gain_min_task", "relative_throughput_gain_pct_proxy", "breakeven_wait_min"]
     for repo, (pairs, blocked, conflicts) in REPLAY.items():
         d = collect(repo)
         base = median(d["dur"])
@@ -180,29 +206,37 @@ def main() -> None:
         day_count = (datetime.strptime(max(d["days"]), "%Y%m%d") - datetime.strptime(min(d["days"]), "%Y%m%d")).days + 1 if d["days"] else 0
         lines += [
             f"[{repo}]",
-            f"direct-child runs={d['runs']}; excluded wrong/malformed status={d['bad']}; calendar days first-to-last={day_count} mean runs/day={fmt(d['runs']/day_count if day_count else None)}; run days={days}",
+            f"direct-child runs={d['runs']}; missing usage.json={d['no_usage']}; excluded wrong/malformed status={d['bad']}; calendar days first-to-last={day_count} mean runs/day={fmt(d['runs']/day_count if day_count else None)}; run days={days}",
             f"states={dict(d['state'].most_common())}",
-            f"session duration (usage timestamps) n={len(d['dur'])} median_min={fmt(base)} p90_min={fmt(percentile(d['dur'],.90))}; repair-labeled runs={d['repair_runs']} duration_n={len(d['repair_dur'])} median_min={fmt(repair_measured)} p90_min={fmt(percentile(d['repair_dur'],.90))}; retry_of={d['retry_of']}",
-            f"complete usage files={d['usage_files']}; median input_tokens={fmt(median(d['input']),0)} cached_input_tokens={fmt(median(d['cached']),0)} output_tokens={fmt(median(d['output']),0)}; provider dollar n={len(d['dollars'])} median={fmt(median(d['dollars']),4)}",
-            f"launcher held n={len(d['held'])} median_min={fmt(median(d['held']))} (dispatch delay, not lease wait); S5 scope-refusal status={SCOPE[repo][1]}/{SCOPE[repo][0]} (not lease refusal)",
-            f"SP-F5 sampled PR pairs={pairs}, file-blocked={blocked}, textual conflicts={conflicts}; c proxy={c:.3f}, naive Wilson upper95={upper:.3f}; repair R for CSV={repair:.1f} ({'measured label proxy' if repair_measured is not None else 'illustrative fallback'}), B={b:.1f}",
+            f"mixed-session duration n={len(d['dur'])} median_min={fmt(base)} p90_min={fmt(percentile(d['dur'],.90))}; repair-labeled runs={d['repair_runs']} duration_n={len(d['repair_dur'])} median_min={fmt(repair_measured)} p90_min={fmt(percentile(d['repair_dur'],.90))}; retry links={d['retry_of']}",
+            f"repair labels by category={dict(d['repair_kind'])}; rebase/conflict timed n={len(d['rebase_dur'])} median_min={fmt(median(d['rebase_dur']))}; review-starting labels excluded",
+            f"complete usage files={d['usage_files']}; median input_tokens={fmt(median(d['input']),0)} cached_input_tokens={fmt(median(d['cached']),0)} output_tokens={fmt(median(d['output']),0)}; provider dollar n={len(d['dollars'])} median={fmt(median(d['dollars']),4)}; null tariff files={d['tariff_null']}",
+            f"dispatcher hold n={len(d['held'])} median_min={fmt(median(d['held']))} (not claim wait); declared-footprint study scope-refusal status={SCOPE[repo][1]}/{SCOPE[repo][0]} (not lease refusal)",
+            f"merged-pull-request replay pairs={pairs}, file-blocked={blocked}, textual conflicts={conflicts}; conflict proxy={c:.3f}, naive Wilson upper95 sensitivity={upper:.3f}; R proxy={repair:.1f}, B proxy={b:.1f}; footprint changed/declared ratio proxy={FOOTPRINT_RATIO[repo]:.3f}",
             "",
         ]
-        for label, risk in (("point", c), ("upper95_naive", upper)):
-            for p in (0.05, 0.20, 0.50):
-                for wait in (5, 15, 30, 60):
-                    for failure in (0, 0.10, 0.25):
-                        exclusive, optimistic, gain = model(p, wait, risk, repair, failure, b)
-                        # throughput of one continuously occupied agent, not
-                        # cluster throughput or accepted-land throughput.
-                        throughput_gain = 60 / optimistic - 60 / exclusive
-                        rows.append([repo, pairs, blocked, conflicts, label, f"{risk:.6f}", p, wait, f"{repair:.3f}", failure, f"{b:.3f}", f"{exclusive:.3f}", f"{optimistic:.3f}", f"{gain:.3f}", f"{throughput_gain:.5f}", f"{risk * (repair + failure * b):.3f}"])
-    OUT.mkdir(parents=True, exist_ok=True)
+        conflict_cases = [("point", c), ("upper95_naive", upper)]
+        if repo == "gen-v-research-tools":
+            # Replay's allowlisted union merge leaves eight textual conflicts;
+            # merged-tree validity and actual repair savings were not tested.
+            conflict_cases.append(("union_logs_point_proxy", 8 / blocked))
+        for label, risk in conflict_cases:
+            for ratio_label, ratio in (("equal_rates", 1.0), ("footprint_ratio_proxy", FOOTPRINT_RATIO[repo])):
+                for p_claim in (0.05, 0.20, 0.50):
+                    p_change = p_claim * ratio
+                    for wait in (5, 15, 30, 60):
+                        for failure in (0, 0.10, 0.25):
+                            for residual in (0.0, 1.0):
+                                exclusive, optimistic, gain = model(p_claim, p_change, wait, risk, repair, failure, b, residual)
+                                # Relative throughput for one continuously occupied agent.
+                                throughput_gain_pct = 100 * (exclusive / optimistic - 1)
+                                breakeven = (p_change * risk * (repair + failure * b) - residual) / p_claim
+                                rows.append([repo, pairs, blocked, conflicts, label, f"{risk:.6f}", p_claim, f"{p_change:.6f}", ratio_label, wait, f"{repair:.3f}", failure, f"{b:.3f}", residual, f"{exclusive:.3f}", f"{optimistic:.3f}", f"{gain:.1f}", f"{throughput_gain_pct:.1f}", f"{breakeven:.1f}"])
     with (OUT / "breakeven.csv").open("w", newline="") as stream:
-        writer = csv.writer(stream)
+        writer = csv.writer(stream, lineterminator="\n")
         writer.writerow(header)
         writer.writerows(rows)
-    lines.append(f"CSV rows={len(rows)}; p/W/f are explicit sensitivity scenarios, not estimated live rates.")
+    lines.append(f"CSV rows={len(rows)}; encounter rates, wait, failure and residual repair are sensitivity scenarios, not live estimates. Relative throughput is illustrative agent-active throughput, not accepted landings.")
     (OUT / "output.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 

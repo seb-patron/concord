@@ -1,83 +1,129 @@
 # Claim cost model: wait now or repair later
 
-**Research snapshot: 2026-10-15.** This report answers the owner's value-first question using local worker history and the supplied five-repository replay. Its recommendation is a proposed decision threshold, not a change to the standing exclusive write-claim decision (D-UNIT-1-EXCLUSIVE). The owner approved starting these research spikes on 2026-10-15, not changing the claim policy.
+**Research snapshot, 15 October 2026.** The [standing exclusive-writing decision](../../decisions.md) (D-UNIT-1-EXCLUSIVE) remains in force. This report asks what gain might justify changing it; it does not change policy or authorize a trial.
 
 ## Plain answer
 
-**We cannot yet show that dropping exclusive claims would save time or money.** We can quantify worker-session length and identify textual conflicts in a replay, but the history does not record the time a real worker waited for a lease, the time spent resolving a specific conflict, the chance a repair fails, or the cost of human help. The replay's apparent advantage for parallel work depends mostly on assumed wait time. Four of five repositories had no textual conflicts in their selected overlapping merged-pull-request pairs; that is a small, selected sample, not evidence of zero risk. The fifth, gen-v-research-tools, had 40 conflicts among 61 file-overlapping pairs, mainly append-only logs. **STRUCTURAL (source date: 2026-10-15):** a file intersection is neither a semantic conflict nor a measured wait.
+We cannot yet show that parallel editing saves time or money. The model shows possible gains, but actual claim waiting and conflict repair are not linked in the available records. A replay found textual conflicts concentrated in one repository's reading logs; it measured no agent waiting. The owner needs to choose the smallest worthwhile gain and acceptable added costs before a fair comparison. Until then, keep exclusive writing claims and collect complete task histories.
 
-Our provisional value bar is **at least 15% more accepted tasks per agent-hour**, with the lower bound of a repository- and issue-family-clustered 95% interval above that bar. As provisional cost guardrails, complete-chain tokens and dollars per accepted task should each have **no increase**, and human interventions per 100 accepted tasks should have **no increase**. An owner-valued exchange rate could replace those zero-change guardrails before a pilot; the present data cannot choose one. Failed checks and reverted work also need a separately approved noninferiority margin. This 15% is a **recommendation for the owner to accept or replace before a pilot**, not a measured or previously approved threshold. It is deliberately larger than the few minutes per task implied by several optimistic scenarios, because changing authorization, recovery and merge behavior imposes ongoing operational work. The pilot must also report p95 end-to-end time. No dollar comparison can be calculated until billing and model tariffs are tied to runs. **CAPABILITY-DEPENDENT (source date: 2026-10-15; re-test with current agents):** today's agents' repair and coordination skill may change this bar's practical meaning.
+**Structural** means a mechanism or measurement limit independent of agent skill. **Capability dependent** means agent behavior, such as repair speed, that can change with models, prompts or tools; retest it with current agents. Evidence here has the snapshot date above.
+
+## What the alternatives mean
+
+A **claim** requests permission to write a protected **unit**, such as a file or verified part of it. A **lease** is the time-limited grant. Its **writing hold** excludes another writer until first publication, when a candidate is sent for inspection. A nonblocking landing hold remains afterward. A second writer can therefore still hit a merge conflict before a change **lands** (becomes accepted in the repository). The server checks the lease's generation marker (**fence**) and inspected revision before protected publication and landing. Those checks remain necessary with either writing policy.
+
+Suppose two agents need a reading-trail log. Under exclusive writing, the second waits or switches tasks. Under parallel writing, both edit and one may repair a conflict. At an *assumed* 20% encounter rate and 15-minute unproductive wait, exclusivity spends three wait minutes per dispatched task. In the research-tools example, an equal-encounter-rate scenario spends about 1.7 repair minutes per task in parallel; a changed-file encounter proxy reduces that to about 0.5. These are model illustrations, not observed accepted tasks. The exclusive side may also pay repair costs after publication.
 
 ## What was measured
 
-The reproducible script `spikes/v3/c1/cost_model.py` reads, without modifying, `status.json` and `usage.json` from **direct child run directories** for Concord, agent-workflows, gen-v-research-tools, mwcc-rs and gen-v-decomp under `/Users/sebastianpatronsoto/agent-runs/`. It requires the status repository label to match, excludes run-directory timestamps on or after 2026-10-16 UTC, and counts each matching run once. It does not search nested harness fixtures or archived copies. This intentionally differs from the broader declared-footprint study, which requires an allowed-files marker and a prompt; its run totals are **not interchangeable**. Run date comes from the directory name. Duration is `usage.json` end minus start, limited to zero through 24 hours. The first-to-last calendar-day average includes days with zero matching runs and partial boundary days; it is a volume description, not capacity. All printed per-day counts, state distributions and coverage live in `spikes/v3/c1/output.txt`.
+The script reads local status and usage records for five repositories, dated before 16 October UTC. It verifies repository labels and includes modern repository-hash/run directories plus older repository/run directories, without searching nested fixtures. The older layout adds 63 research-tools runs and two agent-workflows runs. Records without usage data remain in run counts but not timed medians; the zero-to-24-hour duration check removed no timed session. All-session medians mix implementations, read-only reviews, repairs and failed attempts. They are **active-time proxies**, not expected normal-task or restart costs. Retry links connect attempts but do not explain them.
 
-| Repository | Direct runs; first-to-last days; mean/day | Timed sessions; median / p90 minutes | Repair-labeled timed sessions; median / p90 minutes | Retry links |
+| Repository | Runs | Timed sessions | Mixed-session median minutes | Repair-label median minutes | Explicit rebase/conflict sessions |
+|---|---:|---:|---:|---:|---:|
+| Concord | 1,225 | 1,205 | 4.5 | 7.8 | 37 |
+| agent-workflows | 986 | 958 | 10.6 | 20.1 | 1 |
+| gen-v-research-tools | 605 | 510 | 13.2 | 11.8 | 0 |
+| mwcc-rs | 1,905 | 1,845 | 10.9 | 15.6 | 0 |
+| gen-v-decomp | 3,463 | 3,408 | 6.1 | 10.3 | 1 |
+
+A **repair label** is a target pull request or words such as repair, rebase, retry, address review, review fix or fix review in the work label or kind. Spaces and hyphens are accepted in the last three phrases, as is review fixes. Labels starting with review are excluded, even if they mention a rebase. This is a **repair-time proxy**: 220 of 227 research-tools repair-labeled runs explicitly say review fix, and none names rebase or conflict. Concord's 37 explicit rebase/conflict sessions have a 4.6-minute median, the closest available rebase proxy, but are not tied to a recorded merge conflict. The generated output gives category counts, timing coverage and run states. **Capability dependent:** these durations reflect the workers of this period. To measure true repair time, link a conflict to repair start/end, attempts, checks, accepted land and human actions.
+
+The supplied *Declared and actual worker footprints* study compared overlapping approximate run intervals. Declared paths overlap far more often than changed paths, so the two policies cannot share one encounter rate. The table's **ratio proxy** divides changed-path overlapping pairs by declared-path overlapping pairs; it is a sensitivity input only. Changed paths require locally diffable commits, while declarations do not: just 5,367 of 10,513 eligible runs were diffable. The raw output prints 3,592,610 interval pairs but its prose says 3,800,963. Neither pair count estimates a newly dispatched task's chance of waiting. The launcher (the worker's run controller) rejects accepted edits outside its **Allowed-files list**, the approved paths for a task, so final diffs hide attempted scope growth. A scope refusal is not a competing-lease refusal.
+
+| Repository | Declared-path pair share | Changed-path pair share | Ratio proxy |
+|---|---:|---:|---:|
+| Concord | 30.7% | 4.8% | 0.157 |
+| agent-workflows | 26.6% | 7.6% | 0.285 |
+| gen-v-research-tools | 48.6% | 15.4% | 0.317 |
+| mwcc-rs | 19.0% | 0.9% | 0.047 |
+| gen-v-decomp | 26.0% | 0.8% | 0.031 |
+
+The supplied *Larger lock-scheme replay* compared overlapping **merged pull request pairs**, not tasks. It examined all 104 Concord pairs and 300 selected pairs in each other repository. A pair was **file blocked** when both final changes touched a path. Concord, agent-workflows, mwcc-rs and gen-v-decomp had respectively 18, 118, 19 and 25 file-blocked pairs with zero textual conflicts. Research-tools had 40 textual conflicts among 61 file-blocked pairs, giving a 65.6% **conditional conflict proxy**. Zero is a sample point count, not proof of zero risk. Simple upper-bound calculations for a yes/no conflict outcome are 17.6%, 3.2%, 76.3%, 16.8% and 13.3% in table order; they are not population intervals because pairs share requests, repositories have different caps, and final request versions can include later changes. File exclusion also blocked 201 textually clean pairs overall. The replay measured no failures in program meaning (semantic failures), checks on the proposed combined change (merged-tree checks), abandoned work or repair time.
+
+Thirty-six of the 40 research-tools conflicts involved **append-only** logs or indexes, including reading-trail files such as LAB_READING_TRAIL.md; file classes overlap. An allowlisted **union merge** keeps both sides' text in such a file. It left eight textual conflicts, so its replay proxy is 8/61 or 13.1%. It did not verify ordering, duplicates or the merged tree. A separate structured-merge tool, Mergiraf, resolved three of 44 conflicted content files. Symbol-level and interface-versus-body lock schemes often widened to file scope when their extractors could not identify a safe smaller unit; similar totals are a test limitation, not proof of equal value.
+
+The replay's 1,865.9 **pairwise serial-delay hours** sum, for each blocked pair, the time from the later request's creation until the earlier request merges, floored at zero. That may exceed the requests' actual intersection and repeatedly count one request. It is not worker wait time. **Structural:** a file intersection, a textual conflict and a semantic break are different events.
+
+### Waiting and dollars are still unknown
+
+The script extracts **dispatcher hold**, delay before the worker launches; its median is zero in all five repositories. It does **not** extract claim-request-to-grant intervals and makes no assertion that every status file lacks them. The supplied *Concord v3: claim and lease options* synthesis describes a separate Concord lease-event episode on 13 October: 2,392 claim-granted events and 2,306 refused events. If these are the two attempt outcomes, refusals are roughly half of the event attempts. Retries inflate that share, and only two holder principals made claims; it is not a task encounter rate. The separately approved lease-record audit should link each refusal to later grant or cancellation and measure the interval by phase. Its review waits and inspections occur after writing and must not be charged as initial claim wait.
+
+Three selected usage records carry dollar cost as an object with value and USD unit; broad pricing is absent and selected tariff (price-list) fields are null. The supplied *Our measured usage* snapshot's Cloudflare request totals are service volume, not claim costs. After an idle-alarm fix, the hourly table shows eight requests per hour to Cloudflare's stateful storage service; earlier high volume may largely have been background traffic (an inference). Charges for stored artifacts and marginal provider prices are missing. No dollar saving can be calculated. Cached input tokens are part of input tokens, so they must not be added twice. The output retains token medians for engineers.
+
+## Cost model and possible gain bars
+
+Let **B** be a mixed-session median minutes proxy; **p_claim** the unmeasured chance a dispatched task meets a writing claim; **W** the unproductive minutes it waits; **p_change** the unmeasured chance parallel tasks change the same relevant area; **c** the replay conditional-conflict proxy; **R** the mixed repair-label minutes proxy; **f** an assumed repair-failure chance; and **A_exclusive** expected residual repair minutes per task after exclusive publication. Assume one predecessor, one repair and at most one restart, equal landing/check work and no useful task switching during W. No human or compute price is included.
+
+> Exclusive agent minutes per dispatched task = B + p_claim × W + A_exclusive. Parallel agent minutes = B + p_change × c × (R + f × B). Break-even requires p_claim × W = p_change × c × (R + f × B) − A_exclusive.
+
+The older expression W = c × (R + f × B) holds only if encounter rates are equal and exclusive repair is zero. The present exclusive policy can require repair after first publication. Zero exclusive repair is therefore an **idealized sensitivity case**, not a measured baseline. The CSV also tries one assumed residual repair minute per task. A lower changed-file rate or more exclusive-side repair lowers the wait needed for parallel writing to break even. Neither encounter rate is calibrated by the footprint pair shares.
+
+For a relative **illustrative** throughput gain g, required wait is [g × B + (1 + g) × p_change × c × (R + f × B) − A_exclusive] / p_claim. Throughput here is 60 / modeled agent minutes for a continuously occupied agent, not accepted tasks from dispatch through land. With 20% assumed claim encounters, 10% assumed repair failure, zero exclusive repair and replay point conflicts:
+
+| Repository | Break-even wait, equal rates (min) | Break-even wait, ratio proxy (min) | Gain at 15-min wait, equal rates | Gain at 15-min wait, ratio proxy |
 |---|---:|---:|---:|---:|
-| Concord | 1,225; 5; 245.0 | 1,205; 4.5 / 18.4 | 253; 7.1 / 16.9 | 57 |
-| agent-workflows | 984; 23; 42.8 | 958; 10.6 / 55.9 | 270; 19.7 / 58.0 | 95 |
-| gen-v-research-tools | 542; 12; 45.2 | 510; 13.2 / 42.5 | 226; 11.8 / 34.4 | 44 |
-| mwcc-rs | 1,905; 22; 86.6 | 1,845; 10.9 / 51.7 | 362; 15.7 / 54.5 | 97 |
-| gen-v-decomp | 3,463; 22; 157.4 | 3,408; 6.1 / 22.2 | 778; 10.3 / 24.4 | 128 |
+| Concord | 0.0 | 0.0 | 66.2% | 66.2% |
+| agent-workflows | 0.0 | 0.0 | 28.4% | 28.4% |
+| gen-v-research-tools | 8.6 | 2.7 | 8.6% | 17.9% |
+| mwcc-rs | 0.0 | 0.0 | 27.6% | 27.6% |
+| gen-v-decomp | 0.0 | 0.0 | 49.2% | 49.2% |
 
-“Repair-labeled” means a run with a target pull request or a work label containing repair, rebase, address-review, review-fix, fix-review or retry. It includes review fixes unrelated to merging and may miss repairs with different names. Its median duration is an **estimate used as a repair-time proxy**, not a measured merge-conflict repair duration. A `retry_of` link counts attempt lineage but does not prove why the attempt repeated or whether it succeeded. Some timed sessions ended blocked or failed, so the all-session median is an **agent active-time proxy**, not time to an accepted landing. The p90 is the observed rank, with no confidence interval. **CAPABILITY-DEPENDENT (source date: 2026-09-20 through 2026-10-15):** session and repair durations reflect the then-used workers, prompts, models and repository mix.
+For research-tools, substituting the union-log replay proxy gives about **1.7 minutes** break-even wait at equal rates, or **0.5 minutes** with the footprint ratio proxy. At a five-minute wait, ordinary-merge equal-rate arithmetic favors exclusivity; the union-log case favors parallel writing. Semantic safety remains untested.
 
-The complete-usage-file counts are 1,146, 885, 476, 1,680 and 3,328 in table order. Median input / cached input / output tokens per complete record are respectively: Concord 2,035,354 / 1,951,936 / 13,585; agent-workflows 2,330,528 / 2,244,352 / 13,785; gen-v-research-tools 4,383,168 / 4,229,345 / 31,820; mwcc-rs 3,275,742 / 3,152,192 / 20,498; gen-v-decomp 1,654,919 / 1,564,480 / 14,654. Cached input is a subset of input, so those columns must not be added. The script found **zero numeric `provider_cost` records** across these direct runs. Zero records means dollars are **unknown**, not zero dollars. Tokens are model/provider dependent; this report does not apply an invented tariff. **STRUCTURAL (source date: 2026-10-15):** without a price ledger, token counts cannot establish a dollar saving.
+The owner has **not** chosen a minimum worthwhile gain. Previous 15% proposals have no owner-backed valuation, and the model cannot choose a unique bar. Three **candidate owner choices** below show encounter wait needed for each modeled gain, using the ratio-proxy case above. Wait averaged over *all* dispatched tasks is one fifth of each cell. Choosing 5% accepts a small gain for changing authorization and recovery; choosing 30% demands more gain for that work. Fifteen percent is a middle discussion case, not a recommendation.
 
-The owner-supplied usage snapshot (`h4-our-usage.md`, collected 2026-10-15) reports all-repository worker launches by directory date: 299 on October 10, 636 on October 11, 566 on October 12, 558 on October 13, 593 on October 14 and 138 on partial October 15; its October 16 count reflects the UTC boundary. These are not accepted tasks. The same snapshot records 566,159 Durable Object requests on October 13 and 421,749 on October 14, with 1,175,856 cumulative requests against a one-million monthly inclusion. That is service volume, not a per-claim bill. Artifacts billing was absent. A future dollar comparison must attach actual billed marginal service and model costs to a task, including cached-token pricing and failed attempts.
+| Repository | 5% gain: wait min | 15% gain: wait min | 30% gain: wait min |
+|---|---:|---:|---:|
+| Concord | 1.1 | 3.4 | 6.8 |
+| agent-workflows | 2.6 | 7.9 | 15.8 |
+| gen-v-research-tools | 6.2 | 13.0 | 23.3 |
+| mwcc-rs | 2.7 | 8.2 | 16.3 |
+| gen-v-decomp | 1.5 | 4.6 | 9.1 |
 
-### Waiting and refusal
+These rows cannot select a default: rate and duration inputs are proxies, zero-conflict points are uncertain, and the denominator omits review, queue, landing, failed chains and task switching. The shipped [scenario CSV](../../../spikes/v3/c1/breakeven.csv) includes relative throughput percentages and all rate, wait, failure and residual-repair scenarios.
 
-No `status.json` in this direct scan yielded a claim-request-to-grant interval. The median `launch_held_seconds` is zero minutes in all five repositories (coverage: 1,225, 919, 390, 1,539, 3,092). This is **dispatcher hold**, not lease waiting. The declared-footprint study (`s5-declared-footprints.md` and its raw `s5-output.txt`, 2026-10-15) reports scope-refusal states of Concord 6/1,209, agent-workflows 10/989, gen-v-research-tools 17/597, mwcc-rs 742/1,900 and gen-v-decomp 518/3,456. A scope refusal means work tried to exceed the launcher Allowed-files list; its duration and the extra file needed are unrecorded. It is not a competing-lease refusal. **STRUCTURAL (source date: 2026-10-15):** these counts signal declaration/growth pressure but cannot be converted into wait minutes.
+## Decision and measurement plan
 
-The supplied claims-options history reports a separate Concord v2 episode on 2026-10-13 with 2,306 claim refusals and a draft count of 2,382 claims; another event-log study used 2,392 grant events. Their denominators are unreconciled, and the episode is not representative of all five repositories. The same source reports review waits of 3–218 minutes (median 37) in its renewal study, plus 75 of 121 inspections over five minutes. Those are **review/inspection phase** observations, not initial write-claim waiting. The five-minute lease default and exceptional extensions remain decisions; a review wait must not be silently charged as an exclusive edit wait. **STRUCTURAL (source dates: 2026-10-13 and 2026-10-15):** phase boundaries matter to the comparison.
+The owner should choose values *before* a comparison:
 
-The declared-footprint study counted 10,513 eligible runs, of which only 5,367 had locally diffable commits; 4,752 lacked a SHA and 394 could not be diffed. Its raw output prints 3,592,610 approximate interval pairs while its prose says 3,800,963. Raw declared overlaps (896,897) and changed-file overlaps (66,728) have different effective missingness: changed paths require diffable endpoints, while declarations do not. Intervals can be widened by directory timestamps. The launcher censored out-of-scope accepted diffs, and some labels are nested test fixtures or review placeholders. Therefore neither 25.0% declared overlap nor 1.9% changed overlap estimates the chance a task actually waits. **STRUCTURAL (source date: 2026-10-15):** a matched, event-time cohort is required.
+| Outcome from dispatch to accepted land | Value choice and current gap | Instrumentation |
+|---|---|---|
+| Finished tasks per agent-hour and end-to-end elapsed time | Choose the smallest useful accepted-task gain and whether slower wall time can be traded for capacity. The model informs active-time scenarios only. | Link dispatch, work, review, repair, failed attempts and accepted land on one task chain. |
+| Long waits: the 95th-percentile wait, below which 95% of waits fall, and starvation | Choose the longest tolerable tail wait and whether a mean gain can offset it. The model has no wait distribution. | Record request, refusal, wait entry/exit, grant, cancellation and task switching by unit and phase. |
+| Repair and compute spend | Choose acceptable added tokens, dollars and runner minutes, or a value exchange against saved idle minutes. No zero-increase rule is justified. | Price every attempt, cached tokens, provider tariffs, service bills and retries per accepted task. |
+| Human intervention and correctness | Choose acceptable human minutes/actions and an allowed rise, if any, in failed checks and reverts. Model prices neither. | Record human actions/minutes, checked merged trees, lost edits, failures, reverts and protected-asset violations. |
 
-## Replay evidence and its proper denominator
+A fair current-agent comparison would keep task bundles, landing checks, review rules and protected-asset checks fixed while changing writing exclusion, and retain unsuccessful chains. Choose the primary accepted-task outcome and the owner's smallest worthwhile gain first. Plan sample size from pilot variation; report uncertainty by repository and issue family (related tasks), including an analysis without research-tools. An uncertainty interval around gain—a range of values consistent with the sample—should exclude zero before claiming improvement. Excluding zero is an **evidence rule**; the smallest worthwhile gain is a separate **value choice**. Requiring the interval to exceed that gain would be stricter and need a larger study. For costs, human effort, failed checks and reverts, the owner should first set acceptable increases (**margins**). If an interval cannot rule out an increase beyond a margin, the result is **inconclusive** and does not support a general default change. Inconclusive is not proof of no increase. Safety rules such as fenced publication need direct checks even if a small sample has no failures. **Capability dependent:** current agents' repair speed and response to signals showing another active writer (presence signals) require a separately approved trial.
 
-The supplied conflict replay (`sp-f5-replay.md` and `sp-f5-output.txt`, 2026-10-15) selected overlapping **merged pull request pairs**, not agent tasks. It evaluated all 104 Concord pairs and 300 selected pairs in each other repository, with a deterministic rank from a larger universe. The file scheme blocked a pair when both final changes touched a path. Conditional conflict below is textual Git merge conflicts divided by file-blocked pairs. Its Wilson upper bound is a simple binomial calculation for sensitivity, **not** a defensible population interval: pairs share pull requests, repos are capped differently, and final heads may include later edits.
+The next collection should link task, issue family, run, unit and revision across claim request/grant/refusal, first edit, first publication, writing-hold release, review, queue, conflict, repair start/finish, human action and accepted land. Inventory existing event fields and report missing coverage by repository and phase before computing wait. Capture frozen path declarations, discovered files, grow requests and scope refusals; include abandoned and undiffable work so accepted diffs do not hide misses. Reconstruct only what each writer knew at task arrival, then build and check proposed merged trees. **Structural:** final changed-file replays cannot recover missing event times or agent behavior.
 
-| Repository | Evaluated pairs | File-blocked | Text conflicts | Conditional point / naive upper 95% |
-|---|---:|---:|---:|---:|
-| Concord | 104 | 18 | 0 | 0.0% / 17.6% |
-| agent-workflows | 300 | 118 | 0 | 0.0% / 3.2% |
-| gen-v-research-tools | 300 | 61 | 40 | 65.6% / 76.3% |
-| mwcc-rs | 300 | 19 | 0 | 0.0% / 16.8% |
-| gen-v-decomp | 300 | 25 | 0 | 0.0% / 13.3% |
+## For engineers
 
-All 40 textual conflicts came from gen-v-research-tools; 36 involved append-only index/log paths, seven code, and three docs, with overlap among classes. File blocking would also have stopped 201 textually clean pairs overall. A union merge removed 32 of 40 textual conflicts on allowlisted append-only logs, but it did not check ordering, duplicate semantics or the merged tree. Mergiraf resolved only 3 of 44 conflicted content files. No merged-tree builds, semantic checks, actual repair durations or abandoned work were measured. The replay's 1,865.89 **pairwise serial-delay hours** sum pull-request-open-to-merge intersections and can count one request repeatedly; they are emphatically **not** worker wait hours. The symbol and interface/body schemes largely widened to file scope because of extractor fallback, so their similar numbers are a test artifact. **STRUCTURAL (source date: 2026-10-15):** only textual overlap under these replay rules is established.
+Run the Python cost model with bytecode writing disabled from the checkout root. It writes only the output text and scenario CSV beside the script. The output includes coverage, states, token medians, repair-label breakdown and assumptions. Local sources read: *Our measured usage*, *Declared and actual worker footprints* and its raw output, *Larger lock-scheme replay* and its raw output, and *Concord v3: claim and lease options*. No web source or new agent run was used.
 
-## Expected cost per task
+## Review ledger
 
-Define **B** as minutes of normal worker session, **p** as the chance a dispatched task encounters another writer of a protected unit, **W** as minutes that an exclusive claimant must wait on such an encounter, **c** as the chance that parallel work causes a repair-worthy conflict given that encounter, **R** as minutes for one repair attempt, and **f** as the chance that attempt fails and a whole new B-minute run is needed. Assume a single predecessor, at most one repair and one restart, equal inspection/landing cost, no alternate productive task during W, and no additional human or compute charge. These are explicit simplifying assumptions; none establishes accepted throughput.
+Each finding is fixed in the named section. A corrected gap states how to gather evidence; it does not claim that evidence now exists. Related findings share repairs.
 
-> Exclusive minutes/task = B + p × W. Optimistic minutes/task = B + p × c × (R + f × B). Break-even wait W* = c × (R + f × B), for p greater than zero.
-
-The script sets B to each repository's measured all-session median and R to its repair-labeled median. The replay conditional fraction supplies **c as a proxy**, with its naive upper bound as a second sensitivity case. The CSV varies unmeasured p over 5%, 20% and 50%; W over 5, 15, 30 and 60 minutes; f over 0%, 10% and 25%. These are **scenarios, not observations**. If p is zero, neither policy wins on this mechanism. If idle agents can switch to another useful task, replace W with the *unproductive* portion of wait. If repair can repeat, replace R + fB with the measured expected retry chain. If optimism needs more merge or check work, add its cost to the optimistic side. If a lease can block more than one unit or predecessor, a task-level encounter model needs a queue simulation. **STRUCTURAL (source date: 2026-10-15):** this algebra identifies the missing inputs but cannot infer them from PR-open intervals.
-
-At **f = 10%**, the table shows W* in minutes for each repository. It is independent of p in this one-encounter model; p scales the absolute gain. The upper column is a stress case, not a confidence claim about live conflicts.
-
-| Repository | B / R minutes | Point W* | Naive-upper W* | At p = 20%, W = 15 minutes: gain minutes/task, point / upper |
-|---|---:|---:|---:|---:|
-| Concord | 4.5 / 7.1 | 0.0 | 1.3 | 3.000 / 2.733 |
-| agent-workflows | 10.6 / 19.7 | 0.0 | 0.7 | 3.000 / 2.869 |
-| gen-v-research-tools | 13.2 / 11.8 | 8.6 | 10.0 | 1.276 / 0.995 |
-| mwcc-rs | 10.9 / 15.7 | 0.0 | 2.8 | 3.000 / 2.437 |
-| gen-v-decomp | 6.1 / 10.3 | 0.0 | 1.5 | 3.000 / 2.710 |
-
-For example, the gen-v-research-tools point case charges roughly 0.656 × (11.8 + 0.10 × 13.2) = 8.6 minutes per encounter to parallel work. At a 15-minute exclusive wait and 20% encounters, that leaves about 1.28 minutes saved per dispatched task. At a five-minute wait, **exclusive wins** in that scenario. A zero-conflict point row says only that the selected replay found no textual conflict; use the upper row or a larger, task-linked sample for planning. The CSV contains all 360 cases, their expected minutes, gain and illustrative tasks per continuously occupied agent-hour. That throughput denominator excludes human time, queue/review/land latency, failures not linked to repair, and task switching. It must not be reported as measured accepted throughput.
-
-## Value threshold and remaining evidence
-
-The proposed **15% accepted-tasks-per-agent-hour lower-bound threshold** and **zero-increase token, dollar and human-action guardrails** are judgments about minimum worthwhile improvement under uncertainty, not owner decisions or numbers fitted to this replay. For the three cost guardrails, require an upper cluster interval bound at or below zero change before claiming a saving; if their intervals cross zero, say the cost result is inconclusive. I recommend retaining exclusive writing claims unless a controlled current-agent comparison clears the value bar across repositories, while preserving fence and revision checks and separately checking failed checks, reverts and protected-asset correctness. The owner should set the smallest valuable gain, allowable cost tradeoffs and a noninferiority margin for correctness **before** the comparison. An inconclusive interval or a gain concentrated in append-only logs does not justify a general default change. Human intervention should be counted as owner minutes plus requests per 100 accepted tasks. Tokens and dollars should be compared on complete accepted task chains, including repairs and aborted runs. **CAPABILITY-DEPENDENT (source date: 2026-10-15; re-test with current agents):** repair productivity and use of presence/wait signals need a live test. **STRUCTURAL (source date: 2026-10-15):** protected publication must still be fenced and the final merged tree checked.
-
-Every material gap has a concrete measurement path:
-
-1. **Claim waiting and overlap:** log claim request, unit/policy, holder, grant/refusal, wait enter/leave, first edit, first publish and released writing hold with event timestamps and run/revision IDs. Preserve a no-claim comparator with identical landing checks. This yields task-level p and **unproductive** W, including p95 and starvation.
-2. **Scope misses and failed tasks:** capture frozen issue text, declared units, discovered units/time, grow request/outcome, refused-scope paths, retries and abandoned attempts. Distinguish policy denial from contention. Include unsuccessful work and exact changed units rather than conditioning on diffable successful commits.
-3. **Repair and failure:** link conflict record, source paths/classes, predecessor and both revisions to repair start/end, number of attempts, checker result, accepted land, revert and human action. Distinguish ordinary review repairs from textual conflict repairs and semantic breakage. This estimates c, R, f and full task chains.
-4. **Cost:** record model and provider tariff version, input/cached/output tokens, actual provider bill, runner minutes, Cloudflare marginal bill and human minutes for every attempt. Carry these through retries and review so a saved wait can be priced against extra compute.
-5. **Validity:** replay only information available at task arrival, use matched both-diffable pairs, separate append-only logs from code and semantic dependencies, and run full required checks on prospective merged trees. Estimate uncertainty by repository and issue family, including a result excluding gen-v-research-tools. A small zero-conflict sample cannot certify safe optimistic publication.
-
-Reproduce with `PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c1/cost_model.py` from the repository root. It writes only `spikes/v3/c1/output.txt` and `spikes/v3/c1/breakeven.csv`. The exact targeted validation is `python3 spikes/v3/c1/cost_model.py > /dev/null` with `PYTHONDONTWRITEBYTECODE=1` in the environment, followed by `wc -w docs/spikes/v3/c1-cost-model.md`. No network source or new agent run was used. The selected inputs were read in full locally; the deeper v2 episode is cited through the supplied claims-options synthesis, not re-fetched.
+| Finding | Disposition and location |
+|---|---|
+| O1 | fixed — Cost model and gain bars: throughput, candidate choices and wait thresholds; see R2. |
+| O2 | fixed — Decision and measurement plan: four owner values and measurements. |
+| O3 | fixed — Decision and measurement plan: cost margins and inconclusive rule. |
+| O4 | fixed — Cost model: separate encounter rates and exclusive repair; see R1. |
+| O5 | fixed — What was measured: review exclusion, label breakdown and rebase proxy. |
+| O6 | fixed — Plain answer, worked example, definitions and engineering appendix; see R7. |
+| O7 | fixed — What was measured and script: older run layout and untimed coverage. |
+| O8 | fixed — Waiting and dollars and script: object-form dollar costs, empty tariffs. |
+| O9 | fixed — Waiting and dollars: lease events, retry caveat and audit path. |
+| O10 | fixed — Cost model and CSV: union-log case and safety caveat. |
+| O11 | fixed — Plain answer and replay: advantage comes from model scenarios. |
+| O12 | fixed — Waiting and dollars: service requests excluded from claim cost. |
+| O13 | fixed — Script output and shipped CSV: source names and percentage gains. |
+| R1 | fixed — Alternatives and Cost model: exclusive post-publication repair. |
+| R2 | fixed — Cost model and gain bars: no asserted 15% bar; correct target formula. |
+| R3 | fixed — What was measured: mixed-session medians are scenario proxies. |
+| R4 | fixed — What was measured and script: exact classifier and kind search. |
+| R5 | fixed — Replay paragraph: later creation to earlier merge. |
+| R6 | fixed — Waiting and dollars: script does not extract lease waits. |
+| R7 | fixed — Plain answer, alternatives and measurement plan: terms in words. |

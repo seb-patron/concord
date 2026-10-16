@@ -1,51 +1,57 @@
-C1 cost model — local evidence cutoff 2026-10-15 UTC
+Claim cost model — local evidence cutoff 2026-10-15 UTC
 Command: PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c1/cost_model.py
-Inputs: direct-child status.json and usage.json in five local agent-runs repo directories; S5 and SP-F5 constants cited in script.
-Formula minutes/task: exclusive=B+p*W; optimistic=B+p*c*(R+f*B); positive exclusive-optimistic favors optimistic.
-p=task overlap probability (scenario); W=wait minutes if overlapped; c=textual conflict conditional on file-blocked sampled PR pair (proxy); R=repair minutes (repair-labeled run median proxy); f=repair failure probability (scenario); B=all worker-session median minutes.
-Assumptions: one predecessor, one repair, failed repair requires one fresh base run; equal queue/check costs; agent-active capacity, no alternate useful task while waiting; no human or compute price assigned.
-Neither the PR replay nor S5 measured p, W, R for actual conflicts, f, or changes in accepted land quality. Zero conflicts is a point estimate, not proof of zero risk.
-SP-F5 pairwise serial delay is PR-open-to-merge accounting, not claim wait; excluded from W.
-S5 printed 3,592,610 interval pairs, while its prose says 3,800,963; denominators and undiffable endpoints differ. Neither supplies p.
+Inputs: direct-child run records in five repositories, the declared-footprint study, and the merged-pull-request conflict replay.
+Idealized minutes/dispatch: exclusive=B+p_claim*W+A_exclusive; parallel=B+p_change*c*(R+f*B). A_exclusive is residual post-publication repair per task.
+p_claim and p_change are separate task encounter rates; W is unproductive claim wait; c is replay textual-conflict fraction among file-blocked pairs (proxy); R is mixed repair-label duration (proxy); f is unmeasured repair-failure chance; B is mixed-session median (proxy).
+Assumptions: one predecessor, one repair and at most one failed-repair restart; equal queue/check costs; no alternate useful task during wait; no human/compute prices. Zero A_exclusive is an idealization, not current-policy evidence.
+Neither study measured task encounter rates, claim wait, actual conflict repair, repair failure, or accepted land quality. A zero conflict count is not zero risk.
+The replay's pairwise serial delay is from the later request's creation to the earlier request's merge, not their intersection or agent wait.
+The footprint study printed 3,592,610 interval pairs while its prose says 3,800,963; changed-path coverage differs from declared-path coverage. Its ratio is sensitivity only.
+A negative break-even wait in the CSV means parallel work wins in that scenario even with zero claim waiting; it is not a negative observed wait.
 
 [concord]
-direct-child runs=1225; excluded wrong/malformed status=0; calendar days first-to-last=5 mean runs/day=245.0; run days=20261011:271, 20261012:251, 20261013:297, 20261014:295, 20261015:111
+direct-child runs=1225; missing usage.json=20; excluded wrong/malformed status=0; calendar days first-to-last=5 mean runs/day=245.0; run days=20261011:271, 20261012:251, 20261013:297, 20261014:295, 20261015:111
 states={'reviewed': 476, 'no-push': 274, 'pr-opened': 219, 'blocked': 103, 'validation-failed': 67, 'agent-failed': 59, 'launch-failed': 11, 'refused-scope': 6, 'refused-coverage': 5, 'orphaned': 2, 'push-failed': 1, 'running': 1, 'refused-config': 1}
-session duration (usage timestamps) n=1205 median_min=4.5 p90_min=18.4; repair-labeled runs=253 duration_n=253 median_min=7.1 p90_min=16.9; retry_of=57
-complete usage files=1146; median input_tokens=2035354 cached_input_tokens=1951936 output_tokens=13585; provider dollar n=0 median=n/a
-launcher held n=1225 median_min=0.0 (dispatch delay, not lease wait); S5 scope-refusal status=6/1209 (not lease refusal)
-SP-F5 sampled PR pairs=104, file-blocked=18, textual conflicts=0; c proxy=0.000, naive Wilson upper95=0.176; repair R for CSV=7.1 (measured label proxy), B=4.5
+mixed-session duration n=1205 median_min=4.5 p90_min=18.4; repair-labeled runs=232 duration_n=232 median_min=7.8 p90_min=17.9; retry links=57
+repair labels by category={'other/target pull request': 192, 'retry': 3, 'rebase/conflict': 37}; rebase/conflict timed n=37 median_min=4.6; review-starting labels excluded
+complete usage files=1146; median input_tokens=2035354 cached_input_tokens=1951936 output_tokens=13585; provider dollar n=2 median=0.0561; null tariff files=1205
+dispatcher hold n=1225 median_min=0.0 (not claim wait); declared-footprint study scope-refusal status=6/1209 (not lease refusal)
+merged-pull-request replay pairs=104, file-blocked=18, textual conflicts=0; conflict proxy=0.000, naive Wilson upper95 sensitivity=0.176; R proxy=7.8, B proxy=4.5; footprint changed/declared ratio proxy=0.157
 
 [agent-workflows]
-direct-child runs=984; excluded wrong/malformed status=0; calendar days first-to-last=23 mean runs/day=42.8; run days=20260922:3, 20260923:35, 20260924:34, 20260925:23, 20260926:22, 20260927:19, 20260928:13, 20260929:49, 20260930:134, 20261001:142, 20261002:74, 20261003:61, 20261004:1, 20261008:48, 20261009:47, 20261010:48, 20261011:24, 20261012:16, 20261013:112, 20261014:79
-states={'reviewed': 333, 'pr-opened': 304, 'validation-failed': 142, 'blocked': 52, 'agent-failed': 48, 'no-push': 36, 'deadline-exceeded': 24, 'launch-failed': 13, 'refused-scope': 9, 'refused-outcome': 6, 'refused-coverage': 4, 'running': 3, 'refused-config': 3, 'orphaned': 2, 'pushed': 1, 'auth-failed': 1, 'cancelled': 1, 'deadline-error': 1, 'refused-dirty': 1}
-session duration (usage timestamps) n=958 median_min=10.6 p90_min=55.9; repair-labeled runs=271 duration_n=270 median_min=19.7 p90_min=58.0; retry_of=95
-complete usage files=885; median input_tokens=2330528 cached_input_tokens=2244352 output_tokens=13785; provider dollar n=0 median=n/a
-launcher held n=919 median_min=0.0 (dispatch delay, not lease wait); S5 scope-refusal status=10/989 (not lease refusal)
-SP-F5 sampled PR pairs=300, file-blocked=118, textual conflicts=0; c proxy=0.000, naive Wilson upper95=0.032; repair R for CSV=19.7 (measured label proxy), B=10.6
+direct-child runs=986; missing usage.json=28; excluded wrong/malformed status=0; calendar days first-to-last=23 mean runs/day=42.9; run days=20260922:5, 20260923:35, 20260924:34, 20260925:23, 20260926:22, 20260927:19, 20260928:13, 20260929:49, 20260930:134, 20261001:142, 20261002:74, 20261003:61, 20261004:1, 20261008:48, 20261009:47, 20261010:48, 20261011:24, 20261012:16, 20261013:112, 20261014:79
+states={'reviewed': 333, 'pr-opened': 304, 'validation-failed': 143, 'blocked': 52, 'agent-failed': 48, 'no-push': 36, 'deadline-exceeded': 24, 'launch-failed': 13, 'refused-scope': 10, 'refused-outcome': 6, 'refused-coverage': 4, 'running': 3, 'refused-config': 3, 'orphaned': 2, 'pushed': 1, 'auth-failed': 1, 'cancelled': 1, 'deadline-error': 1, 'refused-dirty': 1}
+mixed-session duration n=958 median_min=10.6 p90_min=55.9; repair-labeled runs=277 duration_n=276 median_min=20.1 p90_min=65.3; retry links=95
+repair labels by category={'other/target pull request': 255, 'retry': 14, 'review fix': 7, 'rebase/conflict': 1}; rebase/conflict timed n=1 median_min=22.7; review-starting labels excluded
+complete usage files=885; median input_tokens=2330528 cached_input_tokens=2244352 output_tokens=13785; provider dollar n=0 median=n/a; null tariff files=958
+dispatcher hold n=919 median_min=0.0 (not claim wait); declared-footprint study scope-refusal status=10/989 (not lease refusal)
+merged-pull-request replay pairs=300, file-blocked=118, textual conflicts=0; conflict proxy=0.000, naive Wilson upper95 sensitivity=0.032; R proxy=20.1, B proxy=10.6; footprint changed/declared ratio proxy=0.285
 
 [gen-v-research-tools]
-direct-child runs=542; excluded wrong/malformed status=0; calendar days first-to-last=12 mean runs/day=45.2; run days=20260920:2, 20260922:16, 20260923:99, 20260924:93, 20260925:41, 20260926:42, 20260927:109, 20260928:32, 20260929:34, 20260930:30, 20261001:44
-states={'pr-opened': 218, 'no-push': 168, 'reviewed': 54, 'validation-failed': 21, 'blocked': 17, 'refused-scope': 15, 'deadline-exceeded': 12, 'launch-failed': 9, 'cancelled': 8, 'agent-failed': 7, 'push-failed': 5, 'refused-dirty': 2, 'refused-outcome': 2, 'refused-coverage': 2, 'deadline-error': 1, 'running': 1}
-session duration (usage timestamps) n=510 median_min=13.2 p90_min=42.5; repair-labeled runs=227 duration_n=226 median_min=11.8 p90_min=34.4; retry_of=44
-complete usage files=476; median input_tokens=4383168 cached_input_tokens=4229345 output_tokens=31820; provider dollar n=0 median=n/a
-launcher held n=390 median_min=0.0 (dispatch delay, not lease wait); S5 scope-refusal status=17/597 (not lease refusal)
-SP-F5 sampled PR pairs=300, file-blocked=61, textual conflicts=40; c proxy=0.656, naive Wilson upper95=0.763; repair R for CSV=11.8 (measured label proxy), B=13.2
+direct-child runs=605; missing usage.json=95; excluded wrong/malformed status=0; calendar days first-to-last=16 mean runs/day=37.8; run days=20260916:6, 20260917:27, 20260920:6, 20260921:2, 20260922:40, 20260923:99, 20260924:93, 20260925:41, 20260926:42, 20260927:109, 20260928:32, 20260929:34, 20260930:30, 20261001:44
+states={'pr-opened': 267, 'no-push': 168, 'reviewed': 54, 'validation-failed': 21, 'refused-scope': 17, 'blocked': 17, 'deadline-exceeded': 12, 'launch-failed': 9, 'agent-failed': 8, 'push-failed': 8, 'cancelled': 8, 'running': 7, 'refused-dirty': 2, 'refused-outcome': 2, 'refused-coverage': 2, 'refused-config': 1, 'refused-moved': 1, 'deadline-error': 1}
+mixed-session duration n=510 median_min=13.2 p90_min=42.5; repair-labeled runs=227 duration_n=226 median_min=11.8 p90_min=34.4; retry links=44
+repair labels by category={'review fix': 220, 'other/target pull request': 7}; rebase/conflict timed n=0 median_min=n/a; review-starting labels excluded
+complete usage files=476; median input_tokens=4383168 cached_input_tokens=4229345 output_tokens=31820; provider dollar n=0 median=n/a; null tariff files=510
+dispatcher hold n=390 median_min=0.0 (not claim wait); declared-footprint study scope-refusal status=17/597 (not lease refusal)
+merged-pull-request replay pairs=300, file-blocked=61, textual conflicts=40; conflict proxy=0.656, naive Wilson upper95 sensitivity=0.763; R proxy=11.8, B proxy=13.2; footprint changed/declared ratio proxy=0.317
 
 [mwcc-rs]
-direct-child runs=1905; excluded wrong/malformed status=0; calendar days first-to-last=22 mean runs/day=86.6; run days=20260923:225, 20260924:318, 20260925:56, 20260926:167, 20260927:171, 20260928:102, 20260929:72, 20260930:24, 20261001:115, 20261002:57, 20261008:98, 20261009:113, 20261010:52, 20261011:137, 20261012:118, 20261013:48, 20261014:32
+direct-child runs=1905; missing usage.json=60; excluded wrong/malformed status=0; calendar days first-to-last=22 mean runs/day=86.6; run days=20260923:225, 20260924:318, 20260925:56, 20260926:167, 20260927:171, 20260928:102, 20260929:72, 20260930:24, 20261001:115, 20261002:57, 20261008:98, 20261009:113, 20261010:52, 20261011:137, 20261012:118, 20261013:48, 20261014:32
 states={'refused-scope': 742, 'no-push': 411, 'pr-opened': 317, 'blocked': 166, 'validation-failed': 61, 'reviewed': 53, 'deadline-exceeded': 51, 'agent-failed': 41, 'refused-outcome': 26, 'cancelled': 16, 'refused-start-unverified': 5, 'launch-failed': 4, 'orphaned': 3, 'pushed': 2, 'refused-dirty': 2, 'auth-failed': 1, 'refused-config': 1, 'refused-coverage': 1, 'running': 1, 'push-failed': 1}
-session duration (usage timestamps) n=1845 median_min=10.9 p90_min=51.7; repair-labeled runs=367 duration_n=362 median_min=15.7 p90_min=54.5; retry_of=97
-complete usage files=1680; median input_tokens=3275742 cached_input_tokens=3152192 output_tokens=20498; provider dollar n=0 median=n/a
-launcher held n=1539 median_min=0.0 (dispatch delay, not lease wait); S5 scope-refusal status=742/1900 (not lease refusal)
-SP-F5 sampled PR pairs=300, file-blocked=19, textual conflicts=0; c proxy=0.000, naive Wilson upper95=0.168; repair R for CSV=15.7 (measured label proxy), B=10.9
+mixed-session duration n=1845 median_min=10.9 p90_min=51.7; repair-labeled runs=370 duration_n=365 median_min=15.6 p90_min=54.5; retry links=97
+repair labels by category={'review fix': 326, 'retry': 15, 'other/target pull request': 29}; rebase/conflict timed n=0 median_min=n/a; review-starting labels excluded
+complete usage files=1680; median input_tokens=3275742 cached_input_tokens=3152192 output_tokens=20498; provider dollar n=0 median=n/a; null tariff files=1845
+dispatcher hold n=1539 median_min=0.0 (not claim wait); declared-footprint study scope-refusal status=742/1900 (not lease refusal)
+merged-pull-request replay pairs=300, file-blocked=19, textual conflicts=0; conflict proxy=0.000, naive Wilson upper95 sensitivity=0.168; R proxy=15.6, B proxy=10.9; footprint changed/declared ratio proxy=0.047
 
 [gen-v-decomp]
-direct-child runs=3463; excluded wrong/malformed status=0; calendar days first-to-last=22 mean runs/day=157.4; run days=20260923:265, 20260924:307, 20260925:154, 20260926:149, 20260927:239, 20260928:184, 20260929:240, 20260930:128, 20261001:283, 20261002:111, 20261003:9, 20261004:11, 20261006:194, 20261007:149, 20261008:152, 20261009:176, 20261010:199, 20261011:194, 20261012:155, 20261013:73, 20261014:91
+direct-child runs=3463; missing usage.json=55; excluded wrong/malformed status=0; calendar days first-to-last=22 mean runs/day=157.4; run days=20260923:265, 20260924:307, 20260925:154, 20260926:149, 20260927:239, 20260928:184, 20260929:240, 20260930:128, 20261001:283, 20261002:111, 20261003:9, 20261004:11, 20261006:194, 20261007:149, 20261008:152, 20261009:176, 20261010:199, 20261011:194, 20261012:155, 20261013:73, 20261014:91
 states={'reviewed': 1218, 'pr-opened': 962, 'refused-scope': 518, 'no-push': 389, 'validation-failed': 115, 'blocked': 115, 'agent-failed': 54, 'deadline-exceeded': 23, 'refused-outcome': 20, 'cancelled': 14, 'orphaned': 8, 'refused-start-unverified': 7, 'refused-coverage': 7, 'deadline-error': 4, 'push-failed': 2, 'launch-failed': 2, 'refused-dirty': 1, 'auth-failed': 1, 'refused-config': 1, 'running': 1, 'pushed': 1}
-session duration (usage timestamps) n=3408 median_min=6.1 p90_min=22.2; repair-labeled runs=782 duration_n=778 median_min=10.3 p90_min=24.4; retry_of=128
-complete usage files=3328; median input_tokens=1654919 cached_input_tokens=1564480 output_tokens=14654; provider dollar n=0 median=n/a
-launcher held n=3092 median_min=0.0 (dispatch delay, not lease wait); S5 scope-refusal status=518/3456 (not lease refusal)
-SP-F5 sampled PR pairs=300, file-blocked=25, textual conflicts=0; c proxy=0.000, naive Wilson upper95=0.133; repair R for CSV=10.3 (measured label proxy), B=6.1
+mixed-session duration n=3408 median_min=6.1 p90_min=22.2; repair-labeled runs=781 duration_n=777 median_min=10.3 p90_min=24.4; retry links=128
+repair labels by category={'review fix': 569, 'other/target pull request': 196, 'retry': 15, 'rebase/conflict': 1}; rebase/conflict timed n=1 median_min=7.7; review-starting labels excluded
+complete usage files=3328; median input_tokens=1654919 cached_input_tokens=1564480 output_tokens=14654; provider dollar n=1 median=0.0853; null tariff files=3408
+dispatcher hold n=3092 median_min=0.0 (not claim wait); declared-footprint study scope-refusal status=518/3456 (not lease refusal)
+merged-pull-request replay pairs=300, file-blocked=25, textual conflicts=0; conflict proxy=0.000, naive Wilson upper95 sensitivity=0.133; R proxy=10.3, B proxy=6.1; footprint changed/declared ratio proxy=0.031
 
-CSV rows=360; p/W/f are explicit sensitivity scenarios, not estimated live rates.
+CSV rows=1584; encounter rates, wait, failure and residual repair are sensitivity scenarios, not live estimates. Relative throughput is illustrative agent-active throughput, not accepted landings.
