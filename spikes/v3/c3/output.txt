@@ -1,0 +1,42 @@
+Blind footprint growth scenario; local source snapshot 2026-10-15
+All numbers below are simulated counts in arbitrary file-touch units, not observed seconds.
+Input: first issue-linked launcher attempt per repository/issue family, with diffable base and candidate, nonempty diff and declared set; up to 40 chronological tasks per repository.
+Order source: separate commits in base..candidate if more than one; otherwise alphabetical changed-file order (assumption). Sensitivity reverses assumed order for every second task in a window.
+Arrival: tasks start together in chronological, nonoverlapping windows of N from one repository; agent IDs define deterministic claim tie order.
+One file first touch costs one unit. File leases remain held until task completion. All-up-front atomically requests its complete Allowed-file set.
+Grow requests the next changed file just before its first touch and retains prior claims. This trace gives perfect discovery of required files; real discovery is uncertain.
+A denied request counts once per uninterrupted wait; each waiting agent-tick adds one wait unit. On a grow wait cycle, the youngest task releases all claims, loses completed file work, and restarts after one tick.
+No declaration has zero lease wait/denial/deadlock by definition. Every overlapping actual-file pair in a concurrent window incurs an assumed two-unit repair cost, added to makespan; this is an estimate, not observed repair.
+Every policy uses the same task windows; no publish/review, renewal, expiry, merge, symbol claims, staggered arrivals, or agent adaptation is modeled.
+Frozen source cutoff: 2026-10-16T00:42:28+00:00. Input tasks: 281 in 13 repositories; selected order provenance: {"alphabetical_assumption": 281}; skips: {"diff_outside_declared": 15, "empty_diff": 1, "undiffable_first_attempt": 161}.
+
+Concurrency: 2 agents; 138 windows; 276 task placements
+  Order scenario: alphabetical
+    all: makespan=845, file_work=1149, wait_agent_ticks=122, denials=35, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    grow: makespan=833, file_work=1149, wait_agent_ticks=81, denials=30, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    none: makespan=827, file_work=1149, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, repair_events=34, repair_units=68
+  Order scenario: alternating_reverse
+    all: makespan=845, file_work=1149, wait_agent_ticks=122, denials=35, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    grow: makespan=808, file_work=1181, wait_agent_ticks=33, denials=23, deadlocks=9, restart_lost_file_work=32, repair_events=0, repair_units=0
+    none: makespan=827, file_work=1149, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, repair_events=34, repair_units=68
+
+Concurrency: 5 agents; 54 windows; 270 task placements
+  Order scenario: alphabetical
+    all: makespan=614, file_work=1106, wait_agent_ticks=553, denials=77, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    grow: makespan=588, file_work=1106, wait_agent_ticks=350, denials=72, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    none: makespan=675, file_work=1106, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, repair_events=127, repair_units=254
+  Order scenario: alternating_reverse
+    all: makespan=614, file_work=1106, wait_agent_ticks=553, denials=77, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    grow: makespan=573, file_work=1167, wait_agent_ticks=261, denials=93, deadlocks=18, restart_lost_file_work=61, repair_events=0, repair_units=0
+    none: makespan=675, file_work=1106, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, repair_events=127, repair_units=254
+
+Concurrency: 10 agents; 27 windows; 270 task placements
+  Order scenario: alphabetical
+    all: makespan=515, file_work=1106, wait_agent_ticks=1256, denials=106, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    grow: makespan=491, file_work=1106, wait_agent_ticks=810, denials=103, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    none: makespan=842, file_work=1106, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, repair_events=279, repair_units=558
+  Order scenario: alternating_reverse
+    all: makespan=515, file_work=1106, wait_agent_ticks=1256, denials=106, deadlocks=0, restart_lost_file_work=0, repair_events=0, repair_units=0
+    grow: makespan=468, file_work=1195, wait_agent_ticks=637, denials=143, deadlocks=27, restart_lost_file_work=89, repair_events=0, repair_units=0
+    none: makespan=842, file_work=1106, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, repair_events=279, repair_units=558
+
