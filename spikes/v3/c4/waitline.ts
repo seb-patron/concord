@@ -14,6 +14,7 @@ export interface WaitRecord {
   id: string; agent: string; changeId: string; token: string; requestKey: string; units: string[];
   sequence: number; createdAt: number; deadline: number; state: WaitState;
   turnDeadline?: number; grantCount: number; leaseId?: string; grantedAt?: number;
+  authorizedAtGrant?: boolean; onlineAtGrant?: boolean;
 }
 export interface LeaseRecord {
   id: string; agent: string; units: string[]; grantedAt: number; expiresAt: number;
@@ -52,7 +53,8 @@ export class WaitLine {
   private nextWait = 1;
   private nextLease = 1;
   private readonly auth = new Map<string, { valid: boolean; principal?: string }>();
-  private readonly requestResults = new Map<string, { units: string[]; result: ClaimResult }>();
+  private readonly requestResults = new Map<string, { units: string[]; changeId: string; result: ClaimResult }>();
+  private readonly online = new Map<string, boolean>();
   private readonly waitMs: number;
   private readonly turnMs: number;
   private readonly leaseMs: number;
@@ -63,6 +65,7 @@ export class WaitLine {
     this.leaseMs = options.leaseMs ?? 20_000;
   }
   registerToken(token: string): void { this.auth.set(token, { valid: true }); }
+  setOnline(agent: string, online: boolean): void { this.online.set(agent, online); }
   revokeToken(token: string): void { const entry = this.auth.get(token); if (entry) entry.valid = false; }
   isAuthenticated(token: string, principal?: string): boolean {
     const entry = this.auth.get(token);
@@ -74,25 +77,31 @@ export class WaitLine {
   claim(agent: string, token: string, units: string[], requestKey: string, waitId?: string, changeId = agent): ClaimResult {
     this.calls++; this.advanceTime(0);
     if (!this.isAuthenticated(token, agent)) return { kind: "rejected", waitId };
+    if (this.online.get(agent) === false) return { kind: "rejected", waitId };
     const normalized = [...new Set(units.map(canonical))].sort();
     if (!normalized.length) return { kind: "rejected" };
-    if (waitId) return this.freshClaim(agent, token, waitId, normalized);
+    if (waitId) return this.freshClaim(agent, token, waitId, normalized, changeId);
     const requestId = `${agent}\u0000${requestKey}`;
     const prior = this.requestResults.get(requestId);
-    if (prior) return sameUnits(prior.units, normalized) ? cloneResult(prior.result) : { kind: "rejected" };
+    if (prior) return sameUnits(prior.units, normalized) && prior.changeId === changeId ? cloneResult(prior.result) : { kind: "rejected" };
+
+    // A queued request cannot be bypassed by acquiring a different writing hold.
+    const existing = this.liveWaits().find(w => w.agent === agent && w.changeId === changeId && sameUnits(w.units, normalized));
+    if (existing) return this.remember(requestId, normalized, changeId, { kind: existing.state === "turn" ? "turn" : "queued", waitId: existing.id, units: [...normalized] });
+    if (this.liveWaits().some(w => w.agent === agent && w.state !== "granted")) {
+      return this.remember(requestId, normalized, changeId, { kind: "rejected" });
+    }
 
     // The prototype forbids hold-and-wait. Published holds do not block and may coexist.
     if ([...this.leases.values()].some(l => l.agent === agent && l.phase === "writing")) {
-      return this.remember(requestId, normalized, { kind: "rejected" });
+      return this.remember(requestId, normalized, changeId, { kind: "rejected" });
     }
     const earlier = this.liveWaits().some(w => unitsOverlap(w.units, normalized));
     if (!earlier && this.available(normalized)) {
       const lease = this.grant(agent, normalized);
-      return this.remember(requestId, normalized, { kind: "granted", leaseId: lease.id, units: [...normalized] });
+      return this.remember(requestId, normalized, changeId, { kind: "granted", leaseId: lease.id, units: [...normalized] });
     }
     // One live waiter per agent and normalized unit set, independent of retry key.
-    const existing = this.liveWaits().find(w => w.agent === agent && w.changeId === changeId && sameUnits(w.units, normalized));
-    if (existing) return this.remember(requestId, normalized, { kind: existing.state === "turn" ? "turn" : "queued", waitId: existing.id, units: [...normalized] });
     const wait: WaitRecord = {
       id: `w${this.nextWait++}`, agent, changeId, token, requestKey, units: normalized,
       sequence: ++this.sequence, createdAt: this.now, deadline: this.now + this.waitMs,
@@ -101,7 +110,7 @@ export class WaitLine {
     this.waits.set(wait.id, wait);
     this.events.push({ at: this.now, type: "queued", waitId: wait.id, agent });
     const result = { kind: "queued" as const, waitId: wait.id, units: [...normalized] };
-    this.requestResults.set(requestId, { units: normalized, result });
+    this.requestResults.set(requestId, { units: normalized, changeId, result });
     this.advance();
     return cloneResult(result);
   }
@@ -153,12 +162,13 @@ export class WaitLine {
     }
   }
 
-  private remember(key: string, units: string[], result: ClaimResult): ClaimResult {
-    this.requestResults.set(key, { units: [...units], result: cloneResult(result) }); return cloneResult(result);
+  private remember(key: string, units: string[], changeId: string, result: ClaimResult): ClaimResult {
+    this.requestResults.set(key, { units: [...units], changeId, result: cloneResult(result) }); return cloneResult(result);
   }
-  private freshClaim(agent: string, token: string, waitId: string, units: string[]): ClaimResult {
+  private freshClaim(agent: string, token: string, waitId: string, units: string[], changeId: string): ClaimResult {
     const wait = this.waits.get(waitId);
-    if (!wait || wait.agent !== agent || !sameUnits(wait.units, units) || wait.state !== "turn" || (wait.turnDeadline ?? 0) <= this.now) return { kind: "rejected", waitId };
+    if (!wait || wait.agent !== agent || wait.changeId !== changeId || !sameUnits(wait.units, units) || wait.state !== "turn" || (wait.turnDeadline ?? 0) <= this.now) return { kind: "rejected", waitId };
+    if ([...this.leases.values()].some(l => l.agent === agent && l.phase === "writing")) return { kind: "rejected", waitId };
     if (!this.isAuthenticated(token, agent) || !this.available(wait.units)) return { kind: "rejected", waitId };
     const lease = this.grant(agent, wait.units, wait.id);
     return { kind: "granted", waitId, leaseId: lease.id, units: [...wait.units] };
@@ -166,6 +176,8 @@ export class WaitLine {
   private grant(agent: string, units: string[], waitId?: string): LeaseRecord {
     if (waitId) {
       const wait = this.waits.get(waitId)!; wait.grantCount++; wait.state = "granted"; wait.grantedAt = this.now;
+      wait.authorizedAtGrant = this.isAuthenticated(wait.token, wait.agent);
+      wait.onlineAtGrant = this.online.get(wait.agent) ?? true;
     }
     const lease: LeaseRecord = { id: `l${this.nextLease++}`, agent, units: [...units], grantedAt: this.now, expiresAt: this.now + this.leaseMs, waitId, phase: "writing" };
     this.leases.set(lease.id, lease);
@@ -192,7 +204,7 @@ export class WaitLine {
   private advance(): void {
     for (const wait of this.liveWaits()) {
       const earlierOverlap = this.liveWaits().some(prior => prior.sequence < wait.sequence && unitsOverlap(prior.units, wait.units));
-      if (earlierOverlap || !this.available(wait.units) || wait.state === "turn") continue;
+      if (earlierOverlap || !this.available(wait.units) || wait.state === "turn" || [...this.leases.values()].some(l => l.agent === wait.agent && l.phase === "writing")) continue;
       if (this.mode === "automatic") {
         // Faithful to the original wait-queue design: enqueue authorization is reused.
         // Revocation after enqueue can therefore still produce a lease in this arm.
