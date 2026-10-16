@@ -1,0 +1,2540 @@
+temporary clone command: git clone --no-hardlinks --reference-if-able /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261015T213154Z-16a5e3da61c85739b222df0cd7eaeede/scratch/sp-f5-raw-bvyn00x9/gen-v-research-tools.git --no-checkout /Users/sebastianpatronsoto/agent-runs/clones/gen-v-research-tools /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools
+temporary clone exit: 0
+input pairs: 40
+missing objects imported from local prior replay mirror: 0
+Mergiraf: unavailable (not installed)
+
+[01/40] seb-patron/gen-v-research-tools#170+#172
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: c4b0c62c18193affe9bd49159d093c3a3e5d06b2
+Trying simple merge with 319d6b33c53895df8466b46718b64ce8a44325b7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: c4b0c62c18193affe9bd49159d093c3a3e5d06b2
+Trying simple merge with 319d6b33c53895df8466b46718b64ce8a44325b7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 96.5s
+union check output tail: s/tests/test_snapshot_lifecycle.py", line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 919 tests in 96.009s
+
+FAILED (failures=11, errors=47, skipped=5)
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[02/40] seb-patron/gen-v-research-tools#160+#174
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: aebb683c204969a6b5ea8329bcfa64339f429751
+Trying simple merge with ddeab84783b9dae48f0b74ea183d09dad10f5d45
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: aebb683c204969a6b5ea8329bcfa64339f429751
+Trying simple merge with ddeab84783b9dae48f0b74ea183d09dad10f5d45
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 97.3s
+union check output tail: lifecycle.py", line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1031 tests in 96.812s
+
+FAILED (failures=11, errors=47, skipped=5, expected failures=7)
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[03/40] seb-patron/gen-v-research-tools#160+#175
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: aebb683c204969a6b5ea8329bcfa64339f429751
+Trying simple merge with 917541c0709c8c531eb9289f965048425d139964
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: aebb683c204969a6b5ea8329bcfa64339f429751
+Trying simple merge with 917541c0709c8c531eb9289f965048425d139964
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 100.0s
+union check output tail: /tests/test_snapshot_lifecycle.py", line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1031 tests in 99.569s
+
+FAILED (failures=11, errors=47, skipped=5)
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[04/40] seb-patron/gen-v-research-tools#174+#175
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: ddeab84783b9dae48f0b74ea183d09dad10f5d45
+Trying simple merge with 917541c0709c8c531eb9289f965048425d139964
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: ddeab84783b9dae48f0b74ea183d09dad10f5d45
+Trying simple merge with 917541c0709c8c531eb9289f965048425d139964
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 100.1s
+union check output tail: /tests/test_snapshot_lifecycle.py", line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1031 tests in 99.673s
+
+FAILED (failures=11, errors=47, skipped=5)
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[05/40] seb-patron/gen-v-research-tools#175+#193
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 917541c0709c8c531eb9289f965048425d139964
+Trying simple merge with 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 917541c0709c8c531eb9289f965048425d139964
+Trying simple merge with 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 115.6s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 115.042s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[06/40] seb-patron/gen-v-research-tools#193+#194
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with 54e7974acf459ce2a0a93d61f69f65580191ea38
+Simple merge did not work, trying automatic merge.
+Auto-merging src/gen_v_research_tools/nds.py
+ERROR: content conflict in src/gen_v_research_tools/nds.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: src/gen_v_research_tools/nds.py
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with 54e7974acf459ce2a0a93d61f69f65580191ea38
+Simple merge did not work, trying automatic merge.
+Auto-merging src/gen_v_research_tools/nds.py
+ERROR: content conflict in src/gen_v_research_tools/nds.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: src/gen_v_research_tools/nds.py
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[07/40] seb-patron/gen-v-research-tools#193+#197
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with b5ebd1bfa3e0585feff8ee00759e89a3d67a65f6
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with b5ebd1bfa3e0585feff8ee00759e89a3d67a65f6
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 128.3s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 127.719s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[08/40] seb-patron/gen-v-research-tools#193+#201
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with 2f151b21bd246ec842515fc05b2b4cf69ff41b76
+Simple merge did not work, trying automatic merge.
+Added src/gen_v_research_tools/rng_evaluator.py in both, but differently.
+ERROR: content conflict in src/gen_v_research_tools/rng_evaluator.py
+Added tests/test_rng_evaluator.py in both, but differently.
+ERROR: content conflict in tests/test_rng_evaluator.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: src/gen_v_research_tools/rng_evaluator.py, tests/test_rng_evaluator.py
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with 2f151b21bd246ec842515fc05b2b4cf69ff41b76
+Simple merge did not work, trying automatic merge.
+Added src/gen_v_research_tools/rng_evaluator.py in both, but differently.
+ERROR: content conflict in src/gen_v_research_tools/rng_evaluator.py
+Added tests/test_rng_evaluator.py in both, but differently.
+ERROR: content conflict in tests/test_rng_evaluator.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: src/gen_v_research_tools/rng_evaluator.py, tests/test_rng_evaluator.py
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[09/40] seb-patron/gen-v-research-tools#210+#211
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: c2d3fac41e0ac72f4ea019e2185f8384e4f500cb
+Trying simple merge with 84fe9033b64fb044403c0504c4fe2efafb7dc2e3
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: c2d3fac41e0ac72f4ea019e2185f8384e4f500cb
+Trying simple merge with 84fe9033b64fb044403c0504c4fe2efafb7dc2e3
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 115.7s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1330 tests in 115.139s
+
+FAILED (failures=11, errors=47, skipped=5)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[10/40] seb-patron/gen-v-research-tools#225+#229
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: f898407c698af8964d6456665fa1b5a03029a0ca
+Trying simple merge with 1b90a5494856531ebc7557277acafd653f759cf9
+Simple merge did not work, trying automatic merge.
+Added src/gen_v_research_tools/save5_position.py in both, but differently.
+ERROR: content conflict in src/gen_v_research_tools/save5_position.py
+Added tests/test_save5_position.py in both, but differently.
+ERROR: content conflict in tests/test_save5_position.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: src/gen_v_research_tools/save5_position.py, tests/test_save5_position.py
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: f898407c698af8964d6456665fa1b5a03029a0ca
+Trying simple merge with 1b90a5494856531ebc7557277acafd653f759cf9
+Simple merge did not work, trying automatic merge.
+Added src/gen_v_research_tools/save5_position.py in both, but differently.
+ERROR: content conflict in src/gen_v_research_tools/save5_position.py
+Added tests/test_save5_position.py in both, but differently.
+ERROR: content conflict in tests/test_save5_position.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: src/gen_v_research_tools/save5_position.py, tests/test_save5_position.py
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[11/40] seb-patron/gen-v-research-tools#225+#230
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: f898407c698af8964d6456665fa1b5a03029a0ca
+Trying simple merge with a15422702ef8037eeafc8a3907ce71fa34267184
+Simple merge did not work, trying automatic merge.
+Added scripts/run_npc_tile_lookup.py in both, but differently.
+ERROR: content conflict in scripts/run_npc_tile_lookup.py
+Added tests/test_npc_tile_lookup.py in both, but differently.
+ERROR: content conflict in tests/test_npc_tile_lookup.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: scripts/run_npc_tile_lookup.py, tests/test_npc_tile_lookup.py
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: f898407c698af8964d6456665fa1b5a03029a0ca
+Trying simple merge with a15422702ef8037eeafc8a3907ce71fa34267184
+Simple merge did not work, trying automatic merge.
+Added scripts/run_npc_tile_lookup.py in both, but differently.
+ERROR: content conflict in scripts/run_npc_tile_lookup.py
+Added tests/test_npc_tile_lookup.py in both, but differently.
+ERROR: content conflict in tests/test_npc_tile_lookup.py
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: scripts/run_npc_tile_lookup.py, tests/test_npc_tile_lookup.py
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[12/40] seb-patron/gen-v-research-tools#193+#233
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Auto-merging AGENTS.md
+ERROR: content conflict in AGENTS.md
+Auto-merging LAB_READING_TRAIL.md
+Added scripts/build_trail_index.py in both, but differently.
+ERROR: content conflict in scripts/build_trail_index.py
+Added tests/test_build_trail_index.py in both, but differently.
+ERROR: content conflict in tests/test_build_trail_index.py
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: AGENTS.md, scripts/build_trail_index.py, tests/test_build_trail_index.py, trail/INDEX.md
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: 4469b2c315ea0d1b352ad7f771e260ce3da03ce8
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Auto-merging AGENTS.md
+ERROR: content conflict in AGENTS.md
+Auto-merging LAB_READING_TRAIL.md
+Added scripts/build_trail_index.py in both, but differently.
+ERROR: content conflict in scripts/build_trail_index.py
+Added tests/test_build_trail_index.py in both, but differently.
+ERROR: content conflict in tests/test_build_trail_index.py
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: AGENTS.md, scripts/build_trail_index.py, tests/test_build_trail_index.py, trail/INDEX.md
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[13/40] seb-patron/gen-v-research-tools#216+#233
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 395d4cfb0dbfb8b32322bd6ac25b2b8246b4f1e3
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Auto-merging AGENTS.md
+ERROR: content conflict in AGENTS.md
+Added scripts/build_trail_index.py in both, but differently.
+ERROR: content conflict in scripts/build_trail_index.py
+Added tests/test_build_trail_index.py in both, but differently.
+ERROR: content conflict in tests/test_build_trail_index.py
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: AGENTS.md, scripts/build_trail_index.py, tests/test_build_trail_index.py, trail/INDEX.md
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: 395d4cfb0dbfb8b32322bd6ac25b2b8246b4f1e3
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Auto-merging AGENTS.md
+ERROR: content conflict in AGENTS.md
+Added scripts/build_trail_index.py in both, but differently.
+ERROR: content conflict in scripts/build_trail_index.py
+Added tests/test_build_trail_index.py in both, but differently.
+ERROR: content conflict in tests/test_build_trail_index.py
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: AGENTS.md, scripts/build_trail_index.py, tests/test_build_trail_index.py, trail/INDEX.md
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[14/40] seb-patron/gen-v-research-tools#217+#233
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 950f0dd24c724fbcb24d28d2abe0fce37bacb2ef
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Auto-merging AGENTS.md
+ERROR: content conflict in AGENTS.md
+Auto-merging LAB_READING_TRAIL.md
+Added scripts/build_trail_index.py in both, but differently.
+ERROR: content conflict in scripts/build_trail_index.py
+Added tests/test_build_trail_index.py in both, but differently.
+ERROR: content conflict in tests/test_build_trail_index.py
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: AGENTS.md, scripts/build_trail_index.py, tests/test_build_trail_index.py, trail/INDEX.md
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: 950f0dd24c724fbcb24d28d2abe0fce37bacb2ef
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Auto-merging AGENTS.md
+ERROR: content conflict in AGENTS.md
+Auto-merging LAB_READING_TRAIL.md
+Added scripts/build_trail_index.py in both, but differently.
+ERROR: content conflict in scripts/build_trail_index.py
+Added tests/test_build_trail_index.py in both, but differently.
+ERROR: content conflict in tests/test_build_trail_index.py
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: AGENTS.md, scripts/build_trail_index.py, tests/test_build_trail_index.py, trail/INDEX.md
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[15/40] seb-patron/gen-v-research-tools#227+#233
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 0348ad0b1da1d46ae7dd647d9590f8580c379b26
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: CONFLICT
+union raw output: Fast-forwarding to: 0348ad0b1da1d46ae7dd647d9590f8580c379b26
+Trying simple merge with e44ad0348f1ebf21ddef00d2596d354a84c48e29
+Simple merge did not work, trying automatic merge.
+Added trail/INDEX.md in both, but differently.
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union unresolved paths: trail/INDEX.md
+Mergiraf merge: unavailable (not installed)
+classification: needs a human/agent decision — conflicts remain after ordinary merge and append-only log union
+
+[16/40] seb-patron/gen-v-research-tools#307+#346
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: c1ac372658785333dce74024ecf7ad4e53694761
+Trying simple merge with 6f194627133cd10e5cf4190f9d284dada55f1dde
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: c1ac372658785333dce74024ecf7ad4e53694761
+Trying simple merge with 6f194627133cd10e5cf4190f9d284dada55f1dde
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 122.2s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 121.715s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[17/40] seb-patron/gen-v-research-tools#295+#348
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: b19259dba280e994cdb893ae3a6f84346b28eb93
+Trying simple merge with ab6694adaf68b2ba1176837716e55e16c71cb659
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: b19259dba280e994cdb893ae3a6f84346b28eb93
+Trying simple merge with ab6694adaf68b2ba1176837716e55e16c71cb659
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 128.2s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 127.617s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[18/40] seb-patron/gen-v-research-tools#300+#348
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 5af9c825d6925fece5eb6a5192ca4a5bfa82b5d4
+Trying simple merge with ab6694adaf68b2ba1176837716e55e16c71cb659
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 5af9c825d6925fece5eb6a5192ca4a5bfa82b5d4
+Trying simple merge with ab6694adaf68b2ba1176837716e55e16c71cb659
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 131.4s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 130.759s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[19/40] seb-patron/gen-v-research-tools#309+#348
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: a02d241b86a6c1beeba79add89c10cc38bf2f205
+Trying simple merge with ab6694adaf68b2ba1176837716e55e16c71cb659
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: a02d241b86a6c1beeba79add89c10cc38bf2f205
+Trying simple merge with ab6694adaf68b2ba1176837716e55e16c71cb659
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 128.6s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 128.054s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[20/40] seb-patron/gen-v-research-tools#307+#350
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: c1ac372658785333dce74024ecf7ad4e53694761
+Trying simple merge with e455bf25db3d258b588350325ab0a6d33d40162c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: c1ac372658785333dce74024ecf7ad4e53694761
+Trying simple merge with e455bf25db3d258b588350325ab0a6d33d40162c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 126.9s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 126.292s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[21/40] seb-patron/gen-v-research-tools#346+#350
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 6f194627133cd10e5cf4190f9d284dada55f1dde
+Trying simple merge with e455bf25db3d258b588350325ab0a6d33d40162c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 6f194627133cd10e5cf4190f9d284dada55f1dde
+Trying simple merge with e455bf25db3d258b588350325ab0a6d33d40162c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 132.5s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 131.926s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[22/40] seb-patron/gen-v-research-tools#348+#350
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: ab6694adaf68b2ba1176837716e55e16c71cb659
+Trying simple merge with e455bf25db3d258b588350325ab0a6d33d40162c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: ab6694adaf68b2ba1176837716e55e16c71cb659
+Trying simple merge with e455bf25db3d258b588350325ab0a6d33d40162c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 117.8s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 117.281s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[23/40] seb-patron/gen-v-research-tools#295+#351
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: b19259dba280e994cdb893ae3a6f84346b28eb93
+Trying simple merge with cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: b19259dba280e994cdb893ae3a6f84346b28eb93
+Trying simple merge with cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 121.5s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 120.946s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[24/40] seb-patron/gen-v-research-tools#311+#351
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 70b9e9884dc0250ba57d0ffd74f9fa24ec6413d0
+Trying simple merge with cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 70b9e9884dc0250ba57d0ffd74f9fa24ec6413d0
+Trying simple merge with cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 134.9s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 134.321s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[25/40] seb-patron/gen-v-research-tools#303+#352
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 375a60d011ed09bbca2e072688f0b876c7e86bf6
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 375a60d011ed09bbca2e072688f0b876c7e86bf6
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 117.8s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 117.222s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[26/40] seb-patron/gen-v-research-tools#304+#352
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 9b624f8ca249edc15559dd0064b6b71693dd75f2
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 9b624f8ca249edc15559dd0064b6b71693dd75f2
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 115.3s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 114.744s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[27/40] seb-patron/gen-v-research-tools#311+#352
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 70b9e9884dc0250ba57d0ffd74f9fa24ec6413d0
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 70b9e9884dc0250ba57d0ffd74f9fa24ec6413d0
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 113.6s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 113.032s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[28/40] seb-patron/gen-v-research-tools#351+#352
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: cb46dc84159fe7c2f4fa324679ec7a8c8636df72
+Trying simple merge with 26d8550ec56407ffc5cc29c8eb36b9b22cea6bc7
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 123.3s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 122.781s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[29/40] seb-patron/gen-v-research-tools#299+#353
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: e84fe222e34671a32c2808959bb7e3d71f8d57b0
+Trying simple merge with eedc97a515153f6e9cad5854e181f46401aa07cb
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: e84fe222e34671a32c2808959bb7e3d71f8d57b0
+Trying simple merge with eedc97a515153f6e9cad5854e181f46401aa07cb
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 122.9s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 122.305s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[30/40] seb-patron/gen-v-research-tools#309+#353
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: a02d241b86a6c1beeba79add89c10cc38bf2f205
+Trying simple merge with eedc97a515153f6e9cad5854e181f46401aa07cb
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: a02d241b86a6c1beeba79add89c10cc38bf2f205
+Trying simple merge with eedc97a515153f6e9cad5854e181f46401aa07cb
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 124.9s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 124.237s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[31/40] seb-patron/gen-v-research-tools#329+#357
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 7d7f2b24348d3886a957c89bd4134a4e534ec25b
+Trying simple merge with 36f4551efc06a1b10466656d9e40254dca18382c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 7d7f2b24348d3886a957c89bd4134a4e534ec25b
+Trying simple merge with 36f4551efc06a1b10466656d9e40254dca18382c
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 124.8s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 124.159s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[32/40] seb-patron/gen-v-research-tools#330+#368
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 8dac9ac7a1f978d245020da5ac7ec68472594aaa
+Trying simple merge with 0e6e9c834ab4442ba8036a1eca0b89cce562cde5
+Simple merge did not work, trying automatic merge.
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 8dac9ac7a1f978d245020da5ac7ec68472594aaa
+Trying simple merge with 0e6e9c834ab4442ba8036a1eca0b89cce562cde5
+Simple merge did not work, trying automatic merge.
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 124.7s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 124.129s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[33/40] seb-patron/gen-v-research-tools#299+#369
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: e84fe222e34671a32c2808959bb7e3d71f8d57b0
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: e84fe222e34671a32c2808959bb7e3d71f8d57b0
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 121.9s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 121.276s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[34/40] seb-patron/gen-v-research-tools#300+#369
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 5af9c825d6925fece5eb6a5192ca4a5bfa82b5d4
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 5af9c825d6925fece5eb6a5192ca4a5bfa82b5d4
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 136.3s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 135.751s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[35/40] seb-patron/gen-v-research-tools#303+#369
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 375a60d011ed09bbca2e072688f0b876c7e86bf6
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 375a60d011ed09bbca2e072688f0b876c7e86bf6
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 123.6s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 123.043s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[36/40] seb-patron/gen-v-research-tools#320+#369
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 664db85c22102292f71fbfd2e670bdf7b4aec1cd
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 664db85c22102292f71fbfd2e670bdf7b4aec1cd
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 119.9s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 119.399s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[37/40] seb-patron/gen-v-research-tools#330+#369
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 8dac9ac7a1f978d245020da5ac7ec68472594aaa
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 8dac9ac7a1f978d245020da5ac7ec68472594aaa
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 114.4s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1518 tests in 113.862s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[38/40] seb-patron/gen-v-research-tools#368+#369
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 0e6e9c834ab4442ba8036a1eca0b89cce562cde5
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 0e6e9c834ab4442ba8036a1eca0b89cce562cde5
+Trying simple merge with 4b2916a2e7d8418ac7a378bb0781e7242798c4da
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 113.1s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 112.533s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[39/40] seb-patron/gen-v-research-tools#293+#371
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: c28dd58d917ec7fe90941e1f6e836bf2891bd89b
+Trying simple merge with 08d1538741d69888b79615e364bfac000eec2b7a
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: c28dd58d917ec7fe90941e1f6e836bf2891bd89b
+Trying simple merge with 08d1538741d69888b79615e364bfac000eec2b7a
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 112.3s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1535 tests in 111.772s
+
+FAILED (failures=10, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+[40/40] seb-patron/gen-v-research-tools#320+#371
+ordinary git merge: CONFLICT
+ordinary raw output: Fast-forwarding to: 664db85c22102292f71fbfd2e670bdf7b4aec1cd
+Trying simple merge with 08d1538741d69888b79615e364bfac000eec2b7a
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+ordinary unresolved paths: LAB_READING_TRAIL.md, trail/INDEX.md
+union-for-log merge: SUCCESS
+union raw output: Fast-forwarding to: 664db85c22102292f71fbfd2e670bdf7b4aec1cd
+Trying simple merge with 08d1538741d69888b79615e364bfac000eec2b7a
+Simple merge did not work, trying automatic merge.
+Auto-merging LAB_READING_TRAIL.md
+ERROR: content conflict in LAB_READING_TRAIL.md
+Auto-merging trail/INDEX.md
+ERROR: content conflict in trail/INDEX.md
+fatal: merge program failed
+Automatic merge failed; fix conflicts and then commit the result.
+union check (/opt/homebrew/opt/python@3.14/bin/python3.14 -m unittest discover -s tests -v): fail; 113.1s
+union check output tail: line 326, in test_cleanup_retains_a_replacement_after_snapshot_binding
+    ), self.assertRaisesRegex(SnapshotLifecycleError, "post-binding failure"):
+       ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "post-binding failure" does not match "host governor refused snapshot worker execution"
+
+======================================================================
+FAIL: test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact (test_snapshot_lifecycle.SnapshotLifecycleTests.test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 618, in transaction
+    self._prepare_directory()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 471, in _prepare_directory
+    os.mkdir(self._directory, 0o700)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted: '/private/tmp/gen-v-machine-worker-governor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/snapshot_lifecycle.py", line 404, in _run_adapter
+    admission_permit = acquire_worker_permit(governor)
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1261, in acquire_worker_permit
+    permit = (governor or machine_resource_governor()).reserve()
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 1005, in reserve
+    self._store.transaction(operation)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/src/gen_v_research_tools/host_governor.py", line 629, in transaction
+    raise HostGovernorError(_STATE_FAILED) from error
+gen_v_research_tools.host_governor.HostGovernorError: host governor state failed closed
+
+The above exception was the direct cause of the following exception:
+
+gen_v_research_tools.snapshot_lifecycle.SnapshotLifecycleError: host governor refused snapshot worker execution
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003612Z-ed543e06169a9571c6cb31c1b29b89a2/scratch/tmp/concord-c6a-fnlvaesr/gen-v-research-tools/tests/test_snapshot_lifecycle.py", line 297, in test_refuses_nondivergent_changed_branch_and_cleans_exact_artifact
+    with self.assertRaisesRegex(SnapshotLifecycleError, "did not diverge"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: "did not diverge" does not match "host governor refused snapshot worker execution"
+
+----------------------------------------------------------------------
+Ran 1528 tests in 112.542s
+
+FAILED (failures=11, errors=47, skipped=6)
+worst-case output size: 3833 bytes
+Mergiraf merge: unavailable (not installed)
+classification: resolvable with a rule — allowlisted append-only log union cleared every conflict
+
+Totals:
+trivially resolvable: 0
+resolvable with a rule: 32
+needs a human/agent decision: 8
+ordinary merge successes: 0/40
+union merge successes: 32/40
