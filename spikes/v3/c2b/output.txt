@@ -1,0 +1,19 @@
+Deterministic offline issue-claim simulation
+
+116640 seed-level rows; seeds 1–20; 20 seeds per factorial cell. Each row is one arm × worker-slot × arrival × scope × hidden-need × service × identity × presence cell and seed. There are 648 cells per arm per seed. All timings are synthetic. Five-minute issue TTL and one-third-TTL heartbeat are provisional assumptions. Presence is toggled independently of lease behavior. A/E naive and cooperative variants are capability sensitivities.
+
+Across-seed mean [normal 95% interval], averaging each seed across the same factorial mix (mean counts/minutes per simulation cell):
+
+Arm | duplicate starts | duplicate useful minutes | completed tasks | idle issue-minutes | p95 issue wait | p95 code wait | hoarded lease-minutes | hidden grow delay | shared-token collision attempts
+--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---:
+| baseline | 37.54 [37.34, 37.73] | 1236.87 [1231.83, 1241.91] | 31.07 [30.96, 31.18] | 30605.12 [30559.86, 30650.38] | 0.00 [0.00, 0.00] | 23.71 [23.32, 24.09] | 0.00 [0.00, 0.00] | 1.45 [1.39, 1.50] | 0.00 [0.00, 0.00] |
+| A-naive | 37.54 [37.34, 37.73] | 1236.87 [1231.83, 1241.91] | 31.07 [30.96, 31.18] | 30605.12 [30559.86, 30650.38] | 0.00 [0.00, 0.00] | 23.71 [23.32, 24.09] | 0.00 [0.00, 0.00] | 1.45 [1.39, 1.50] | 0.00 [0.00, 0.00] |
+| A-cooperative | 571.80 [569.18, 574.43] | 571.80 [569.18, 574.43] | 36.82 [36.74, 36.91] | 28636.87 [28600.67, 28673.08] | 0.00 [0.00, 0.00] | 20.14 [19.84, 20.44] | 0.00 [0.00, 0.00] | 0.15 [0.14, 0.15] | 0.00 [0.00, 0.00] |
+| B | 1.62 [1.54, 1.70] | 60.45 [56.29, 64.61] | 42.60 [42.46, 42.75] | 26971.81 [26918.02, 27025.60] | 38.68 [38.45, 38.90] | 29.12 [28.95, 29.28] | 908.05 [906.07, 910.03] | 0.01 [0.01, 0.01] | 351.43 [349.79, 353.07] |
+| C1 | 1.62 [1.54, 1.70] | 60.45 [56.29, 64.61] | 42.60 [42.46, 42.75] | 26971.81 [26918.02, 27025.60] | 38.68 [38.45, 38.90] | 29.12 [28.95, 29.28] | 908.05 [906.07, 910.03] | 0.01 [0.01, 0.01] | 351.43 [349.79, 353.07] |
+| C2 | 1.72 [1.63, 1.80] | 63.37 [58.60, 68.14] | 41.93 [41.80, 42.06] | 27468.83 [27419.18, 27518.47] | 38.61 [38.39, 38.84] | 29.01 [28.83, 29.19] | 8243.02 [8209.36, 8276.67] | 0.01 [0.01, 0.01] | 2713.21 [2697.69, 2728.74] |
+| D | 1.62 [1.54, 1.70] | 60.45 [56.29, 64.61] | 42.60 [42.46, 42.75] | 26971.81 [26918.02, 27025.60] | 38.68 [38.45, 38.90] | 29.12 [28.95, 29.28] | 908.05 [906.07, 910.03] | 0.01 [0.01, 0.01] | 351.43 [349.79, 353.07] |
+| E-naive | 37.54 [37.34, 37.73] | 1236.87 [1231.83, 1241.91] | 31.07 [30.96, 31.18] | 30605.12 [30559.86, 30650.38] | 0.00 [0.00, 0.00] | 23.71 [23.32, 24.09] | 0.00 [0.00, 0.00] | 1.45 [1.39, 1.50] | 0.00 [0.00, 0.00] |
+| E-cooperative | 304.67 [303.31, 306.03] | 904.34 [901.21, 907.47] | 33.95 [33.86, 34.04] | 29621.00 [29581.95, 29660.05] | 0.00 [0.00, 0.00] | 21.92 [21.63, 22.22] | 0.00 [0.00, 0.00] | 0.80 [0.77, 0.83] | 0.00 [0.00, 0.00] |
+
+The CSV is the complete seed-level result. Metric definitions: duplicate starts are overlapping attempts; duplicate useful-work minutes are duplicated service minutes; completed tasks count first accepted completions; idle issue-minutes sum backlog issues left incomplete times the eight-hour horizon; issue/code wait percentiles are blocked retry gaps; hoarded lease-minutes count issue authority after the first-publish midpoint; grow delay is hidden-scope acquisition wait; shared-token collision attempts count blocked foreign runs sharing a principal. Empty wait samples are zero. Unfinished work is retained as starvation, failure and abandonment counts.
