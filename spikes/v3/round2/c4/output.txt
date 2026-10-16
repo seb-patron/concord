@@ -1,52 +1,52 @@
-C4 symbol claim replay (2026-10-16)
+Round-two symbol claim replay (2026-10-16)
 Source: local read-only clones and gh merged-pull metadata; temporary bare mirrors only.
 Python: 3.14.7; tree-sitter: 0.25.2; tree-sitter-language-pack: 0.13.0
-Exact setup: python3 -m venv "$TMPDIR/c4-symbol-venv"; "$TMPDIR/c4-symbol-venv/bin/python" -m pip install --disable-pip-version-check tree-sitter==0.25.2 tree-sitter-language-pack==0.13.0
-Exact run: PYTHONDONTWRITEBYTECODE=1 "$TMPDIR/c4-symbol-venv/bin/python" spikes/v3/round2/c4/symbols.py
+Exact setup: python3 -m venv "$DELEGATE_SCRATCH_DIR/c4-symbol-venv"; "$DELEGATE_SCRATCH_DIR/c4-symbol-venv/bin/python" -m pip install --disable-pip-version-check tree-sitter==0.25.2 tree-sitter-language-pack==0.13.0
+Exact run: PYTHONDONTWRITEBYTECODE=1 "$DELEGATE_SCRATCH_DIR/c4-symbol-venv/bin/python" spikes/v3/round2/c4/symbols.py
 Exact metadata command per repository: gh api --paginate 'repos/OWNER/REPO/pulls?state=closed&per_page=100' --jq '[.[] | select(.merged_at != null) | {number,created_at,merged_at,head:{sha:.head.sha}}]'
 Exact Git command forms: git clone --bare --shared LOCAL_CLONE TEMP_MIRROR; git --git-dir=TEMP_MIRROR fetch --no-tags REMOTE +refs/pull/N/head:refs/pull/N/head (missing heads only); git --git-dir=TEMP_MIRROR merge-base HEAD_A HEAD_B; git --git-dir=TEMP_MIRROR diff --no-ext-diff --no-renames --name-only -z BASE HEAD; git --git-dir=TEMP_MIRROR diff --no-ext-diff --no-textconv --no-renames --unified=0 BASE HEAD -- PATH; git --git-dir=TEMP_MIRROR show REV:PATH; git --git-dir=TEMP_MIRROR merge-tree --write-tree --merge-base=BASE HEAD_A HEAD_B.
 The path and revision placeholders above protect private-repository file lists; commands use actual values at run time.
-Historical SP-F5 fallback table (code-side cases, from supplied raw output; reasons overlap):
+Historical larger replay fallback table (code-side cases, from supplied raw output; reasons overlap):
 reason	cases
 missing file side	6907
 parse/query error	148346
 grammar unavailable	0
-Historical query imported PackConfig and configure; both are absent in pinned language-pack 0.13.0. The old exception handler classified those import failures as parse/query errors. Historical package version was not recorded, so this is a reproduced likely cause, not proof of its exact environment.
+Historical query imported PackConfig and configure. They are absent in language-pack 0.13.0, so that version fails before parsing. A surviving historical environment used language-pack 1.22.1; a fresh 1.22.1 probe succeeds. The cause of the historical parse/query errors remains unresolved.
 Earlier code also required both file sides and identical body-signature text, and treated a file fallback as a unit that could compare disjoint from a symbol in the same path.
-Matched hunk cohort below: changed shared paths on file-blocked sampled pairs; each unique base/head/path diff counted once per repository. A hunk falls back if either available side lacks a single named unit. The reproduced old query gives a file fallback for every matched hunk; old/new hunk rates use this same denominator.
+Matched hunk cohort below: changed shared paths on file-blocked sampled pairs; each unique base/head/path diff counted once per repository. A hunk falls back if either available side lacks a single named unit. Old matched-cohort fallback rates were not executed and are not reported.
 JSON/TOML/YAML top-level key queries are enabled; unsupported extensions fall back to file.
 
 Repository: seb-patron/concord
 merged_prs=49 overlap_universe=104 evaluated=104 candidates_attempted=104 missing_heads_fetched=0 unevaluable=0
-file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-18	4	0	4	10	170	100.000%	66	38.824%
-language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-markdown	10	5	0	0	42	100.000%	0	0.000%
-typescript	12	1	0	10	128	100.000%	66	51.562%
+file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+18	4	0	4	10	170	66	38.824%
+language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+markdown	10	5	0	0	42	0	0.000%
+typescript	12	1	0	10	128	66	51.562%
 fallback_reason	events	pairs
 no_enclosing_unit	66	10
 language	fallback_reason	events	pairs
 typescript	no_enclosing_unit	66	10
 
 Repository: seb-patron/agent-workflows
-merged_prs=340 overlap_universe=790 evaluated=300 candidates_attempted=300 missing_heads_fetched=0 unevaluable=0
-file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-118	12	0	12	81	2462	100.000%	1291	52.437%
-language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-bash	76	4	0	70	1443	100.000%	1237	85.724%
-json	1	0	0	1	4	100.000%	4	100.000%
-markdown	85	27	0	10	959	100.000%	21	2.190%
-python	12	0	0	11	51	100.000%	24	47.059%
-unsupported	1	0	0	1	5	100.000%	5	100.000%
+merged_prs=340 overlap_universe=790 evaluated=300 candidates_attempted=300 missing_heads_fetched=5 unevaluable=0
+file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+118	12	0	12	81	2462	1291	52.437%
+language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+bash	76	4	0	70	1443	1237	85.724%
+json	1	0	0	1	4	4	100.000%
+markdown	85	27	0	10	959	21	2.190%
+python	12	0	0	11	51	24	47.059%
+unsupported	1	0	0	1	5	5	100.000%
 fallback_reason	events	pairs
-no_enclosing_unit	148	39
+no_enclosing_unit	147	39
 parse_error	1102	49
-spans_units	36	29
+spans_units	37	29
 unsupported_language	5	1
 language	fallback_reason	events	pairs
-bash	no_enclosing_unit	119	34
+bash	no_enclosing_unit	118	34
 bash	parse_error	1102	49
-bash	spans_units	16	14
+bash	spans_units	17	14
 json	no_enclosing_unit	4	1
 markdown	no_enclosing_unit	10	2
 markdown	spans_units	11	8
@@ -55,32 +55,32 @@ python	spans_units	9	8
 unsupported	unsupported_language	5	1
 
 Repository: seb-patron/gen-v-research-tools
-merged_prs=436 overlap_universe=1170 evaluated=300 candidates_attempted=300 missing_heads_fetched=0 unevaluable=0
-file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-61	0	0	0	25	582	100.000%	104	17.869%
-language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-json	1	0	0	0	2	100.000%	0	0.000%
-markdown	53	0	0	17	453	100.000%	59	13.024%
-python	12	0	0	11	122	100.000%	45	36.885%
-unsupported	1	0	0	1	0	0.000%	0	0.000%
-yaml	4	0	0	0	5	100.000%	0	0.000%
+merged_prs=436 overlap_universe=1170 evaluated=300 candidates_attempted=300 missing_heads_fetched=3 unevaluable=0
+file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+61	0	0	0	25	582	99	17.010%
+language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+json	1	0	0	0	2	0	0.000%
+markdown	53	0	0	17	453	59	13.024%
+python	12	0	0	11	122	40	32.787%
+unsupported	1	0	0	1	0	0	0.000%
+yaml	4	0	0	0	5	0	0.000%
 fallback_reason	events	pairs
-no_enclosing_unit	45	11
+no_enclosing_unit	40	11
 no_text_hunks	4	1
 spans_units	59	17
 language	fallback_reason	events	pairs
 markdown	spans_units	59	17
-python	no_enclosing_unit	45	11
+python	no_enclosing_unit	40	11
 unsupported	no_text_hunks	4	1
 
 Repository: seb-patron/mwcc-rs
 merged_prs=587 overlap_universe=1247 evaluated=300 candidates_attempted=300 missing_heads_fetched=0 unevaluable=0
-file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-19	2	0	2	15	328	100.000%	53	16.159%
-language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-python	1	0	0	1	17	100.000%	2	11.765%
-rust	16	2	0	12	307	100.000%	47	15.309%
-unsupported	2	0	0	2	4	100.000%	4	100.000%
+file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+19	2	0	2	15	328	53	16.159%
+language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+python	1	0	0	1	17	2	11.765%
+rust	16	2	0	12	307	47	15.309%
+unsupported	2	0	0	2	4	4	100.000%
 fallback_reason	events	pairs
 no_enclosing_unit	45	13
 spans_units	4	3
@@ -94,45 +94,43 @@ unsupported	unsupported_language	4	2
 
 Repository: seb-patron/gen-v-decomp
 merged_prs=1310 overlap_universe=4283 evaluated=300 candidates_attempted=300 missing_heads_fetched=0 unevaluable=0
-file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-25	3	0	3	18	389	100.000%	152	39.075%
-language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-c	1	0	0	1	34	100.000%	34	100.000%
-json	7	4	0	3	19	100.000%	4	21.053%
-markdown	17	6	0	6	96	100.000%	6	6.250%
-python	12	0	0	12	207	100.000%	75	36.232%
-unsupported	2	0	0	2	33	100.000%	33	100.000%
+file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+25	3	0	3	18	389	142	36.504%
+language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+c	1	0	0	1	34	34	100.000%
+json	7	4	0	3	19	4	21.053%
+markdown	17	6	0	6	96	6	6.250%
+python	12	0	0	11	207	65	31.401%
+unsupported	2	0	0	2	33	33	100.000%
 fallback_reason	events	pairs
-no_enclosing_unit	84	12
+no_enclosing_unit	74	12
 spans_units	35	13
 unsupported_language	33	2
 language	fallback_reason	events	pairs
 c	no_enclosing_unit	34	1
 json	spans_units	4	3
 markdown	spans_units	6	6
-python	no_enclosing_unit	50	12
+python	no_enclosing_unit	40	11
 python	spans_units	25	7
 unsupported	unsupported_language	33	2
 
-Overall (pair totals across the five repository strata)
-evaluated	file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-1304	241	21	0	21	149	3931	100.000%	1666	42.381%
-Matched code-side old query reproduction: code_side_attempts	old_parse_query_error
-4618	4618
-Old code-side attempts are a separate diagnostic count; old/new hunk fallback rates use the matched shared-path hunk denominator. Old 100% rate is conditional on the reproduced API error plus historical fallback-by-design for non-code.
-language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	old_fallback_rate	new_fallback_hunks	new_fallback_rate
-bash	76	4	0	70	1443	100.000%	1237	85.724%
-c	1	0	0	1	34	100.000%	34	100.000%
-json	9	4	0	4	25	100.000%	8	32.000%
-markdown	165	38	0	33	1550	100.000%	86	5.548%
-python	37	0	0	35	397	100.000%	146	36.776%
-rust	16	2	0	12	307	100.000%	47	15.309%
-typescript	12	1	0	10	128	100.000%	66	51.562%
-unsupported	6	0	0	6	42	100.000%	42	100.000%
-yaml	4	0	0	0	5	100.000%	0	0.000%
+Overall (pair totals across the five repository groups)
+evaluated	file_blocked	symbol_disjoint	disjoint_conflicts	clean_disjoint	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+1304	241	21	0	21	149	3931	1651	41.999%
+Old matched-cohort fallback rate: not measured; the historical extractors' original file classification and parser behavior were not executed on this cohort.
+language	file_blocked_pairs	symbol_disjoint_pairs	disjoint_conflicts	pairs_with_fallback	hunks	new_fallback_hunks	new_fallback_rate
+bash	76	4	0	70	1443	1237	85.724%
+c	1	0	0	1	34	34	100.000%
+json	9	4	0	4	25	8	32.000%
+markdown	165	38	0	33	1550	86	5.548%
+python	37	0	0	34	397	131	32.997%
+rust	16	2	0	12	307	47	15.309%
+typescript	12	1	0	10	128	66	51.562%
+unsupported	6	0	0	6	42	42	100.000%
+yaml	4	0	0	0	5	0	0.000%
 overall_fallback_reason	events	pairs
-no_enclosing_unit	388	85
+no_enclosing_unit	372	85
 no_text_hunks	4	1
 parse_error	1102	49
-spans_units	134	62
+spans_units	135	62
 unsupported_language	42	5
