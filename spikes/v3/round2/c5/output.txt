@@ -1,0 +1,88 @@
+# Spec prediction raw aggregate output
+command: PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/round2/c5/spec_prediction.py
+local read command: git -C <clone-or-worktree> diff --name-only -z <base> <candidate>
+optional read command: gh pr diff <pull-request-URL> --name-only
+input root: agent-runs (read only); random seed: 20261016
+eligible_unique=9781 duplicate_archives=1764
+implementation_runs=7203 review_only_runs=2578
+completed=4354 completed_diffable=4056
+refused_scope_state=1325 refused_with_unmatched_file=35
+blocked_implementation=473 blocked_rule_positive=129
+sample_size=30 sample_rule_positive=16
+visible_need_total=164 visible_extra_count_0_path=21 visible_extra_count_1=92 visible_extra_count_2=23 visible_extra_count_3plus=28
+repair_families_with_first=323 repair_families_without_first=961 growth_families=88
+repair_runs_with_first=653 growing_repairs=154 added_entries_across_repairs=313 unique_added_files_within_families=195
+
+[overall_by_kind]
+group	runs	first	repair	review	completed	refused_file	blocked_file	visible_need	need_share	95%_Wilson	known_extra_files	declared_completed_diffable	unused_declared	unused_share	95%_Wilson	linked_repairs	growing_repairs	growth_share	95%_Wilson	added_entries
+first run	4898	4898	0	0	2443	26	99	125	2.6%	2.1..3.0%	198	13474	2350	17.4%	16.8..18.1%	0	0	n/a	n<10	0
+repair	2305	0	2305	0	1911	9	30	39	1.7%	1.2..2.3%	57	8493	3220	37.9%	36.9..39.0%	653	154	23.6%	20.5..27.0%	313
+review-only	2578	0	0	2578	0	0	0	0	n/a	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+
+[repository]
+group	runs	first	repair	review	completed	refused_file	blocked_file	visible_need	need_share	95%_Wilson	known_extra_files	declared_completed_diffable	unused_declared	unused_share	95%_Wilson	linked_repairs	growing_repairs	growth_share	95%_Wilson	added_entries
+3	5	5	0	0	1	0	0	0	0.0%	n<10	0	2	0	0.0%	n<10	0	0	n/a	n<10	0
+4	5	5	0	0	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+agent-review-evals	138	80	44	14	94	0	1	1	0.8%	0.1..4.4%	1	262	9	3.4%	1.8..6.4%	44	0	0.0%	0.0..8.0%	0
+agent-run-analytics	8	1	2	5	3	0	0	0	0.0%	n<10	0	11	0	0.0%	0.0..25.9%	0	0	n/a	n<10	0
+agent-workflows	993	384	256	353	359	1	9	10	1.6%	0.9..2.9%	12	1552	229	14.8%	13.1..16.6%	172	43	25.0%	19.1..32.0%	100
+antechamber	1	1	0	0	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+azeron-macos	184	98	65	21	137	0	2	2	1.2%	0.3..4.4%	1	388	40	10.3%	7.7..13.7%	21	4	19.0%	7.7..40.0%	7
+azeron-windows-protocol-lab	4	1	1	2	2	0	0	0	0.0%	n<10	0	6	0	0.0%	n<10	1	0	0.0%	n<10	0
+concord	1266	531	207	528	522	0	27	27	3.7%	2.5..5.3%	25	4768	1610	33.8%	32.4..35.1%	135	33	24.4%	18.0..32.3%	56
+decomp-learning	13	1	4	8	5	0	0	0	0.0%	n<10	0	15	0	0.0%	0.0..20.4%	4	0	0.0%	n<10	0
+gen-v-decomp	3456	1425	759	1272	1352	14	18	32	1.5%	1.0..2.1%	66	5149	970	18.8%	17.8..19.9%	201	57	28.4%	22.6..34.9%	105
+gen-v-map-studio	83	50	33	0	58	3	1	4	4.8%	1.9..11.7%	6	341	19	5.6%	3.6..8.5%	6	2	33.3%	n<10	2
+gen-v-research-tools	597	311	227	59	435	6	1	7	1.3%	0.6..2.7%	9	2142	238	11.1%	9.8..12.5%	3	0	0.0%	n<10	0
+gen-v-workshop	512	272	190	50	351	4	9	13	2.8%	1.7..4.8%	34	254	7	2.8%	1.3..5.6%	15	11	73.3%	48.0..89.1%	38
+mother-base	261	60	54	147	95	0	1	1	0.9%	0.2..4.8%	1	189	8	4.2%	2.2..8.1%	37	2	5.4%	1.5..17.7%	3
+mwcc-rs	1900	1494	350	56	730	7	59	66	3.6%	2.8..4.5%	99	6017	2393	39.8%	38.5..41.0%	8	1	12.5%	n<10	1
+probe	3	3	0	0	2	0	0	0	0.0%	n<10	0	2	0	0.0%	n<10	0	0	n/a	n<10	0
+repo	21	21	0	0	1	0	0	0	0.0%	0.0..15.5%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+sft-course	65	19	16	30	29	0	0	0	0.0%	0.0..9.9%	0	181	8	4.4%	2.3..8.5%	0	0	n/a	n<10	0
+swiftui-rewine	246	125	97	24	178	0	1	1	0.5%	0.1..2.5%	1	688	39	5.7%	4.2..7.7%	6	1	16.7%	n<10	1
+the-big-shell	9	0	0	9	0	0	0	0	n/a	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+unknown	11	11	0	0	0	0	0	0	0.0%	0.0..25.9%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+
+[worker_agent_model]
+group	runs	first	repair	review	completed	refused_file	blocked_file	visible_need	need_share	95%_Wilson	known_extra_files	declared_completed_diffable	unused_declared	unused_share	95%_Wilson	linked_repairs	growing_repairs	growth_share	95%_Wilson	added_entries
+codex/gpt-6-astra	208	58	6	144	30	0	2	2	3.1%	0.9..10.7%	2	229	170	74.2%	68.2..79.5%	2	0	0.0%	n<10	0
+codex/gpt-6-luna	1864	713	218	933	558	0	14	14	1.5%	0.9..2.5%	10	2817	372	13.2%	12.0..14.5%	100	21	21.0%	14.2..30.0%	30
+codex/gpt-6-sol	2356	633	351	1372	589	0	36	36	3.7%	2.7..5.0%	33	4578	2048	44.7%	43.3..46.2%	215	45	20.9%	16.0..26.9%	93
+codex/unavailable	945	854	84	7	154	0	28	28	3.0%	2.1..4.3%	30	1333	711	53.3%	50.7..56.0%	5	4	80.0%	n<10	7
+devin/swe-2-high	577	382	118	77	272	5	4	9	1.8%	0.9..3.4%	21	891	61	6.8%	5.4..8.7%	36	2	5.6%	1.5..18.1%	2
+devin/swe-2-medium	3	2	1	0	2	0	0	0	0.0%	n<10	0	2	0	0.0%	n<10	1	1	100.0%	n<10	1
+devin/unavailable	322	220	68	34	108	0	2	2	0.7%	0.2..2.5%	3	208	7	3.4%	1.6..6.8%	3	1	33.3%	n<10	3
+fake/unavailable	21	21	0	0	1	0	0	0	0.0%	0.0..15.5%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+muse/muse-spark-1.3-contributor	1824	947	867	10	1395	17	29	46	2.5%	1.9..3.4%	123	6296	1265	20.1%	19.1..21.1%	248	65	26.2%	21.1..32.0%	138
+muse/muse-wonder-1.0-contributor	4	1	3	0	4	0	0	0	0.0%	n<10	0	14	2	14.3%	4.0..39.9%	3	0	0.0%	n<10	0
+muse/muse-wonder-full-1.0-contributor	1	1	0	0	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+muse/unavailable	1565	975	589	1	1181	12	14	26	1.7%	1.1..2.4%	32	5414	923	17.0%	16.1..18.1%	40	15	37.5%	24.2..53.0%	39
+muse/unknown	75	75	0	0	58	1	0	1	1.3%	0.2..7.2%	1	182	11	6.0%	3.4..10.5%	0	0	n/a	n<10	0
+opencode/unavailable	5	5	0	0	2	0	0	0	0.0%	n<10	0	3	0	0.0%	n<10	0	0	n/a	n<10	0
+unknown/unknown	11	11	0	0	0	0	0	0	0.0%	0.0..25.9%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+
+[final_state]
+group	runs	first	repair	review	completed	refused_file	blocked_file	visible_need	need_share	95%_Wilson	known_extra_files	declared_completed_diffable	unused_declared	unused_share	95%_Wilson	linked_repairs	growing_repairs	growth_share	95%_Wilson	added_entries
+agent-failed	273	182	40	51	0	0	0	0	0.0%	0.0..1.7%	0	0	0	n/a	n<10	6	1	16.7%	n<10	3
+auth-failed	3	1	1	1	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	1	0	0.0%	n<10	0
+blocked	528	373	100	55	0	0	129	129	27.3%	23.5..31.5%	161	0	0	n/a	n<10	38	9	23.7%	13.0..39.2%	12
+cancelled	44	44	0	0	0	0	0	0	0.0%	0.0..8.0%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+deadline-error	6	6	0	0	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+deadline-exceeded	131	120	11	0	0	0	0	0	0.0%	0.0..2.8%	0	0	0	n/a	n<10	4	0	0.0%	n<10	0
+launch-failed	31	31	0	0	0	0	0	0	0.0%	0.0..11.0%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+missing-status	11	11	0	0	0	0	0	0	0.0%	0.0..25.9%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+no-push	1656	1656	0	0	1656	0	0	0	0.0%	0.0..0.2%	0	9923	1608	16.2%	15.5..16.9%	0	0	n/a	n<10	0
+orphaned	15	5	5	5	0	0	0	0	0.0%	0.0..27.8%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+pr-opened	2694	784	1910	0	2694	0	0	0	0.0%	0.0..0.1%	0	12027	3962	32.9%	32.1..33.8%	532	110	20.7%	17.5..24.3%	229
+push-failed	13	5	8	0	0	0	0	0	0.0%	0.0..22.8%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+pushed	4	3	1	0	4	0	0	0	0.0%	n<10	0	17	0	0.0%	0.0..18.4%	1	0	0.0%	n<10	0
+refused-config	17	10	5	2	0	0	0	0	0.0%	0.0..20.4%	0	0	0	n/a	n<10	2	1	50.0%	n<10	1
+refused-coverage	21	10	1	10	0	0	0	0	0.0%	0.0..25.9%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+refused-dirty	6	6	0	0	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+refused-moved	1	1	0	0	0	0	0	0	0.0%	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+refused-outcome	74	37	17	20	0	0	0	0	0.0%	0.0..6.6%	0	0	0	n/a	n<10	1	1	100.0%	n<10	2
+refused-scope	1325	1270	48	7	0	35	0	35	2.7%	1.9..3.7%	94	0	0	n/a	n<10	13	7	53.8%	29.1..76.8%	11
+reviewed	2425	0	0	2425	0	0	0	0	n/a	n<10	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+running	19	13	4	2	0	0	0	0	0.0%	0.0..18.4%	0	0	0	n/a	n<10	0	0	n/a	n<10	0
+validation-failed	484	330	154	0	0	0	0	0	0.0%	0.0..0.8%	0	0	0	n/a	n<10	55	25	45.5%	33.0..58.5%	55
