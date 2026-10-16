@@ -8,10 +8,13 @@ not an estimate of observed lease latency or agent behavior.
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+import hashlib
 import json
 import subprocess
+import sys
 
-from build_dataset import SOURCE_CUTOFF, assignment_time, changed_paths, clone_for, inventory
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_dataset import SOURCE_CUTOFF, assignment_time, base_time, changed_paths, clone_for, inventory, worker_time
 
 OUTPUT = Path("spikes/v3/c3/output.txt")
 CAP_PER_REPO = 40
@@ -60,6 +63,11 @@ def tasks_by_repo():
         run, status = attempts[0]
         base = status.get("base_sha") or status.get("base")
         candidate = status.get("candidate_sha") or status.get("validated_sha") or status.get("commit_sha")
+        committed = base_time(repo, base, run)
+        start = worker_time(run)
+        if committed is None or start is None or start > SOURCE_CUTOFF or committed > start:
+            skipped["unverified_worker_start_snapshot"] += 1
+            continue
         changed = changed_paths(repo, base, candidate, run)
         if changed is None:
             skipped["undiffable_first_attempt"] += 1
@@ -72,16 +80,19 @@ def tasks_by_repo():
             skipped["empty_declaration"] += 1
             continue
         if not set(changed).issubset(declared):
-            skipped["diff_outside_declared"] += 1
-            continue
+            skipped["diff_outside_declared_retained"] += 1
         order, source = touch_order(repo, run, base, candidate, changed)
         groups[repo].append({
-            "issue": issue, "when": assignment_time(run), "declared": declared,
-            "order": order, "source": source,
+            "issue": issue, "when": start, "declared": declared,
+            "order": order, "source": source, "run": str(run.relative_to(Path('/Users/sebastianpatronsoto/agent-runs'))),
         })
     for repo in groups:
         groups[repo].sort(key=lambda task: (task["when"], task["issue"]))
-        groups[repo] = groups[repo][:CAP_PER_REPO]
+        first = groups[repo][:CAP_PER_REPO]
+        # Preserve every scope-miss task even when a repository reaches its cap.
+        misses = [task for task in groups[repo][CAP_PER_REPO:]
+                  if not set(task["order"]).issubset(task["declared"])]
+        groups[repo] = sorted(first + misses, key=lambda task: (task["when"], task["issue"]))
     provenance = Counter(task["source"] for tasks in groups.values() for task in tasks)
     return groups, skipped, provenance
 
@@ -112,15 +123,29 @@ def cycle_nodes(blocked):
     return None
 
 
-def run_window(tasks, policy):
+def initial_set(task, policy):
+    actual = set(task["order"])
+    if policy == "all":
+        return set(task["declared"])
+    if policy == "exact":
+        return actual
+    if policy.startswith("hybrid:"):
+        recall = float(policy.split(":", 1)[1])
+        ordered = sorted(actual, key=lambda p: hashlib.sha256((task["run"] + "|" + p).encode()).digest())
+        count = round(recall * len(ordered))
+        return set(ordered[:count]) | (set(task["declared"]) - actual)
+    return set()
+
+
+def run_window(tasks, policy, repair_cost=2):
     n = len(tasks)
     if policy == "none":
         conflicts = sum(
             bool(set(tasks[i]["order"]) & set(tasks[j]["order"]))
             for i in range(n) for j in range(i + 1, n)
         )
-        return Counter({"makespan": max(len(t["order"]) for t in tasks) + 2 * conflicts,
-                        "repair_events": conflicts, "repair_units": 2 * conflicts,
+        return Counter({"makespan": max(len(t["order"]) for t in tasks) + repair_cost * conflicts,
+                        "repair_events": conflicts, "repair_units": repair_cost * conflicts,
                         "file_work": sum(len(t["order"]) for t in tasks)})
     step = [0] * n
     held = [set() for _ in tasks]
@@ -128,14 +153,26 @@ def run_window(tasks, policy):
     cooldown = [0] * n
     metrics = Counter()
     denied_before = set()
+    initial_claimed = [False] * n
+    scope_counted = set()
     for tick in range(10000):
         owners = {path: i for i in range(n) for path in held[i]}
         blocked = defaultdict(set)
+        finishing = []
         for i, task in enumerate(tasks):
             if i in finished or cooldown[i]:
                 cooldown[i] = max(0, cooldown[i] - 1)
                 continue
-            needed = task["declared"] if policy == "all" else {task["order"][step[i]]}
+            initial = initial_set(task, policy)
+            next_path = task["order"][step[i]]
+            if policy == "all" and next_path not in initial and i not in scope_counted:
+                metrics["scope_refusals"] += 1
+                scope_counted.add(i)
+                # Refuse once, then redeclare/grow on the following tick.
+                continue
+            if next_path not in initial and next_path not in held[i]:
+                metrics["growth_requests"] += 1
+            needed = {next_path} | (initial if not initial_claimed[i] else set())
             missing = needed - held[i]
             blockers = {owners[path] for path in missing if path in owners and owners[path] != i}
             if blockers:
@@ -147,18 +184,20 @@ def run_window(tasks, policy):
                 continue
             held[i].update(missing)
             owners.update({path: i for path in missing})
+            initial_claimed[i] = True
             denied_before.discard(i)
             step[i] += 1
             metrics["file_work"] += 1
             if step[i] == len(task["order"]):
                 finished.add(i)
-                for path in held[i]:
-                    owners.pop(path, None)
-                held[i].clear()
+                finishing.append(i)
+        # An edit occupies its entire tick, including peers' acquisition attempts.
+        for i in finishing:
+            held[i].clear()
         if len(finished) == n:
             metrics["makespan"] = tick + 1
             return metrics
-        if policy == "grow":
+        if policy != "exact":
             cycle = cycle_nodes(blocked)
             if cycle:
                 victim = max(cycle)  # deterministic youngest arrival in this window
@@ -166,6 +205,7 @@ def run_window(tasks, policy):
                 metrics["restart_lost_file_work"] += step[victim]
                 step[victim] = 0
                 held[victim].clear()
+                initial_claimed[victim] = False
                 cooldown[victim] = 1
                 denied_before.discard(victim)
     raise RuntimeError("simulation did not converge within 10,000 ticks")
@@ -176,21 +216,37 @@ def main():
     lines = [
         "Blind footprint growth scenario; local source snapshot 2026-10-15",
         "All numbers below are simulated counts in arbitrary file-touch units, not observed seconds.",
-        "Input: first issue-linked launcher attempt per repository/issue family, with diffable base and candidate, nonempty diff and declared set; up to 40 chronological tasks per repository.",
+        "Input: first issue-linked launcher attempt per repository/issue family, with diffable base and candidate, nonempty diff and declared set; first 40 chronological tasks per repository plus every later scope miss.",
         "Order source: separate commits in base..candidate if more than one; otherwise alphabetical changed-file order (assumption). Sensitivity reverses assumed order for every second task in a window.",
         "Arrival: tasks start together in chronological, nonoverlapping windows of N from one repository; agent IDs define deterministic claim tie order.",
         "One file first touch costs one unit. File leases remain held until task completion. All-up-front atomically requests its complete Allowed-file set.",
-        "Grow requests the next changed file just before its first touch and retains prior claims. This trace gives perfect discovery of required files; real discovery is uncertain.",
-        "A denied request counts once per uninterrupted wait; each waiting agent-tick adds one wait unit. On a grow wait cycle, the youngest task releases all claims, loses completed file work, and restarts after one tick.",
-        "No declaration has zero lease wait/denial/deadlock by definition. Every overlapping actual-file pair in a concurrent window incurs an assumed two-unit repair cost, added to makespan; this is an estimate, not observed repair.",
+        "Hybrid starts with a deterministic subset of changed files at stated recall, plus declared-but-unchanged files; misses grow at first touch. These oracle subsets are scenarios, not predictions.",
+        "Exact and first-touch use identical actual changed sets: exact claims all at start; first-touch claims on first use and is an upper bound on discovery knowledge, not throughput.",
+        "A missed Allowed-file declaration incurs one refusal tick, then grows; a denied claim counts once per uninterrupted wait. A wait cycle makes the youngest task release claims, lose completed work and restart after one tick.",
+        "No declaration has zero lease wait/denial/deadlock by definition. Overlapping actual-file pairs incur assumed repair costs of zero, one, or two units.",
         "Every policy uses the same task windows; no publish/review, renewal, expiry, merge, symbol claims, staggered arrivals, or agent adaptation is modeled.",
         f"Frozen source cutoff: {SOURCE_CUTOFF.isoformat()}. Input tasks: {sum(len(v) for v in groups.values())} in {len(groups)} repositories; selected order provenance: {json.dumps(provenance, sort_keys=True)}; skips: {json.dumps(skipped, sort_keys=True)}.",
         "",
     ]
+    lines.append("Selected input manifest (run, declared, changed order, provenance):")
+    for repo, tasks in sorted(groups.items()):
+        for task in tasks:
+            lines.append(json.dumps({"run": task["run"], "repository": repo,
+                                     "declared": sorted(task["declared"]), "order": task["order"],
+                                     "order_source": task["source"]}, sort_keys=True))
+    lines.append("")
+    all_tasks = [task for tasks in groups.values() for task in tasks]
+    for policy in ("all", "exact", "hybrid:0", "hybrid:0.5", "hybrid:0.8", "hybrid:1", "first_touch"):
+        positives = sum(len(set(t["order"]) & initial_set(t, policy)) for t in all_tasks)
+        actual = sum(len(t["order"]) for t in all_tasks)
+        extras = sum(len(initial_set(t, policy) - set(t["order"])) for t in all_tasks)
+        lines.append(f"Initial footprint {policy}: observed_files={actual}, initially_recalled={positives}, "
+                     f"realized_recall={positives / actual:.3f}, extra_initial_files={extras}")
+    lines.append("")
     for n in (2, 5, 10):
         windows = [(repo, tasks[start:start + n]) for repo, tasks in sorted(groups.items())
-                   for start in range(0, len(tasks) - n + 1, n)]
-        lines.append(f"Concurrency: {n} agents; {len(windows)} windows; {sum(len(w) for _, w in windows)} task placements")
+                   for start in range(0, len(tasks), n)]
+        lines.append(f"Concurrency: up to {n} agents; {len(windows)} windows; {sum(len(w) for _, w in windows)} task placements")
         for order_mode in ("alphabetical", "alternating_reverse"):
             lines.append(f"  Order scenario: {order_mode}")
             scenario = []
@@ -202,15 +258,20 @@ def main():
                         item["order"] = list(reversed(item["order"]))
                     copy.append(item)
                 scenario.append(copy)
-            for policy in ("all", "grow", "none"):
+            for policy in ("all", "exact", "hybrid:0", "hybrid:0.5", "hybrid:0.8", "hybrid:1", "first_touch", "none"):
                 total = Counter()
                 for window in scenario:
                     total.update(run_window(window, policy))
                 lines.append(f"    {policy}: " + ", ".join(f"{key}={total[key]}" for key in
                              ("makespan", "file_work", "wait_agent_ticks", "denials", "deadlocks",
-                              "restart_lost_file_work", "repair_events", "repair_units")))
+                              "restart_lost_file_work", "scope_refusals", "growth_requests", "repair_events", "repair_units")))
+            for cost in (0, 1):
+                total = Counter()
+                for window in scenario:
+                    total.update(run_window(window, "none", repair_cost=cost))
+                lines.append(f"    none_repair_cost_{cost}: makespan={total['makespan']}, repair_events={total['repair_events']}, repair_units={total['repair_units']}")
         lines.append("")
-    OUTPUT.write_text("\n".join(lines) + "\n")
+    OUTPUT.write_text("\n".join(lines).rstrip() + "\n")
     print(OUTPUT.read_text(), end="")
 
 

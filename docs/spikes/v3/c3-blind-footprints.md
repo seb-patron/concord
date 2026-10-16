@@ -1,93 +1,100 @@
-# Blind issue footprints and mid-run growth
+# Can an issue predict the files a worker will edit?
 
-**Answer for the owner.** The available history does not yet justify making an issue's proposed files its exclusive leases. Only **four** substantive, pre-assignment issue bodies survive a conservative blind-data audit, across **two** repositories. Another **702** tasks have usable redacted outcome text, but an author who knew the code wrote that text; this is a **LEAKY** tier. A mechanical growth simulation shows why gradual claims deserve a live test: it reduces modeled waiting, while plausible changes to the unknown first-touch order create deadlocks and restarts. These are scenario results, not measured agent speed or a policy recommendation. The current exclusive-write decision (D-UNIT-1-EXCLUSIVE) remains the baseline; the owner's 2026-10-15 approval covers this research spike, not a policy change.
+## Plain answer
 
-**STRUCTURAL (local launcher and issue-history sources dated through 2026-10-15; audited 2026-10-16 UTC):** issue bodies commonly already contain delegation specs and Allowed-file lists. Accepted commits are constrained by those lists, so a final diff cannot reveal every file the agent needed. **CAPABILITY-DEPENDENT (2026-10-16 dataset; re-test with current agents):** how accurately a separate agent predicts files or symbols from a clean issue is unknown; no predictions were run here.
+**The historical data cannot justify automatic exclusive file claims from issue text.** Only four pre-specification GitHub issue bodies have a usable, verified starting tree and observed answer in this freeze, and three of those four name code or folders that lead to changed files. The issue writers knew the code. The larger redacted-spec sample is useful for debugging extraction and search baselines, but it is not blind evidence. Four of the same tasks appear in both samples.
 
-## What was frozen
+**The growth model supports a live test, not a policy ranking.** It now starts from partial declared sets, grows missed files, retains tasks whose Allowed list missed a file, and keeps each lock for the whole modeled edit. Its predicted sets are constructed from the answer, so even a favorable result does not measure a real predictor. The owner-approved declare, grow and verify plan (D-LEASE-Q5-CPLUS) remains a plan; the current exclusive-write rule (D-UNIT-1-EXCLUSIVE) remains the policy.
 
-A *bundle* is the issue or outcome text plus the repository's assignment-time base commit SHA. Its separate *answer key* contains the candidate commit SHA, changed files, and any explicit refused-scope paths in the launch log. The bundle contains no final diff, Allowed-file list, candidate SHA, or later repository tree. The files are [bundles](../../../spikes/v3/c3/bundles.jsonl) and [answers](../../../spikes/v3/c3/answers.jsonl). Together they are 1,113,824 bytes, below the 20 MB cap. Their SHA-256 values at freeze are:
+**Recommendation:** collect new blind requests inside the planned live pilot and Concord's own issue store. Freeze the requester's words before anyone who has inspected the code writes a work specification. Record discovery, growth, waiting, failed work and accepted work. Use the redacted historical tier to debug the prediction harness only.
+
+## Short glossary and worked example
+
+- A **bundle** is the text shown to a future predictor plus the starting commit. An **answer key** separately records the observed changed files and any explicit refusal. Each JSONL line is one JSON record.
+- A **file claim** or **lease** reserves a file for one writer; a **unit** is the file in this study. **Declare** requests an initial set, **grow** requests a newly discovered file, and **verify** checks the final changed set.
+- The **base** is the commit used to start work; a SHA is its Git identifier. A **diffable** attempt has both starting and candidate commits locally. An **issue family** joins retries for one repository issue; the first attempt is used here. An **undiffable** attempt has no usable local before/after diff.
+- **Tier A** is issue text recovered from the issue's first GitHub revision, written before the work spec. It is *pre-spec*, not code-blind. **Tier B** is the work spec's Goal or Outcome with paths redacted; its author knew the code, so it is *leaky*. The four Tier A families also have Tier B records.
+- **Recall** is the share of observed changed files in the initial set; **precision** is the share of initially named files that changed. **Over-declaration** is extra named files. An **exact set** has no observed miss or extra file. Because an Allowed list prevented some edits, the observed diff can be an incomplete, or **censored**, answer.
+- A simulation **tick** is an arbitrary one-file work unit, not a second. **Wait** is time denied a claim; a **cycle** is a group of tasks each waiting for another's lock; **makespan** is the time until the last task in a window finishes. **First touch** is the first modeled edit to a file, not a timestamp recovered from a worker log.
+- **Train** and **held out** are repository groups reserved for fitting and later evaluation. They do not make a leaky text blind. A **clustered interval** groups related tasks when estimating uncertainty. A **top-k** rule limits a prediction to its first k named files.
+
+For example, the SwiftUI Rewine lint-dimensions issue says “evidence-records spec.” The starting tree contains `docs/specs/evidence-records.md`, one of five files in its answer key. A text search can find that answer without reasoning about future edits. Its bundle is Tier A because the first issue revision predates the work spec, but its wording is still a location clue.
+
+## Data audit
+
+The source cutoff is **October 15, 2026, 7:42:28 pm Chicago time**. Local assignments in the freeze begin September 16. The builder reads launcher run directories and local Git clones read-only; its GitHub calls retrieve issue creation revisions. It uses a logged worker-start marker where available, otherwise the run-name time as a conservative proxy; it excludes a base when its commit time cannot be shown to precede that bound. A future predictor must see only an export of that base tree, never the clone's later refs.
+
+The history scan found **9,678** runs with the required local marker, status and prompt/spec; **8,518** lacked an issue number. That includes all **1,228** Concord runs in this source slice: Concord is absent from both historical issue-linked tiers and from the issue-linked growth model. There are **935** issue families, and their creation revisions were recovered. Among **898** families with a verified starting snapshot, **807** first bodies already contained a spec or Allowed list, **66** had a revealing path or location, **21** were too thin, and **4** entered Tier A. Another **37** lack a verifiable starting snapshot and are tracked separately. Creation-text eligibility is checked independently of whether an attempt produced a diff or a usable Goal/Outcome. Failed and abandoned families appear as audit records rather than scored tasks; the freeze cannot promise complete labels for them.
+
+Tier A contains **four** usable creation-time issues across two repositories. The family audit includes **37** issue families whose base commit time was unavailable; their creation text is still screened for obvious spec and location clues, but they cannot enter a frozen predictor bundle without a verified starting tree. A base-tree search in the independent audit found direct clues in three usable records:
+
+| Pre-spec issue, named in words | Clue in first body | Starting-tree result |
+|---|---|---|
+| Gen-V research tools interrupt residuals (issue 141) | `_packet_summary`, `STOP_INTERRUPTED`, `_hold_interrupts` | The first two find the changed probe script; the third finds the two changed files. |
+| Gen-V research tools assumption register (issue 360) | “chosen by the spike” | No direct answer-file pointer, but the body lacks the parent context. |
+| SwiftUI Rewine probe frame (issue 109) | `ScenarioSupport`, `SCN-0002`, `CounterCard` | The folder and matched scenario files lead to changed files. |
+| SwiftUI Rewine lint dimensions (issue 115) | “evidence-records spec” | Names the changed evidence-records document. |
+
+This is a pre-spec audit, not a claim that the writer lacked repository knowledge. The creation-revision method uses GitHub's earliest content edit only when its edit time equals the issue creation time; an unedited issue uses its body. A body containing a delegation spec, Allowed list, explicit location, or too little substance is excluded. The first four surviving revisions were independently checked against their GitHub creation bodies.
+
+The regenerated Tier B has **687** records. Its per-bundle flags mark answer-file stems, non-generic answer folders and wording that grants edits. These are separate overlapping indicators, not a complete leak detector. The deterministic scan finds **92** file-stem clues (**13.4%**), **140** folder clues (**20.4%**) and **3** permission phrases (**0.4%**); **205** records (**29.8%**) have at least one flag. A deterministic 60-record sample, ordered by a hash of task ID, found **5** texts (**8.3%**) with a code-like identifier whose base-tree search matched at most three files including an answer file. This sample is not a population estimate. The independent earlier sample found 8 of 60, and the old freeze had five permission passages and four commit identifiers off the base ancestry. The extractor now stops at the next labeled field, and the predictor protocol excludes those commits entirely. Literal answer-path matching alone was zero in the earlier freeze; that narrow fact did not mean the text was blind.
+
+The redactor now preserves prose between paired code spans, matches full file extensions (including `.json`), keeps multiline goals, removes prose line numbers, templated paths and commit identifiers, and ignores fenced examples before choosing the outer Goal/Outcome. The old freeze damaged 116 of 702 Tier B records in the independent review, with overlap among the three bug categories. Regeneration changes both text and membership; the old hashes must not be used. The builder records a checked base commit time, the worker start, and a source run in the answer key. Refused-scope paths come from actual unmatched diagnostics and the candidate's changed files outside its Allowed set, excluding “nearest” suggestions; a dirty refusal is labeled separately. Missing refused paths mean “not reported,” not “none needed.”
+
+The labels are observed changed files, not all files a worker would have needed without an Allowed-file gate. Scope refusals expose some misses, but unknown missed needs remain. There is no defensible symbol-level answer key here. The answer JSONL also contains **935** `family_audit` records, one for each issue family, giving source run, creation-revision status, snapshot evidence, label availability and exclusion reason. They are audit records, not scored answers. Concord's own issue store, not this historical GitHub-issue subset, is the natural source for its future blind data.
+
+## Growth simulation: what changes when a declaration is partial?
+
+The [simulation](../../../spikes/v3/c3/growth_sim.py) reads first issue-linked attempts with a local diff and Allowed list. It selects the first 40 tasks per repository **plus all 15** tasks whose changed files exceeded the list, yielding **295** tasks. One task has an order derived from successive commits; the other **294** use alphabetical first-touch order as an assumption. Worker logs were not mined for first-edit ordering. The [raw output](../../../spikes/v3/c3/output.txt) includes every selected run, declared set and derived order as an audit manifest, followed by all scenario metrics.
+
+The up-front arm requests the author's whole Allowed list. If a missing file is reached, it pays one modeled refusal tick and then grows. The exact arm requests precisely the actual changed set at start. The partial arms start with deterministic answer-derived subsets at **0%, 50%, 80% and 100%** recall, plus the original declared-but-unchanged files, and grow the misses. The first-touch arm has perfect foresight and claims changed files only as needed; it is an upper bound on discovery knowledge, not throughput. Comparing exact with first-touch holds footprint accuracy fixed and isolates acquisition timing. Comparing all with exact shows the effect of surplus declared files and misses. Every acquired lock remains held through the whole edit tick and until completion.
+
+Across selected tasks, the historical Allowed lists named **1,321** files: **1,231** changed and **90** did not, while **87** changed files were missed. Thus **6.8%** of declared entries were extra. The earlier, broader declared-footprints study found **25.2%** extra entries; these selected issue-linked tasks are not representative of that larger history. The partial arms achieved **50.8%** and **79.7%** observed-file recall at their nominal 50% and 80% settings. They retain the same 90 extra files, so recall alone does not specify the footprint.
+
+Tasks start simultaneously in nonoverlapping same-repository windows of up to two, five or ten workers. The final smaller window is kept, so every selected task appears in each concurrency scenario. Agent order breaks claim ties. A denied claim counts once per uninterrupted wait; a wait cycle makes the youngest task release its locks and repeat its completed file work. An alternating reverse-file-order sensitivity exposes cycles hidden by alphabetical ordering. No-claim scenarios assume zero, one or two repair ticks for each pair sharing a changed file. The earlier larger lock replay observed textual conflicts in only 40 of 1,304 overlapping merged-change pairs, all in one repository; charging every overlap two repair ticks is deliberately pessimistic.
+
+For windows of up to ten workers with alphabetical assumed edit order, the model gives:
+
+| Initial claim strategy | Waiting worker-ticks | Scope refusals | Deadlocks | Window finish ticks |
+|---|---:|---:|---:|---:|
+| Author's full Allowed list, then grow misses | 1,659 | 15 modeled refusals | 0 | 755 |
+| Exact changed set up front | 1,589 | 0 | 0 | 741 |
+| Partial set at 50.8% recall, then grow | 1,689 | 0 | 4 | 738 |
+| Partial set at 79.7% recall, then grow | 1,725 | 0 | 0 | 748 |
+| Partial set at 100% recall, still with extras | 1,763 | 0 | 0 | 754 |
+| Claim at first touch with perfect foresight | 1,283 | 0 | 0 | 696 |
+
+Reversing every second task's assumed order yields **32** deadlocks and **102** repeated file-work units for perfect-foresight first touch at ten workers. With no claims, the same windows finish in **422**, **712** or **1,002** ticks under zero, one or two assumed repair ticks per overlapping pair. This range reverses apparent rankings and is not observed repair time.
+
+The output is a mechanics sensitivity study, not elapsed time or measured agent throughput. The subset construction knows the answer and has no measured prediction cost. At the modeled ten-worker windows, the partial arms do not establish a reliable minimum recall: their wait and restart counts change with order and the arbitrary subset choice. In particular, a high recall can still hold extra files for the whole job, while a low recall can create growth waits or cycles. A real threshold requires frozen independent predictions and observed discovery, claim latency, repair and completion costs. No agent prediction or live run was made here.
+
+## How to obtain and test blind data
+
+The prediction protocol should first freeze task text and a base-tree export. Put each prediction in a fresh sandbox with no network, home directory, GitHub login, run directories, chat transcripts, memory, current branch, Git refs or reflog. Give only the base tree and the single task's permitted text; strip issue-family identifiers and candidate commit identifiers from the predictor view. A cited branch commit outside the base, even if older than the task, is unavailable unless it was explicitly present and frozen at assignment. Run Tier A before Tier B or use separate predictors with no shared memory; never reveal labels until both tiers' predictions are frozen. The original spec author cannot be the blind predictor.
+
+Predeclare a file budget, top-k rule, time and spend. Use two simple baselines: search the issue words for file, folder and symbol names in the base tree, and reuse the previous task's changed files in the same repository. The author's Allowed list is an informed reference ceiling, not a blind comparator. Repeat each bundle in isolated sessions at least twice to expose prediction variance. Report Tier A and leaky Tier B separately, and split Tier B by its hint flags; quarantine related issue families and cross-repository links between train and held-out groups.
+
+Let **K** be known needed files (changed files plus explicit refused paths) and **P** the prediction. Files in both are confirmed hits; files in K but not P are confirmed misses; files in P but not K are **unknown**, not confirmed false positives. Report precision against K as a lower bound, `|P ∩ K| / |P|`, with upper bound 1 if every unverified prediction was needed. Report `|P ∩ K| / |K|` as *observed-label recall*, never as true recall. True recall has no useful lower bound without a finite, justified universe of possible unseen needs; its upper bound assumes every unverified predicted file was needed and no other unseen file was. Exact-set accuracy is unidentified where the answer is censored. Failed, undiffable and unlabeled tasks belong in a missingness table, not a falsely scored denominator. New pilot work should log every first edit, attempted out-of-scope edit, growth request, abandoned task and accepted change so independent adjudicators can produce an uncensored outcome. Report uncertainty by issue family and repository, plus elapsed time, wait, refusal and repair cost. Prediction accuracy alone cannot choose a lease policy.
+
+The historical Tier A count is too small to promise a useful sample. Fifty independent new families would have a worst-case simple 95% proportion half-width near 14 percentage points before clustering; about 200 would approach seven points. These are planning illustrations, not recruitment promises or product gates. The planned live pilot in the claims-options study is the right place to estimate actual variance, with owner-approved arms and spend before any policy comparison.
+
+## Owner's choices for blind text
+
+| Choice | Who writes and freezes the text | Benefit | Cost and limit |
+|---|---|---|---|
+| **Collect new requests inside the live pilot and Concord issue store** | The requester writes the original request without consulting the target code; Concord freezes it before a code-aware orchestrator writes the spec. | Directly matches agent work; can collect uncensored edits, growth, waiting and failure, including Concord's own runs. | Requires a changed issue-creation workflow, instrumentation, review and pilot agent time; early sample is small. Recommended. |
+| **Use a public issue-to-change dataset** | Public issue authors wrote text; the researcher freezes a verifiable first revision and assignment-time tree. | Potentially large and unconstrained by this launcher's Allowed list. | Data acquisition and historical audit cost; models may have trained on public fixes, human open-source issues differ from orchestrated agent work, and first-edit timing is usually absent. Useful only for a quick outside check. |
+| **Accept the measured leaky spec tier** | A code-aware spec author wrote the Goal/Outcome; the researcher freezes the repaired redaction. | Available now, cheap, useful for testing parsing, isolation and scoring code. | Residual names and permission clues bias accuracy upward; not evidence for initial claims. |
+| **Mine the owner's original requests** | The owner wrote past requests; a researcher with authorized access freezes the earliest untouched wording before any code-aware response. | Closer to the owner's real task mix and often less code-informed than a spec. | Retrieval, privacy review, chronology checks, matching to runs and missing or informal context cost; some requests may already name code. No such text was included in this freeze. |
+
+## Reproduction notes
+
+The allowed deliverables are [bundles](../../../spikes/v3/c3/bundles.jsonl), [answers](../../../spikes/v3/c3/answers.jsonl), the [builder](../../../spikes/v3/c3/build_dataset.py), simulation and raw output. The JSONL pair remains below the 20 MB cap. Rebuild with `PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c3/build_dataset.py` using local runs/clones and read-only GitHub history, then `PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c3/growth_sim.py`. The required redirected simulation command checks a successful rerun while leaving the generated output in place. `npm run -s decisions` was attempted; local `tsx` was missing, so its “Approved but not live” list was unavailable. The decisions cited above were checked in the readable decision record.
+
+Frozen SHA-256 checksums for the regenerated files:
 
 ```text
-70b0c717687e84bca15e74f7e49e6d985d630a033a7956a0982bde10f3da60fb  spikes/v3/c3/bundles.jsonl
-6dbafe7bdf87796f3c51d0aa989e6296fd1f787f6be7756a0272a009c11fbf2e  spikes/v3/c3/answers.jsonl
+982fa46c7df41d3834c305a79ca25c97c036bf10276346f972494749d95fac37  spikes/v3/c3/bundles.jsonl
+57a88db7228272fc478d33e42f829b2e30e594930a817e785aaefa0fd6edcaf8  spikes/v3/c3/answers.jsonl
+7a86646e381f63f5bdbac7079ecd98c6429da4e30a0cb43c6fa1ff42b478392a  spikes/v3/c3/output.txt
 ```
-
-The audit's source cutoff is **2026-10-16 00:42:28 UTC** (2026-10-15 in the owner's time zone). It scanned read-only launcher run directories under `agent-runs` with an Allowed-file marker, status and spec/prompt, then used matching read-only local clone history. There were **9,678** such timestamped runs, including **8,518** without an issue number. Among **935** issue families, the first attempt was undiffable for **161**, had no extractable Goal/Outcome for **61**, and had an empty diff for **one**. This left **712** first attempts with an assignment-time base and a locally diffable candidate. Choosing the first attempt prevents successful retries from replacing a failed original; the attrition also means the answer sample is success biased.
-
-**Tier A** means a substantive first issue-body revision recovered from GitHub's read-only `userContentEdits(last:1).diff`, or the creation-time body of an unedited issue. Its GitHub creation timestamp must precede assignment. A marker for a delegation spec or Allowed-file list, a path or file:line hint, an actual changed-file basename, or a placeholder body excludes it. **Tier B** means only the local spec's Goal/Outcome text, with code spans containing paths, paths, file:line hints and changed-file names redacted; it is labelled **LEAKY** in every bundle. Ten Tier B texts still failed the post-redaction path audit and were excluded.
-
-| Repository | First attempts audited | Tier A | A: spec/list | A: revealing path | A: thin body | Tier B | B: redaction failed |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| agent-review-evals | 2 | 0 | 1 | 1 | 0 | 2 | 0 |
-| agent-run-analytics | 1 | 0 | 1 | 0 | 0 | 1 | 0 |
-| agent-workflows | 20 | 0 | 20 | 0 | 0 | 20 | 0 |
-| azeron-macos | 31 | 0 | 9 | 4 | 18 | 31 | 0 |
-| decomp-learning | 1 | 0 | 1 | 0 | 0 | 1 | 0 |
-| gen-v-decomp | 222 | 0 | 206 | 16 | 0 | 222 | 0 |
-| gen-v-map-studio | 13 | 0 | 9 | 3 | 1 | 13 | 0 |
-| gen-v-research-tools | 203 | 2 | 184 | 17 | 0 | 203 | 0 |
-| gen-v-workshop | 2 | 0 | 2 | 0 | 0 | 2 | 0 |
-| mother-base | 41 | 0 | 41 | 0 | 0 | 41 | 0 |
-| mwcc-rs | 108 | 0 | 108 | 0 | 0 | 98 | 10 |
-| sft-course | 13 | 0 | 13 | 0 | 0 | 13 | 0 |
-| swiftui-rewine | 55 | 2 | 39 | 14 | 0 | 55 | 0 |
-| **Total** | **712** | **4** | **634** | **55** | **19** | **702** | **10** |
-
-The antechamber issue family had no diffable first attempt. Runs without issue numbers cannot supply Tier A and were excluded from both issue-family datasets. The repository holdouts are **gen-v-decomp** and **swiftui-rewine**; all other repositories are train. Thus Tier A has **2 train / 2 held-out**, and Tier B **425 train / 277 held-out**. Every attempt in a repository and issue family stays in one split. This split does not prove that related cross-repository issue families are independent; a later predictor run must quarantine explicit cross-links before using train labels.
-
-### Leak and label audit
-
-**STRUCTURAL (GitHub issue revisions and local specs, 2026-09-17–2026-10-15; audit 2026-10-16):** 634 of 712 first revisions exposed a spec or Allowed list, 55 exposed a revealing path/location, and 19 were placeholder or very short bodies. Tier A's four surviving bodies have no literal changed path in their bundle text. The automated answer-path check found **0** literal answer paths in all 706 bundles. This is a mechanical leak check: conceptual clues and explicit symbol names can still occur naturally in an original issue. One Tier A body refers to a parent spike without supplying it, so even this small tier contains a context-poor task.
-
-**STRUCTURAL (launcher and local git, 2026-09-17–2026-10-15):** the 702 Tier B bundles inherit author knowledge despite redaction; file classes, API names and scope may still hint at answers. The first-attempt answer key has ten explicit refused-scope diagnostics with paths. Other absent refused paths mean “not reported,” not “none needed.” The old launcher's Allowed-file gate censors successful diffs: no precision/recall estimate from these labels alone can establish a safe initial lease set. A separate symbol answer key was not defensible from single final commits and was not fabricated. This freeze supports **file** scoring only; symbol prediction awaits independently reviewed labels.
-
-**STRUCTURAL (read-only source retrieval, 2026-10-16):** creation-time `UserContentEdit.diff` was treated as a full historical body only when its `editedAt` equalled `createdAt`; if unavailable, the task would be excluded. Assignment time comes from the run directory name, not a signed spec creation event. A pre-assignment issue revision without a spec is the best available proxy for “pre-spec,” but cannot prove that no private draft spec existed. Local clone object retention and GitHub edit-history availability also limit later rebuilds; the committed JSONL and hashes are the actual freeze.
-
-## Mid-run growth scenario
-
-The [simulation script](../../../spikes/v3/c3/growth_sim.py) is independent of the blind bundles. It reads **281** first, diffable issue-family attempts from **13** repositories, at most 40 chronological tasks per repository. All **281** selected tasks had a single candidate commit, so no log or commit history supplied a first-touch order. The baseline assumes alphabetical changed-file order; a sensitivity run reverses that assumed order for every second task. The complete raw [output](../../../spikes/v3/c3/output.txt) records inputs, skipped cases, assumptions and every metric.
-
-The approved declare/grow/verify plan (D-LEASE-Q5-CPLUS) was not a complete shipped workflow in the supplied 2026-10-15 history. This simulation is a prospective comparison of mechanics, with no claim that its wait line or deadlock recovery existed in the historical runs.
-
-**STRUCTURAL (simulation on local run history through 2026-10-15, run 2026-10-16):** an all-up-front policy requests every declared Allowed file atomically; gradual growth requests each actually changed file just before its first touch, holding claims until completion; no declaration does not claim. Each first file touch costs one arbitrary unit. Same-repository tasks start together in nonoverlapping windows of 2, 5 or 10, and lower agent index wins same-tick claims. A denied request is counted once per continuous wait. A cycle makes the youngest task release, lose its completed file work, pause one tick and restart. With no declaration, every pair that changes a common file incurs an **assumed**, not measured, two-unit repair cost. The table gives total simulated agent wait units / denials / deadlocks / restart work, followed by total window makespan. The no-declaration repair estimate is separate.
-
-| Agents | Order | All upfront: wait / denial / deadlock / makespan | Grow: wait / denial / deadlock / lost work / makespan | No declaration: assumed repair events / units / makespan |
-|---:|---|---|---|---|
-| 2 | alphabetical | 122 / 35 / 0 / 845 | 81 / 30 / 0 / 0 / 833 | 34 / 68 / 827 |
-| 2 | alternating reverse | 122 / 35 / 0 / 845 | 33 / 23 / 9 / 32 / 808 | 34 / 68 / 827 |
-| 5 | alphabetical | 553 / 77 / 0 / 614 | 350 / 72 / 0 / 0 / 588 | 127 / 254 / 675 |
-| 5 | alternating reverse | 553 / 77 / 0 / 614 | 261 / 93 / 18 / 61 / 573 | 127 / 254 / 675 |
-| 10 | alphabetical | 1,256 / 106 / 0 / 515 | 810 / 103 / 0 / 0 / 491 | 279 / 558 / 842 |
-| 10 | alternating reverse | 1,256 / 106 / 0 / 515 | 637 / 143 / 27 / 89 / 468 | 279 / 558 / 842 |
-
-All-up-front's wait rises with agent count in these windows. Growth lowers modeled waiting but can add denials, deadlocks and lost work. Alphabetical order forces a common acquisition order and therefore hides cycles; the reverse sensitivity demonstrates that this zero is not evidence of safety. Gradual growth also receives a perfect trace of required files, which real agents lack. The simulation omits actual claim latency, renewal, expiry, queue phase, inspection, review, publish/land, merged-tree checks, symbol units, staggered arrivals and adaptation. Its no-declaration makespan depends strongly on the assumed repair cost. It cannot rank policies for real throughput or correctness.
-
-## Protocol for a later prediction run
-
-1. Freeze these JSONL hashes and preregister the file-prediction metric, top-k rule, time and model budget, and handling of missing labels. A separate operator checks cross-repository issue/parent links and quarantines related families across splits before any held-out prediction. Keep failures and refused-scope cases in denominators.
-2. Give a separate prediction agent **only** one bundle at a time: tier label, repository, frozen issue text, assignment-time base SHA and split. Permit read-only checkout of that repository **at exactly the base SHA**. Block GitHub, current branches, run directories, specs, Allowed files, answers, later commits and final diffs. Do not provide this report's answer discussion during prediction. Never let the original spec author serve as the blind predictor.
-3. Record the agent's ordered initial file set, uncertainty, rationale, discovery/grow requests if a live run is later approved, elapsed time and cost, before revealing any answer. Commit or hash the predictions. The research operator alone then joins `task_id` and `tier` to the answer key; train and held-out repository groups are reported separately.
-4. Report per-task precision, recall, over-declaration and exact-set accuracy with clustered intervals by issue family and repository. Treat explicit refused-scope paths as positives. Report censored, undiffable and missing-path cases separately; do not score unknown unmet paths as true negatives. Report Tier A and LEAKY Tier B separately, with no pooled “blind” number. Symbols require a new independent answer audit. No prediction was run in this spike.
-
-Four Tier A examples, with only two held out, are too few for a useful general test. A **50-family, three-repository** substantive blind pilot would at least expose gross failures and repository variation; even a simple proportion at 50 has a worst-case approximate 95% half-width of **14 percentage points** before clustering. Around **200** independent families would narrow that simple bound to about **7 points**; a real policy comparison needs a pilot variance and the owner's minimum useful improvement first. These are planning estimates, not gates.
-
-The owner can (1) collect new issues with text frozen **before** any delegation spec is written, including first-touch and scope-growth events; (2) use a public issue-to-change corpus whose issue revisions and assignment-time trees can be audited; or (3) use Tier B for a limited diagnostic while explicitly accepting its author-knowledge bias. **CAPABILITY-DEPENDENT (2026-10-16; re-test with current agents):** whether a predictor can infer enough of the first write set remains unanswered by all three options until an independent run occurs.
-
-## Reproduction and decision check
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c3/build_dataset.py
-PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c3/growth_sim.py
-PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/c3/growth_sim.py > /dev/null
-wc -w docs/spikes/v3/c3-blind-footprints.md
-```
-
-The first command reads only local runs/clones and read-only `gh api graphql` issue revisions; its stdout is the repository and exclusion counts tabulated above. The second command writes the raw output file. Python executions in this run set `PYTHONDONTWRITEBYTECODE=1`. The current `npm run -s decisions` check was attempted before editing and failed because local `tsx` is missing; it could not produce an `Approved but not live:` list. Raw failure:
-
-```text
-Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'tsx'
-Node.js v26.7.0
-```
-
-No global installation, product code change or prediction call was made.
