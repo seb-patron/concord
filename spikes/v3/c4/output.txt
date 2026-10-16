@@ -1,0 +1,49 @@
+Concord v3 wait-line prototype — local results
+Run date: 2026-10-15
+Seeded fault plan: xorshift seed 0xC0A4 + agent count; 190 steps and a bounded 30-step drain per mode/case.
+Metrics and assumptions are defined in docs/spikes/v3/c4-waitline.md. These are simulation outputs, not production measurements.
+
+Successful local execution command:
+$ node --experimental-strip-types spikes/v3/c4/test.ts
+deterministic tests: 7 scenarios passed for automatic grant and fresh-claim turn
+fault injection (seeded xorshift; 190 steps plus bounded drain per case)
+mode=automatic agents=2 seed=49318 safety=0 grants=1 p50_ms=4 p95_ms=4 wasted_holds=0 wasted_ms=0 calls=6 starvation=0 disconnects=0 crashes=2
+mode=fresh-claim agents=2 seed=49318 safety=0 grants=0 p50_ms=0 p95_ms=0 wasted_holds=0 wasted_ms=0 calls=43 starvation=1 disconnects=0 crashes=0
+mode=automatic agents=5 seed=49321 safety=0 grants=4 p50_ms=9 p95_ms=13 wasted_holds=1 wasted_ms=22 calls=23 starvation=0 disconnects=3 crashes=1
+mode=fresh-claim agents=5 seed=49321 safety=0 grants=1 p50_ms=17 p95_ms=17 wasted_holds=0 wasted_ms=0 calls=56 starvation=2 disconnects=1 crashes=2
+mode=automatic agents=10 seed=49326 safety=0 grants=14 p50_ms=22 p95_ms=55 wasted_holds=3 wasted_ms=66 calls=45 starvation=0 disconnects=4 crashes=1
+mode=fresh-claim agents=10 seed=49326 safety=0 grants=4 p50_ms=19 p95_ms=42 wasted_holds=0 wasted_ms=0 calls=211 starvation=5 disconnects=1 crashes=2
+mode=automatic agents=25 seed=49341 safety=0 grants=33 p50_ms=36 p95_ms=77 wasted_holds=6 wasted_ms=132 calls=190 starvation=13 disconnects=15 crashes=5
+mode=fresh-claim agents=25 seed=49341 safety=0 grants=12 p50_ms=36 p95_ms=67 wasted_holds=0 wasted_ms=0 calls=542 starvation=18 disconnects=9 crashes=2
+
+Specified validation command (plain invocation) was attempted:
+$ cd spikes/v3/c4 && (bun test.ts || npx --yes tsx test.ts)
+zsh:1: command not found: bun
+npm error code EPERM
+npm error syscall open
+npm error path /Users/sebastianpatronsoto/.npm/_cacache/tmp/***
+npm error errno EPERM
+npm error
+npm error Your cache folder contains root-owned files, due to a bug in previous versions of npm which has since been addressed.
+npm error Log files were not written due to an error writing to the directory: /Users/sebastianpatronsoto/.npm/_logs
+
+Retry with npm cache in the delegated scratch directory:
+$ npm_config_cache="$DELEGATE_SCRATCH_DIR/npm-cache" sh -c 'cd spikes/v3/c4 && (bun test.ts || npx --yes tsx test.ts)'
+sh: bun: command not found
+Error: listen EINVAL: invalid argument /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003638Z-af5969e2073fe57f8f2eeb0fc9464788/scratch/tmp/tsx-501/91732.pipe
+  code: 'EINVAL',
+  errno: -22,
+  syscall: 'listen',
+
+Final prescribed validation invocation (exit 1):
+$ npm_config_cache="$DELEGATE_SCRATCH_DIR/npm-cache" sh -c 'cd spikes/v3/c4 && (bun test.ts || npx --yes tsx test.ts)'
+sh: bun: command not found
+Error: listen EINVAL: invalid argument /Users/sebastianpatronsoto/agent-runs/concord-c1b87e70add5a86a89981a0a/work-codex-20261016T003638Z-af5969e2073fe57f8f2eeb0fc9464788/scratch/tmp/tsx-501/49110.pipe
+  code: 'EINVAL', errno: -22, syscall: 'listen'
+  Node.js v26.7.0
+
+Final report word-count command:
+$ wc -w docs/spikes/v3/c4-waitline.md
+    1941 docs/spikes/v3/c4-waitline.md
+
+The network-fetched runner could not create its IPC socket under the supplied scratch path. Node's built-in TypeScript stripping executed the same test file successfully (command and raw output above).
