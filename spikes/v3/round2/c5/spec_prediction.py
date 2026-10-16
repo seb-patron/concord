@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """Read-only audit of launcher file declarations and observable scope growth.
 
-Run from the Concord checkout with PYTHONDONTWRITEBYTECODE=1. The only write is
-the aggregate output file. No source-run path or report excerpt is emitted.
+Run from the Concord checkout with PYTHONDONTWRITEBYTECODE=1. A fresh scan
+writes a privacy-safe manifest and aggregate output. Replay uses that manifest.
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
-import math
 import os
-from pathlib import Path
-import random
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 
-ROOT = Path('/Users/sebastianpatronsoto/agent-runs')
 OUTPUT = Path('spikes/v3/round2/c5/output.txt')
+MANIFEST = Path('spikes/v3/round2/c5/manifest.tsv')
 SEED = 20261016
 SKIP_DIRS = {'clones', 'worktree', '.git', 'node_modules', 'scratch', 'tmp', '.venv'}
 DONE_STATES = {'pr-opened', 'no-push', 'pushed'}
 SCOPE_LINE = re.compile(r"^scope check: unmatched:\s*['\"](.+?)['\"]\s*$", re.M)
 SCOPE_DIRECT = re.compile(r"^scope check: ['\"](.+?)['\"] is not in Allowed files(?:\s|$)", re.M)
-BLOCKED_SECTION = re.compile(r'^Blocked:\s*\n(.*?)(?=^[A-Z][A-Za-z ]+:\s*$|\Z)', re.M | re.S)
-NEED_WORDS = re.compile(r'\b(?:need|needs|needed|require|requires|required|must|cannot|can.t|impossible|blocked)\b', re.I)
-ALLOW_WORDS = re.compile(r'\b(?:not (?:in|on|among) .{0,30}allowed|outside .{0,40}allowed|not allowed|out.of.scope|scope .{0,50}(?:grow|expand|widen)|add .{0,100} to .{0,30}allowed|authoriz(?:e|ation) .{0,100}(?:file|\.py|\.ts|\.rs|\.sh)|allowed to touch|may not touch)\b', re.I)
-FILE_CUE = re.compile(r'\bfiles?\b|[\w.-]+/[\w./-]+\.(?:py|ts|tsx|js|rs|md|json|toml|yaml|yml|sh|txt|tsv|swift|c|h|cpp|hpp|html|css|sql|age)\b', re.I)
-PATH_IN_REPORT = re.compile(r'(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\.(?:py|ts|tsx|js|rs|md|json|toml|yaml|yml|sh|txt|tsv|swift|c|h|cpp|hpp|html|css|sql|age)\b', re.I)
+BLOCKED_SECTION = re.compile(r'^Blocked:\s*(.*?)(?=^[A-Z][A-Za-z ]+:\s*(?:\n|$)|\Z)', re.M | re.S)
+NEED_WORDS = re.compile(r'\b(?:need|needs|needed|require|requires|required|must|cannot|can.t|impossible|blocked|please|request|allow|permit|grant)\b', re.I)
+ALLOW_WORDS = re.compile(r'\b(?:not (?:in|on|among) .{0,30}allowed|outside .{0,40}allowed|not allowed|out.of.scope|allowed.files?.only|allowed.files? list.{0,40}(?:extend(?:ed)?|widen(?:ed)?|expand(?:ed)?)|scope .{0,50}(?:grow|expand|widen|extend)|add .{0,100} to .{0,30}allowed|(?:widen|extend|expand) .{0,40}(?:allowed|scope)|(?:allow|permit|authorize|authorise) .{0,50}(?:(?:additional|another|extra|new|more)\s+(?:file|path)|edits?|changes?|(?:an?\s+)?updates?|touch|remove|[\w./-]+\.(?:py|ts|rs|c|md|tsv))|allowed to touch|may not touch)\b', re.I)
+FILE_CUE = re.compile(r'\bfiles?\b|[\w.-]+/[\w./-]+\.(?:py|ts|tsx|js|rs|md|json|toml|yaml|yml|sh|txt|tsv|swift|c|h|cpp|hpp|html|css|sql|age|conf)\b', re.I)
+PATH_IN_REPORT = re.compile(r'(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\.(?:py|ts|tsx|js|rs|md|json|toml|yaml|yml|sh|txt|tsv|swift|c|h|cpp|hpp|html|css|sql|age|conf)\b', re.I)
 
 
 def read(path: Path, limit: int = 500_000) -> str:
@@ -57,13 +56,38 @@ def status(path: Path) -> dict:
         return {}
 
 
-def normalized_allowed(raw: str) -> set[str]:
-    return {s for line in raw.splitlines() if (s := line.strip()) and not s.startswith('#')
-            and s != '(none; review only)'}
+PATH_PART = re.compile(r'^[A-Za-z0-9._@+\-]+$')
+EXTENSIONLESS = {'Makefile', 'Dockerfile', 'LICENSE', 'NOTICE', 'Procfile', 'Gemfile', 'Rakefile', 'BUILD', 'WORKSPACE'}
 
 
-def run_dirs():
-    for directory, children, files in os.walk(ROOT):
+def valid_path(value: str) -> bool:
+    """Accept one normalized repository file path; quarantine ambiguous records."""
+    if not value or value.startswith(('/', './')) or '\\' in value or any(c.isspace() for c in value):
+        return False
+    parts = PurePosixPath(value).parts
+    if not parts or any(p in {'.', '..'} or not PATH_PART.fullmatch(p) for p in parts):
+        return False
+    if str(PurePosixPath(value)) != value:
+        return False
+    name = parts[-1]
+    return '.' in name or name in EXTENSIONLESS
+
+
+def normalized_allowed(raw: str) -> tuple[set[str], list[str]]:
+    valid, malformed = set(), []
+    for line in raw.splitlines():
+        value = line.strip()
+        if not value or value.startswith('#') or value == '(none; review only)':
+            continue
+        if valid_path(value):
+            valid.add(value)
+        else:
+            malformed.append(value)
+    return valid, malformed
+
+
+def run_dirs(root: Path):
+    for directory, children, files in os.walk(root):
         children[:] = [c for c in children if c not in SKIP_DIRS and not c.startswith('.git')]
         if 'allowed-files.txt' in files and ('work-spec.md' in files or 'prompt.md' in files):
             yield Path(directory)
@@ -84,28 +108,6 @@ def git_paths(base: str, head: str, places: list[Path]) -> set[str] | None:
     return None
 
 
-def gh_paths(url: str) -> set[str] | None:
-    if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+', url):
-        return None
-    try:
-        p = subprocess.run(['gh', 'pr', 'diff', url, '--name-only'], stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL, timeout=20, check=True)
-        return set(p.stdout.decode('utf-8', 'replace').splitlines())
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def wilson(k: int, n: int) -> str:
-    if n < 10:
-        return 'n<10'
-    z = 1.9599639845
-    p = k / n
-    den = 1 + z*z/n
-    mid = (p + z*z/(2*n))/den
-    radius = z*math.sqrt(p*(1-p)/n + z*z/(4*n*n))/den
-    return f'{100*(mid-radius):.1f}..{100*(mid+radius):.1f}%'
-
-
 def share(k: int, n: int) -> str:
     return f'{100*k/n:.1f}%' if n else 'n/a'
 
@@ -116,148 +118,246 @@ def blocked_rule(report: str) -> bool:
     A narrow two-cue rule reduces false positives from boilerplate about allowed
     files in every prompt. It intentionally misses reports with no Blocked section.
     """
-    m = BLOCKED_SECTION.search(report)
-    passage = m.group(1) if m else ''
+    passage = blocked_body(report)
+    if re.search(r'outside .{0,25}allowed commands', passage, re.I) and not re.search(r'allowed.files?|outside .{0,25}allowed (?:files?|tests?)', passage, re.I):
+        return False
     return bool(NEED_WORDS.search(passage) and ALLOW_WORDS.search(passage) and FILE_CUE.search(passage))
 
 
 def blocked_paths(report: str, allowed: set[str]) -> set[str]:
-    m = BLOCKED_SECTION.search(report)
-    return (set(PATH_IN_REPORT.findall(m.group(1))) - allowed) if m else set()
+    return {p for p in PATH_IN_REPORT.findall(blocked_body(report)) if valid_path(p) and p not in allowed}
 
 
-def kind_of(d: dict) -> str:
+LEGACY_REVIEW = re.compile(r'(?:final|independent|read.only|review.only).{0,35}review|review.{0,35}(?:final|independent|read.only)', re.I | re.S)
+NO_EDIT = re.compile(r'(?:do not|don.t|never|no)\s+(?:create[, ]+|make[, ]+|write[, ]+|run[, ]+|stage[, ]+|edit[, ]+|modify[, ]+|commit[, ]+|change[, ]+){0,4}(?:commits?|edits?|changes?|modify|touch|write|commit)', re.I)
+FINAL_OUTCOME = re.compile(r'VERDICT|REQUEST CHANGES|APPROVE|final review', re.I)
+
+
+def kind_of(d: dict, prompt: str) -> tuple[str, str]:
     if d.get('review_run') is True or str(d.get('launch_class', '')).lower() == 'review' or d.get('kind') == 'review':
-        return 'review-only'
+        return 'review-only', 'metadata'
+    intro = prompt[:1500]
+    if LEGACY_REVIEW.search(intro) and NO_EDIT.search(intro) and FINAL_OUTCOME.search(intro):
+        return 'review-only', 'legacy-text'
     if d.get('target_pr_url') or d.get('publish_target') in {'existing-pr', 'repair'}:
-        return 'repair'
-    return 'first run'
+        return 'repair', 'target-pr'
+    return 'first run', 'default'
+
+
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode('utf-8', 'replace')).hexdigest()
+
+
+def blocked_body(report: str) -> str:
+    match = BLOCKED_SECTION.search(report)
+    return match.group(1).strip() if match else ''
 
 
 def table(rows: list[dict], field: str, label: str) -> list[str]:
     grouped = collections.defaultdict(list)
     for r in rows:
         grouped[r[field]].append(r)
-    lines = [f'[{label}]', 'group\truns\tfirst\trepair\treview\tcompleted\trefused_file\tblocked_file\tvisible_need\tneed_share\t95%_Wilson\tknown_extra_files\tdeclared_completed_diffable\tunused_declared\tunused_share\t95%_Wilson\tlinked_repairs\tgrowing_repairs\tgrowth_share\t95%_Wilson\tadded_entries']
+    lines = [f'[{label}]', 'group\truns\tfirst\trepair\treview\tcompleted\tcompleted_diffable\tcompleted_undiffable\trefused_omitted\trefused_malformed_grant\tblocked_flag\tparser_flags\tflag_share\tdeclared_diffable\tunused_declared\tunused_share\tlinked_repairs\tgrowing_repairs\tgrowth_share\tadded_entries\tquarantined_declarations']
     for key, group in sorted(grouped.items(), key=lambda kv: str(kv[0])):
         predictions = [r for r in group if r['kind'] != 'review-only']
         need = sum(r['needed'] for r in predictions)
-        scored = [r for r in group if r['completed'] and r['changed'] is not None and r['kind'] != 'review-only']
-        declared = sum(len(r['allowed']) for r in scored)
-        unused = sum(len(r['allowed'] - r['changed']) for r in scored)
+        scored = [r for r in group if r['completed'] and r['diffable'] and r['kind'] != 'review-only']
+        declared = sum(r['declared_n'] for r in scored)
+        unused = sum(r['unused_n'] for r in scored)
         linked = [r for r in group if r['growth_known']]
         growing = sum(r['growth_extra'] > 0 for r in linked)
+        completed = sum(r['completed'] for r in group)
+        diffable = sum(r['completed'] and r['diffable'] for r in group)
         lines.append('\t'.join(map(str, [key, len(group), sum(r['kind']=='first run' for r in group),
             sum(r['kind']=='repair' for r in group), sum(r['kind']=='review-only' for r in group),
-            sum(r['completed'] for r in group), sum(r['refused'] for r in group),
+            completed, diffable, completed-diffable,
+            sum(r['refused'] for r in group), sum(r['malformed_refusal'] for r in group),
             sum(r['blocked_file'] for r in group), need, share(need,len(predictions)),
-            wilson(need,len(predictions)), sum(r['extra_files'] for r in group),
-            declared, unused, share(unused,declared), wilson(unused,declared),
-            len(linked), growing, share(growing,len(linked)), wilson(growing,len(linked)),
-            sum(r['growth_extra'] for r in linked)])))
+            declared, unused, share(unused,declared), len(linked), growing,
+            share(growing,len(linked)), sum(r['growth_extra'] for r in linked),
+            sum(r['malformed_n'] for r in group)])))
     return lines + ['']
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--gh', action='store_true', help='read-only PR diff fallback for missing local commits')
-    args = ap.parse_args()
-    rows = []
-    duplicates = 0
-    seen = set()
-    for directory in run_dirs():
-        d = status(directory/'status.json')
-        identity = d.get('run_dir') or str(directory)
+def scan(root: Path) -> tuple[list[dict], int]:
+    selected, seen, duplicates = [], set(), 0
+    for directory in sorted(run_dirs(root)):
+        raw_status = read(directory / 'status.json')
+        d = status(directory / 'status.json')
+        identity = str(d.get('run_dir') or directory.relative_to(root))
         if identity in seen:
             duplicates += 1
             continue
         seen.add(identity)
-        allowed = normalized_allowed(read(directory/'allowed-files.txt'))
-        repo = str(d.get('repo') or 'unknown')
-        repo_name = repo.split('/')[-1]
+        raw_allowed = read(directory / 'allowed-files.txt')
+        prompt = read(directory / 'work-spec.md') or read(directory / 'prompt.md')
+        report = read(directory / 'agent-report.txt')
+        log = read_tail(directory / 'run.log')
+        allowed, malformed = normalized_allowed(raw_allowed)
+        repo = str(d.get('repo') or 'unknown').split('/')[-1]
         agent = str(d.get('agent') or 'unknown')
         model = str(d.get('served_model') or d.get('muse_observed_model') or d.get('requested_model') or 'unknown')
-        state = str(d.get('state') or 'missing-status')
-        kind = kind_of(d)
-        report = read(directory/'agent-report.txt')
-        log = read_tail(directory/'run.log')
-        unmatched = (set(SCOPE_LINE.findall(log)) | set(SCOPE_DIRECT.findall(log))) - allowed
-        # A scope state by itself is insufficient: missing/extra commits also produce it.
-        refused = state.replace('_','-') == 'refused-scope' and bool(unmatched)
-        blocked_file = state == 'blocked' and blocked_rule(report)
+        state = str(d.get('state') or 'missing-status').replace('_', '-')
+        kind, provenance = kind_of(d, prompt)
+        population = 'fixture-or-unknown' if repo in {'3', '4', 'repo', 'probe', 'unknown'} or agent == 'fake' or state == 'missing-status' else 'worker'
+        run_id = digest(identity)[:24]
+        fingerprints = [digest(x) for x in (raw_status, raw_allowed, prompt, report, log)]
+        unmatched = set(SCOPE_LINE.findall(log)) | set(SCOPE_DIRECT.findall(log))
+        malformed_tokens = {token.strip('`\'" ,') for entry in malformed for token in entry.split()}
+        malformed_diagnostic = state == 'refused-scope' and any(p in malformed_tokens or not valid_path(p) for p in unmatched)
+        omitted = {p for p in unmatched if valid_path(p) and p not in allowed and p not in malformed_tokens}
+        mixed_refusal = malformed_diagnostic and bool(omitted)
+        malformed_refusal = malformed_diagnostic and not mixed_refusal and kind != 'review-only'
+        refused = state == 'refused-scope' and bool(omitted) and not mixed_refusal and kind != 'review-only'
+        blocked_file = state == 'blocked' and kind != 'review-only' and blocked_rule(report)
         blocked_extras = blocked_paths(report, allowed) if blocked_file else set()
         changed = None
-        if state in DONE_STATES and kind != 'review-only':
-            places = [ROOT/'clones'/repo_name, directory/'worktree']
+        if state in DONE_STATES and kind != 'review-only' and population == 'worker':
             changed = git_paths(str(d.get('base_sha') or d.get('base') or ''),
-                                str(d.get('candidate_sha') or d.get('validated_sha') or d.get('commit_sha') or ''), places)
-            if changed is None and args.gh:
-                changed = gh_paths(str(d.get('pr_url') or d.get('target_pr_url') or ''))
-        rows.append({'repo': repo_name, 'worker': f'{agent}/{model}', 'kind': kind, 'state': state,
-                     'allowed': allowed, 'changed': changed, 'completed': state in DONE_STATES,
-                     'refused': refused, 'blocked_file': blocked_file,
-                     'needed': refused or blocked_file, 'extra_files': len(unmatched) if refused else len(blocked_extras),
-                     'growth_known': False, 'growth_extra': 0,
-                     'pr': str(d.get('target_pr_url') or d.get('pr_url') or ''),
-                     'time': str(d.get('updated_at') or ''), 'report': report if state=='blocked' else ''})
+                                str(d.get('candidate_sha') or d.get('validated_sha') or d.get('commit_sha') or ''),
+                                [root / 'clones' / repo, directory / 'worktree'])
+        selected.append({'id': run_id, 'fingerprints': fingerprints, 'repo': repo,
+                         'worker': f'{agent}/{model}', 'kind': kind, 'provenance': provenance,
+                         'population': population, 'state': state, 'allowed': allowed,
+                         'malformed': malformed, 'changed': changed,
+                         'declared_n': len(allowed), 'malformed_n': len(malformed),
+                         'unused_n': len(allowed - changed) if changed is not None else 0,
+                         'diffable': changed is not None,
+                         'completed': state in DONE_STATES and kind != 'review-only',
+                         'refused': refused, 'malformed_refusal': malformed_refusal,
+                         'mixed_refusal': mixed_refusal and kind != 'review-only',
+                         'blocked_file': blocked_file, 'needed': refused or blocked_file,
+                         'extra_files': len(omitted) if refused else len(blocked_extras),
+                         'growth_known': False, 'growth_extra': 0,
+                         'pr': str(d.get('target_pr_url') or d.get('pr_url') or ''),
+                         'time': str(d.get('updated_at') or ''), 'report': report if state == 'blocked' else ''})
+    return selected, duplicates
 
-    # Repair growth is measured against the earliest observed first-run declaration
-    # on the same PR, not against a later repair's possibly enlarged list.
-    families = collections.defaultdict(list)
-    for r in rows:
-        if r['pr'] and re.fullmatch(r'https://github\.com/[^/]+/[^/]+/pull/\d+', r['pr']):
-            families[r['pr']].append(r)
-    repair_families = 0; growth_families = 0; repair_runs = 0; growing_repairs = 0
-    growth_sum = 0; growth_unique = 0; no_first = 0
-    for group in families.values():
-        firsts = sorted((r for r in group if r['kind']=='first run'), key=lambda r:r['time'])
-        repairs = [r for r in group if r['kind']=='repair']
-        if not repairs:
-            continue
-        if not firsts:
-            no_first += 1
-            continue
-        repair_families += 1
-        initial = firsts[0]['allowed']
-        additions = set()
-        for r in repairs:
-            extra = r['allowed'] - initial
-            r['growth_known'] = True
-            r['growth_extra'] = len(extra)
-            repair_runs += 1; growing_repairs += bool(extra)
-            growth_sum += len(extra); additions |= extra
-        growth_unique += len(additions)
-        growth_families += bool(additions)
 
-    blocked = [r for r in rows if r['state']=='blocked' and r['kind']!='review-only']
-    sample = random.Random(SEED).sample(blocked, min(30,len(blocked)))
-    # The sample records are deliberately not written: the report is checked
-    # manually via a separate read-only inspection command, then counts are added.
-    need_rows = [r for r in rows if r['needed']]
-    extras = collections.Counter(('0 path visible' if r['extra_files']==0 else
-                                  '1' if r['extra_files']==1 else
-                                  '2' if r['extra_files']==2 else '3+') for r in need_rows)
-    lines = ['# Spec prediction raw aggregate output',
-             'command: PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/round2/c5/spec_prediction.py' + (' --gh' if args.gh else ''),
-             'local read command: git -C <clone-or-worktree> diff --name-only -z <base> <candidate>',
-             'optional read command: gh pr diff <pull-request-URL> --name-only',
-             f'input root: agent-runs (read only); random seed: {SEED}',
-             f'eligible_unique={len(rows)} duplicate_archives={duplicates}',
-             f'implementation_runs={sum(r["kind"]!="review-only" for r in rows)} review_only_runs={sum(r["kind"]=="review-only" for r in rows)}',
-             f'completed={sum(r["completed"] for r in rows)} completed_diffable={sum(r["completed"] and r["changed"] is not None for r in rows)}',
-             f'refused_scope_state={sum(r["state"]=="refused-scope" for r in rows)} refused_with_unmatched_file={sum(r["refused"] for r in rows)}',
+MANIFEST_HEADER = ['id', 'status_sha256', 'allowed_sha256', 'prompt_sha256', 'report_sha256',
+                   'log_tail_sha256', 'population', 'kind', 'provenance', 'state', 'repo',
+                   'worker', 'completed', 'diffable', 'valid_entries', 'unused_entries',
+                   'quarantined_entries', 'refused_omitted', 'refused_malformed', 'refused_mixed',
+                   'blocked_flag', 'parser_flag', 'extra_path_mentions', 'growth_known',
+                   'growth_extra', 'manual_label']
+
+
+def manifest_record(r: dict, label: str = '') -> str:
+    values = [r['id'], *r['fingerprints'], r['population'], r['kind'], r['provenance'],
+              r['state'], r['repo'], r['worker'], int(r['completed']), int(r['diffable']),
+              r['declared_n'], r['unused_n'], r['malformed_n'], int(r['refused']),
+              int(r['malformed_refusal']), int(r['mixed_refusal']), int(r['blocked_file']),
+              int(r['needed']), r['extra_files'], int(r['growth_known']), r['growth_extra'], label]
+    return '\t'.join(map(str, values))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--input-root', type=Path, required=True, help='read-only worker-run root')
+    ap.add_argument('--refresh-manifest', action='store_true', help='freeze a fresh local scan')
+    args = ap.parse_args()
+    if args.refresh_manifest:
+        if not args.input_root.is_dir():
+            ap.error('input root must be a directory')
+        old_labels = {}
+        if MANIFEST.is_file():
+            old_lines = MANIFEST.read_text().splitlines()
+            old_labels = {p[0]: p[-1] for line in old_lines[2:] if (p := line.split('\t'))}
+        scanned, duplicates = scan(args.input_root)
+        rows = [r for r in scanned if r['population'] == 'worker']
+        families = collections.defaultdict(list)
+        for r in rows:
+            if re.fullmatch(r'https://github\.com/[^/]+/[^/]+/pull/\d+', r['pr']):
+                families[r['pr']].append(r)
+        repair_families = growth_families = repair_runs = growing_repairs = 0
+        growth_sum = growth_unique = no_first = 0
+        for group in families.values():
+            firsts = sorted((r for r in group if r['kind'] == 'first run'), key=lambda r: (r['time'], r['id']))
+            repairs = [r for r in group if r['kind'] == 'repair']
+            if not repairs:
+                continue
+            if not firsts:
+                no_first += 1
+                continue
+            repair_families += 1
+            initial = firsts[0]['allowed']
+            additions = set()
+            for r in repairs:
+                extra = r['allowed'] - initial
+                r['growth_known'] = True
+                r['growth_extra'] = len(extra)
+                repair_runs += 1
+                growing_repairs += bool(extra)
+                growth_sum += len(extra)
+                additions |= extra
+            growth_unique += len(additions)
+            growth_families += bool(additions)
+        stats = [repair_families, no_first, growth_families, repair_runs,
+                 growing_repairs, growth_sum, growth_unique]
+        MANIFEST.write_text(f'# duplicate_archives={duplicates}\n# growth_stats=' +
+                            ','.join(map(str, stats)) + '\n' + '\t'.join(MANIFEST_HEADER) + '\n' +
+                            '\n'.join(manifest_record(r, old_labels.get(r['id'], '')) for r in scanned) + '\n')
+    if not MANIFEST.is_file():
+        ap.error('manifest missing; use --refresh-manifest for a fresh scan')
+    manifest_text = MANIFEST.read_text()
+    manifest_lines = manifest_text.splitlines()
+    frozen_duplicates = int(manifest_lines[0].split('=', 1)[1])
+    if manifest_lines[2].split('\t') != MANIFEST_HEADER:
+        ap.error('manifest schema mismatch')
+    repair_families, no_first, growth_families, repair_runs, growing_repairs, growth_sum, growth_unique = map(
+        int, manifest_lines[1].split('=', 1)[1].split(','))
+    frozen = {parts[0]: parts for line in manifest_lines[3:] if (parts := line.split('\t'))}
+    rows = []
+    for parts in frozen.values():
+        r = dict(zip(MANIFEST_HEADER, parts))
+        if r['population'] != 'worker':
+            continue
+        rows.append({'id': r['id'], 'repo': r['repo'], 'worker': r['worker'], 'kind': r['kind'],
+                     'provenance': r['provenance'], 'state': r['state'],
+                     'completed': bool(int(r['completed'])), 'diffable': bool(int(r['diffable'])),
+                     'declared_n': int(r['valid_entries']), 'unused_n': int(r['unused_entries']),
+                     'malformed_n': int(r['quarantined_entries']),
+                     'refused': bool(int(r['refused_omitted'])),
+                     'malformed_refusal': bool(int(r['refused_malformed'])),
+                     'mixed_refusal': bool(int(r['refused_mixed'])),
+                     'blocked_file': bool(int(r['blocked_flag'])),
+                     'needed': bool(int(r['parser_flag'])), 'extra_files': int(r['extra_path_mentions']),
+                     'growth_known': bool(int(r['growth_known'])), 'growth_extra': int(r['growth_extra'])})
+    blocked = [r for r in rows if r['state'] == 'blocked' and r['kind'] != 'review-only']
+    # Ranks 0..29 were used to refine the parser. Keep the next thirty held out.
+    sample = sorted(blocked, key=lambda r: (digest(f'{SEED}:{r["id"]}'), r['id']))[30:60]
+    labels = {run_id: parts[-1] for run_id, parts in frozen.items()}
+    labeled = [r for r in sample if labels[r['id']] in {'0', '1'}]
+    tp = sum(r['blocked_file'] and labels[r['id']] == '1' for r in labeled)
+    tn = sum(not r['blocked_file'] and labels[r['id']] == '0' for r in labeled)
+    fp = sum(r['blocked_file'] and labels[r['id']] == '0' for r in labeled)
+    fn = sum(not r['blocked_file'] and labels[r['id']] == '1' for r in labeled)
+    need_rows = [r for r in rows if r['needed'] and r['kind'] != 'review-only']
+    extras = collections.Counter('0' if r['extra_files'] == 0 else '1' if r['extra_files'] == 1 else
+                                 '2' if r['extra_files'] == 2 else '3+' for r in need_rows)
+    lines = ['# Frozen spec prediction aggregate, counts and shares only',
+             'command: PYTHONDONTWRITEBYTECODE=1 python3 spikes/v3/round2/c5/spec_prediction.py --input-root <local-run-root>',
+             'fresh scan: same command with --refresh-manifest (changes the frozen population)',
+             f'manifest_sha256={digest(manifest_text)} seed={SEED}',
+             f'eligible_unique={len(frozen)} duplicate_archives={frozen_duplicates} excluded_fixture_unknown={len(frozen)-len(rows)}',
+             f'worker_runs={len(rows)} implementation_runs={sum(r["kind"]!="review-only" for r in rows)} review_only_runs={sum(r["kind"]=="review-only" for r in rows)} legacy_reviews={sum(r["provenance"]=="legacy-text" for r in rows)}',
+             f'completed={sum(r["completed"] for r in rows)} completed_diffable={sum(r["completed"] and r["diffable"] for r in rows)}',
+             f'quarantined_declaration_entries={sum(r["malformed_n"] for r in rows)} runs_with_quarantine={sum(r["malformed_n"]>0 for r in rows)}',
+             f'refused_scope_state={sum(r["state"]=="refused-scope" for r in rows)} refused_omitted_path={sum(r["refused"] for r in rows)} refused_malformed_grant={sum(r["malformed_refusal"] for r in rows)} refused_mixed={sum(r["mixed_refusal"] for r in rows)}',
              f'blocked_implementation={len(blocked)} blocked_rule_positive={sum(r["blocked_file"] for r in blocked)}',
-             f'sample_size={len(sample)} sample_rule_positive={sum(r["blocked_file"] for r in sample)}',
-             f'visible_need_total={len(need_rows)} visible_extra_count_0_path={extras["0 path visible"]} visible_extra_count_1={extras["1"]} visible_extra_count_2={extras["2"]} visible_extra_count_3plus={extras["3+"]}',
+             f'holdout_rank=30..59 sample_size={len(sample)} hand_labeled={len(labeled)} agreement={tp+tn} false_positive={fp} false_negative={fn} true_positive={tp} true_negative={tn}',
+             f'parser_flags={len(need_rows)} flagged_extra_count_0={extras["0"]} flagged_extra_count_1={extras["1"]} flagged_extra_count_2={extras["2"]} flagged_extra_count_3plus={extras["3+"]}',
              f'repair_families_with_first={repair_families} repair_families_without_first={no_first} growth_families={growth_families}',
              f'repair_runs_with_first={repair_runs} growing_repairs={growing_repairs} added_entries_across_repairs={growth_sum} unique_added_files_within_families={growth_unique}',
              '']
     lines.extend(table(rows, 'kind', 'overall_by_kind'))
-    for field,label in [('repo','repository'),('worker','worker_agent_model'),('state','final_state')]:
-        lines.extend(table(rows,field,label))
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text('\n'.join(lines))
-    print('\n'.join(lines[:10]))
+    for field, label in [('repo', 'repository'), ('worker', 'worker_agent_model'),
+                         ('state', 'final_state'), ('provenance', 'classification_provenance')]:
+        lines.extend(table(rows, field, label))
+    lines.extend(['[hand_labeled_sample]', 'id\tparser_flag\tmanual_need'])
+    lines.extend(f'{r["id"]}\t{int(r["blocked_file"])}\t{labels[r["id"]] or "unlabeled"}' for r in sample)
+    OUTPUT.write_text('\n'.join(lines) + '\n')
+    print('\n'.join(lines[:14]))
 
 
 if __name__ == '__main__':
