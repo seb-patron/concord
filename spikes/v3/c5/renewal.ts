@@ -1,52 +1,40 @@
-/**
- * Lease renewal thought experiment. This is a deterministic model, not Concord
- * product code. Time is simulated in seconds and all expiry decisions use the
- * model server clock. Fences change only when ownership is newly acquired.
- */
+/** Deterministic lease-lifecycle model; this is a research spike, not product code. */
 export const DEFAULT_TTL_SECONDS = 300;
 export const LONG_HOLD_SECONDS = 7_200;
 export const HEARTBEAT_SECONDS = 100;
 export const DISCONNECT_GRACE_SECONDS = 45;
+export const PHASES = ["editing", "checks", "review", "queue", "landed"] as const;
+export type Phase = typeof PHASES[number];
+export type DesignId = "A" | "B" | "C" | "D" | "BD";
 
-export type Phase = "editing" | "waiting for checks/review" | "queued to land" | "landed";
-export type DesignId = "A" | "B" | "C" | "D";
 export interface Faults {
   disconnectAt: number;
   disconnectSeconds: number;
   sleepAt: number;
   sleepSeconds: number;
   reviewSeconds: number;
+  inspectionSeconds: number;
+  queueSeconds: number;
   restartAt: number;
-  clockSkewSeconds: number;
+  clockRatePpm: number;
   abandonAt: number | null;
+  abandonmentSignal: boolean;
 }
 export interface RunResult {
-  design: DesignId;
-  agents: number;
-  safetyViolations: number;
-  wronglyLost: number;
-  deadHeldAgentMinutes: number;
-  renewCalls: number;
-  runsCompleted: number;
-  longReviewLosses: number;
-  staleWritesRefused: number;
-  reconnectsWithinGrace: number;
-  restartEpochs: number;
+  design: DesignId; agents: number; safetyViolations: number; outageLapses: number;
+  deadHeldAgentMinutes: number; renewCalls: number; serverExtensions: number;
+  landed: number; reviewPhaseLosses: number; staleWritesRefused: number;
+  reconnectsWithinGrace: number; restartEpochs: number; phaseAbandonments: number;
 }
 
 export class SeededRandom {
   private state: number;
   constructor(seed: number) { this.state = seed >>> 0 || 1; }
-  next(): number {
-    let x = this.state;
-    x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
-    this.state = x >>> 0;
-    return this.state / 0x1_0000_0000;
-  }
+  next(): number { let x = this.state; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.state = x >>> 0; return this.state / 0x1_0000_0000; }
   int(min: number, max: number): number { return min + Math.floor(this.next() * (max - min + 1)); }
 }
 
-/** Small executable specification of monotonic fencing at a protected write. */
+/** Authoritative state: renewals preserve a fence; only a new claim increments it. */
 export class LeaseFence {
   private currentFence = 0;
   private currentEpoch = 1;
@@ -54,192 +42,236 @@ export class LeaseFence {
   private expiresAt = 0;
   claim(holder: string, now: number, ttl = DEFAULT_TTL_SECONDS): number {
     if (this.holder !== null && now <= this.expiresAt) throw new Error("LEASE_CONFLICT");
-    this.currentFence++;
-    this.holder = holder;
-    this.expiresAt = now + ttl;
-    return this.currentFence;
+    this.currentFence++; this.holder = holder; this.expiresAt = now + ttl; return this.currentFence;
   }
   get epoch(): number { return this.currentEpoch; }
+  get expiry(): number { return this.expiresAt; }
+  get owner(): string | null { return this.holder; }
   restart(): number { this.currentEpoch++; return this.currentEpoch; }
   renew(holder: string, fence: number, now: number, ttl = DEFAULT_TTL_SECONDS): boolean {
     if (holder !== this.holder || fence !== this.currentFence || now > this.expiresAt) return false;
-    this.expiresAt = now + ttl;
-    return true;
+    this.expiresAt = now + ttl; return true;
   }
-  resumeWithinGrace(holder: string, fence: number, now: number, expiredAt: number,
-    grace = DISCONNECT_GRACE_SECONDS, ttl = DEFAULT_TTL_SECONDS): boolean {
-    if (holder !== this.holder || fence !== this.currentFence || now > expiredAt + grace) return false;
-    this.expiresAt = now + ttl;
-    return true;
+  resumeWithinGrace(holder: string, fence: number, now: number, grace = DISCONNECT_GRACE_SECONDS, ttl = DEFAULT_TTL_SECONDS): boolean {
+    if (holder !== this.holder || fence !== this.currentFence || now < this.expiresAt || now > this.expiresAt + grace) return false;
+    this.expiresAt = now + ttl; return true;
   }
-  protectedWrite(holder: string, fence: number, now: number, epoch = this.currentEpoch): boolean {
+  release(holder: string, fence: number): boolean {
+    if (holder !== this.holder || fence !== this.currentFence) return false;
+    this.holder = null; this.expiresAt = 0; return true;
+  }
+  protectedWrite(holder: string, fence: number, now: number, epoch: number): boolean {
     return holder === this.holder && fence === this.currentFence && epoch === this.currentEpoch && now <= this.expiresAt;
   }
 }
 
-export function reconnectWithinGrace(disconnectedAt: number, reconnectAt: number, grace = DISCONNECT_GRACE_SECONDS): boolean {
-  return reconnectAt >= disconnectedAt && reconnectAt - disconnectedAt <= grace;
-}
-
-export function phaseAt(t: number, reviewSeconds: number): Phase {
+export function phaseAt(t: number, f: Pick<Faults, "inspectionSeconds" | "reviewSeconds" | "queueSeconds">): Phase {
   if (t < 600) return "editing";
-  if (t < 900 + reviewSeconds) return "waiting for checks/review";
-  if (t < 1_500 + reviewSeconds) return "queued to land";
+  if (t < 600 + f.inspectionSeconds) return "checks";
+  if (t < 600 + f.inspectionSeconds + f.reviewSeconds) return "review";
+  if (t < 600 + f.inspectionSeconds + f.reviewSeconds + f.queueSeconds) return "queue";
   return "landed";
 }
-
-export function seededFaults(seed: number, agent: number): Faults {
-  const r = new SeededRandom((seed ^ Math.imul(agent + 1, 0x9e3779b1)) >>> 0);
-  const disconnect = [0, 30, 90, 180, 360, 720][agent % 6];
-  const sleep = [0, 0, 120, 480, 900, 1_200][(agent + Math.floor(r.next() * 6)) % 6];
-  return {
-    disconnectAt: disconnect,
-    disconnectSeconds: disconnect ? r.int(20, 900) : 0,
-    sleepAt: sleep ? 600 + r.int(0, 900) : 0,
-    sleepSeconds: sleep,
-    reviewSeconds: r.int(180, 1_200),
-    restartAt: agent % 5 === 0 ? 1_000 : -1,
-    clockSkewSeconds: r.int(-120, 120),
-    abandonAt: agent % 11 === 10 ? r.int(60, 540) : null,
-  };
+export function reconnectWithinGrace(expiry: number, reconnectAt: number, grace = DISCONNECT_GRACE_SECONDS): boolean {
+  return reconnectAt >= expiry && reconnectAt <= expiry + grace;
 }
-
-function isDisconnected(t: number, f: Faults): boolean {
+function offlineAt(t: number, f: Faults): boolean {
   return (f.disconnectSeconds > 0 && t >= f.disconnectAt && t < f.disconnectAt + f.disconnectSeconds)
     || (f.sleepSeconds > 0 && t >= f.sleepAt && t < f.sleepAt + f.sleepSeconds);
 }
-interface AgentResult {
-  safety: number; lost: boolean; deadHeld: number; renews: number; completed: boolean;
-  longReviewLoss: boolean; staleRefused: number; reconnect: number; restart: number;
+function interval(start: number, end: number, t: number): boolean { return t >= start && t < end; }
+function pickPhaseTime(r: SeededRandom, f: Faults): number {
+  const lengths = [600, f.inspectionSeconds, f.reviewSeconds, f.queueSeconds];
+  const total = lengths.reduce((a, b) => a + b, 0);
+  let n = r.next() * total;
+  for (let i = 0; i < lengths.length; i++) { if (n < lengths[i]) return lengths.slice(0, i).reduce((a, b) => a + b, 0) + n; n -= lengths[i]; }
+  return total - 1;
 }
-
-export function simulateScenario(design: DesignId, fault: Faults, clientSkewSeconds = 0): AgentResult {
-  let expiresAt = DEFAULT_TTL_SECONDS;
-  let fence = 1;
-  let live = true;
-  let abandoned = false;
-  let lost = false;
-  let renews = 0;
-  let safety = 0;
-  let deadHeld = 0;
-  let staleRefused = 0;
-  let reconnect = 0;
-  let restart = 0;
-  let lastBeat = clientSkewSeconds - HEARTBEAT_SECONDS;
-  let graceUntil = -1;
-  let disconnectStarted = -1;
-  let wasDisconnected = false;
-  let lapseAt = -1;
-  let pendingRecovery = false;
-  let oldFence = fence;
-
-  const total = 1_500 + fault.reviewSeconds;
-  for (let t = 0; t <= total; t += 15) {
-    const phase = phaseAt(t, fault.reviewSeconds);
-    if (phase === "landed") { live = false; break; }
-    if (fault.abandonAt !== null && t >= fault.abandonAt) { live = false; abandoned = true; }
-
-    const disconnected = isDisconnected(t, fault);
-    if ((design === "C" || design === "D") && disconnected && !wasDisconnected) {
-      disconnectStarted = t;
-      graceUntil = t + DISCONNECT_GRACE_SECONDS;
-    }
-    if (!disconnected && wasDisconnected && (design === "C" || design === "D")) {
-      const withinSessionGrace = t <= graceUntil;
-      const withinLapseGrace = pendingRecovery && t <= lapseAt + DISCONNECT_GRACE_SECONDS;
-      if (withinSessionGrace || withinLapseGrace) {
-        reconnect++;
-        if (pendingRecovery) {
-          expiresAt = t + DEFAULT_TTL_SECONDS;
-          pendingRecovery = false;
-          lost = false;
-        }
-      }
-    }
-    wasDisconnected = disconnected;
-
-    // Server restart increments an epoch. It preserves committed lease state;
-    // the next write must use the current epoch/fence, so queued old packets fail.
-    if (design === "D" && t === fault.restartAt) { restart++; oldFence = fence; }
-
-    const platformOwns = phase === "waiting for checks/review" || phase === "queued to land";
-    const shouldRenew = !abandoned && t < total && (
-      (design === "A" && live && !disconnected)
-      || (design === "B" && (live && !disconnected || platformOwns))
-      || (design === "C" && live && !disconnected)
-      || (design === "D" && live && (!disconnected || !isDisconnected(t, fault)))
-    );
-
-    // Server phase renewal is idempotent state extension, not a client RPC.
-    if (design === "B" && platformOwns && !abandoned) expiresAt = Math.max(expiresAt, t + DEFAULT_TTL_SECONDS);
-    const clientNow = t + clientSkewSeconds;
-    if (shouldRenew && clientNow - lastBeat >= HEARTBEAT_SECONDS) {
-      expiresAt = Math.max(expiresAt, t + DEFAULT_TTL_SECONDS);
-      lastBeat = clientNow;
-      if (design !== "B" || !platformOwns) renews++;
-    }
-    if (t > expiresAt && !lost) {
-      if ((design === "C" || design === "D") && disconnected) {
-        if (lapseAt < 0) lapseAt = expiresAt;
-        if (t <= lapseAt + DISCONNECT_GRACE_SECONDS) pendingRecovery = true;
-        else lost = true;
-      } else {
-        lost = true;
-      }
-      // A connected, non-abandoned run still needs its unit: this is an
-      // availability loss, not a safety violation; the next owner fences it.
-    }
-    if (pendingRecovery && !disconnected && t > lapseAt + DISCONNECT_GRACE_SECONDS) {
-      pendingRecovery = false;
-      lost = true;
-    }
-    if (abandoned && t <= expiresAt) deadHeld += 15;
-  }
-
-  if (!lost && fault.reviewSeconds > DEFAULT_TTL_SECONDS && (design === "B" || design === "D")) {
-    // Long review should be preserved by known-phase holding or live session keepalive.
-  }
-  // A late holder submits its original fence after expiry. It is refused if a
-  // replacement claim occurred; expiry itself never authorizes an old write.
-  if (lost) {
-    fence++;
-    if (oldFence < fence) staleRefused++;
-    else safety++;
-  }
+export function seededFaults(seed: number, agent: number): Faults {
+  const r = new SeededRandom((seed ^ Math.imul(agent + 1, 0x9e3779b1)) >>> 0);
+  const inspectionSeconds = r.int(120, 2_352); // 2–39.2 minutes
+  const reviewSeconds = r.int(180, 13_080); // 3–218 minutes
+  const queueSeconds = r.int(300, 1_800); // modeled wait bound, not a product measurement
+  const chooseFaultTime = (): number => pickPhaseTime(r, { inspectionSeconds, reviewSeconds, queueSeconds } as Faults);
+  const disconnected = r.next() < 0.68;
+  const sleep = r.next() < 0.38;
+  const abandon = r.next() < 0.12;
+  const restartAt = r.next() < 0.15 ? r.int(100, 590) : -1;
   return {
-    safety, lost, deadHeld: deadHeld / 60, renews, completed: !abandoned && !lost,
-    longReviewLoss: lost && fault.reviewSeconds > DEFAULT_TTL_SECONDS,
-    staleRefused, reconnect, restart,
+    disconnectAt: disconnected ? chooseFaultTime() : -1,
+    disconnectSeconds: disconnected ? r.int(20, 900) : 0,
+    sleepAt: sleep ? chooseFaultTime() : -1,
+    sleepSeconds: sleep ? r.int(120, 1_200) : 0,
+    inspectionSeconds, reviewSeconds, queueSeconds,
+    restartAt, clockRatePpm: r.int(-100_000, 100_000),
+    abandonAt: abandon ? chooseFaultTime() : null,
+    abandonmentSignal: r.next() < 0.25,
   };
 }
 
-export function runFaultInjection(design: DesignId, agents: number, seed: number): RunResult {
-  const total: RunResult = {
-    design, agents, safetyViolations: 0, wronglyLost: 0, deadHeldAgentMinutes: 0,
-    renewCalls: 0, runsCompleted: 0, longReviewLosses: 0, staleWritesRefused: 0,
-    reconnectsWithinGrace: 0, restartEpochs: 0,
-  };
-  const skewProbe = new SeededRandom(seed ^ 0x51f15e);
-  for (let i = 0; i < agents; i++) {
-    const f = seededFaults(seed, i);
-    // Skew is injected at clients; it affects only a client's local guess. The
-    // authoritative server expiry remains on server time and renewals use slack.
-    const clientSkew = f.clockSkewSeconds + skewProbe.int(-2, 2);
-    const a = simulateScenario(design, f, clientSkew);
-    total.safetyViolations += a.safety;
-    total.wronglyLost += Number(a.lost && f.abandonAt === null);
-    total.deadHeldAgentMinutes += a.deadHeld;
-    total.renewCalls += a.renews;
-    total.runsCompleted += Number(a.completed);
-    total.longReviewLosses += Number(a.longReviewLoss);
-    total.staleWritesRefused += a.staleRefused;
-    total.reconnectsWithinGrace += a.reconnect;
-    total.restartEpochs += a.restart;
+export interface ScenarioResult {
+  safety: number; lapsedDuringOutage: boolean; deadHeldMinutes: number; renews: number;
+  serverExtensions: number; landed: boolean; reviewLoss: boolean; staleRefused: number;
+  reconnects: number; restarts: number; abandonedPhase: Phase | null;
+}
+export interface SimulationOptions { writeCheck?: (lease: LeaseFence, holder: string, fence: number, now: number, epoch: number) => boolean; }
+
+/** Each edit attempt and late stale attempt uses the same authoritative fence check. */
+export function simulateScenario(design: DesignId, fault: Faults, options: SimulationOptions = {}): ScenarioResult {
+  const holder = "agent-session";
+  const leases = [new LeaseFence(), new LeaseFence()]; // one session beat covers multiple units
+  const fences = leases.map(x => x.claim(holder, 0));
+  const landingLease = new LeaseFence();
+  let landingFence = 0, landingEpoch = landingLease.epoch;
+  let epoch = leases[0].epoch;
+  let now = 0, lastBeatLocal = 0, localClock = 0;
+  let abandonedAt: number | null = null, abandonedPhase: Phase | null = null;
+  let outageLapse = false, reviewLoss = false, reconnects = 0, restarts = 0;
+  let renews = 0, serverExtensions = 0, deadSeconds = 0, staleRefused = 0, safety = 0;
+  let lost = false, recovered = false, firstLossAt = -1, firstLossPhase: Phase | null = null;
+  let published = false, landed = false, landingExpiry = 0, oldFences = [...fences], replacementClaimed = false;
+  let nextServerExtension = HEARTBEAT_SECONDS;
+  const sessionDesign = design === "C" || design === "D" || design === "BD";
+  const serverDesign = design === "B" || design === "BD";
+  const epochDesign = design === "D" || design === "BD";
+  const end = 600 + fault.inspectionSeconds + fault.reviewSeconds + fault.queueSeconds;
+  const guard = options.writeCheck ?? ((l, h, f, t, e) => l.protectedWrite(h, f, t, e));
+  const dt = 5;
+  while (now < end) {
+    const step = Math.min(dt, end - now), next = now + step, phase = phaseAt(now, fault);
+    const disconnected = offlineAt(now, fault);
+    if (fault.abandonAt !== null && abandonedAt === null && now <= fault.abandonAt && fault.abandonAt < next) {
+      abandonedAt = fault.abandonAt; abandonedPhase = phaseAt(abandonedAt, fault);
+    }
+    if (fault.restartAt >= 0 && now < fault.restartAt && next >= fault.restartAt) {
+      const delayedEpoch = epoch;
+      const currentEpoch = leases[0].restart(); leases[1].restart(); restarts++;
+      // Every design receives the restart event. Only session-aware designs refresh
+      // their cached epoch; all pre-restart packets are checked and rejected.
+      if (guard(leases[0], holder, fences[0], fault.restartAt, delayedEpoch)) safety++;
+      else staleRefused++;
+      if (epochDesign) epoch = currentEpoch;
+      if (published) {
+        const delayedLandingEpoch = landingEpoch;
+        const currentLandingEpoch = landingLease.restart();
+        if (guard(landingLease, holder, landingFence, fault.restartAt, delayedLandingEpoch)) safety++;
+        else staleRefused++;
+        if (epochDesign) landingEpoch = currentLandingEpoch;
+      }
+    }
+    const active = abandonedAt === null || now < abandonedAt;
+    if (!published && phase === "editing" && active) {
+      for (let i = 0; i < leases.length; i++) {
+        const accepted = guard(leases[i], holder, fences[i], now, epoch);
+        if (!accepted && !lost) {
+          lost = true; firstLossAt = now; firstLossPhase = phase; outageLapse = disconnected;
+        }
+        // An accepted protected edit is expected only for the current lease owner.
+        if (accepted && leases[i].owner !== holder) safety++;
+      }
+    }
+    if (lost && !replacementClaimed && now > Math.max(...leases.map(x => x.expiry)) + (sessionDesign ? DISCONNECT_GRACE_SECONDS : 0)) {
+      for (let i = 0; i < leases.length; i++) {
+        try { leases[i].claim("contender", now); replacementClaimed = true; } catch { /* still live */ }
+      }
+      if (replacementClaimed) oldFences = [...fences];
+    }
+    if (replacementClaimed && active && !published) {
+      for (let i = 0; i < leases.length; i++) {
+        const accepted = guard(leases[i], holder, oldFences[i], now, epoch);
+        if (accepted) safety++; else staleRefused++;
+      }
+    }
+    if (lost && !recovered && sessionDesign && !disconnected && now >= firstLossAt && now <= firstLossAt + DISCONNECT_GRACE_SECONDS) {
+      let ok = true;
+      for (let i = 0; i < leases.length; i++) ok = leases[i].resumeWithinGrace(holder, fences[i], now) && ok;
+      if (ok) { recovered = true; lost = false; reconnects++; firstLossAt = -1; firstLossPhase = null; }
+    }
+    const clientAvailable = !disconnected && active;
+    const beatDue = localClock - lastBeatLocal >= HEARTBEAT_SECONDS;
+    if (published && now > landingExpiry && !lost) {
+      lost = true; firstLossAt = now; firstLossPhase = phase; outageLapse = disconnected;
+      if (phase === "review" && abandonedAt === null) reviewLoss = true;
+    }
+    if (published && lost && !recovered && sessionDesign && clientAvailable && firstLossAt >= 0 && now <= firstLossAt + DISCONNECT_GRACE_SECONDS) {
+      if (landingLease.resumeWithinGrace(holder, landingFence, now)) {
+        landingExpiry = landingLease.expiry; lost = false; recovered = true; reconnects++;
+      }
+    }
+    if (active && !published && !lost && phase === "editing" && clientAvailable && beatDue) {
+      const ok = leases.every((l, i) => l.renew(holder, fences[i], now));
+      if (ok) { renews++; lastBeatLocal = localClock; }
+      else if (!lost) { lost = true; firstLossAt = now; firstLossPhase = phase; outageLapse = disconnected; }
+    } else if (published && active && !lost && now <= landingExpiry && beatDue && clientAvailable) {
+      if (landingLease.renew(holder, landingFence, now)) landingExpiry = landingLease.expiry;
+      else lost = true;
+      renews++; lastBeatLocal = localClock;
+    }
+    const inPlatformPhase = phase === "checks" || phase === "review" || phase === "queue";
+    const platformKnowsAbandonment = fault.abandonmentSignal && abandonedAt !== null && now >= abandonedAt;
+    if (published && platformKnowsAbandonment) {
+      landingLease.release(holder, landingFence);
+      landingExpiry = Math.min(landingExpiry, now);
+    }
+    if (published && serverDesign && inPlatformPhase && !platformKnowsAbandonment && now >= nextServerExtension) {
+      // Known phase work extends a nonblocking landing authorization, not an edit lock.
+      if (landingLease.renew(holder, landingFence, now)) landingExpiry = landingLease.expiry;
+      else lost = true;
+      serverExtensions++;
+      nextServerExtension = now + HEARTBEAT_SECONDS;
+    }
+    // Published landing authorization is revision-bound and nonblocking. It does not
+    // retain an exclusive edit claim; a fresh writer can claim the released unit.
+    if (!published && now < 600 && now + step >= 600) {
+      published = true;
+      landingFence = landingLease.claim(holder, now);
+      landingEpoch = landingLease.epoch;
+      landingExpiry = landingLease.expiry;
+      for (let i = 0; i < leases.length; i++) leases[i].release(holder, fences[i]);
+    }
+    if (abandonedAt !== null && now >= abandonedAt && now <= (published ? landingExpiry : Math.max(...leases.map(x => x.expiry)))) deadSeconds += step;
+    if (firstLossAt >= 0 && firstLossPhase === "review" && abandonedAt === null) reviewLoss = true;
+    const rate = 1 + fault.clockRatePpm / 1_000_000;
+    localClock += step * rate; // clock drift changes real heartbeat spacing
+    now = next;
   }
-  total.deadHeldAgentMinutes = Math.round(total.deadHeldAgentMinutes * 10) / 10;
+  // A terminal land is an event at the exact end; no earlier state counts as complete.
+  const landingAccepted = published && guard(landingLease, holder, landingFence, end, landingEpoch);
+  if (landingAccepted && landingLease.owner !== holder) safety++;
+  landed = landingAccepted && abandonedAt === null && landingExpiry >= end;
+  // Direct stale-write probe after replacement, through the exact guard used above.
+  if (replacementClaimed) for (let i = 0; i < leases.length; i++) {
+    if (guard(leases[i], holder, oldFences[i], end + 1, epoch)) safety++;
+    else staleRefused++;
+  }
+  return { safety, lapsedDuringOutage: outageLapse, deadHeldMinutes: deadSeconds / 60, renews, serverExtensions,
+    landed, reviewLoss, staleRefused, reconnects, restarts, abandonedPhase };
+}
+
+export function runFaultInjection(design: DesignId, agents: number, seed: number, options: SimulationOptions = {}): RunResult {
+  const total: RunResult = { design, agents, safetyViolations: 0, outageLapses: 0, deadHeldAgentMinutes: 0,
+    renewCalls: 0, serverExtensions: 0, landed: 0, reviewPhaseLosses: 0, staleWritesRefused: 0,
+    reconnectsWithinGrace: 0, restartEpochs: 0, phaseAbandonments: 0 };
+  for (let i = 0; i < agents; i++) {
+    const f = seededFaults(seed, i), r = simulateScenario(design, f, options);
+    total.safetyViolations += r.safety;
+    total.outageLapses += Number(r.lapsedDuringOutage);
+    total.deadHeldAgentMinutes += r.deadHeldMinutes;
+    total.renewCalls += r.renews; total.serverExtensions += r.serverExtensions;
+    total.landed += Number(r.landed); total.reviewPhaseLosses += Number(r.reviewLoss);
+    total.staleWritesRefused += r.staleRefused; total.reconnectsWithinGrace += r.reconnects;
+    total.restartEpochs += r.restarts; total.phaseAbandonments += Number(r.abandonedPhase !== null);
+  }
+  total.deadHeldAgentMinutes = Math.round(total.deadHeldAgentMinutes * 100) / 100;
   return total;
 }
 
+export function meanInterval(values: number[]): { mean: number; low: number; high: number } {
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, values.length - 1);
+  const margin = 1.96 * Math.sqrt(variance / values.length);
+  return { mean, low: mean - margin, high: mean + margin };
+}
 export function formatResult(r: RunResult): string {
-  return `${r.design} | ${r.agents} | ${r.safetyViolations} | ${r.wronglyLost} | ${r.deadHeldAgentMinutes.toFixed(1)} | ${r.renewCalls} | ${r.runsCompleted} | ${r.longReviewLosses} | ${r.staleWritesRefused}`;
+  return `${r.design} | ${r.agents} | ${r.safetyViolations} | ${r.outageLapses} | ${r.deadHeldAgentMinutes.toFixed(2)} | ${r.renewCalls} | ${r.serverExtensions} | ${r.landed} | ${r.reviewPhaseLosses} | ${r.staleWritesRefused} | ${r.reconnectsWithinGrace} | ${r.restartEpochs}`;
 }

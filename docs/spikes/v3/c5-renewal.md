@@ -1,79 +1,89 @@
-# Lease renewal under disconnects and review gaps
+# Lease renewal: what this simulation can tell us
 
-## Answer in brief
+## Summary first
 
-**Recommendation for the next design discussion:** keep the decided five-minute lease as the default and separate “the agent is alive” from “Concord is actively checking or landing this change.” During editing, use one session heartbeat for the agent’s leases, with a short reconnect grace and a stable fence. When Concord owns a known phase such as checks, review wait, or queue processing, let the server preserve the lease under a bounded phase deadline. On landing, cancellation, close, or explicit abandonment, release it. Require a reasoned, bounded owner-approved exception for a lease that must outlast the normal policy. This is a proposed combination of prototypes B and D, not an owner decision or a product specification.
+In this deterministic workload, keeping a published change alive through server-run checks, review, and queue work raised the share that reached landing from 26% to 87% for the 20-agent sample. It also increased unannounced abandoned-change retention: the server-phase designs held nonblocking landing permission for about 8.0 agent-minutes per run, compared with less than a third of a minute for the other designs. The paired 95% intervals are narrow for these simulated inputs, but they do not describe real Concord traffic or prove a production policy is safe.
 
-The seeded model found zero stale writes accepted across all eight design-and-size runs (100 simulated agent-runs); each stale write after a lapse was refused by its old fence. The best continuity in this particular workload came from server phase renewal: design B lost five non-abandoned holds among twenty runs, compared with fourteen for each other design. It also made fewer renewal calls: 88 among twenty agents, compared with 281 for the other designs. These are outputs of a small deterministic scenario model, not measurements of Concord, a live agent fleet, or a real network. The run intentionally includes long offline periods that exceed the short session grace; the high loss count for session designs describes this injected workload, not their expected behavior with healthy keepalives.
+The numbers support this limited statement: a server that preserves a published change’s landing permission during known platform phases can prevent lapses when client outages overlap those phases. They do not choose the recommended combination of session keepalives, stable fences, bounded server-phase holds, and a short reconnect grace. That combination is supported by the prior design research, not selected by this experiment. The model’s combined arm has the same modeled landing and abandonment tradeoff as server-phase holding, while its session and restart behaviors remain only small deterministic mechanisms.
 
-This spike addresses the open renewal question in the supplied claim-options report. The five-minute default and exceptional-long-hold direction is already recorded (D-LEASE-5MIN-EXTEND), as is exclusive writing at the claimed unit (D-UNIT-1-EXCLUSIVE). This report tests mechanics around those decisions; it does not choose a new lease policy.
+Keep the decided five-minute default and exceptional, owner-approved long-hold direction (the five-minute lease decision, D-LEASE-5MIN-EXTEND). Keep exclusive writing while a change is being edited (the exclusive unit decision, D-UNIT-1-EXCLUSIVE). Once the first publication is accepted, release the exclusive writing hold and retain only a revision-bound, **nonblocking** authorization for checks, review, and landing (the post-publication bottleneck decision, D-LEASE-BOTTLENECK-ASAP). This report evaluates renewal mechanics around those recorded choices; it does not set product policy.
 
-## Terms and scope
+## What the simulation did
 
-A **lease** is the server’s time-limited permission for one holder to write a named unit. A **fence** is a monotonically increasing number attached to that permission; the protected write endpoint checks it and refuses an older number. A **session** groups one agent run’s leases and keepalives. **Grace** is a short interval in which the same session may reconnect after a missed lease deadline if another holder has not taken over. **Server-owned phase** means the platform has accepted responsibility for an operation such as checks or queue work, rather than waiting for an agent to edit.
+The model uses a 300-second lease and a client heartbeat every 100 seconds. It follows editing, checks, review, queue, and landing as separate phases. Inspection and review durations are drawn over the ranges recorded in `v2-history/lease-renewal-research.html`: 2–39.2 minutes for inspection and 3–218 minutes for review. Queue time is a stated scenario assumption of 5–30 minutes, not a Concord measurement. Time advances in five-second steps; scheduled restart events are delivered when the simulation crosses their actual time, including off-grid times.
 
-The prototype is self-contained in `spikes/v3/c5/renewal.ts`, with deterministic assertions and seeded fault injection in `spikes/v3/c5/test.ts`. It models the four required phases: editing, waiting for checks/review, queued to land, and landed. The default is 300 seconds. A 7,200-second long hold exists as an explicit exception constant; the model does not authorize who grants it. Client keepalives are scheduled every 100 seconds, one third of the default term. The Chubby-inspired reconnect grace is 45 seconds.
+Five designs use the same seeded fault for each agent within each sample:
 
-## Four renewal designs
+| Design name | Modeled behavior |
+|---|---|
+| Agent heartbeat | The agent renews its leases while editing and keeps its published landing permission alive while connected. It has no reconnect grace. |
+| Server phases | The agent renews while editing. During checks, review, and queue work, the server extends published landing permission. An unannounced abandonment is not visible to the server. |
+| Session grace | One session heartbeat covers two units. After a lapse, the same holder may recover during a 45-second grace if nobody has replaced it. |
+| Session with restart epoch | Session grace plus a server restart epoch. A delayed pre-restart write is checked and refused; the session refreshes its epoch and keeps its fence. |
+| Server phases plus session | Server-phase extension plus session grace and restart-epoch handling. |
 
-**A — Agent heartbeats only.** The agent’s own process renews at one third of the five-minute term. It continues through review only while that process remains alive and connected. A disconnected or sleeping laptop stops the beat. This is cheap and keeps ownership close to the worker, but it makes review reliability depend on a client process that may no longer be running. A heartbeat proves that a process can send a request, not that useful work is progressing; a detached orphan could keep renewing indefinitely unless there is a maximum or explicit close.
+Publication releases the exclusive editing leases. Landing permission is tied to the published revision and does not block another writer. Each simulated edit attempt, restart-delayed write, and stale-holder attempt goes through the same `LeaseFence.protectedWrite` check using that holder’s fence and epoch. A failed write check can therefore raise the safety count. A deliberate mutation that makes the write guard accept every request is exercised in the test and produces nonzero violations.
 
-**B — Server renewal in known phases.** The client renews during editing. Once a change enters checks, review wait, or queue processing, Concord advances expiry while that phase is active. The model does not issue a client request for these extensions. This addresses long reviews and queue checks without requiring a laptop to remain awake. It can also retain a lease for an abandoned review if phase ownership has no deadline or operator release, so phase deadlines, close, force-release and abandonment handling are part of the design, not optional cleanup.
+Disconnects, sleep, restarts, clock-rate drift, and abandonment are drawn from seeded random streams rather than assigned by agent position. Disconnect and sleep times may fall in any phase. Abandonment may happen during editing, checks, review, or queue. A server learns of abandonment only when the fault includes an explicit close or cancellation signal; otherwise its known-phase deadline continues and contributes to the same dead-holder measure used for every design. That measure is elapsed time from abandonment while any lease or landing permission remains valid, including nonblocking landing permission.
 
-**C — Session lease with reconnect grace.** A session heartbeat covers its leases; the fence remains stable on renewal. If the connection drops, the server allows a 45-second reconnect window. A timely reconnect resumes the same session if no other holder has acquired the unit. After the grace period, a lapsed lease can be reassigned; a later request must claim again and receive a higher fence. This separates a transient network break from abandonment, but does not hide a real laptop sleep longer than the grace. The grace creates a bounded wait for contenders and must be measured against expected reconnect time.
+If a lease has lapsed, ordinary renewal is refused. Session recovery can restore it with the same fence only through the stored expiry plus 45 seconds and only while no replacement has claimed it. After that, the test requires a new claim and a higher fence. The model does not silently treat an expired renewal as a reacquisition.
 
-**D — Chubby-style session, keepalive and epoch.** One session keepalive covers multiple leases, and the server returns state and events with the keepalive. A server restart advances an epoch; packets from the old epoch are rejected even when the durable lease and fence remain valid. Session recovery is allowed only during grace and only if ownership was not reassigned. This borrows the session, keepalive, grace and failover-epoch pattern described in the supplied Chubby research notes (source: Burrows, “The Chubby lock service for loosely-coupled distributed systems,” 2006; local notes read 2026-10-15). Chubby’s system is a coarse-grained lock service, so this is a mechanism analogy, not direct evidence for coding-agent workload. Design D does not automatically preserve a lease across a disconnected interval longer than the term.
+## Results
 
-The fence changes when ownership changes, not when the same holder renews. The supplied renewal-history report found that changing fences on renew allowed a sidecar and a land process to invalidate one another. Fencing only helps if the protected publish or land operation checks the current fence. Expiry without downstream checking would be a timeout hint, not write protection.
+The primary measure was the share of runs that reached an authorized landing. Outage lapses and dead-holder minutes were selected as paired secondary measures before running the 200-seed comparison. Every interval below is a 95% normal interval across 200 independent seeded runs; each seed is paired across designs. The five-agent and twenty-agent samples use separate seed ranges, so the smaller sample is not a prefix of the larger one. Counts are normalized per simulated agent.
 
-## Timeline
+| Design | Agents | Outage lapses per agent, mean [95% interval] | Dead-held minutes per agent, mean [95% interval] | Reached landing, mean [95% interval] |
+|---|---:|---:|---:|---:|
+| Agent heartbeat | 5 | 0.531 [0.501, 0.561] | 0.229 [0.165, 0.293] | 0.257 [0.228, 0.286] |
+| Server phases | 5 | 0.035 [0.024, 0.046] | 7.121 [5.518, 8.725] | 0.893 [0.879, 0.907] |
+| Session grace | 5 | 0.532 [0.502, 0.562] | 0.229 [0.165, 0.293] | 0.276 [0.247, 0.305] |
+| Session with restart epoch | 5 | 0.623 [0.593, 0.653] | 0.257 [0.192, 0.322] | 0.328 [0.299, 0.357] |
+| Server phases plus session | 5 | 0.036 [0.025, 0.047] | 7.121 [5.518, 8.725] | 0.893 [0.879, 0.907] |
+| Agent heartbeat | 20 | 0.523 [0.507, 0.539] | 0.265 [0.232, 0.298] | 0.260 [0.247, 0.273] |
+| Server phases | 20 | 0.041 [0.035, 0.047] | 8.008 [7.041, 8.975] | 0.871 [0.861, 0.880] |
+| Session grace | 20 | 0.521 [0.505, 0.537] | 0.271 [0.238, 0.304] | 0.282 [0.269, 0.294] |
+| Session with restart epoch | 20 | 0.614 [0.601, 0.628] | 0.301 [0.267, 0.335] | 0.329 [0.316, 0.342] |
+| Server phases plus session | 20 | 0.040 [0.034, 0.046] | 8.008 [7.041, 8.975] | 0.871 [0.861, 0.880] |
 
-```text
-server time →  0           10m          15m          27m             35m+
-run phase     | editing    | checks / review wait | queued to land | landed
-A / C / D     | agent or session heartbeat ────────────────┐
-              | disconnect: grace, then five-minute expiry  └─ reclaim + new fence
-B             | client heartbeat | server phase deadline extends lease ── release
-fence         | claim = 41      renew stays 41                 new holder = 42
-```
+In the full 20-agent sample, review losses averaged 0.338 per agent for agent heartbeat, 0.000 for server phases, 0.340 for session grace, 0.403 for session with restart epoch, and 0.000 for the combined design. A review loss is counted only when the landing permission lapses during the review phase, and abandoned runs are excluded. Across the same 4,000 runs per design, the safety counter recorded zero accepted stale writes. The deliberately broken guard recorded three violations in its deterministic probe. The simulation refused 9,024–32,792 stale writes by design across the 20-agent sample. Session recovery occurred 11–158 times, and restart events fired 624 times per design.
 
-Illustrative timeline only; durations vary by run. For A/C/D, the session must remain alive or reconnect in time. B requires the server to know that the work is still in a live checks, review, or queue phase. The new owner receives a greater fence so a delayed request from the former owner cannot write.
+Server-phase retention carries a clear cost in this scenario: dead-holder minutes are much higher because an unannounced abandonment is not guessed by the server and published landing permission continues through known platform work. Explicit cancellation reduces that hold. The simulated server extension count is reported separately from client renewal calls in `spikes/v3/c5/output.txt`; it is not treated as zero work.
 
-## Fault model and results
+## What the recommendation comes from
 
-The seeded workload was fixed at `0x00c0ffee`, with five and twenty agents per design. It includes disconnect durations from 20 to 900 seconds, laptop sleeps up to 1,200 seconds, review waits from 180 to 1,200 seconds, a server restart in selected runs, client clock skew from −120 to +120 seconds, and explicit abandonment in a subset. Time advances in 15-second steps. Server time controls expiry; client skew changes the heartbeat schedule only. All designs use the same modeled claim and protected-write check. A stale write after lapse is tested against the higher fence of a replacement holder. Design B counts server phase extensions as zero renew RPCs.
+The design sources support preserving a fence when its holder renews, acquiring a higher fence only on a fresh claim, and checking the fence at the protected write destination. They also support one heartbeat for a session’s leases, server ownership during known platform phases with an explicit abandonment bound, and fail-closed reacquisition after an expired lease. These are design-source conclusions, not findings established by the simulation.
 
-The exact generated table is in `spikes/v3/c5/output.txt`. Its columns are design, agent count, safety violations, non-abandoned runs that lost their original lease, dead-holder minutes after abandonment, client renewal calls, completed runs, long-review losses, and stale writes refused.
+The source for the reconnect rule is the lapse-handling discussion in `v2-history/lease-renewal-research.html`, section “What happens when a lease lapses and nobody else took the unit?” It is not the same as Chubby’s 45-second client jeopardy period: Chubby’s grace concerns a client reconnecting after a master outage. The provided `s1-leases-lockservices-notes.md` summarizes that distinction and records the earlier researcher’s full-paper read; this repair did not fetch or independently re-read the paper.
 
-```text
-lease renewal fault-injection prototype
-seed=0x00c0ffee; server-authoritative expiry; simulated faults: disconnect, laptop sleep, long review, restart, clock skew, abandonment
-design | agents | safety violations | wrongly lost live leases | dead-holder minutes | renew calls | completed | >5m review losses | stale writes refused
-A | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
-B | 5 | 0 | 3 | 0.0 | 16 | 2 | 2 | 3
-C | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
-D | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
-A | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
-B | 20 | 0 | 5 | 4.3 | 88 | 14 | 4 | 6
-C | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
-D | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
-checks: stale fenced write refused; reconnect at 45s succeeds and at 46s fails; abandonment expires; long review retained by A/B/D when renewal owner remains live
-```
+The assigned work authorized this offline deterministic model repair. It did not run a live-agent pilot, measure user behavior, or approve a product change. The primary endpoint is landing; outage lapses and dead-holder time are the prespecified secondary measures. No p95 or monetary threshold is inferred because the model has no real task-time or cost distribution. The comparison is inconclusive for choosing a policy combination: the combined arm does not show a reliable advantage over server-phase holding alone, and the retention cost depends on abandonment signals and deadlines the workload only represents as assumptions.
 
-All four designs had zero modeled safety violations. That number demonstrates only that the modeled protected-write check refuses a stale fence; it is not a safety proof. A and D show 13 long-review losses in the twenty-agent run because review gaps overlap injected sleep or disconnect. Their renewal works when the session stays active. C has the same overall loss count because most injected outages exceed its 45-second grace; the test’s direct boundary check confirms 45 seconds succeeds and 46 seconds fails. B’s remaining five losses happen before or outside a server-owned phase, especially while editing through a long outage. The design does not imply that a server can know whether an editing agent is still useful.
+## Terms
 
-Dead-holder minutes were 4.3 in each twenty-agent run: the dead agent was abandoned during editing, and ordinary five-minute expiry reclaimed the hold. There were no abandonment cases among the five-agent sample. The value counts lease time after modeled abandonment; it does not include the different risk of a server-held abandoned review. Design B would need an explicit abandonment deadline or an operator action to bound that case.
+- **Lease:** time-limited permission to write one named unit.
+- **Unit:** the protected resource, such as a file or row, represented here by one simulated lease.
+- **Fence:** increasing number attached to a claim. The write destination refuses a request with an old number, even when the old and new claim use the same principal.
+- **Session:** one agent run that can renew leases for several units with one heartbeat.
+- **Heartbeat or keepalive:** a periodic message that asks to extend a live lease or session.
+- **RPC:** a request from one process to a service. Here each client renewal call is counted as one request; server extensions are counted separately.
+- **Epoch:** server generation number advanced on restart. A delayed request from an older generation is refused.
+- **Fail closed:** refuse an operation when ownership or freshness cannot be established; the holder must claim again.
+- **Renewal:** extension of a still-live lease without changing its fence. A lapsed lease cannot be renewed.
+- **Grace:** the 45-second interval after recorded expiry during which the same holder can recover, if no replacement claim has occurred.
+- **Publish:** submit a revision for platform checks and review. **Land:** accept that revision into the destination branch after queue processing. They are separate events.
+- **Checker:** automated validation performed after publication.
+- **Landing permission:** revision-bound authority for the platform to finish checks and landing. After publication it does not block another writer.
+- **Seeded fault injection:** use a repeatable pseudo-random seed to choose scenario faults, so a run can be reproduced.
+- **Idempotent:** safe to repeat without applying the same state change twice. The model does not implement request retries, so it makes no idempotency claim.
+- **Orphan keeper:** a background renewal process that outlives the agent’s useful work. The model does not include one; an absent abandonment signal is represented by server retention until its phase deadline.
+- **Refreshed base:** the latest destination revision used before retrying a claim or landing after another change has landed. The model does not simulate rebasing.
+- **Tail behavior:** rare long waits or holds near the slow end of the observed distribution.
+- **p95:** the value below which 95% of measured observations fall. No p95 is reported because this experiment has no real timing observations.
+- **95% interval:** an uncertainty range around a sample mean across the modeled seeds. It does not cover errors in the assumptions or predict live-system outcomes.
+- **STRUCTURAL:** a property of a deterministic mechanism or recorded artifact; it says nothing about whether current agents can use it well.
+- **CAPABILITY-DEPENDENT:** an outcome that depends on current agent behavior and therefore needs a new live test; this offline model cannot establish it.
 
-The scenario’s skew is deliberately a client-side scheduling perturbation. Lease expiry is checked by the server’s clock. A production protocol must avoid comparing client wall-clock timestamps to decide whether a fence is valid. Restart recovery also needs durable lease state, epoch checks on each protected write, and a clear outcome when the server cannot establish whether a prior owner is still current.
+## Limits and source record
 
-## Recommendation and limits
+Each agent has two simulated units. One renewal call renews the session’s live edit leases, but the model does not measure database, network, or real server cost. A restart and delayed write are simplified events. The test exercises a deliberately broken write guard; it does not prove every possible product implementation correct. The 95% intervals describe seed-to-seed variation only. The model’s five-second step, queue range, fault probabilities, clock-rate drift, and abandonment-signal rate are scenario assumptions.
 
-For the next design pass, combine session-level client renewal during editing (D) with server-owned phase renewal after accepted publication (B). Keep renewal idempotent and fence-stable; bump the fence on new ownership and on operator force-release. At the lease deadline, fail closed: reconnect within grace only if the server still recognizes the session and no replacement claim won; otherwise require a fresh claim, refreshed base and new fence before protected writes. Do not silently retake a unit after a lapse. Keep queue and review extensions tied to visible phases, bounded by checker deadlines or an explicit abandonment rule. Preserve an auditable owner-approved long-hold path with a reason and hard maximum; two hours is a prototype example, not a selected limit.
-
-This mix trades client renewal traffic during quiet editing for server responsibility during known platform waits. The result favors fewer renewal calls and fewer losses in the injected sample, but a 20-agent deterministic run cannot estimate production rates or tail behavior. It does not model multiple units per agent, contention and wait queues, renewal request loss/retry, server partition or durable-store failure, actual reviewer behavior, phase transitions racing expiry, force-release authorization, a leaked keepalive process, or a stale publish that bypasses the fence checker. It has no confidence intervals. Current-agent behavior and whether keepalive reliably follows the true agent lifetime are **CAPABILITY-DEPENDENT (source date: 2026-10-15; re-test with current agents)**. Server-time expiry, fencing at protected writes, lease retention while an explicitly active platform phase runs, and the bounded limits of a fixed grace interval are **STRUCTURAL (source dates: Chubby, 2006; supplied renewal log, 2026-10-13; lease-options report, 2026-10-15)**.
-
-The model does not settle whether review should count as a server-owned phase, how long a queued lease should persist, who may approve a long hold, or what constitutes abandonment. These remain owner choices in the supplied research. Before product work, replay production-shaped event traces and fault-inject restart, two concurrent renewers, lost heartbeat replies, lease expiry concurrent with queue admission, a review held past the proposed deadline, and a session that outlives its agent. Measure p95 recovery delay, false loss, dead-holder minutes, server calls and successful landing—not only safety invariants. The owner should then decide whether review is included in server-held time and choose an abandonment threshold. No web sources were fetched for this spike; the only prior-art mechanism used here is the supplied Chubby material read in full.
-
-## Reproduction and validation notes
-
-The required command is `cd spikes/v3/c5 && (bun test.ts || npx --yes tsx test.ts)`. Bun was unavailable. The sandbox blocked the fallback twice: first because the configured npm cache was not writable, and then because `tsx` could not create its IPC socket in the deep scratch path; `/tmp` was not writable. The same test was run successfully with `cd spikes/v3/c5 && node --experimental-strip-types test.ts` on Node 26.7.0. Its full output is stored in `spikes/v3/c5/output.txt`. The expected `npm run -s decisions` command also failed because the repository could not load `tsx`, matching the known environment limitation. The document word count is reported with the required `wc -w docs/spikes/v3/c5-renewal.md` command.
+Inputs read for this repair: the complete Opus and Astra review files; `v2-history/lease-renewal-research.html`; `v2-history/v2-lease-decisions.md`; `s1-leases-lockservices-notes.md`; `v2-history/181-published-leases-stop-blocking.md`; and sections 4 and 5 of `claims-options.md`. The policy context was checked in `docs/decisions.md`. Section 4 of `claims-options.md` requires owner approval before a live research pilot; this delegated offline repair is not such a pilot.

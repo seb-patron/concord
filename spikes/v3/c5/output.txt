@@ -1,16 +1,65 @@
-lease renewal fault-injection prototype
-seed=0x00c0ffee; server-authoritative expiry; simulated faults: disconnect, laptop sleep, long review, restart, clock skew, abandonment
-design | agents | safety violations | wrongly lost live leases | dead-holder minutes | renew calls | completed | >5m review losses | stale writes refused
-A | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
-B | 5 | 0 | 3 | 0.0 | 16 | 2 | 2 | 3
-C | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
-D | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
-A | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
-B | 20 | 0 | 5 | 4.3 | 88 | 14 | 4 | 6
-C | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
-D | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
-checks: stale fenced write refused; reconnect at 45s succeeds and at 46s fails; abandonment expires; long review retained by A/B/D when renewal owner remains live
-
-Interpretation: “wrongly lost” counts intended non-abandoned runs that lost the original hold during a disconnect or sleep; it is an availability proxy, not a claim that expiry violated the protocol. Dead-holder minutes sum only the abandoned-run lease time after abandonment and before expiry. Renew calls count client heartbeats; server phase extensions are not RPCs. A run is complete only if it lands without abandonment or lapse.
-
-Reproduction used `node --experimental-strip-types test.ts` because Bun is absent and the sandbox blocked npx/tsx startup. Seed and inputs are fixed in test.ts. This model has no real network, agents, queue service, or clock implementation.
+mutation probe: always-accept write guard => safetyViolations=3 (caught)
+lease renewal simulation: 200 independent seeds per size; each seed is paired across designs
+design | agents | metric (mean [95% CI])
+A | 5 | outage lapses/agent: 0.531 [0.501, 0.561]
+A | 5 | dead-held min/agent: 0.229 [0.165, 0.293]
+A | 5 | client renewals/agent: 46.689 [44.000, 49.378]
+A | 5 | landed fraction: 0.257 [0.228, 0.286]
+A | 5 | review losses/agent: 0.336 [0.305, 0.367]
+B | 5 | outage lapses/agent: 0.035 [0.024, 0.046]
+B | 5 | dead-held min/agent: 7.121 [5.518, 8.725]
+B | 5 | client renewals/agent: 67.969 [65.017, 70.921]
+B | 5 | landed fraction: 0.893 [0.879, 0.907]
+B | 5 | review losses/agent: 0.000 [0.000, 0.000]
+C | 5 | outage lapses/agent: 0.532 [0.502, 0.562]
+C | 5 | dead-held min/agent: 0.229 [0.165, 0.293]
+C | 5 | client renewals/agent: 47.937 [45.198, 50.676]
+C | 5 | landed fraction: 0.276 [0.247, 0.305]
+C | 5 | review losses/agent: 0.339 [0.308, 0.370]
+D | 5 | outage lapses/agent: 0.623 [0.593, 0.653]
+D | 5 | dead-held min/agent: 0.257 [0.192, 0.322]
+D | 5 | client renewals/agent: 57.143 [54.936, 59.350]
+D | 5 | landed fraction: 0.328 [0.299, 0.357]
+D | 5 | review losses/agent: 0.407 [0.376, 0.438]
+BD | 5 | outage lapses/agent: 0.036 [0.025, 0.047]
+BD | 5 | dead-held min/agent: 7.121 [5.518, 8.725]
+BD | 5 | client renewals/agent: 80.801 [79.009, 82.593]
+BD | 5 | landed fraction: 0.893 [0.879, 0.907]
+BD | 5 | review losses/agent: 0.000 [0.000, 0.000]
+A | 20 | outage lapses/agent: 0.523 [0.507, 0.539]
+A | 20 | dead-held min/agent: 0.265 [0.232, 0.298]
+A | 20 | client renewals/agent: 47.247 [46.091, 48.403]
+A | 20 | landed fraction: 0.260 [0.247, 0.273]
+A | 20 | review losses/agent: 0.338 [0.324, 0.352]
+B | 20 | outage lapses/agent: 0.041 [0.035, 0.047]
+B | 20 | dead-held min/agent: 8.008 [7.041, 8.975]
+B | 20 | client renewals/agent: 67.539 [66.146, 68.933]
+B | 20 | landed fraction: 0.871 [0.861, 0.880]
+B | 20 | review losses/agent: 0.000 [0.000, 0.000]
+C | 20 | outage lapses/agent: 0.521 [0.505, 0.537]
+C | 20 | dead-held min/agent: 0.271 [0.238, 0.304]
+C | 20 | client renewals/agent: 48.542 [47.373, 49.712]
+C | 20 | landed fraction: 0.282 [0.269, 0.294]
+C | 20 | review losses/agent: 0.340 [0.326, 0.354]
+D | 20 | outage lapses/agent: 0.614 [0.601, 0.628]
+D | 20 | dead-held min/agent: 0.301 [0.267, 0.335]
+D | 20 | client renewals/agent: 56.898 [55.840, 57.956]
+D | 20 | landed fraction: 0.329 [0.316, 0.342]
+D | 20 | review losses/agent: 0.403 [0.389, 0.417]
+BD | 20 | outage lapses/agent: 0.040 [0.034, 0.046]
+BD | 20 | dead-held min/agent: 8.008 [7.041, 8.975]
+BD | 20 | client renewals/agent: 80.011 [79.001, 81.022]
+BD | 20 | landed fraction: 0.871 [0.861, 0.880]
+BD | 20 | review losses/agent: 0.000 [0.000, 0.000]
+safety aggregate over 200 seeds | agents | accepted stale writes | refused stale writes | grace recoveries | restart events | server phase extensions
+A | 5 | 0 | 7880 | 0 | 154 | 0
+B | 5 | 0 | 6806 | 0 | 154 | 88490
+C | 5 | 0 | 5988 | 28 | 154 | 0
+D | 5 | 0 | 3202 | 30 | 154 | 0
+BD | 5 | 0 | 1938 | 2 | 154 | 88490
+A | 20 | 0 | 32792 | 0 | 624 | 0
+B | 20 | 0 | 28572 | 0 | 624 | 354577
+C | 20 | 0 | 24800 | 129 | 624 | 0
+D | 20 | 0 | 14038 | 158 | 624 | 0
+BD | 20 | 0 | 9024 | 11 | 624 | 354577
+sample detail format: A | 5 | 0 | 2 | 3.67 | 243 | 0 | 1 | 2 | 87 | 0 | 1
