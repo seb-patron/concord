@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Replay the 40 SP-F5 textual conflicts in an isolated temporary clone."""
+"""Recheck the forty recorded SP-F5 conflict pairs in an isolated clone."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,275 +22,265 @@ SUPPLEMENTAL = Path(
     "work-codex-20261015T213154Z-16a5e3da61c85739b222df0cd7eaeede/"
     "scratch/sp-f5-raw-bvyn00x9/gen-v-research-tools.git"
 )
-LOG_PATHS = {"LAB_READING_TRAIL.md", "trail/INDEX.md"}
+UNION_CANDIDATE = "LAB_READING_TRAIL.md"
+GENERATED = "trail/INDEX.md"
 CHECK = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
-CHECK_ENV = {**os.environ, "PYTHONPATH": "src", "PYTHONDONTWRITEBYTECODE": "1"}
 
 
-def git(repo: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+def run(argv: list[str], cwd: Path | None = None, *, env=None,
+        timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=check,
+        argv, cwd=cwd, env=env, timeout=timeout, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
 
 
-def safe_run(argv: list[str], cwd: Path, timeout: int | None = None,
-             env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        argv,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-        env=env,
+def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-C", str(repo), *args])
+
+
+def require_git(repo: Path, *args: str) -> str:
+    result = git(repo, *args)
+    if result.returncode:
+        raise RuntimeError(f"git {' '.join(args)} failed ({result.returncode}): {result.stdout.strip()}")
+    return result.stdout.strip()
+
+
+def stable_output(value: str, repo: Path) -> str:
+    return value.replace(str(repo), "<temporary repository>").replace(
+        str(repo.parent), "<temporary directory>"
     )
+
+
+def merge_tree(repo: Path, base: str, left: str, right: str):
+    result = run([
+        "git", "--git-dir", str(repo / ".git"), "merge-tree", "--write-tree",
+        f"--merge-base={base}", left, right,
+    ])
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"merge-tree failed ({result.returncode}): {result.stdout.strip()}")
+    first = result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
+    if len(first) != 40 or any(char not in "0123456789abcdef" for char in first):
+        raise RuntimeError(f"merge-tree returned no tree identity: {result.stdout.strip()}")
+    conflicts = [line.rsplit(" in ", 1)[-1] for line in result.stdout.splitlines()
+                 if line.startswith("CONFLICT (") and " in " in line]
+    return first, result.returncode == 0, conflicts, result.stdout
 
 
 def unresolved(repo: Path) -> list[str]:
     result = git(repo, "diff", "--name-only", "--diff-filter=U")
+    if result.returncode:
+        raise RuntimeError(f"could not inspect merge index: {result.stdout.strip()}")
     return [line for line in result.stdout.splitlines() if line]
 
 
-def reset_pair(repo: Path, base: str) -> None:
-    git(repo, "merge", "--abort")
-    git(repo, "reset", "--hard", base, check=True)
-    git(repo, "clean", "-fd", check=True)
+def abort_reset(repo: Path, revision: str) -> None:
+    require_git(repo, "reset", "--hard", revision)
 
 
-def try_merge(repo: Path, base: str, left: str, right: str,
-              union_logs: bool) -> tuple[bool, list[str], str]:
-    git(repo, "merge", "--abort")
-    git(repo, "checkout", "--detach", base, check=True)
-    result = git(repo, "merge", "--no-commit", "--no-ff", left, right)
-    if result.returncode == 0:
-        return True, [], result.stdout
+def stage_blob(repo: Path, stage: int, path: str) -> bytes | None:
+    result = git(repo, "show", f":{stage}:{path}")
+    return result.stdout.encode() if result.returncode == 0 else None
 
+
+def union_merge(repo: Path, base: str, left: str, right: str,
+                conflict_paths: list[str]) -> tuple[str, list[str], str]:
+    # Use a normal two-parent merge and require Git's computed base to match the
+    # recorded replay base. Generated files and rewritten documents are ineligible.
+    if require_git(repo, "merge-base", left, right) != base:
+        raise RuntimeError("recorded base differs from Git's merge base")
+    abort_reset(repo, left)
+    merge = git(repo, "merge", "--no-commit", "--no-ff", "--strategy=ort", right)
+    if merge.returncode not in (0, 1):
+        raise RuntimeError(f"two-parent merge failed ({merge.returncode}): {merge.stdout.strip()}")
     paths = unresolved(repo)
-    if union_logs:
-        for path in paths:
-            if path not in LOG_PATHS:
-                continue
-            stages = []
-            for stage in (":2:", ":1:", ":3:"):
-                blob = git(repo, "show", f"{stage}{path}")
-                if blob.returncode:
-                    stages = []
-                    break
-                stages.append(blob.stdout)
-            if len(stages) != 3:
-                continue
-            with tempfile.TemporaryDirectory(prefix="c6a-union-") as tmp:
-                ours, ancestor, theirs = (Path(tmp) / name for name in ("ours", "base", "theirs"))
-                ours.write_text(stages[0], encoding="utf-8")
-                ancestor.write_text(stages[1], encoding="utf-8")
-                theirs.write_text(stages[2], encoding="utf-8")
-                merged = safe_run(
-                    ["git", "merge-file", "--union", "-p", str(ours), str(ancestor), str(theirs)],
-                    repo,
-                )
-                if merged.returncode not in (0, 1):
-                    continue
-                (repo / path).write_text(merged.stdout, encoding="utf-8")
-                git(repo, "add", "--", path, check=True)
-        paths = unresolved(repo)
-
+    if (merge.returncode == 0) != (not paths):
+        raise RuntimeError("two-parent merge exit status disagrees with index conflict state")
     if not paths:
-        return True, [], result.stdout
-    return False, paths, result.stdout
+        tree = require_git(repo, "write-tree")
+        return "clean", [], tree
 
-
-def try_mergiraf(repo: Path, base: str, left: str, right: str,
-                 executable: str) -> tuple[bool, list[str], str]:
-    git(repo, "merge", "--abort")
-    git(repo, "checkout", "--detach", base, check=True)
-    result = git(repo, "merge", "--no-commit", "--no-ff", left, right)
-    paths = unresolved(repo)
+    applied = []
     for path in paths:
-        with tempfile.TemporaryDirectory(prefix="c6a-mergiraf-") as tmp:
-            blobs = []
-            for stage in (":1:", ":2:", ":3:"):
-                blob = git(repo, "show", f"{stage}{path}")
-                if blob.returncode:
-                    blobs = []
-                    break
-                item = Path(tmp) / f"stage-{len(blobs)}"
-                item.write_text(blob.stdout, encoding="utf-8")
-                blobs.append(item)
-            if len(blobs) != 3:
-                continue
-            output = Path(tmp) / "merged"
-            merged = safe_run(
-                [executable, "merge", "--path-name", path, "--output", str(output),
-                 str(blobs[0]), str(blobs[1]), str(blobs[2])], repo,
-            )
-            if merged.returncode or not output.is_file():
-                continue
-            content = output.read_text(encoding="utf-8")
-            if any(marker in content for marker in ("<<<<<<<", "=======", ">>>>>>>")):
-                continue
-            (repo / path).write_text(content, encoding="utf-8")
-            git(repo, "add", "--", path, check=True)
+        if path != UNION_CANDIDATE or path == GENERATED:
+            continue
+        ancestor, ours, theirs = (stage_blob(repo, stage, path) for stage in (1, 2, 3))
+        if ancestor is None or ours is None or theirs is None:
+            continue
+        # Prefix preservation proves this particular version only adds bytes to
+        # the existing document. A filename alone never grants union eligibility.
+        if not (ours.startswith(ancestor) and theirs.startswith(ancestor)):
+            continue
+        with tempfile.TemporaryDirectory(prefix="c6a-union-") as directory:
+            root = Path(directory)
+            files = [root / name for name in ("ours", "base", "theirs")]
+            for file, content in zip(files, (ours, ancestor, theirs)):
+                file.write_bytes(content)
+            merged = run(["git", "merge-file", "--union", "-p",
+                          *(str(file) for file in files)])
+        if merged.returncode != 0:
+            continue
+        content = merged.stdout.encode()
+        if not content.startswith(ancestor) or b"<<<<<<<" in content:
+            continue
+        (repo / path).write_bytes(content)
+        require_git(repo, "add", "--", path)
+        applied.append(path)
+
     remaining = unresolved(repo)
-    return not remaining, remaining, result.stdout
+    regenerated = False
+    generator = repo / "scripts" / "build_trail_index.py"
+    if GENERATED in remaining and generator.is_file() and "scripts/build_trail_index.py" not in remaining:
+        generated = run([sys.executable, "scripts/build_trail_index.py"],
+                        cwd=repo, timeout=60)
+        if generated.returncode == 0:
+            require_git(repo, "add", "--", GENERATED)
+            regenerated = True
+            remaining = unresolved(repo)
+    regen_note = f"; regenerated_index={'yes' if regenerated else 'no'}"
+    if remaining:
+        return "conflict", remaining, f"union={','.join(applied) or 'none'}{regen_note}"
+    tree = require_git(repo, "write-tree")
+    return "clean", [], f"{tree}; union={','.join(applied) or 'none'}{regen_note}"
 
 
-def run_check(repo: Path) -> tuple[str, str, float]:
-    started = time.monotonic()
-    process = subprocess.Popen(
-        CHECK,
-        cwd=repo,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=CHECK_ENV,
-        start_new_session=True,
-    )
-    try:
-        output, _ = process.communicate(timeout=300)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGTERM)
+def validate_index(repo: Path, scratch: Path) -> str:
+    validator_path = repo / "scripts" / "build_trail_index.py"
+    if not validator_path.is_file():
+        return "trail index validator: not present in this historical revision"
+    env = {**os.environ, "PYTHONPATH": "tests/ci_support:src",
+           "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(scratch)}
+    validator = run([sys.executable, "scripts/build_trail_index.py", "--check"],
+                    cwd=repo, env=env, timeout=120)
+    return (f"trail index validator: {'pass' if validator.returncode == 0 else 'fail'}; "
+            f"exit={validator.returncode}; {stable_output(validator.stdout.strip(), repo) or '(no output)'}")
+
+
+def checks(repo: Path, scratch: Path, *, run_unit_suite: bool) -> list[str]:
+    env = {**os.environ, "PYTHONPATH": "tests/ci_support:src",
+           "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(scratch)}
+    if run_unit_suite:
+        started = time.monotonic()
         try:
-            output, _ = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            output, _ = process.communicate()
-        return "over-5m", output[-4000:], time.monotonic() - started
-    except BaseException:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
-        raise
-    return ("pass" if process.returncode == 0 else "fail", output[-4000:],
-            time.monotonic() - started)
+            process = subprocess.Popen(
+                CHECK, cwd=repo, env=env, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, start_new_session=True,
+            )
+            try:
+                output, _ = process.communicate(timeout=120)
+            except subprocess.TimeoutExpired as timeout:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=5)
+                output = timeout.stdout or ""
+                if isinstance(output, bytes):
+                    output = output.decode(errors="replace")
+                if process.stdout:
+                    process.stdout.close()
+                results = ["unit tests: timeout after 120s; process group terminated",
+                           "unit test output tail: " + stable_output(
+                               "\n".join(output.splitlines()[-12:]), repo)]
+            else:
+                elapsed = time.monotonic() - started
+                tail = stable_output("\n".join(output.splitlines()[-12:]), repo)
+                results = [f"unit tests: {'pass' if process.returncode == 0 else 'fail'}; exit={process.returncode}; {elapsed:.1f}s",
+                           "unit test summary: " + (tail or "(no output)")]
+        except OSError as error:
+            results = [f"unit tests could not start: {error}"]
+    else:
+        results = ["unit tests: not repeated after the single bounded suite attempt; freshness validator run"]
+    results.append(validate_index(repo, scratch))
+    return results
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pairs_json", type=Path, help="SP-F5 pair-results.json")
+    parser.add_argument("pairs_json", type=Path, help="the SP-F5 pair-results.json input")
     parser.add_argument("--source", type=Path, default=SOURCE)
     parser.add_argument("--supplemental-mirror", type=Path, default=SUPPLEMENTAL)
     args = parser.parse_args()
-
-    all_pairs = json.loads(args.pairs_json.read_text(encoding="utf-8"))
-    pairs = [item for item in all_pairs if item.get("merge_tree_exit_conflict")]
+    raw = args.pairs_json.read_bytes()
+    pairs = [item for item in json.loads(raw) if item.get("merge_tree_exit_conflict")]
     if len(pairs) != 40:
-        raise SystemExit(f"expected exactly 40 textual-conflict pairs; got {len(pairs)}")
+        raise SystemExit(f"expected exactly 40 conflict pairs; got {len(pairs)}")
     if not args.source.is_dir():
-        raise SystemExit(f"local source clone is missing: {args.source}")
+        raise SystemExit(f"source clone is missing: {args.source}")
 
-    mergiraf = shutil.which("mergiraf")
-    with tempfile.TemporaryDirectory(prefix="concord-c6a-", dir=os.environ.get("TMPDIR")) as tmp:
-        repo = Path(tmp) / "gen-v-research-tools"
+    with tempfile.TemporaryDirectory(prefix="concord-c6a-", dir=os.environ.get("TMPDIR")) as temporary:
+        scratch = Path(temporary)
+        repo = scratch / "repository"
         clone_args = ["git", "clone", "--no-hardlinks"]
         if args.supplemental_mirror.is_dir():
-            clone_args.extend(["--reference-if-able", str(args.supplemental_mirror)])
-        clone_args.extend(["--no-checkout", str(args.source), str(repo)])
-        clone = safe_run(clone_args, Path(tmp))
-        print("temporary clone command: " + " ".join(clone_args))
-        print(f"temporary clone exit: {clone.returncode}")
+            clone_args += ["--reference-if-able", str(args.supplemental_mirror)]
+        clone_args += ["--no-checkout", str(args.source), str(repo)]
+        clone = run(clone_args, cwd=scratch)
         if clone.returncode:
-            print(clone.stdout)
-            return 2
+            raise SystemExit(f"clone failed ({clone.returncode}): {clone.stdout.strip()}")
+        refs = {}
+        listing = run(["git", "-C", str(args.supplemental_mirror), "show-ref"])
+        if args.supplemental_mirror.is_dir() and listing.returncode == 0:
+            refs = {line.split(" ", 1)[0]: line.split(" ", 1)[1]
+                    for line in listing.stdout.splitlines()}
+        missing = sorted({revision for pair in pairs for revision in [pair["base"], *pair["heads"]]
+                          if git(repo, "cat-file", "-e", f"{revision}^{{commit}}").returncode})
+        for revision in missing:
+            ref = refs.get(revision)
+            if not ref:
+                raise SystemExit(f"required revision unavailable: {revision}")
+            fetched = run(["git", "-C", str(repo), "fetch", "--no-tags",
+                           str(args.supplemental_mirror), ref])
+            if fetched.returncode:
+                raise SystemExit(f"could not import {revision}: {fetched.stdout.strip()}")
 
-        missing: set[str] = set()
+        print("SP-F5 evidence: gen-v-research-tools; 40 conflict pairs")
+        print(f"pair input SHA-256: {hashlib.sha256(raw).hexdigest()}")
+        print("baseline: git merge-tree --write-tree --merge-base=BASE LEFT RIGHT")
+        print("ordinary comparison: git merge --no-commit --no-ff --strategy=ort RIGHT from LEFT")
+        print("append-only eligibility: LAB_READING_TRAIL.md only, base bytes prefix both sides")
+        print("generated file excluded from union: trail/INDEX.md; when its generator is clean, rebuild with scripts/build_trail_index.py and verify with --check")
+        print("pair | base | left | right | merge-tree tree | ordinary | rule result | remaining conflict paths | checks")
+        records = []
+        unit_suite_attempted = False
         for pair in pairs:
-            for commit in [pair["base"], *pair["heads"]]:
-                if git(repo, "cat-file", "-e", f"{commit}^{{commit}}").returncode:
-                    missing.add(commit)
-        fetched: set[str] = set()
-        supplemental_refs: dict[str, str] = {}
-        if args.supplemental_mirror.is_dir():
-            listed = safe_run(["git", "-C", str(args.supplemental_mirror), "show-ref"], repo)
-            if listed.returncode == 0:
-                for line in listed.stdout.splitlines():
-                    sha, ref = line.split(" ", 1)
-                    supplemental_refs[sha] = ref
-        for commit in sorted(missing):
-            ref = supplemental_refs.get(commit)
-            if ref:
-                result = safe_run(["git", "-C", str(repo), "fetch", "--no-tags",
-                                   str(args.supplemental_mirror), ref], repo)
-                if result.returncode == 0:
-                    fetched.add(commit)
-                else:
-                    print(f"supplemental fetch failed for {commit}: {result.stdout.strip()}")
-        unresolved_objects = missing - fetched
-        if unresolved_objects:
-            raise SystemExit("required pair objects unavailable in clone and supplemental mirror: "
-                             + ",".join(sorted(unresolved_objects)))
-
-        print(f"input pairs: {len(pairs)}")
-        print(f"missing objects imported from local prior replay mirror: {len(fetched)}")
-        print(f"Mergiraf: {mergiraf if mergiraf else 'unavailable (not installed)'}")
-        checks_enabled = True
-        summaries = []
-        for index, pair in enumerate(pairs, 1):
             label = pair["pair"]
-            base, left, right = pair["base"], *pair["heads"]
-            reset_pair(repo, base)
-            ordinary, ordinary_paths, ordinary_raw = try_merge(repo, base, left, right, False)
-            print(f"\n[{index:02d}/40] {label}")
-            print(f"ordinary git merge: {'SUCCESS' if ordinary else 'CONFLICT'}")
-            print(f"ordinary raw output: {ordinary_raw.strip() or '(empty)'}")
-            if ordinary_paths:
-                print("ordinary unresolved paths: " + ", ".join(ordinary_paths))
-            if ordinary:
-                status, output, seconds = run_check(repo)
-                print(f"ordinary check ({' '.join(CHECK)}): {status}; {seconds:.1f}s")
-                print(f"ordinary check output tail: {output.strip() or '(empty)'}")
-            reset_pair(repo, base)
-            union, union_paths, union_raw = try_merge(repo, base, left, right, True)
-            print(f"union-for-log merge: {'SUCCESS' if union else 'CONFLICT'}")
-            print(f"union raw output: {union_raw.strip() or '(empty)'}")
-            if union_paths:
-                print("union unresolved paths: " + ", ".join(union_paths))
-            if union and checks_enabled:
-                status, output, seconds = run_check(repo)
-                print(f"union check ({' '.join(CHECK)}): {status}; {seconds:.1f}s")
-                print(f"union check output tail: {output.strip() or '(empty)'}")
-                if status == "over-5m":
-                    checks_enabled = False
-            reset_pair(repo, base)
-            if mergiraf:
-                structural, structural_paths, structural_raw = try_mergiraf(
-                    repo, base, left, right, mergiraf)
-                print(f"Mergiraf merge: {'SUCCESS' if structural else 'CONFLICT'}")
-                print(f"Mergiraf raw output: {structural_raw.strip() or '(empty)'}")
-                if structural_paths:
-                    print("Mergiraf unresolved paths: " + ", ".join(structural_paths))
-                if structural and checks_enabled:
-                    status, output, seconds = run_check(repo)
-                    print(f"Mergiraf check ({' '.join(CHECK)}): {status}; {seconds:.1f}s")
-                    print(f"Mergiraf check output tail: {output.strip() or '(empty)'}")
-                    if status == "over-5m":
-                        checks_enabled = False
-            else:
-                structural = False
-                print("Mergiraf merge: unavailable (not installed)")
-            classification = ("trivially resolvable" if ordinary else
-                              "resolvable with a rule" if union or structural else
-                              "needs a human/agent decision")
-            reason = ("ordinary Git merge completed" if ordinary else
-                      "allowlisted append-only log union cleared every conflict" if union else
-                      "Mergiraf resolved every conflict" if structural else
-                      "conflicts remain after ordinary merge and append-only log union")
-            summaries.append((label, ordinary, union, classification, reason))
-            print(f"classification: {classification} — {reason}")
-            reset_pair(repo, base)
-
-        print("\nTotals:")
-        for classification in ("trivially resolvable", "resolvable with a rule",
-                               "needs a human/agent decision"):
-            print(f"{classification}: {sum(row[3] == classification for row in summaries)}")
-        print(f"ordinary merge successes: {sum(row[1] for row in summaries)}/40")
-        print(f"union merge successes: {sum(row[2] for row in summaries)}/40")
+            base, (left, right) = pair["base"], pair["heads"]
+            try:
+                tree, clean, conflict_paths, _ = merge_tree(repo, base, left, right)
+                status, paths, union_result = union_merge(repo, base, left, right, conflict_paths)
+                check_output = []
+                if status == "clean":
+                    check_output = checks(repo, scratch,
+                                          run_unit_suite=not unit_suite_attempted)
+                    unit_suite_attempted = True
+                elif GENERATED in conflict_paths:
+                    check_output = [validate_index(repo, scratch)]
+                print(f"{label} | {base} | {left} | {right} | {tree} | "
+                      f"{'clean' if clean else 'conflict'} | {status} {union_result} | "
+                      f"{', '.join(paths) if paths else 'none'} | "
+                      + ("; ".join(check_output) if check_output else "not run: unresolved"))
+                records.append((clean, status, union_result))
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                print(f"{label} | {base} | {left} | {right} | OPERATIONAL FAILURE | {error}")
+                records.append((False, "operational failure", ""))
+            abort_reset(repo, base)
+        print("totals:")
+        print(f"ordinary clean: {sum(record[0] for record in records)}/40")
+        print(f"append-only union clean: {sum(record[1] == 'clean' and 'union=' in record[2] and record[2].split('union=', 1)[1].split(';', 1)[0] != 'none' for record in records)}/40")
+        print(f"generated-index regeneration clean: {sum(record[1] == 'clean' and 'regenerated_index=yes' in record[2] for record in records)}/40")
+        print(f"any rule clean: {sum(record[1] == 'clean' for record in records)}/40")
+        print(f"unresolved: {sum(record[1] == 'conflict' for record in records)}/40")
+        print(f"operational failures: {sum(record[1] == 'operational failure' for record in records)}/40")
+        clean_count = sum(record[1] == "clean" for record in records)
+        print(f"unit suite attempts: {int(unit_suite_attempted)}; clean trees without a suite attempt: {max(0, clean_count - int(unit_suite_attempted))}")
     return 0
 
 
