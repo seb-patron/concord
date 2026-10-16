@@ -25,6 +25,7 @@ export interface RunResult {
   deadHeldAgentMinutes: number; renewCalls: number; serverExtensions: number;
   landed: number; reviewPhaseLosses: number; staleWritesRefused: number;
   reconnectsWithinGrace: number; restartEpochs: number; phaseAbandonments: number;
+  shortOutages: number; longOutages: number;
 }
 
 export class SeededRandom {
@@ -40,11 +41,13 @@ export class LeaseFence {
   private currentEpoch = 1;
   private holder: string | null = null;
   private expiresAt = 0;
-  claim(holder: string, now: number, ttl = DEFAULT_TTL_SECONDS): number {
+  claim(holder: string, now: number, ttl = DEFAULT_TTL_SECONDS, incrementFence = true): number {
     if (this.holder !== null && now <= this.expiresAt) throw new Error("LEASE_CONFLICT");
-    this.currentFence++; this.holder = holder; this.expiresAt = now + ttl; return this.currentFence;
+    if (incrementFence) this.currentFence++;
+    this.holder = holder; this.expiresAt = now + ttl; return this.currentFence;
   }
   get epoch(): number { return this.currentEpoch; }
+  get fence(): number { return this.currentFence; }
   get expiry(): number { return this.expiresAt; }
   get owner(): string | null { return this.holder; }
   restart(): number { this.currentEpoch++; return this.currentEpoch; }
@@ -89,8 +92,16 @@ function pickPhaseTime(r: SeededRandom, f: Faults): number {
 }
 export function seededFaults(seed: number, agent: number): Faults {
   const r = new SeededRandom((seed ^ Math.imul(agent + 1, 0x9e3779b1)) >>> 0);
-  const inspectionSeconds = r.int(120, 2_352); // 2–39.2 minutes
-  const reviewSeconds = r.int(180, 13_080); // 3–218 minutes
+  // Empirical anchors: inspection n=121, 62% >5m, median 6.8m, p90 23.8m,
+  // max 39.2m; review n=13, range 3–218m and median 37m. Raw observations
+  // are unavailable, so interpolation within the reported quantile bands is assumed.
+  const q = r.next();
+  const inspectionSeconds = q < 0.38 ? r.int(120, 300)
+    : q < 0.5 ? r.int(300, 408)
+      : q < 0.9 ? r.int(408, 1_428)
+        : r.int(1_428, 2_352);
+  const reviewSide = r.next();
+  const reviewSeconds = reviewSide < 0.5 ? r.int(180, 2_220) : r.int(2_220, 13_080);
   const queueSeconds = r.int(300, 1_800); // modeled wait bound, not a product measurement
   const chooseFaultTime = (): number => pickPhaseTime(r, { inspectionSeconds, reviewSeconds, queueSeconds } as Faults);
   const disconnected = r.next() < 0.68;
@@ -111,10 +122,18 @@ export function seededFaults(seed: number, agent: number): Faults {
 
 export interface ScenarioResult {
   safety: number; lapsedDuringOutage: boolean; deadHeldMinutes: number; renews: number;
-  serverExtensions: number; landed: boolean; reviewLoss: boolean; staleRefused: number;
+  serverExtensions: number; published: boolean; landed: boolean; reviewLoss: boolean; staleRefused: number;
   reconnects: number; restarts: number; abandonedPhase: Phase | null;
 }
-export interface SimulationOptions { writeCheck?: (lease: LeaseFence, holder: string, fence: number, now: number, epoch: number) => boolean; }
+export interface SimulationOptions {
+  writeCheck?: (lease: LeaseFence, holder: string, fence: number, now: number, epoch: number) => boolean;
+  disableGrace?: boolean;
+  suppressContenderFenceIncrement?: boolean;
+}
+// Independent monitor: this describes the grant state, not the write-guard result.
+function grantIsCurrent(lease: LeaseFence, holder: string, fence: number, now: number, epoch: number): boolean {
+  return lease.owner === holder && lease.fence === fence && now <= lease.expiry && lease.epoch === epoch;
+}
 
 /** Each edit attempt and late stale attempt uses the same authoritative fence check. */
 export function simulateScenario(design: DesignId, fault: Faults, options: SimulationOptions = {}): ScenarioResult {
@@ -128,7 +147,7 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
   let abandonedAt: number | null = null, abandonedPhase: Phase | null = null;
   let outageLapse = false, reviewLoss = false, reconnects = 0, restarts = 0;
   let renews = 0, serverExtensions = 0, deadSeconds = 0, staleRefused = 0, safety = 0;
-  let lost = false, recovered = false, firstLossAt = -1, firstLossPhase: Phase | null = null;
+  let lost = false, firstLossAt = -1, firstLossPhase: Phase | null = null;
   let published = false, landed = false, landingExpiry = 0, oldFences = [...fences], replacementClaimed = false;
   let nextServerExtension = HEARTBEAT_SECONDS;
   const sessionDesign = design === "C" || design === "D" || design === "BD";
@@ -148,14 +167,16 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
       const currentEpoch = leases[0].restart(); leases[1].restart(); restarts++;
       // Every design receives the restart event. Only session-aware designs refresh
       // their cached epoch; all pre-restart packets are checked and rejected.
-      if (guard(leases[0], holder, fences[0], fault.restartAt, delayedEpoch)) safety++;
-      else staleRefused++;
+      const accepted = guard(leases[0], holder, fences[0], fault.restartAt, delayedEpoch);
+      if (accepted && !grantIsCurrent(leases[0], holder, fences[0], fault.restartAt, delayedEpoch)) safety++;
+      if (!accepted) staleRefused++;
       if (epochDesign) epoch = currentEpoch;
       if (published) {
         const delayedLandingEpoch = landingEpoch;
         const currentLandingEpoch = landingLease.restart();
-        if (guard(landingLease, holder, landingFence, fault.restartAt, delayedLandingEpoch)) safety++;
-        else staleRefused++;
+        const accepted = guard(landingLease, holder, landingFence, fault.restartAt, delayedLandingEpoch);
+        if (accepted && !grantIsCurrent(landingLease, holder, landingFence, fault.restartAt, delayedLandingEpoch)) safety++;
+        if (!accepted) staleRefused++;
         if (epochDesign) landingEpoch = currentLandingEpoch;
       }
     }
@@ -163,6 +184,7 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
     if (!published && phase === "editing" && active) {
       for (let i = 0; i < leases.length; i++) {
         const accepted = guard(leases[i], holder, fences[i], now, epoch);
+        if (accepted && !grantIsCurrent(leases[i], holder, fences[i], now, epoch)) safety++;
         if (!accepted && !lost) {
           lost = true; firstLossAt = now; firstLossPhase = phase; outageLapse = disconnected;
         }
@@ -172,20 +194,21 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
     }
     if (lost && !replacementClaimed && now > Math.max(...leases.map(x => x.expiry)) + (sessionDesign ? DISCONNECT_GRACE_SECONDS : 0)) {
       for (let i = 0; i < leases.length; i++) {
-        try { leases[i].claim("contender", now); replacementClaimed = true; } catch { /* still live */ }
+        try { leases[i].claim("contender", now, DEFAULT_TTL_SECONDS, !options.suppressContenderFenceIncrement); replacementClaimed = true; } catch { /* still live */ }
       }
-      if (replacementClaimed) oldFences = [...fences];
-    }
-    if (replacementClaimed && active && !published) {
-      for (let i = 0; i < leases.length; i++) {
-        const accepted = guard(leases[i], holder, oldFences[i], now, epoch);
-        if (accepted) safety++; else staleRefused++;
+      if (replacementClaimed) {
+        oldFences = [...fences];
+        for (let i = 0; i < leases.length; i++) {
+          const accepted = guard(leases[i], holder, oldFences[i], now, epoch);
+          if (accepted && !grantIsCurrent(leases[i], holder, oldFences[i], now, epoch)) safety++;
+          if (!accepted) staleRefused++;
+        }
       }
     }
-    if (lost && !recovered && sessionDesign && !disconnected && now >= firstLossAt && now <= firstLossAt + DISCONNECT_GRACE_SECONDS) {
+    if (!published && lost && sessionDesign && !options.disableGrace && !disconnected && now >= firstLossAt && now <= firstLossAt + DISCONNECT_GRACE_SECONDS) {
       let ok = true;
       for (let i = 0; i < leases.length; i++) ok = leases[i].resumeWithinGrace(holder, fences[i], now) && ok;
-      if (ok) { recovered = true; lost = false; reconnects++; firstLossAt = -1; firstLossPhase = null; }
+      if (ok) { lost = false; reconnects++; firstLossAt = -1; firstLossPhase = null; }
     }
     const clientAvailable = !disconnected && active;
     const beatDue = localClock - lastBeatLocal >= HEARTBEAT_SECONDS;
@@ -193,9 +216,9 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
       lost = true; firstLossAt = now; firstLossPhase = phase; outageLapse = disconnected;
       if (phase === "review" && abandonedAt === null) reviewLoss = true;
     }
-    if (published && lost && !recovered && sessionDesign && clientAvailable && firstLossAt >= 0 && now <= firstLossAt + DISCONNECT_GRACE_SECONDS) {
-      if (landingLease.resumeWithinGrace(holder, landingFence, now)) {
-        landingExpiry = landingLease.expiry; lost = false; recovered = true; reconnects++;
+    if (published && lost && sessionDesign && !options.disableGrace && clientAvailable && firstLossAt >= 0 && now <= firstLossAt + DISCONNECT_GRACE_SECONDS) {
+      if (!options.disableGrace && landingLease.resumeWithinGrace(holder, landingFence, now)) {
+        landingExpiry = landingLease.expiry; lost = false; reconnects++; firstLossAt = -1; firstLossPhase = null;
       }
     }
     if (active && !published && !lost && phase === "editing" && clientAvailable && beatDue) {
@@ -222,7 +245,8 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
     }
     // Published landing authorization is revision-bound and nonblocking. It does not
     // retain an exclusive edit claim; a fresh writer can claim the released unit.
-    if (!published && now < 600 && now + step >= 600) {
+    if (!published && now < 600 && now + step >= 600 && active && !lost
+      && leases.every((l, i) => l.protectedWrite(holder, fences[i], 600, epoch))) {
       published = true;
       landingFence = landingLease.claim(holder, now);
       landingEpoch = landingLease.epoch;
@@ -237,21 +261,23 @@ export function simulateScenario(design: DesignId, fault: Faults, options: Simul
   }
   // A terminal land is an event at the exact end; no earlier state counts as complete.
   const landingAccepted = published && guard(landingLease, holder, landingFence, end, landingEpoch);
-  if (landingAccepted && landingLease.owner !== holder) safety++;
+  if (landingAccepted && !grantIsCurrent(landingLease, holder, landingFence, end, landingEpoch)) safety++;
   landed = landingAccepted && abandonedAt === null && landingExpiry >= end;
+  if (landed) landingLease.release(holder, landingFence);
   // Direct stale-write probe after replacement, through the exact guard used above.
   if (replacementClaimed) for (let i = 0; i < leases.length; i++) {
-    if (guard(leases[i], holder, oldFences[i], end + 1, epoch)) safety++;
-    else staleRefused++;
+    const accepted = guard(leases[i], holder, oldFences[i], end + 1, epoch);
+    if (accepted && !grantIsCurrent(leases[i], holder, oldFences[i], end + 1, epoch)) safety++;
+    if (!accepted) staleRefused++;
   }
   return { safety, lapsedDuringOutage: outageLapse, deadHeldMinutes: deadSeconds / 60, renews, serverExtensions,
-    landed, reviewLoss, staleRefused, reconnects, restarts, abandonedPhase };
+    published, landed, reviewLoss: reviewLoss && abandonedAt === null, staleRefused, reconnects, restarts, abandonedPhase };
 }
 
 export function runFaultInjection(design: DesignId, agents: number, seed: number, options: SimulationOptions = {}): RunResult {
   const total: RunResult = { design, agents, safetyViolations: 0, outageLapses: 0, deadHeldAgentMinutes: 0,
     renewCalls: 0, serverExtensions: 0, landed: 0, reviewPhaseLosses: 0, staleWritesRefused: 0,
-    reconnectsWithinGrace: 0, restartEpochs: 0, phaseAbandonments: 0 };
+    reconnectsWithinGrace: 0, restartEpochs: 0, phaseAbandonments: 0, shortOutages: 0, longOutages: 0 };
   for (let i = 0; i < agents; i++) {
     const f = seededFaults(seed, i), r = simulateScenario(design, f, options);
     total.safetyViolations += r.safety;
@@ -261,6 +287,10 @@ export function runFaultInjection(design: DesignId, agents: number, seed: number
     total.landed += Number(r.landed); total.reviewPhaseLosses += Number(r.reviewLoss);
     total.staleWritesRefused += r.staleRefused; total.reconnectsWithinGrace += r.reconnects;
     total.restartEpochs += r.restarts; total.phaseAbandonments += Number(r.abandonedPhase !== null);
+    for (const seconds of [f.disconnectSeconds, f.sleepSeconds]) if (seconds > 0) {
+      if (seconds <= DISCONNECT_GRACE_SECONDS) total.shortOutages++;
+      else total.longOutages++;
+    }
   }
   total.deadHeldAgentMinutes = Math.round(total.deadHeldAgentMinutes * 100) / 100;
   return total;
@@ -273,5 +303,5 @@ export function meanInterval(values: number[]): { mean: number; low: number; hig
   return { mean, low: mean - margin, high: mean + margin };
 }
 export function formatResult(r: RunResult): string {
-  return `${r.design} | ${r.agents} | ${r.safetyViolations} | ${r.outageLapses} | ${r.deadHeldAgentMinutes.toFixed(2)} | ${r.renewCalls} | ${r.serverExtensions} | ${r.landed} | ${r.reviewPhaseLosses} | ${r.staleWritesRefused} | ${r.reconnectsWithinGrace} | ${r.restartEpochs}`;
+  return `${r.design} | ${r.agents} | ${r.safetyViolations} | ${r.outageLapses} | ${r.deadHeldAgentMinutes.toFixed(2)} | ${r.renewCalls} | ${r.serverExtensions} | ${r.landed} | ${r.reviewPhaseLosses} | ${r.staleWritesRefused} | ${r.reconnectsWithinGrace} | ${r.restartEpochs} | ${r.shortOutages} | ${r.longOutages}`;
 }

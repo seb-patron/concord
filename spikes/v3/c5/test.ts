@@ -63,15 +63,15 @@ const base: Faults = {
   inspectionSeconds: 300, reviewSeconds: 1_200, queueSeconds: 600,
   restartAt: 503, clockRatePpm: 100_000, abandonAt: null, abandonmentSignal: false,
 };
-const longOfflineReview = { ...base, disconnectAt: 650, disconnectSeconds: 285 };
+const longOfflineReview = { ...base, disconnectAt: 650, disconnectSeconds: 285, restartAt: -1 };
 assert.equal(simulateScenario("A", longOfflineReview).landed, false);
 assert.equal(simulateScenario("B", longOfflineReview).landed, true,
   "server-held review keeps the nonblocking landing authorization alive");
 assert.ok(simulateScenario("D", longOfflineReview).reconnects > 0,
   "session design recovers inside the stored lapse grace");
-assert.equal(simulateScenario("BD", longOfflineReview).restarts, 1,
+assert.equal(simulateScenario("BD", base).restarts, 1,
   "off-grid restart event is delivered by crossing its event time");
-assert.ok(simulateScenario("BD", longOfflineReview).staleRefused > 0,
+assert.ok(simulateScenario("BD", base).staleRefused > 0,
   "pre-restart packet is checked against the incremented epoch");
 assert.equal(simulateScenario("D", base).landed, true, "session design resumes after restart with the refreshed epoch");
 assert.equal(simulateScenario("A", base).landed, false, "agent-only design fails closed on a stale restart packet");
@@ -81,12 +81,29 @@ assert.notEqual(simulateScenario("A", { ...base, clockRatePpm: -100_000 }).renew
   simulateScenario("A", { ...base, clockRatePpm: 100_000 }).renews,
   "clock drift changes heartbeat scheduling");
 
+// A second disconnect gets a new recovery opportunity after the first recovery,
+// including one lapse before publication and another during landing permission.
+const repeatedDisconnects = { ...base, disconnectAt: 250, disconnectSeconds: 280, sleepAt: 650, sleepSeconds: 280 };
+assert.ok(simulateScenario("D", repeatedDisconnects).reconnects >= 2,
+  "each lapse has its own grace recovery, before and after publication");
+const noGrace = simulateScenario("D", repeatedDisconnects, { disableGrace: true });
+assert.throws(() => assert.ok(noGrace.reconnects >= 2), "disabling grace must break repeated recovery");
+console.log(`mutation probe: grace disabled => reconnects=${noGrace.reconnects} (caught)`);
+const lostDuringEdit = { ...base, disconnectAt: 250, disconnectSeconds: 500 };
+assert.equal(simulateScenario("D", lostDuringEdit).published, false,
+  "lost editing authorization cannot be converted into fresh landing permission");
+
 // A server has no abandonment oracle. Only an explicit signal ends server renewal.
-const reviewAbandon = { ...base, abandonAt: 1_000 };
+const reviewAbandon = { ...base, abandonAt: 1_000, restartAt: -1 };
 const unannounced = simulateScenario("B", reviewAbandon);
 const announced = simulateScenario("B", { ...reviewAbandon, abandonmentSignal: true });
 assert.ok(unannounced.serverExtensions > announced.serverExtensions);
 assert.equal(unannounced.abandonedPhase, "review");
+const laterAbandonment = simulateScenario("A", {
+  ...base, restartAt: -1, disconnectAt: 650, disconnectSeconds: 400, abandonAt: 1_200,
+});
+assert.equal(laterAbandonment.reviewLoss, false,
+  "a later abandonment removes the scenario from review-loss results");
 
 // Abandonment is drawn across every phase; fault scheduling is not tied to agent index.
 const phasesSeen = new Set(Array.from({ length: 500 }, (_, s) => {
@@ -104,6 +121,22 @@ assert.ok(broken.safety > 0, "write-check mutation produces measurable safety vi
 const safe = simulateScenario("A", safetyFault);
 assert.equal(safe.safety, 0);
 console.log(`mutation probe: always-accept write guard => safetyViolations=${broken.safety} (caught)`);
+const expiryBlind = simulateScenario("A", safetyFault, {
+  writeCheck: (l, h, f, _now, e) => h === l.owner && f === l.fence && e === l.epoch,
+});
+assert.ok(expiryBlind.safety > 0, "an expiry-blind guard must count every accepted expired write");
+console.log(`mutation probe: write guard ignores expiry => safetyViolations=${expiryBlind.safety} (caught)`);
+
+// Suppressing a contender's increment must fail the fencing invariant.
+const normalClaim = new LeaseFence();
+const oldClaimFence = normalClaim.claim("holder", 0);
+const newerFence = normalClaim.claim("contender", 301);
+assert.ok(newerFence > oldClaimFence);
+const suppressedClaim = new LeaseFence();
+const suppressedOldFence = suppressedClaim.claim("holder", 0);
+const suppressedNewFence = suppressedClaim.claim("contender", 301, DEFAULT_TTL_SECONDS, false);
+assert.throws(() => assert.ok(suppressedNewFence > suppressedOldFence), "suppressed fence increment must fail");
+console.log(`mutation probe: contender fence increment suppressed => ${suppressedOldFence} -> ${suppressedNewFence} (caught)`);
 
 // 200 independent paired seeds per size; separate seed namespaces keep the 5- and
 // 20-agent draws independent. Confidence intervals describe variation across seeds.
@@ -136,13 +169,13 @@ for (const agents of [5, 20]) {
       reconnect: a.reconnect + x.reconnectsWithinGrace, restarts: a.restarts + x.restartEpochs,
       server: a.server + x.serverExtensions,
     }), { safety: 0, stale: 0, reconnect: 0, restarts: 0, server: 0 });
-    aggregateRows.push(`${design} | ${agents} | ${sums.safety} | ${sums.stale} | ${sums.reconnect} | ${sums.restarts} | ${sums.server}`);
+    aggregateRows.push(`${design} | ${agents} | ${sums.safety} | ${sums.stale} | ${sums.reconnect} | ${sums.restarts} | ${sums.server} | ${samples.reduce((n, x) => n + x.shortOutages, 0)} | ${samples.reduce((n, x) => n + x.longOutages, 0)}`);
   }
 }
 
 console.log("lease renewal simulation: 200 independent seeds per size; each seed is paired across designs");
 console.log("design | agents | metric (mean [95% CI])");
 for (const row of allRows) console.log(`${row.design} | ${row.agents} | ${row.metric}: ${row.mean.toFixed(3)} [${row.low.toFixed(3)}, ${row.high.toFixed(3)}]`);
-console.log("safety aggregate over 200 seeds | agents | accepted stale writes | refused stale writes | grace recoveries | restart events | server phase extensions");
+console.log("safety aggregate over 200 seeds | agents | accepted unauthorized writes | refused stale writes | grace recoveries | restart events | server phase extensions | outages <=45s | outages >45s");
 for (const row of aggregateRows) console.log(row);
 console.log("sample detail format:", formatResult(runFaultInjection("A", 5, 0x00c0ffee)));
