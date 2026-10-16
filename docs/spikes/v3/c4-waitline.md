@@ -1,99 +1,103 @@
-# Wait-line prototype: automatic grant or fresh-claim turn?
+# Wait-line spike: automatic grant or a fresh claim?
 
-**Decision status check:** `$ npm run -s decisions` failed because this checkout cannot resolve `tsx` (`ERR_MODULE_NOT_FOUND`). The checker therefore did not produce its `Approved but not live:` list; no status list is inferred here.
+## Summary
 
-## Summary and answer
+This repaired prototype compares an original-style automatic queue grant with a fresh-authentication turn. A queued grant immediately creates a lease; a turn only reserves the waiter's place and requires a new authenticated claim. The simulation now uses the same scheduled arrivals, crashes, and credential revocations for both modes. Across two hundred traces per cell, results vary with agent count and turn length; they do not establish a generally faster mode. The automatic mode sometimes grants to a credential revoked after enqueue, which reproduces the risk in the original design.
 
-This throwaway experiment compares two ways to advance an agent waiting for an exclusive lease. In the automatic design, release of the current lease grants the next eligible waiter a lease immediately. In the fresh-claim design, release gives that waiter a short priority turn; the waiter must then make a new authenticated claim. In this seeded in-memory run, automatic grant completed more queued claims with fewer simulated calls. It also created six leases for disconnected agents at the 25-agent setting, wasting an estimated 132 lease-milliseconds. The fresh-claim design created no lease for a disconnected waiter, but made far more calls and left more requests waiting or expired.
+The source designs support a fresh claim when authorization cannot be checked in the same atomic operation as granting a lease. The supplied material does not establish whether Concord's planned coordinator can make that operation atomic. Keep that architecture question open; do not choose a grant policy from these throughput results. The comparison and its raw output are in [the test output](../../../spikes/v3/c4/output.txt).
 
-**Recommendation:** retain the fresh-authenticated-claim turn unless the real coordinator can make grant-time authentication, revocation ordering, and lease fencing one atomic decision. This is a structural safety recommendation for the split authorization and lease boundary described in the supplied v2 history, not a claim that the short simulation establishes better throughput. If a future single-server design can prove that atomic boundary, automatic grant deserves a new comparison because it used fewer calls in these scenarios. The owner still chooses; the experiment does not change policy. The established decision approves a FIFO line and human controls (D-LEASE-WAIT-LINE); a separate decision approves automatic enqueue of refused claims, not automatic lease grants (D-LEASE-QUEUE-AUTO). The current exclusive-unit rule remains the premise (D-UNIT-1-EXCLUSIVE).
+At twenty-five agents and the source-matched turn ratio, mean completed tasks were 36.09 for automatic grant and 25.59 for a fresh claim. Their per-mode 95% intervals were [35.30, 36.87] and [24.94, 26.24]. Mean calls were 95.51 [94.15, 96.87] and 133.92 [131.85, 135.99]. Those numbers describe this small synthetic workload only. They are not estimates of production task rates, and the experiment did not calculate an interval for the between-mode difference.
 
-## What was modeled
+## Terms and model
 
-A **wait line** is an ordered list of claim requests that cannot yet receive all of their requested units. A **lease** is the exclusive, time-limited right to work on one or more units. A **turn** gives one waiter priority for a short time but is not a lease: it creates no fence and no write authority. A **barging claim** is a later request that takes an overlapping unit ahead of an earlier waiter. A **wasted hold** is a lease granted to a waiter that has already disconnected without notifying the coordinator.
+A **wait line** orders claims that cannot yet receive every requested unit. A **lease** is a time-limited exclusive writing right. A **turn** reserves priority without granting a lease. A **writing hold** blocks an overlapping writer until release, expiry, or first publication. A **published hold** remains attached to its change while it is landing but does not block another writer; the queue handles landing order. A **principal** is the simulated agent identity associated with a credential. **Revocation** makes that credential invalid for a later authentication check. A **request key** identifies one attempt and safely replays its result only when the retried unit set matches. A **task** may have multiple attempts and counts as complete only when its lease is released after work.
 
-The prototype is self-contained TypeScript in `spikes/v3/c4/waitline.ts`; it imports nothing from Concord's source tree. It uses an in-memory coordinator with a monotonic server clock, FIFO sequence numbers, all-or-nothing multi-unit acquisition, wait deadlines, lease deadlines, request-key deduplication, token revocation, and simple path/symbol alias overlap. A whole-file request conflicts with symbols in that file; distinct symbol names do not conflict. Claims use a fresh lease record only after every requested unit is free. This prevents partial ownership of a multi-unit request, so the modeled protocol cannot form a cycle by holding one requested unit while waiting for another.
+The prototype is in-memory TypeScript with a single monotonic coordinator clock. It models canonical file and symbol overlap, all-or-nothing multi-unit claims, FIFO among overlapping waiters, bounded wait and lease deadlines, retries, credential revocation, and publication. It has no credential-expiry timestamp, cryptographic authentication, persistence, concurrent transactions, lease fence values, or production unit resolver. The report therefore makes no fencing or stale-write guarantee. Distinct symbols in one file do not overlap; a file and a symbol in that file do.
 
-The two modes share admission, queue order, deadlines, overlap rules, and the lease record. Automatic mode checks that the queued token remains valid at the moment of grant; revoked waiters are removed and the line advances. Fresh-claim mode opens a time-limited turn, then requires an authenticated claim for the same agent and exact normalized unit set. A revoked or expired token cannot use that turn. A repeated request key returns the original queued result; a repeated turn claim returns the same lease instead of creating a duplicate. The server clock decides expiry. Client clock skew only contributes to modeled call delay.
+The automatic arm follows the original wait-queue design: it authenticates when the wait is enqueued and does not recheck the credential when the queue grants. A separate test revokes a queued credential and observes that grant. The fresh-claim arm checks the credential at the turn claim. This is a purposeful comparison of different authorization boundaries, not a claim that the automatic arm has the fresh arm's safety property.
 
-```text
-holder owns unit(s)
-        |
-        | release or lease expiry
-        v
-  FIFO eligibility scan ---- blocked by earlier overlapping waiter
-        |
-        +-- automatic mode --> recheck token --> lease + fence
-        |
-        +-- fresh-claim mode -> short priority turn
-                                  |
-                                  +--> fresh authenticated claim --> lease + fence
-                                  +--> revoke / disconnect / timeout --> next waiter
-```
-
-This is a behavioral prototype, not a persistence, concurrency, or cryptographic implementation. The `token` strings and authenticated agent identity are in-memory test fixtures. The simulation has no concurrent transactions, process restart, network transport, real access-token catalog, lease renewal, human override, deadlock graph, or real Concord unit-policy resolver. Its path/symbol overlap helper covers only the examples used here; it does not establish canonical alias or parent/child behavior for production unit kinds. The v2 turn design called out a cross-object revocation boundary, and the later published-lease design changed which lease states block new writers (source dates: 2026-10-14 for the turn proposal and 2026-10-14 for the published-hold proposal). This prototype models an active holder plus release/expiry and does not model that broader lifecycle.
+The model forbids **hold-and-wait**: an agent with a writing lease cannot request another writing lease before publishing or releasing the first. A two-agent cycle test confirms both growing claims are refused. This is the deadlock policy modeled here; it does not detect cycles for an incremental-growth protocol. At first publication a lease changes from a blocking writing hold to a nonblocking published hold, then to a landing hold. Release represents a terminal landing outcome such as merge, close, or queue termination; expiry remains a recovery path. Multiple published holds may overlap, consistent with the supplied lifecycle design.
 
 ## Deterministic checks
 
-`spikes/v3/c4/test.ts` checks no barging, grant-time revoked-token handling, atomic multi-unit claims, waiter expiry, explicit disconnect cancellation, idempotent request retries, holder crash followed by lease expiry, and duplicate-grant prevention in both modes. It also checks that a fresh turn expires, that a revoked credential fails its fresh claim, and that a different subset cannot claim a multi-unit turn. Every deterministic case calls the safety assertion, which rejects overlapping live leases and any waiter granted more than once.
+Five scenario groups exercise both modes where applicable: FIFO/no-barging and the three broken turn-claim variants; simultaneous lease and waiter deadlines; enqueue-time versus fresh-claim revocation; attempt identity, terminal-wait recovery, lease-expiry retry, and stale-turn rejection; and published-hold transitions plus the hold-and-wait refusal. Additional assertions cover a turn capped by its wait deadline, cancellation followed by queue advancement, same-agent use of a replacement credential, alias overlap, and single event classification for fresh grants. The suite asserts successful acquisitions and resulting states rather than treating a missing lease as a passing case.
 
-The deadlock check is intentionally narrow. Because a request acquires all units at once, no waiter can hold a subset while blocking another waiter. That construction avoids the classic partial-acquisition cycle in this model; the prototype does not implement or test a waits-for graph, dependencies between changes, or the youngest-change-yields policy from the supplied deadlock design (source date: 2026-10-12). This result is **STRUCTURAL (source date: 2026-10-15 prototype)** for atomic acquisition in this model only.
+The cycle policy is deliberately restrictive. It proves only that this prototype refuses a second writing acquisition while the first writing hold remains. Atomic acquisition by itself would not prevent a cycle across separate claims. The supplied cycle design instead describes cycle detection and younger-change yield for a grow-capable protocol; that protocol is not implemented here.
 
-## Seeded fault-injection results
+## Seeded comparison
 
-The test runs both modes at 2, 5, 10, and 25 agents. Each case uses seed `0xC0A4 + agent_count`, 190 bounded simulation steps, and a 30-step drain. The xorshift generator makes the run repeatable. The workload injects random request delays, ungraceful holder crashes, silent waiter disconnects, and client clock skew from −4 to +4 time units. Five hot units create overlap; a minority of requests ask for two units. The waiter deadline is 85 modeled milliseconds, turn deadline 9 milliseconds, and lease deadline 22 milliseconds. Those are scenario settings, not recommended production timeouts.
+Each cell runs two hundred seeds. For every seed, purpose-specific random streams create one fixed arrival, crash, and revocation schedule, then the same schedule is replayed in each mode. Queue behavior can diverge, but a mode cannot consume extra random draws and thereby change future scheduled events. A single integer-tick event clock advances both modes. A fresh claim's two-tick reaction delay schedules when that request arrives; it never advances the shared clock or expires another agent's deadline by itself.
 
-The test defines **starvation** as a wait still queued at the end, an expired wait, or a completed grant whose wait exceeded 60 modeled milliseconds. **p50** and **p95** are nearest-rank percentiles of observed waiting grants, measured from enqueue to lease grant; a turn that never becomes a lease is excluded. **Calls** count simulated client claim, release, fresh-claim, and disconnect operations. Internal clock advancement and automatic expiry do not count. **Wasted holds** count leases automatically granted to agents already known offline to the simulated client; wasted time is the lease lifetime remaining at grant. The agent may still be alive when a real server grants a lease; this simulation's offline state is intentionally a conservative fault signal, not a production detector.
+The baseline uses two, five, ten, or twenty-five agents, three planned tasks per agent, five shared units, a ninety-tick wait deadline, a twenty-four-tick lease, and a forty-five-tick turn. These are scenario settings, not recommended timeouts. A crash leaves the agent offline for the rest of that run; any held lease expires, while the simulation still records a queued grant to an offline agent as wasted. A task attempt is renewed after a terminal wait or lost lease with a new attempt key. Tasks count once, at completed release.
 
-Raw output from the run:
+The interval shown after each mean is a two-sided 95% normal interval across the two hundred seed-level values. “Completed” counts useful finished tasks. “Online wait grants” counts queued leases or turns successfully claimed by agents still online. “Waiting grants” includes all successfully granted waits, including grants to agents that have since crashed. “Calls” counts simulated claim, release, and turn-claim requests. “Wasted unit-ticks” includes time spent in abandoned turns and writing leases held by offline agents, in both modes. The p95 is wait-to-action time in abstract simulation ticks. Automatic grants after revocation are counted separately; a negative interval endpoint is clipped to zero.
 
-```text
-deterministic tests: 7 scenarios passed for automatic grant and fresh-claim turn
-fault injection (seeded xorshift; 190 steps plus bounded drain per case)
-mode=automatic agents=2 seed=49318 safety=0 grants=1 p50_ms=4 p95_ms=4 wasted_holds=0 wasted_ms=0 calls=6 starvation=0 disconnects=0 crashes=2
-mode=fresh-claim agents=2 seed=49318 safety=0 grants=0 p50_ms=0 p95_ms=0 wasted_holds=0 wasted_ms=0 calls=43 starvation=1 disconnects=0 crashes=0
-mode=automatic agents=5 seed=49321 safety=0 grants=4 p50_ms=9 p95_ms=13 wasted_holds=1 wasted_ms=22 calls=23 starvation=0 disconnects=3 crashes=1
-mode=fresh-claim agents=5 seed=49321 safety=0 grants=1 p50_ms=17 p95_ms=17 wasted_holds=0 wasted_ms=0 calls=56 starvation=2 disconnects=1 crashes=2
-mode=automatic agents=10 seed=49326 safety=0 grants=14 p50_ms=22 p95_ms=55 wasted_holds=3 wasted_ms=66 calls=45 starvation=0 disconnects=4 crashes=1
-mode=fresh-claim agents=10 seed=49326 safety=0 grants=4 p50_ms=19 p95_ms=42 wasted_holds=0 wasted_ms=0 calls=211 starvation=5 disconnects=1 crashes=2
-mode=automatic agents=25 seed=49341 safety=0 grants=33 p50_ms=36 p95_ms=77 wasted_holds=6 wasted_ms=132 calls=190 starvation=13 disconnects=15 crashes=5
-mode=fresh-claim agents=25 seed=49341 safety=0 grants=12 p50_ms=36 p95_ms=67 wasted_holds=0 wasted_ms=0 calls=542 starvation=18 disconnects=9 crashes=2
-```
+| Agents | Mode | Completed tasks, mean [95% interval] | Calls, mean [95% interval] | Wasted unit-ticks, mean [95% interval] | Revoked-credential grants, mean [95% interval] |
+|---:|---|---:|---:|---:|---:|
+| 2 | Automatic | 5.21 [5.06, 5.35] | 10.95 [10.73, 11.17] | 6.17 [4.73, 7.60] | 0.01 [0.00, 0.03] |
+| 2 | Fresh claim | 5.16 [5.00, 5.31] | 12.08 [11.68, 12.48] | 7.82 [6.05, 9.58] | 0.00 [0.00, 0.00] |
+| 5 | Automatic | 12.66 [12.42, 12.91] | 26.86 [26.49, 27.22] | 20.66 [18.19, 23.12] | 0.23 [0.16, 0.30] |
+| 5 | Fresh claim | 12.07 [11.79, 12.36] | 35.94 [35.00, 36.87] | 33.02 [29.49, 36.54] | 0.00 [0.00, 0.00] |
+| 10 | Automatic | 22.86 [22.39, 23.33] | 50.15 [49.44, 50.86] | 60.99 [57.06, 64.92] | 0.93 [0.80, 1.05] |
+| 10 | Fresh claim | 20.00 [19.43, 20.56] | 73.77 [72.24, 75.30] | 87.04 [81.58, 92.50] | 0.00 [0.00, 0.00] |
+| 25 | Automatic | 36.09 [35.30, 36.87] | 95.51 [94.15, 96.87] | 150.60 [144.22, 156.98] | 3.23 [2.99, 3.47] |
+| 25 | Fresh claim | 25.59 [24.94, 26.24] | 133.92 [131.85, 135.99] | 182.12 [175.25, 188.99] | 0.00 [0.00, 0.00] |
 
-All eight fault cases reported zero safety violations. At 25 agents, automatic mode recorded 33 waiting grants, p50 36 ms, p95 77 ms, 190 calls, and 13 starvation events. Fresh-claim mode recorded 12 waiting grants, p50 36 ms, p95 67 ms, 542 calls, and 18 starvation events. Across the tested cases, automatic mode had six wasted holds and 132 modeled wasted milliseconds; the turn mode had none because a turn does not occupy a lease. At two agents, turn mode produced zero completed waits, so its zero percentiles mean “no sample,” not zero latency.
+The turn-duration sensitivity run uses the same two hundred traces at twenty-five agents and a two-tick reaction. Completed-task means were 29.51 with a nine-tick turn (4.5 times reaction), 27.70 with twenty ticks (10 times), 25.59 with forty-five ticks (22.5 times), and 24.62 with ninety ticks (45 times). Full intervals and the other measurements are in the raw output. The revised design uses a 45-second turn and requires polling no faster than every two seconds: at least a 22.5-to-one turn/reaction ratio. The model's forty-five-tick baseline represents that ratio; the other turn lengths show this workload is sensitive to the choice.
 
-These values are **CAPABILITY-DEPENDENT (source date: 2026-10-15 prototype run)** where they describe agent retry, delay, disconnection, or task completion behavior. They are not estimates of real agents, real wall-clock latency, server call volume, or production starvation. The modes followed the same seed, but their different state transitions changed subsequent events; this is not a paired benchmark with a fixed common event trace. The short runs also have few grants, no repeated seeds, no confidence intervals, and arbitrary contention probabilities. The safety count is a check of this implementation's asserted invariant, not evidence of protocol safety in a concurrent server.
+The fault run exercises revocation, including post-enqueue revocations that result in automatic grants. In the twenty-five-agent automatic cell, the mean was 3.23 revoked-credential grants per run [2.99, 3.47]; the fresh-claim cell recorded none. This is a simulated consequence of the original rule, not an estimate of actual authorization incidents. The source designs also call out queue capacity, status and position, ETA, force-release, ownership and close behavior, renewals, and retaining a turn when capacity blocks grant. This prototype does not model those behaviors, the separate lease fence path, cross-process races, or an actual landing stack.
 
-## Recommendation and limits
+## Limits and sources
 
-Choose the **fresh authenticated claim** design for a coordinator where authorization lives outside the lease transaction. The turn may be abandoned, but it cannot itself transfer authority to a principal whose token was revoked after enqueue. This recommendation is **STRUCTURAL (source dates: 2026-10-14 design history; 2026-10-15 review)**: it follows from requiring a new authentication check at the point of authority, while the v2 notes say a separate authorization catalog cannot be synchronously read inside the lease transaction. It does not prove that every in-flight request is ordered after revocation, nor does it solve a compromised or incorrectly bound identity.
+The simulations use synthetic event schedules, five hot units, a short fixed horizon, a single coordinator, and an offline-agent crash rule. They do not model agent adaptation, real network distributions, task acceptance checks, repair costs, persisted queue state, change revisions, a real authorization catalog, or merged-tree validation. A mean confidence interval is not a policy decision threshold; there is no owner-approved minimum useful effect or safety margin here. The results are inconclusive for choosing a production design. In particular, the experiment cannot establish whether the planned single coordinator can atomically authenticate and grant; that decision needs an architecture review against the actual authorization boundary.
 
-Automatic grant is attractive where the coordinator can atomically validate current authorization and install a fenced lease. It avoids an extra agent round trip, and this prototype shows the expected reduction in call count under its particular workload. Its grant-time token check is a model assumption, not evidence the deployed system can perform that check atomically. If authorization and granting cannot share a transaction or equivalent linearization point, a release hook that grants from the enqueue record risks transferring a lease after revocation. A future experiment should include a real authorization boundary and test revocation racing with grant.
+The report follows the supplied comparison plan's preference for useful completed work, deterministic protocol checks, common event traces, uncertainty ranges, sensitivity analysis, and an explicit inconclusive outcome. No external sources were fetched. The local source files read in full for this repair were:
 
-Before choosing based on performance, rerun a larger, predeclared simulation over many seeds and fixed common arrival/failure traces. Vary holding-time distributions, notice-versus-silent disconnect rates, lease renewal, turn duration, delayed alarms, multi-unit hot spots, and arrivals after published changes. Report grants per task, p50/p95/p99 latency, calls by operation, unused lease time, starvation definition and rate, and uncertainty ranges. Keep authorization safety tests separate from throughput measurements. Then run a bounded live pilot with consent and instrumented agents; no result here authorizes that pilot. The owner questions about holder identity, waiter ordering across aliases, and selection of stage-two experiments remain open in the supplied research report (source date: 2026-10-15).
+- “Wait queue” design, `v2-history/72-lease-wait-queue.md`: original enqueue-authorized automatic grant, queue order, caps, and lifecycle.
+- “Fresh-authentication wait turn” design, `v2-history/116-lease-wait-v2.md`: turn deadlines, a later authenticated claim, expiry ordering, and queue limits.
+- “Refuse deadlocking lease growth” design, `v2-history/73-lease-deadlock.md`: waits-for cycle detection and younger-change yield for incremental acquisition.
+- “Published leases stop blocking” design, `v2-history/181-published-leases-stop-blocking.md`: writing holds end at first publication; landing holds no longer block other writers.
+- “Claims experiment options,” sections four and five of `claims-options.md`: comparison methods, useful-work endpoint, uncertainty, and open owner decisions.
+- The complete supplied Opus and Astra reviews, `review-opus-111.md` and `review-astra-111.md`, plus all four original spike files on this branch.
 
-## Reproduction and validation
+## Review ledger
 
-The prescribed command was attempted. Bun is not installed; the network-fetched `tsx` runner then failed to create its IPC socket under the supplied scratch path (`listen EINVAL`). Node 26's built-in TypeScript stripping ran the same test file successfully as a local fallback. The report's measurements are simulation output, not an external benchmark.
+Every supplied finding is accounted for below. Entries marked fixed describe code, tests, or report sections in this repair. Cross-references identify shared repairs.
 
-```text
-$ cd spikes/v3/c4 && (bun test.ts || npx --yes tsx test.ts)
-zsh:1: command not found: bun
-npm error code EPERM
-npm error syscall open
-npm error path /Users/sebastianpatronsoto/.npm/_cacache/tmp/***
-npm error errno EPERM
-npm error
-npm error Your cache folder contains root-owned files, due to a bug in previous versions of npm which has since been addressed.
+| Finding | Disposition |
+|---|---|
+| O1 | fixed — task, attempt, and completion are distinct; a new key follows terminal waits and lease loss; see simulator and retry tests. |
+| O2 | fixed — independent schedule streams, shared predetermined events, two hundred seeds per cell, and intervals; see seeded comparison. |
+| O3 | fixed — four turn/reaction ratios are reported, including the source ratio; see sensitivity paragraph and output. |
+| O4 | fixed — all agents share one event clock; request reaction is scheduled without advancing that clock. |
+| O5 | fixed — useful completions, online grants, dead-agent grants, and unit-time waste are counted; see metrics definitions and table. |
+| O6 | fixed — original automatic grant omits a grant-time recheck; revocation is injected; its measured risk is reported separately. |
+| O7 | fixed — regression checks reject a foreign claimant, a later waiter, and turn extension. |
+| O8 | fixed — the model explicitly forbids hold-and-wait and tests both sides of a two-agent cycle; no general no-cycle claim remains. |
+| O9 | fixed — waits, turns, and leases expire before queue advancement; simultaneous deadlines have a regression test. |
+| O10 | fixed — completion increments only after a completed release. |
+| O11 | fixed — crash rule is explicit: agents stay offline and their leases expire; no return is assumed. |
+| O12 | fixed — all time is labeled in abstract ticks; no multiplication is presented as measured milliseconds. |
+| O13 | fixed — the report says fence values are not modeled and removes claims that a lease grants a fence. |
+| O14 | fixed — a live duplicate is identified by agent, change, and normalized unit set; mismatched payload reuse is rejected; token expiry is not claimed. |
+| O15 | fixed — successful grant, replacement credential, deadline cap, cancellation advancement, lease-loss retry, and stale-turn outcomes are asserted. |
+| O16 | fixed — queue capacities, position and ETA, ownership and close, force-release, renewals, capacity behavior, and landing-stack gaps are listed. |
+| O17 | fixed — the report leads with a plain summary, defines essential terms, names local sources, and keeps finding identifiers in this ledger. |
+| O18 | fixed — the coordinator's atomic authentication ability is stated as an open architecture question; throughput does not decide the policy. |
+| R01 | fixed — simultaneous expiry and delayed advancement are covered by the same expire-before-grant implementation and test. |
+| R02 | fixed — task identity, attempt identity, completion count, terminal recovery, and completion timing are separate. |
+| R03 | fixed — both modes replay common arrivals and faults over two hundred seeds per cell with intervals. |
+| R04 | fixed — hold-and-wait is refused and the two-agent cycle is tested; incremental cycle detection is not claimed. |
+| R05 | fixed — writing, published, and landing phases are modeled; terminal release and expiry are exercised. |
+| R06 | fixed — live-wait deduplication uses agent, change, and normalized units, while request-key payload mismatch is rejected. |
+| R07 | fixed — no unsupported token-expiry or fencing guarantee is claimed; revocation is tested and the remaining limits are explicit. |
+| R08 | fixed — a stale turn retry is rejected rather than reporting a released or expired lease as current. |
+| R09 | fixed — assertions require concrete successful state transitions and cover expiry and progression. |
+| R10 | fixed — the report uses regenerated per-cell totals and no incorrect aggregate. |
+| R11 | fixed — a fresh grant emits one correctly classified acquisition event. |
+| R12 | fixed — descriptive titles and filenames identify the four source designs; alias overlap is tested. |
+| R13 | fixed — terms are defined in plain language and source provenance and model limits are explicit. |
 
-$ npm_config_cache="$DELEGATE_SCRATCH_DIR/npm-cache" sh -c 'cd spikes/v3/c4 && (bun test.ts || npx --yes tsx test.ts)'
-sh: bun: command not found
-Error: listen EINVAL: invalid argument <scratch>/tmp/tsx-501/<socket>.pipe
+## Validation
 
-$ node --experimental-strip-types spikes/v3/c4/test.ts
-deterministic tests: 7 scenarios passed for automatic grant and fresh-claim turn
-fault injection (seeded xorshift; 190 steps plus bounded drain per case)
-...the eight raw result lines are recorded above...
-```
-
-The word-count check is intended to keep this report between 1,500 and 3,000 words. The command and final count are in the handoff validation record.
+The required test command is `node --experimental-strip-types spikes/v3/c4/test.ts`. The report's raw results are regenerated from that command in [output.txt](../../../spikes/v3/c4/output.txt). The required finding-row count command is `grep -c -E '^\| *(O[0-9]|R[0-9])' docs/spikes/v3/c4-waitline.md`; it should report 31.
