@@ -164,6 +164,24 @@ def run_window(tasks, policy, repair_cost=2):
                 cooldown[i] = max(0, cooldown[i] - 1)
                 continue
             initial = initial_set(task, policy)
+            if not initial_claimed[i]:
+                # Initial declaration is an acquisition step of its own. Hold
+                # those files while later growth waits, including before edit 1.
+                missing_initial = initial - held[i]
+                blockers = {owners[path] for path in missing_initial if path in owners and owners[path] != i}
+                if blockers:
+                    blocked[i].update(blockers)
+                    metrics["wait_agent_ticks"] += 1
+                    if i not in denied_before:
+                        metrics["denials"] += 1
+                        denied_before.add(i)
+                    continue
+                held[i].update(missing_initial)
+                owners.update({path: i for path in missing_initial})
+                initial_claimed[i] = True
+                denied_before.discard(i)
+                if initial:
+                    continue
             next_path = task["order"][step[i]]
             if policy == "all" and next_path not in initial and i not in scope_counted:
                 metrics["scope_refusals"] += 1
@@ -172,8 +190,7 @@ def run_window(tasks, policy, repair_cost=2):
                 continue
             if next_path not in initial and next_path not in held[i]:
                 metrics["growth_requests"] += 1
-            needed = {next_path} | (initial if not initial_claimed[i] else set())
-            missing = needed - held[i]
+            missing = {next_path} - held[i]
             blockers = {owners[path] for path in missing if path in owners and owners[path] != i}
             if blockers:
                 blocked[i].update(blockers)
@@ -184,7 +201,6 @@ def run_window(tasks, policy, repair_cost=2):
                 continue
             held[i].update(missing)
             owners.update({path: i for path in missing})
-            initial_claimed[i] = True
             denied_before.discard(i)
             step[i] += 1
             metrics["file_work"] += 1
@@ -219,8 +235,9 @@ def main():
         "Input: first issue-linked launcher attempt per repository/issue family, with diffable base and candidate, nonempty diff and declared set; first 40 chronological tasks per repository plus every later scope miss.",
         "Order source: separate commits in base..candidate if more than one; otherwise alphabetical changed-file order (assumption). Sensitivity reverses assumed order for every second task in a window.",
         "Arrival: tasks start together in chronological, nonoverlapping windows of N from one repository; agent IDs define deterministic claim tie order.",
-        "One file first touch costs one unit. File leases remain held until task completion. All-up-front atomically requests its complete Allowed-file set.",
-        "Hybrid starts with a deterministic subset of changed files at stated recall, plus declared-but-unchanged files; misses grow at first touch. These oracle subsets are scenarios, not predictions.",
+        "One file first touch costs one unit. File leases remain held until task completion. All-up-front atomically requests its complete Allowed-file set as a separate initial step.",
+        "A nonempty initial acquisition consumes one modeled tick before file work; an empty initial set consumes no acquisition tick.",
+        "Hybrid acquires a deterministic initial subset of changed files at stated recall, plus declared-but-unchanged files, as its own step when nonempty; it holds those files before requesting growth at first touch. These oracle subsets are scenarios, not predictions.",
         "Exact and first-touch use identical actual changed sets: exact claims all at start; first-touch claims on first use and is an upper bound on discovery knowledge, not throughput.",
         "A missed Allowed-file declaration incurs one refusal tick, then grows; a denied claim counts once per uninterrupted wait. A wait cycle makes the youngest task release claims, lose completed work and restart after one tick.",
         "No declaration has zero lease wait/denial/deadlock by definition. Overlapping actual-file pairs incur assumed repair costs of zero, one, or two units.",

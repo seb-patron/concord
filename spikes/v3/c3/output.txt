@@ -3,8 +3,9 @@ All numbers below are simulated counts in arbitrary file-touch units, not observ
 Input: first issue-linked launcher attempt per repository/issue family, with diffable base and candidate, nonempty diff and declared set; first 40 chronological tasks per repository plus every later scope miss.
 Order source: separate commits in base..candidate if more than one; otherwise alphabetical changed-file order (assumption). Sensitivity reverses assumed order for every second task in a window.
 Arrival: tasks start together in chronological, nonoverlapping windows of N from one repository; agent IDs define deterministic claim tie order.
-One file first touch costs one unit. File leases remain held until task completion. All-up-front atomically requests its complete Allowed-file set.
-Hybrid starts with a deterministic subset of changed files at stated recall, plus declared-but-unchanged files; misses grow at first touch. These oracle subsets are scenarios, not predictions.
+One file first touch costs one unit. File leases remain held until task completion. All-up-front atomically requests its complete Allowed-file set as a separate initial step.
+A nonempty initial acquisition consumes one modeled tick before file work; an empty initial set consumes no acquisition tick.
+Hybrid acquires a deterministic initial subset of changed files at stated recall, plus declared-but-unchanged files, as its own step when nonempty; it holds those files before requesting growth at first touch. These oracle subsets are scenarios, not predictions.
 Exact and first-touch use identical actual changed sets: exact claims all at start; first-touch claims on first use and is an upper bound on discovery knowledge, not throughput.
 A missed Allowed-file declaration incurs one refusal tick, then grows; a denied claim counts once per uninterrupted wait. A wait cycle makes the youngest task release claims, lose completed work and restart after one tick.
 No declaration has zero lease wait/denial/deadlock by definition. Overlapping actual-file pairs incur assumed repair costs of zero, one, or two units.
@@ -318,23 +319,23 @@ Initial footprint first_touch: observed_files=1318, initially_recalled=0, realiz
 
 Concurrency: up to 2 agents; 150 windows; 295 task placements
   Order scenario: alphabetical
-    all: makespan=1040, file_work=1318, wait_agent_ticks=175, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=92, repair_events=0, repair_units=0
-    exact: makespan=1023, file_work=1318, wait_agent_ticks=196, denials=35, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
-    hybrid:0: makespan=1017, file_work=1318, wait_agent_ticks=167, denials=35, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=1485, repair_events=0, repair_units=0
-    hybrid:0.5: makespan=1019, file_work=1318, wait_agent_ticks=178, denials=35, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=733, repair_events=0, repair_units=0
-    hybrid:0.8: makespan=1026, file_work=1318, wait_agent_ticks=202, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=279, repair_events=0, repair_units=0
-    hybrid:1: makespan=1031, file_work=1318, wait_agent_ticks=207, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    all: makespan=1228, file_work=1318, wait_agent_ticks=247, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=87, repair_events=0, repair_units=0
+    exact: makespan=1208, file_work=1318, wait_agent_ticks=231, denials=35, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    hybrid:0: makespan=1050, file_work=1318, wait_agent_ticks=166, denials=40, deadlocks=5, restart_lost_file_work=0, scope_refusals=0, growth_requests=1479, repair_events=0, repair_units=0
+    hybrid:0.5: makespan=1186, file_work=1318, wait_agent_ticks=198, denials=37, deadlocks=1, restart_lost_file_work=0, scope_refusals=0, growth_requests=734, repair_events=0, repair_units=0
+    hybrid:0.8: makespan=1209, file_work=1318, wait_agent_ticks=235, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=275, repair_events=0, repair_units=0
+    hybrid:1: makespan=1218, file_work=1318, wait_agent_ticks=244, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
     first_touch: makespan=1008, file_work=1318, wait_agent_ticks=155, denials=33, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=1473, repair_events=0, repair_units=0
     none: makespan=969, file_work=1318, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=35, repair_units=70
     none_repair_cost_0: makespan=899, repair_events=35, repair_units=0
     none_repair_cost_1: makespan=934, repair_events=35, repair_units=35
   Order scenario: alternating_reverse
-    all: makespan=1040, file_work=1318, wait_agent_ticks=175, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=92, repair_events=0, repair_units=0
-    exact: makespan=1023, file_work=1318, wait_agent_ticks=196, denials=35, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
-    hybrid:0: makespan=997, file_work=1358, wait_agent_ticks=83, denials=48, deadlocks=13, restart_lost_file_work=40, scope_refusals=0, growth_requests=1441, repair_events=0, repair_units=0
-    hybrid:0.5: makespan=1016, file_work=1320, wait_agent_ticks=139, denials=36, deadlocks=1, restart_lost_file_work=2, scope_refusals=0, growth_requests=744, repair_events=0, repair_units=0
-    hybrid:0.8: makespan=1026, file_work=1318, wait_agent_ticks=202, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=321, repair_events=0, repair_units=0
-    hybrid:1: makespan=1031, file_work=1318, wait_agent_ticks=207, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    all: makespan=1228, file_work=1318, wait_agent_ticks=247, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=87, repair_events=0, repair_units=0
+    exact: makespan=1208, file_work=1318, wait_agent_ticks=231, denials=35, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    hybrid:0: makespan=1028, file_work=1354, wait_agent_ticks=85, denials=46, deadlocks=12, restart_lost_file_work=36, scope_refusals=0, growth_requests=1434, repair_events=0, repair_units=0
+    hybrid:0.5: makespan=1182, file_work=1320, wait_agent_ticks=158, denials=36, deadlocks=1, restart_lost_file_work=2, scope_refusals=0, growth_requests=694, repair_events=0, repair_units=0
+    hybrid:0.8: makespan=1209, file_work=1318, wait_agent_ticks=235, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=275, repair_events=0, repair_units=0
+    hybrid:1: makespan=1218, file_work=1318, wait_agent_ticks=244, denials=37, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
     first_touch: makespan=974, file_work=1353, wait_agent_ticks=61, denials=42, deadlocks=9, restart_lost_file_work=35, scope_refusals=0, growth_requests=1414, repair_events=0, repair_units=0
     none: makespan=969, file_work=1318, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=35, repair_units=70
     none_repair_cost_0: makespan=899, repair_events=35, repair_units=0
@@ -342,23 +343,23 @@ Concurrency: up to 2 agents; 150 windows; 295 task placements
 
 Concurrency: up to 5 agents; 65 windows; 295 task placements
   Order scenario: alphabetical
-    all: makespan=847, file_work=1318, wait_agent_ticks=777, denials=87, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=144, repair_events=0, repair_units=0
-    exact: makespan=840, file_work=1318, wait_agent_ticks=801, denials=85, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
-    hybrid:0: makespan=804, file_work=1318, wait_agent_ticks=615, denials=86, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=1933, repair_events=0, repair_units=0
-    hybrid:0.5: makespan=827, file_work=1322, wait_agent_ticks=795, denials=92, deadlocks=3, restart_lost_file_work=4, scope_refusals=0, growth_requests=961, repair_events=0, repair_units=0
-    hybrid:0.8: makespan=835, file_work=1318, wait_agent_ticks=838, denials=89, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=367, repair_events=0, repair_units=0
-    hybrid:1: makespan=851, file_work=1318, wait_agent_ticks=880, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    all: makespan=983, file_work=1318, wait_agent_ticks=993, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=140, repair_events=0, repair_units=0
+    exact: makespan=973, file_work=1318, wait_agent_ticks=936, denials=85, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    hybrid:0: makespan=844, file_work=1332, wait_agent_ticks=737, denials=108, deadlocks=11, restart_lost_file_work=14, scope_refusals=0, growth_requests=1942, repair_events=0, repair_units=0
+    hybrid:0.5: makespan=945, file_work=1323, wait_agent_ticks=888, denials=95, deadlocks=5, restart_lost_file_work=5, scope_refusals=0, growth_requests=819, repair_events=0, repair_units=0
+    hybrid:0.8: makespan=966, file_work=1318, wait_agent_ticks=970, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=316, repair_events=0, repair_units=0
+    hybrid:1: makespan=986, file_work=1318, wait_agent_ticks=1024, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
     first_touch: makespan=791, file_work=1318, wait_agent_ticks=538, denials=84, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=1856, repair_events=0, repair_units=0
     none: makespan=845, file_work=1318, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=139, repair_units=278
     none_repair_cost_0: makespan=567, repair_events=139, repair_units=0
     none_repair_cost_1: makespan=706, repair_events=139, repair_units=139
   Order scenario: alternating_reverse
-    all: makespan=846, file_work=1318, wait_agent_ticks=772, denials=86, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=139, repair_events=0, repair_units=0
-    exact: makespan=840, file_work=1318, wait_agent_ticks=801, denials=85, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
-    hybrid:0: makespan=770, file_work=1375, wait_agent_ticks=508, denials=111, deadlocks=17, restart_lost_file_work=57, scope_refusals=0, growth_requests=1883, repair_events=0, repair_units=0
-    hybrid:0.5: makespan=821, file_work=1331, wait_agent_ticks=759, denials=95, deadlocks=4, restart_lost_file_work=13, scope_refusals=0, growth_requests=1002, repair_events=0, repair_units=0
-    hybrid:0.8: makespan=837, file_work=1318, wait_agent_ticks=837, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=445, repair_events=0, repair_units=0
-    hybrid:1: makespan=851, file_work=1318, wait_agent_ticks=880, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    all: makespan=985, file_work=1318, wait_agent_ticks=997, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=144, repair_events=0, repair_units=0
+    exact: makespan=973, file_work=1318, wait_agent_ticks=936, denials=85, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    hybrid:0: makespan=789, file_work=1374, wait_agent_ticks=512, denials=114, deadlocks=19, restart_lost_file_work=56, scope_refusals=0, growth_requests=1785, repair_events=0, repair_units=0
+    hybrid:0.5: makespan=936, file_work=1333, wait_agent_ticks=835, denials=97, deadlocks=5, restart_lost_file_work=15, scope_refusals=0, growth_requests=778, repair_events=0, repair_units=0
+    hybrid:0.8: makespan=968, file_work=1318, wait_agent_ticks=974, denials=89, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=318, repair_events=0, repair_units=0
+    hybrid:1: makespan=986, file_work=1318, wait_agent_ticks=1024, denials=88, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
     first_touch: makespan=746, file_work=1370, wait_agent_ticks=400, denials=104, deadlocks=15, restart_lost_file_work=52, scope_refusals=0, growth_requests=1770, repair_events=0, repair_units=0
     none: makespan=845, file_work=1318, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=139, repair_units=278
     none_repair_cost_0: makespan=567, repair_events=139, repair_units=0
@@ -366,23 +367,23 @@ Concurrency: up to 5 agents; 65 windows; 295 task placements
 
 Concurrency: up to 10 agents; 37 windows; 295 task placements
   Order scenario: alphabetical
-    all: makespan=755, file_work=1318, wait_agent_ticks=1659, denials=117, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=144, repair_events=0, repair_units=0
-    exact: makespan=741, file_work=1318, wait_agent_ticks=1589, denials=115, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
-    hybrid:0: makespan=725, file_work=1318, wait_agent_ticks=1495, denials=125, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=2813, repair_events=0, repair_units=0
-    hybrid:0.5: makespan=738, file_work=1323, wait_agent_ticks=1689, denials=125, deadlocks=4, restart_lost_file_work=5, scope_refusals=0, growth_requests=1295, repair_events=0, repair_units=0
-    hybrid:0.8: makespan=748, file_work=1318, wait_agent_ticks=1725, denials=119, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=431, repair_events=0, repair_units=0
-    hybrid:1: makespan=754, file_work=1318, wait_agent_ticks=1763, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    all: makespan=873, file_work=1318, wait_agent_ticks=2021, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=140, repair_events=0, repair_units=0
+    exact: makespan=855, file_work=1318, wait_agent_ticks=1859, denials=115, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    hybrid:0: makespan=765, file_work=1332, wait_agent_ticks=1677, denials=151, deadlocks=13, restart_lost_file_work=14, scope_refusals=0, growth_requests=2752, repair_events=0, repair_units=0
+    hybrid:0.5: makespan=857, file_work=1325, wait_agent_ticks=1972, denials=146, deadlocks=12, restart_lost_file_work=7, scope_refusals=0, growth_requests=1123, repair_events=0, repair_units=0
+    hybrid:0.8: makespan=856, file_work=1318, wait_agent_ticks=2001, denials=121, deadlocks=1, restart_lost_file_work=0, scope_refusals=0, growth_requests=356, repair_events=0, repair_units=0
+    hybrid:1: makespan=870, file_work=1318, wait_agent_ticks=2053, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
     first_touch: makespan=696, file_work=1318, wait_agent_ticks=1283, denials=121, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=2601, repair_events=0, repair_units=0
     none: makespan=1002, file_work=1318, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=290, repair_units=580
     none_repair_cost_0: makespan=422, repair_events=290, repair_units=0
     none_repair_cost_1: makespan=712, repair_events=290, repair_units=290
   Order scenario: alternating_reverse
-    all: makespan=757, file_work=1318, wait_agent_ticks=1656, denials=116, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=139, repair_events=0, repair_units=0
-    exact: makespan=741, file_work=1318, wait_agent_ticks=1589, denials=115, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
-    hybrid:0: makespan=688, file_work=1406, wait_agent_ticks=1294, denials=183, deadlocks=29, restart_lost_file_work=88, scope_refusals=0, growth_requests=2700, repair_events=0, repair_units=0
-    hybrid:0.5: makespan=732, file_work=1322, wait_agent_ticks=1630, denials=123, deadlocks=3, restart_lost_file_work=4, scope_refusals=0, growth_requests=1600, repair_events=0, repair_units=0
-    hybrid:0.8: makespan=746, file_work=1318, wait_agent_ticks=1705, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=652, repair_events=0, repair_units=0
-    hybrid:1: makespan=754, file_work=1318, wait_agent_ticks=1763, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    all: makespan=875, file_work=1318, wait_agent_ticks=2027, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=15, growth_requests=144, repair_events=0, repair_units=0
+    exact: makespan=855, file_work=1318, wait_agent_ticks=1859, denials=115, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
+    hybrid:0: makespan=701, file_work=1401, wait_agent_ticks=1306, denials=184, deadlocks=30, restart_lost_file_work=83, scope_refusals=0, growth_requests=2499, repair_events=0, repair_units=0
+    hybrid:0.5: makespan=853, file_work=1329, wait_agent_ticks=1912, denials=146, deadlocks=11, restart_lost_file_work=11, scope_refusals=0, growth_requests=1059, repair_events=0, repair_units=0
+    hybrid:0.8: makespan=854, file_work=1318, wait_agent_ticks=1985, denials=121, deadlocks=1, restart_lost_file_work=0, scope_refusals=0, growth_requests=350, repair_events=0, repair_units=0
+    hybrid:1: makespan=870, file_work=1318, wait_agent_ticks=2053, denials=118, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=0, repair_units=0
     first_touch: makespan=651, file_work=1420, wait_agent_ticks=997, denials=178, deadlocks=32, restart_lost_file_work=102, scope_refusals=0, growth_requests=2417, repair_events=0, repair_units=0
     none: makespan=1002, file_work=1318, wait_agent_ticks=0, denials=0, deadlocks=0, restart_lost_file_work=0, scope_refusals=0, growth_requests=0, repair_events=290, repair_units=580
     none_repair_cost_0: makespan=422, repair_events=290, repair_units=0

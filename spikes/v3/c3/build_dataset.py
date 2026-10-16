@@ -22,7 +22,9 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 STAMP = re.compile(r"(20\d{6}T\d{6}Z)")
 PATH = re.compile(r"(?<!\w)(?:[\w.-]+/)+[\w.\-]+|(?<!\w)[\w.\-]+\.(?:json|yaml|html|swift|toml|tsx|cpp|css|txt|yml|py|ts|js|rs|sh|md|c|h)\b(?::\d+)?", re.I)
 CODE_SPAN = re.compile(r"`([^`\n]*)`")
-LABEL = re.compile(r"^[ \t]*(?:Done when|Allowed files|Inputs|Out of scope|Validation|Steps|Role|Rules|Publication|Sandbox|Commit message|Closes|Goal|Outcome):", re.I)
+FIELD = re.compile(r"^[ \t]*(?:#{1,6}[ \t]+\S|(?:[-*][ \t]+)?[A-Za-z][A-Za-z0-9_/-]*(?:[ \t]+[A-Za-z][A-Za-z0-9_/-]*){0,4}(?:[ \t]+\([^):]{1,20}\))?:[ \t]*(?:\S|$))", re.I)
+LINE_HINT = re.compile(r"(?<!\w)(?:~[ \t]*)?(?:(?:around|at|near|about)[ \t]+)?lines?[ \t]+~?[ \t]*\d+(?:[ \t]*[-–—][ \t]*~?[ \t]*\d+)?\b", re.I)
+LINE_INDEX = re.compile(r"(?<!\w)L\d{1,5}\b")
 
 
 def shell(*args):
@@ -89,17 +91,17 @@ def changed_paths(repo, base, candidate, run):
 
 def outcome_text(spec):
     text = spec.read_text(errors="replace")
+    # Discard quoted templates before looking for the real delegation marker.
+    text = re.sub(r"(?ms)^[ \t]*```[^\n]*\n.*?^[ \t]*```[ \t]*$", "", text)
     # The worker prompt embeds the original delegation spec below this marker.
     if re.search(r"(?m)^## Delegation spec\s*$", text):
         text = re.split(r"(?m)^## Delegation spec\s*$", text, maxsplit=1)[1]
-    # Examples inside a fenced block are not task instructions.
-    text = re.sub(r"(?ms)^\s*```[^\n]*\n.*?^\s*```[ \t]*$", "", text)
     match = re.search(r"(?m)^[ \t]*Outcome:[ \t]*(.*)$", text)
     if match:
         tail = text[match.end():].splitlines()
         lines = [match.group(1).strip()]
         for line in tail:
-            if LABEL.match(line):
+            if FIELD.match(line):
                 break
             if line.strip():
                 lines.append(line.strip())
@@ -109,7 +111,7 @@ def outcome_text(spec):
         return ""
     lines = [match.group(1).strip()]
     for line in text[match.end():].splitlines():
-        if LABEL.match(line):
+        if FIELD.match(line):
             break
         if line.strip():
             lines.append(line.strip())
@@ -124,17 +126,19 @@ def redact(text, answers):
                 text = re.sub(re.escape(token), "[path redacted]", text, flags=re.I)
     text = re.sub(r"\b(?:[\w.-]+/)+<[^>]+>\.[A-Za-z]+", "[path redacted]", text)
     text = PATH.sub("[path redacted]", text)
-    text = re.sub(r"\b(?:around|at|near)\s+lines?\s+\d+(?:\s*[-–]\s*\d+)?\b", "[location redacted]", text, flags=re.I)
+    text = LINE_HINT.sub("[location redacted]", text)
+    text = LINE_INDEX.sub("[location redacted]", text)
+    text = re.sub(r"(?<!\w)~\s*\d+(?:\s*[-–—]\s*\d+)?\b", "[location redacted]", text)
     text = re.sub(r"\b[0-9a-f]{7,40}\b", "[commit redacted]", text, flags=re.I)
     text = re.sub(r"(?<!\w)(?:[\w.-]+):\d+(?:-\d+)?", "[location redacted]", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def leaks(text, answers):
+def leaks(text, answers, strict_spec=True):
     low = text.lower()
-    if re.search(r"allowed[- ]files|delegation spec|^\s*steps:", text, re.I | re.M):
+    if re.search(r"allowed[- ]files|^[ \t]*#{1,6}[ \t]+delegation spec[ \t]*$|^[ \t]*steps:", text, re.I | re.M) or (strict_spec and "delegation spec" in low):
         return "spec_or_allowed_list"
-    if PATH.search(text) or re.search(r"\b[\w.-]+:\d+\b|\b(?:around|at|near)\s+lines?\s+\d+", text, re.I):
+    if PATH.search(text) or re.search(r"\b[\w.-]+:\d+\b|(?<!\w)~\s*\d+(?:\s*[-–—]\s*\d+)?\b", text) or LINE_HINT.search(text) or LINE_INDEX.search(text):
         return "path_or_location"
     if any(len(p.rsplit("/", 1)[-1]) >= 4 and p.rsplit("/", 1)[-1].lower() in low for p in answers):
         return "answer_basename"
@@ -349,7 +353,7 @@ def main():
                                   if dirty_refusal else "candidate diff under Allowed-file gate; acceptance not established; unknown unmet paths possible"
                                   if paths else "no diffable changed-file label")}
         tier_b = redact(raw, paths or []) if raw and paths else ""
-        if tier_b and not leaks(tier_b, paths):
+        if tier_b and not leaks(tier_b, paths, strict_spec=False):
             audit_row["tier_b_status"] = "included"
             bundles.append({**common, "tier": "B", "leak_status": "LEAKY: spec author knew code",
                             "issue_text": tier_b, "source": "delegation Goal/Outcome only",
