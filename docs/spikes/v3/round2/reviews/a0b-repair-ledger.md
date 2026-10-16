@@ -1,0 +1,27 @@
+# Platform audit repair ledger
+
+The entries below repair the independent October 16 review of the platform audit. Line references point to the repaired audit and tracker in this change. **Fixed** means the audit now reports the evidence and the tracker carries the needed decision or research gate; it does not mean the architecture draft or the open hosting choice was changed. The owner’s October 15 LFS ruling overrides the review’s proposed MVP service requirement.
+
+| Finding | One-line summary | What changed (section and line) | Status |
+| --- | --- | --- | --- |
+| R01 | Home-hosted promotion conflicts with owner policy and hides costs. | Audit “Mismatches,” line 50; tracker “Deployment,” line 12: exclude owner-machine promotion, qualify costs. | fixed |
+| R02 | Draft MIT choice precedes the deferred license decision. | Audit “Mismatches,” line 22; tracker “Requirements” and “Hosted service timing,” lines 3 and 22: mark MIT unapproved, preserve eventual self-hosting. | fixed |
+| R03 | Ten-repository size result and superseded figure were missing. | Audit “Git placement and correctness,” line 84; tracker “Git placement,” line 20: report aggregates, no LFS, side-branch exception and stale-clone limits. | fixed |
+| R04 | Canonical Git write credentials lacked a protected boundary. | Audit “Security and Git submissions” and “Git placement,” lines 45 and 84; tracker “Security” and “Git placement,” lines 10 and 20: gateway or task repository, server-only canonical token. | fixed |
+| R05 | LFS import was treated as an approved MVP promise. | Audit opening, import finding and recovery, lines 5, 47 and 86; tracker import and recovery, lines 11 and 21: remove LFS from MVP; optional future service requires auth, storage and restore. Owner ruling overrides review direction. | fixed |
+| R06 | Stream duration and Bun idle defaults were absent from cost comparison. | Audit events findings and operating limits, lines 39–40 and 86; tracker Events, line 9: distinguish SSE/MCP active duration, 120-second default, keepalive and reconnect. | fixed |
+| R07 | Cloudflare compute loss and backup failure domains were undefined. | Audit “Git placement and correctness,” line 84; tracker “Git placement” and “Independent recovery,” lines 20–21: R2 objects, Durable Object refs/metadata, disposable Container and outside-provider backup. | fixed |
+| R08 | Daily storage peaks and asynchronous deletion were omitted. | Audit “Task-copy cost and cleanup,” line 88; tracker “Cost and budgets” and “Git placement,” lines 13 and 20: peak bytes and confirmed reclamation. | fixed |
+| R09 | Universal two-object-request claim was false. | Audit “What v3 fixes” and baseline, lines 26 and 82; tracker same subject, line 4: credential- and action-specific accounting. | fixed |
+| R10 | Screenshot was called an invoice and account topology was incomplete. | Audit “Current-state baseline,” line 82; tracker same subject, line 19: filtered screenshot, Paid inclusions, inaccessible subscriptions, no zones and workers.dev. | fixed |
+| R11 | Workers Builds dependence on Artifacts main was missing. | Audit baseline and delivery finding, lines 82 and 64; tracker Deployment and Delivery plan, lines 12 and 15: require replacement deploy source before storage removal. | fixed |
+| R12 | Supported WebSocket prototype was misclassified as contradictory. | Audit Events finding and limits, lines 38 and 90; tracker Events, line 9: preserve 200 clients, 60 seconds, included-client memory and separate simulated-hour target. | fixed |
+| R13 | Supplied Bun source did not cover SQLite behavior. | Audit runtime finding and Decisions, lines 54 and 76; tracker Deployment, line 12: WebSocket API supported, SQLite compatibility unverified. | fixed |
+| R14 | Mismatch kinds overstated contradiction and approval evidence. | Audit “Mismatches,” lines 21, 35, 38, 47–51, 57–58 and 65–67: separate unsupported guarantees, open work, supported binding limit and internal draft inconsistencies. | fixed |
+| R15 | Serialization, mirror timing and retry budget conflicted across draft sections. | Audit Components and Cost findings, lines 30, 32 and 58; tracker Components and Cost, lines 6 and 13: name all three inconsistencies and reconciliation gates. | fixed |
+| R16 | Model-cost dominance and budget-broker control lacked evidence. | Audit Cost finding, line 59; tracker Cost, line 13: price selected backend, test stopping/overshoot; companion audit owns broker details. | fixed |
+| R17 | Approved one-sentence agent deployment was missing. | Audit Requirements finding, line 23; tracker Requirements and Delivery plan, lines 3 and 15: add eventual self-host install acceptance. | fixed |
+| R18 | MCP Origin rejection and pre-upgrade WebSocket authorization were too soft. | Audit API finding and operating limits, lines 37 and 86; tracker API and Security, lines 8 and 10: required invalid-Origin 403 and principal/repository authorization before upgrade. | fixed |
+| R19 | Undefined terms and coded source labels hindered owner reading. | Audit opening terms and “Source titles and reading key,” lines 9–11 and 92–106; tracker Summary, line 2: definitions, readable titles, dates and section pointers. | fixed |
+
+Evidence boundary: supplied files were read without a web fetch. The dated local repository check is an aggregate, not a capacity test; the Cloudflare billing screenshot is filtered; the runtime, host and future import behavior remain unverified. The next draft must apply these findings before design approval.
