@@ -1,0 +1,68 @@
+mutation probe: grace disabled => reconnects=0 (caught)
+mutation probe: always-accept write guard => safetyViolations=119 (caught)
+mutation probe: write guard ignores expiry => safetyViolations=78 (caught)
+mutation probe: contender fence increment suppressed => 1 -> 1 (caught)
+lease renewal simulation: 200 independent seeds per size; each seed is paired across designs
+design | agents | metric (mean [95% CI])
+A | 5 | outage lapses/agent: 0.512 [0.480, 0.544]
+A | 5 | dead-held min/agent: 0.270 [0.204, 0.336]
+A | 5 | client renewals/agent: 32.729 [30.863, 34.595]
+A | 5 | landed fraction: 0.256 [0.228, 0.284]
+A | 5 | review losses/agent: 0.297 [0.269, 0.325]
+B | 5 | outage lapses/agent: 0.057 [0.042, 0.072]
+B | 5 | dead-held min/agent: 4.765 [3.496, 6.034]
+B | 5 | client renewals/agent: 45.782 [43.799, 47.765]
+B | 5 | landed fraction: 0.682 [0.653, 0.711]
+B | 5 | review losses/agent: 0.000 [0.000, 0.000]
+C | 5 | outage lapses/agent: 0.512 [0.480, 0.544]
+C | 5 | dead-held min/agent: 0.277 [0.211, 0.343]
+C | 5 | client renewals/agent: 33.549 [31.690, 35.408]
+C | 5 | landed fraction: 0.276 [0.247, 0.305]
+C | 5 | review losses/agent: 0.299 [0.271, 0.327]
+D | 5 | outage lapses/agent: 0.595 [0.565, 0.625]
+D | 5 | dead-held min/agent: 0.299 [0.232, 0.366]
+D | 5 | client renewals/agent: 40.152 [38.411, 41.893]
+D | 5 | landed fraction: 0.339 [0.308, 0.370]
+D | 5 | review losses/agent: 0.355 [0.327, 0.383]
+BD | 5 | outage lapses/agent: 0.055 [0.041, 0.069]
+BD | 5 | dead-held min/agent: 5.172 [3.879, 6.464]
+BD | 5 | client renewals/agent: 54.826 [53.274, 56.378]
+BD | 5 | landed fraction: 0.824 [0.802, 0.846]
+BD | 5 | review losses/agent: 0.000 [0.000, 0.000]
+A | 20 | outage lapses/agent: 0.507 [0.491, 0.523]
+A | 20 | dead-held min/agent: 0.256 [0.227, 0.285]
+A | 20 | client renewals/agent: 34.572 [33.572, 35.572]
+A | 20 | landed fraction: 0.281 [0.266, 0.295]
+A | 20 | review losses/agent: 0.271 [0.258, 0.284]
+B | 20 | outage lapses/agent: 0.059 [0.051, 0.066]
+B | 20 | dead-held min/agent: 4.057 [3.444, 4.670]
+B | 20 | client renewals/agent: 47.058 [45.988, 48.129]
+B | 20 | landed fraction: 0.702 [0.687, 0.717]
+B | 20 | review losses/agent: 0.000 [0.000, 0.000]
+C | 20 | outage lapses/agent: 0.507 [0.491, 0.523]
+C | 20 | dead-held min/agent: 0.261 [0.231, 0.291]
+C | 20 | client renewals/agent: 35.433 [34.415, 36.451]
+C | 20 | landed fraction: 0.305 [0.290, 0.320]
+C | 20 | review losses/agent: 0.272 [0.260, 0.285]
+D | 20 | outage lapses/agent: 0.583 [0.567, 0.599]
+D | 20 | dead-held min/agent: 0.294 [0.262, 0.326]
+D | 20 | client renewals/agent: 41.144 [40.229, 42.059]
+D | 20 | landed fraction: 0.361 [0.345, 0.377]
+D | 20 | review losses/agent: 0.316 [0.303, 0.329]
+BD | 20 | outage lapses/agent: 0.056 [0.049, 0.063]
+BD | 20 | dead-held min/agent: 4.875 [4.205, 5.545]
+BD | 20 | client renewals/agent: 55.195 [54.472, 55.918]
+BD | 20 | landed fraction: 0.829 [0.818, 0.840]
+BD | 20 | review losses/agent: 0.000 [0.000, 0.000]
+safety aggregate over 200 seeds | agents | accepted unauthorized writes | refused stale writes | grace recoveries | restart events | server phase extensions | outages <=45s | outages >45s
+A | 5 | 0 | 3090 | 0 | 162 | 0 | 13 | 1051
+B | 5 | 0 | 1094 | 0 | 162 | 48779 | 13 | 1051
+C | 5 | 0 | 3078 | 30 | 162 | 0 | 13 | 1051
+D | 5 | 0 | 2842 | 36 | 162 | 0 | 13 | 1051
+BD | 5 | 0 | 482 | 3 | 162 | 58511 | 13 | 1051
+A | 20 | 0 | 11854 | 0 | 606 | 0 | 68 | 4127
+B | 20 | 0 | 4098 | 0 | 606 | 196905 | 68 | 4127
+C | 20 | 0 | 11778 | 126 | 606 | 0 | 68 | 4127
+D | 20 | 0 | 10934 | 149 | 606 | 0 | 68 | 4127
+BD | 20 | 0 | 1830 | 10 | 606 | 233141 | 68 | 4127
+sample detail format: A | 5 | 0 | 2 | 4.42 | 155 | 0 | 2 | 2 | 12 | 0 | 0 | 0 | 4
