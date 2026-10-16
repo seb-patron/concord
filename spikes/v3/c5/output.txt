@@ -1,0 +1,16 @@
+lease renewal fault-injection prototype
+seed=0x00c0ffee; server-authoritative expiry; simulated faults: disconnect, laptop sleep, long review, restart, clock skew, abandonment
+design | agents | safety violations | wrongly lost live leases | dead-holder minutes | renew calls | completed | >5m review losses | stale writes refused
+A | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
+B | 5 | 0 | 3 | 0.0 | 16 | 2 | 2 | 3
+C | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
+D | 5 | 0 | 5 | 0.0 | 63 | 0 | 4 | 5
+A | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
+B | 20 | 0 | 5 | 4.3 | 88 | 14 | 4 | 6
+C | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
+D | 20 | 0 | 14 | 4.3 | 281 | 5 | 13 | 15
+checks: stale fenced write refused; reconnect at 45s succeeds and at 46s fails; abandonment expires; long review retained by A/B/D when renewal owner remains live
+
+Interpretation: “wrongly lost” counts intended non-abandoned runs that lost the original hold during a disconnect or sleep; it is an availability proxy, not a claim that expiry violated the protocol. Dead-holder minutes sum only the abandoned-run lease time after abandonment and before expiry. Renew calls count client heartbeats; server phase extensions are not RPCs. A run is complete only if it lands without abandonment or lapse.
+
+Reproduction used `node --experimental-strip-types test.ts` because Bun is absent and the sandbox blocked npx/tsx startup. Seed and inputs are fixed in test.ts. This model has no real network, agents, queue service, or clock implementation.
