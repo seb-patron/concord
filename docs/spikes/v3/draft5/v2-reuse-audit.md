@@ -1,0 +1,168 @@
+# Concord v2 reuse audit for v3
+
+**Answer (17 October 2026).** Yes: keep the current browser application and change it for v3. Its plain JavaScript, responsive layout, repository browser, issue list, tracker, change drawer, owner controls and safe text rendering are useful. The work is a substantial data and interaction update, not a new visual product. **Estimate:** about **1,100–1,800 existing UI lines touched**, plus roughly **500–900 new UI lines**, or **four to eight engineer-weeks** for one person after the v3 API shapes are fixed. This is an effort estimate, not a quote or a measured implementation. It includes browser integration and focused verification; it excludes server implementation, hosted checks, migration, and design or accessibility review. A v3 API that retains compatible snapshot fields could move the estimate toward the low end. A wholly different identity or event transport could move it above the range.
+
+**STRUCTURAL finding (code at `origin/main` c9d9278, inspected 17 October 2026):** the strongest reuse is presentation and browser safety, not the v1 data contract. `web/api.js:99-153` centralizes same-origin requests and credential handling; `web/index.html:20-31` already has places for issues, work, leases, queue, an inbox and a detail drawer. The main risks are showing a stale actor as authorized, treating a queued preview as guaranteed to land, and calling an unavailable check a failure. Those mistakes would mislead the owner precisely where v3 requires a decision. **CAPABILITY-DEPENDENT finding (research dated 15–16 October 2026):** the staffing estimate depends on the unsettled issue lifetime, atomic wait handover, hosting fence and exact API schema. Re-estimate after the local prototype and hosting safety test. The owner requested plans before implementation (update plans first, `D-UPDATE-PLANS-FIRST`) and continuation with later real-project trials (continue v3, `D-V3-CONTINUE-BUILD`); this document is an audit, not a claim that v3 has shipped.
+
+## Scope and terms
+
+This audits the v2 files at observed `origin/main` c9d9278; the local `main` ref in this checkout is older, so the observed remote-tracking head and this worktree are the useful v2 baseline. A **code claim** is temporary exclusive permission to edit a file or verified symbol. An **issue work slot** is the server-held record saying who is working on one ordinary task, including review and repair periods. A **fence** is a generation number that makes a former holder's late action invalid. A **preview commit** is an immutable proposed version of a queued prefix that a child change can use as its parent. A **replay cursor** is the last durable event sequence the browser has applied. A **landing intent** is the durable record of a proposed movement of canonical `main`, reconciled with Git after a crash. These meanings come from the 16 October claims design and hosting study, which supersede the partly stale architecture draft. The five-minute renewable writing claim, exclusive units and nonblocking holds after first publication remain current owner policy (exclusive units, `D-UNIT-1-EXCLUSIVE`; lease extension, `D-LEASE-5MIN-EXTEND`; publication transition, `D-LEASE-BOTTLENECK-ASAP`). An exact maximum age for server-held issue custody is open (maximum age, `D-LEASE-MAX-AGE-OPEN`).
+
+The v2 UI is not a generic forge frontend. It trusts one versioned repository snapshot with projections for changes, issues, leases, queue, jobs, findings and settings (`web/app.js:80-86`; `web/views.js:95-129`). V3 needs an issue slot, actor epoch, phase deadline, wait requests, preview tickets, dependency edges, check availability and landing intent in those projections or their replacements. Server authority remains decisive; browser role gates only hide inappropriate controls. **STRUCTURAL finding (17 October 2026):** do not make a button's visibility the access check (`web/api.js:328-341`; `src/auth.ts:122-146`).
+
+## File-by-file browser disposition
+
+Every file below was read through its full length. “Routes” names the actual v1 requests used directly or through imports; a dash means no request in that file. In this table, `R` expands to `/v1/repos/:repo`; method names before paths are HTTP methods. Counts are **estimated lines touched**, not a diff forecast. The table's dispositions are **STRUCTURAL findings from 17 October 2026**; the line estimates are **CAPABILITY-DEPENDENT estimates from 17 October 2026**.
+
+| File | What it shows or does; v1 routes called | V3 disposition and exact work | Estimated lines touched |
+| --- | --- | --- | ---: |
+| `web/api.js` | Same-origin fetch, in-memory bearer token, redacted errors, cached snapshot; declares wrappers for every route in the mapping below, plus unused `GET R/settings`. | **Keep and change.** Replace route helpers with versioned v3 operations; carry issue/actor/code fences, preview and landing tickets, replay cursor and idempotency keys. Parse `unavailable` separately from `failed`; preserve same-origin and secret scrubbing. | **180–240** |
+| `web/app.js` | Session, dashboard, drawer and actions; `GET /health`, `/v1/session`, `/v1/me`, `/v1/repos`, `/v1/principals`, `R/snapshot`, `R/events`, `R/metrics`, `R/changes/:change/verdicts`, `R/changes/:change/human-approval/diff`; `PUT R/settings`; `POST R/leases`, `R/queue/enqueue`, `R/queue/withdraw`, `R/changes/:change/human-approval`, `R/changes/:change/verdicts`. | **Keep and change.** Use server issue slot as task authority, not lease inference; introduce event connection/replay reducer, pinned versions and resync; render queue preview/child risk, landing intent/retry and check availability; rework action forms for new authority. | **300–450** |
+| `web/avatars/seb.jpeg` | 96×96 profile image; no route. | **Keep.** No v3 protocol change; retain asset only if the owner still wants this account-specific avatar. | **0** |
+| `web/index.html` | Navigation, work lanes, lease/queue sidebars, detail drawer, inbox, settings, sign-in links; direct `/v1/session/signin` and `/v1/session/signout` links. | **Keep and change.** Add issue actor/deadline, wait line, preview/dependency and check-state slots; update login text and live connection status; retain semantic headings and responsive layout. | **30–60** |
+| `web/issues.js` | Search/filter, assignees, issue drawer and linked changes from snapshot; no direct route. | **Keep and change.** Replace lease-derived assignee (`web/issues.js:59-70`) with server issue slot; show phase, actor, deadline, needs repair and intervention; place acknowledgment and owner cancellation in drawer. | **70–120** |
+| `web/milestones.js` | Milestone rows, create dialog and owner policy; `POST R/milestones`, `PATCH R/milestone-settings`. | **Keep and change.** Retain presentation; adapt milestone projection and versioned mutations to v3 contract, add issue phase counts only if the server supplies them. | **20–50** |
+| `web/owner-controls.js` | Reasoned cancel, queue withdraw and force release; `POST R/changes/:change/close`, `R/queue/withdraw`, `R/leases/:id/force-release`. | **Keep and change.** Make issue-slot cancellation atomic in the server operation; add wait pause/cancel, move to front, force release and priority warning. Replace two-call withdraw-then-close sequence (`web/owner-controls.js:69-76`) with one authoritative cancellation. | **50–90** |
+| `web/repo.js` | Human/agent code browser, clone panel, README and file content; `GET R/tree`, `R/file`, `R/readme`. | **Keep and change.** Pin views to canonical or preview commit; label conditional preview and its dependency; update clone instructions and Git endpoint if host changes. Preserve safe text rendering and OID-pinned reads. | **40–80** |
+| `web/styles.css` | Theme, cards, tracker, issue list, mobile layout, owner controls; no route. | **Keep and change.** Add distinguishable needs-repair, intervention, wait, at-risk, landing-retry and unavailable states with mobile and keyboard focus treatments. | **80–150** |
+| `web/tracker.js` | Five issue lanes, holders, queue badges, friction and issue editing; `POST R/issues`, `PATCH R/issues/:number`. | **Keep and change.** Derive lane from server issue phase (`web/tracker.js:75-126` currently infers from changes and leases); show actor/deadline and child risk; map review/check failure to needs repair and intervention, not generic “blocked.” | **160–240** |
+| `web/verdicts.js` | Paginated approval-history loader and cache; callback invokes `GET R/changes/:change/verdicts` through app. | **Keep and change.** Bind cached approval to exact revision/tree/issue version and invalidation cursor; retain bounded pagination and loading behavior (`web/verdicts.js:24-60`). | **20–40** |
+| `web/views.js` | Pure snapshot adapters, board stages, inbox, lease countdown, next-action copy, safe display; no direct route. | **Keep and change.** Replace guessed states with typed v3 phases, wait position, preview validity, check `unavailable`/`failed`, land reconciliation and stale authority. Keep escaping and focus helpers. | **130–200** |
+
+The estimates sum to about **1,080–1,720 touched lines** before new UI modules or expanded markup; rounding and integration uncertainty produce the opening **1,100–1,800** range. The 500–900 additional lines estimate covers connection handling, new controls and state views; it is not part of the touched-line sum. No file needs a wholesale rewrite on current evidence. A later v3 contract may justify splitting `app.js`, but module boundaries are an implementation choice, not a reason to discard the UI.
+
+## Browser API mapping
+
+There is no approved v3 route naming scheme in the supplied design. The right column therefore names **operations**, not invented URLs; “none yet” means a v3 operation must be specified. All rows are **STRUCTURAL mappings (v2 code 17 October; v3 design 16 October 2026)**. Repository, change and issue parameters in route patterns are written `:repo`, `:change`, and `:number`.
+
+| V1 route the UI uses today | V3 operation and change |
+| --- | --- |
+| `GET /health` | Service capability/connection health; report hosted check and event availability separately. |
+| `GET /v1/session`, `/v1/session/signin`, `/v1/session/signout`, `GET /v1/me` | Authenticated session, sign-in/out and current principal; enforce event-upgrade access. Preserve in-memory bearer behavior where used. |
+| `GET /v1/repos`, `GET /v1/principals` | List authorized repositories and current principals; wait grant must recheck principal authority at handover. |
+| `GET /v1/repos/:repo/snapshot?history=1` (also without query) | Versioned v3 repository snapshot with issue slots, code claims/waits, queue tickets, children, checks and landing intents; history remains bounded. |
+| `GET /v1/repos/:repo/events?after=…&limit=100` | Durable event replay after cursor plus authorized push stream (WebSocket or other chosen transport); cursor gap leads to snapshot resync. |
+| `GET /v1/repos/:repo/metrics?since=…&until=…` | Coordination metrics: duplicate effort, wait, repair, invalidation, unavailable checks and owner intervention; exact schema none yet. |
+| `GET /v1/repos/:repo/changes/:change/verdicts` | Revision/tree-bound review history, including invalidation and carried provenance only when safe. |
+| `GET /v1/repos/:repo/changes/:change/human-approval/diff`; `POST …/human-approval` | Exact proposed-tree diff and human approval bound to the current revision and issue generation; v3 endpoint shape none yet. |
+| `PUT /v1/repos/:repo/settings` | Update owner policy and path protection with expected version; future time caps need a v3 policy field. |
+| `POST /v1/repos/:repo/milestones`; `PATCH /v1/repos/:repo/milestone-settings` | Create milestone and change milestone policy under v3 issue model; schema none yet. |
+| `GET /v1/repos/:repo/tree`, `/file`, `/readme` | Read canonical or explicitly ticketed preview commit by object identity; host-specific Git/content adapter may change. |
+| `POST /v1/repos/:repo/issues`; `PATCH /v1/repos/:repo/issues/:number` | Create/edit task with version and actor acknowledgment; edits after send invalidate dependent evidence. |
+| `POST /v1/repos/:repo/leases` | Claim/grow code units with current issue actor fence and policy version; refusal joins wait line by default if chosen. Separate issue-slot claim operation: **none yet**. |
+| `POST /v1/repos/:repo/leases/:id/force-release` | Owner release code claim and advance wait line atomically; add owner pause/cancel/move-to-front wait operations: **none yet**. |
+| `POST /v1/repos/:repo/queue/enqueue` | Enqueue exact reviewed revision with landing authorization and dependency edges; return preview ticket and affected children. |
+| `POST /v1/repos/:repo/queue/withdraw` | Eject revision and invalidate dependent previews; expose descendant impact before confirmation. |
+| `POST /v1/repos/:repo/changes/:change/close` | Cancel issue work/revision and all authority in one fenced transition; old separate close is insufficient. |
+| `POST /v1/repos/:repo/changes/:change/verdicts` | Submit independent review bound to exact revision/tree/check and issue version; reject stale results. |
+
+The `GET /v1/repos/:repo/settings` helper exists in `web/api.js:229-231` but no browser module invokes it; settings are read from the snapshot. The browser also never directly calls a v1 change-create or publish route: those are agent workflows. V3 preview creation, issue repair takeover, wait management and landing-intent observation nevertheless need server operations for this UI; their API names and payloads are **none yet**. This is an explicit interface gap, not a reason to fabricate endpoints.
+
+## Live updates and consistency
+
+**STRUCTURAL finding (17 October 2026):** today's browser is primarily refresh-on-action, focus and visibility, not a continuous 15-second data poll. Initial `loadRepo` fetches snapshot and one event page (`web/app.js:271-292`). `poll` asks for `/events?after=state.seq`, appends a page, then re-fetches the snapshot only if the returned version advanced (`web/app.js:328-359`). It runs after manual refresh (`web/app.js:1069`), when the tab regains focus or visibility (`web/app.js:1103-1111`), and after mutations (`web/app.js:950-969`); anonymous reads are throttled to one poll per minute (`web/app.js:332-335`). The 15-second interval changes only the “Updated” label (`web/app.js:1112`), which is easy to mistake for live data refresh. The API cache uses an entity tag and can reuse an in-flight snapshot (`web/api.js:207-226`). It does not use a WebSocket or `EventSource`.
+
+V3 should open an authorized event connection after a versioned snapshot, then apply numbered events in order from the saved cursor. On reconnect it requests all events after that cursor; if replay is incomplete, the version jumps, or the stream says the cursor is too old, it fetches a fresh snapshot and resumes from that snapshot's event sequence. A snapshot and stream subscription need a race-safe handshake: subscribe from the snapshot cursor, deduplicate repeated sequences, and do not show a later projection with an older authority version. Keep the existing manual refresh and focus resync as recovery paths. The browser must say “disconnected” and “state may be stale”; it must disable authority-sensitive actions until a fresh snapshot confirms actor/fence, review and queue ticket. Store a nonsecret cursor only if persistence is desired; the bearer token remains in memory. **CAPABILITY-DEPENDENT finding (hosting study, 16 October):** hibernatable WebSockets are a candidate, but hosted idle cost, replay retention and authentication ordering need measurement. The transport could change; the cursor and resync rules cannot.
+
+## New decisions and controls in existing views
+
+The following are **STRUCTURAL UI requirements from the 16 October claims design**, subject to its explicitly provisional time limits. Each needs an authoritative server result and a numbered event; a browser timer may display time remaining but cannot grant authority.
+
+| Missing v3 information or action | Place it in the existing UI |
+| --- | --- |
+| Issue slot from Open through Claimed, Sent, In review, Needs repair, Intervention, Waiting to land, Landed/Closed; current actor, last actor, phase deadline, reason and current revision | Issue list and issue drawer (`web/issues.js:119-174`), tracker card and its five lanes (`web/tracker.js:75-126`). Show needs repair and intervention as explicit states, not just “blocked”; mark server custody while no agent is writing. |
+| Repair takeover, issue-edit acknowledgment, owner extension/cancel/close in every holding state | Issue drawer and existing detail/action panel (`web/index.html:24,30`). A repairer needs a new actor turn and fresh code claims. A reasoned owner cancel invalidates late sends; a post-land request is a new revert/repair decision. |
+| Code claim holders, unit aliases, expiry, intent and durable FIFO wait position/deadline; no promised grant time | Existing Leases sidebar and selected change detail (`web/index.html:29-30`). Distinguish active hold from queued request; show the holder and advisory expiry returned on refusal. |
+| Owner pause/cancel wait, move named waiter to front with reason, force-release hold | Expand `web/owner-controls.js` in the lease row and wait-line drawer. Show every affected waiter and the pending deadline before confirmation. A pause stops grants but deadlines keep running. |
+| Exact queue preview commit, ordered prefix, child edge, queue epoch and invalidation risk | Existing Merge queue sidebar, tracker card and detail drawer. An “at risk” child opens the dependency chain; priority moves, withdrawal and predecessor replacement preview how many descendants need new checks/review. |
+| Landing intent, expected old `main`, checked new commit, retry/readback and uncertain outcome | Queue row, change History and inbox. Display “reconciling” until Git readback confirms the checked commit; never display landed from a successful request alone. |
+| Check **unavailable** versus **failed**; exact tree and result digest | Runner health and findings sections (`web/index.html:30`), tracker badge and inbox. Unavailable means evidence could not be produced, including missing tool or timeout; failed means a runnable check returned nonzero. Neither is green. |
+
+The current issue assignee is derived from active leases (`web/issues.js:63-70`), so it vanishes when a change is sent and its writing hold ends. The current tracker chooses a change from linked change status and lease evidence (`web/tracker.js:87-104`). Both need issue-slot data rather than more inference. The existing owner cancellation is two requests, withdraw then close (`web/owner-controls.js:69-76`); v3 cancellation must be one server transition that revokes issue, revision, code and child tickets together. These are **STRUCTURAL findings (17 October 2026 code; 16 October 2026 v3 design)**. Whether automatic wait grant is implementable is **CAPABILITY-DEPENDENT (16 October hosting design)**: it requires revocation and grant in one serializable order; otherwise the UI should show a short priority turn requiring a fresh authenticated claim. The handover policy remains a research proposal, not an owner-approved production default (handover redesign, `D-HANDOVER-REDESIGN`).
+
+## V2 server reuse
+
+The following files were read in full. Their dispositions are **STRUCTURAL code-shape findings (17 October 2026)**; deployment fit is separately **CAPABILITY-DEPENDENT (15–16 October studies)**. “Keep and change” means reuse a module's responsibility and selected helpers, not its v1 state shape unchanged.
+
+| File | Disposition and named v3 mechanism |
+| --- | --- |
+| `wrangler.jsonc` | **Keep and change if Cloudflare stays.** Assets, Worker, tenant and per-repository Durable Object bindings remain useful; add hosted promoter/check jobs and event transport. Rework Artifacts binding only if Git placement changes. |
+| `src/worker.ts` | **Keep and change.** Request forwarding and static asset serving survive; authorize event upgrade/replay and v3 task/claim routes, preserve public/private boundaries. |
+| `src/coordinator.ts` | **Keep and change.** One ordered coordinator per repository is useful for issue-slot and wait transactions; add event cursor, preview epoch, land intent and Git reconciliation. Existing module projections and mutation versions need a v3 schema. |
+| `src/catalog.ts` | **Keep and change.** Tenant repository/identity registry remains; atomic wait grants require current principal authority in the same serial order as claim grant, or a fresh-auth priority turn. |
+| `src/state.ts` | **Keep and change.** SQLite state, numbered event log and idempotency are foundations for replay; add normalized issue/wait/preview/intent records, durable snapshot cursor and recovery ordering. |
+| `src/auth.ts` | **Keep and change.** Reuse principal/repository role checks; add issue actor/epoch, current access at wait handover and event-stream authorization. Browser hints never substitute for this gate. |
+| `src/storage/artifacts.ts` | **Conditional keep.** Preserve Git object/read adapter if Artifacts is retained. Its repository-wide write tokens and absent delete operation cannot enforce a v3 canonical fence or task-repository cleanup alone. A gateway or different Git store must supply that mechanism. |
+| `src/leases/units.ts` | **Keep and change.** Normalization, file/symbol overlap and coverage ideas survive; pin policy version and conservative symbol identity, aliases and fallback in declare/grow/verify. A lexical/function-name hint is not a verified symbol. |
+| `src/features/leases.ts` | **Keep and change.** Claim, renewal, fence, release and projection foundations survive; add durable FIFO waits, no barging, owner controls and current-authority handover. Keep writing holds separate from revision-specific landing authorization. |
+| `src/features/issues.ts` | **Rewrite lifecycle, keep issue storage concepts.** V2 issue links and edits do not enforce the issue work slot. Add one ordinary slot, actor epochs, server custody through review/repair, deadlines, intervention and version acknowledgment. |
+| `src/features/queue.ts` | **Rewrite queue core, reuse admission, promotion ticket and reconciliation ideas.** V3 needs preview commits, explicit child edges and invalidation, exact merged-tree checks, durable land intent and fenced compare-and-swap. V2's stale-main block and local promoter workflow are insufficient. Existing ticket/reconcile paths (`src/features/queue.ts:943-969,1196-1212`) are starting points, not proof of the v3 fence. |
+
+The next inventory follows the 15 October Cloudflare code-path study and 16 October hosting study; **each file is not read in full for this audit**, so each disposition is provisional and **CAPABILITY-DEPENDENT (15–16 October 2026)**. “Retarget” means keep the responsibility while changing v1 types, endpoints or host calls. This is a file inventory, not a claim that a full-file review proved reuse.
+
+| Other file(s), each not read in full | Disposition from v2 Cloudflare/hosting study |
+| --- | --- |
+| `src/access.ts`, `src/contracts.ts`, `src/http.ts` | **Retarget:** Access/session edge, v1 contracts and HTTP envelope to v3 identity, events and routes. |
+| `src/experiments/checker-exp-worker.ts`, `src/features/container-checker.ts` | **Retarget or drop experiment:** retain isolated hosted-check lessons; v3 check runner must bind exact combined commit. |
+| `src/features/findings.ts`, `src/findings/round.ts`, `src/features/verdicts.ts`, `src/verdicts/manifest.ts` | **Retarget:** review/findings lifecycle to issue repair and exact tree/revision digest. |
+| `src/features/metrics.ts`, `src/features/principals.ts`, `src/features/settings.ts` | **Retarget:** coordination metrics, current access and owner policy. |
+| `src/features/repos.ts`, `src/repos/model.ts`, `src/repos/paths.ts` | **Retarget:** task repos and canonical reads; change-fork creation/retention and Git placement depend on host. |
+| `src/features/runners.ts`, `src/jobs/policy.ts` | **Retarget:** hosted isolated checks and result admission; remove reliance on local runner scheduling. |
+| `src/leases/symbol-keys.ts` | **Retarget:** verified symbol finder and file fallback; test coverage before choosing defaults. |
+| `src/queue/arbitrate.ts`, `src/queue/plan.ts` | **Retarget:** queue diagnostics and composition planning for prefix preview and exact-tree checks. |
+| `src/storage/bridge.ts`, `src/storage/fake.ts`, `src/storage/interface.ts` | **Keep for local testing / retarget interface:** bridge and fake are not production evidence; interface must support chosen Git store and conditional ref movement. |
+| `cli/aw-run.ts`, `cli/client.ts`, `cli/git-token.ts`, `cli/git.ts`, `cli/import.ts`, `cli/land.ts`, `cli/main.ts`, `cli/profile.ts`, `cli/start.ts`, `cli/version.ts` | **Retarget:** keep thin-client/auth and native Git concepts; replace v1 change/claim/land commands with server authority and preview tickets. Local `land` promotion path is **drop** once hosted promoter is proven. |
+| `runner/execute.ts`, `runner/generate-units.ts`, `runner/git.ts`, `runner/main.ts`, `runner/profiles.ts`, `runner/units.ts` | **Retarget to hosted checker or drop local daemon:** retain validation/profile and native Git logic where portable; `runner/main.ts` local service role is **drop** under no-local-promoter decision. |
+| `deploy/checker-exp/Dockerfile`, `deploy/checker-exp/README.md`, `deploy/checker-exp/wrangler.jsonc`, `deploy/mirror.ts`, `deploy/preflight.ts`, `deploy/trusted-parts.ts` | **Retarget:** experiment image/config become hosted job build inputs if chosen; mirror remains one-way with lag/retry, preflight and trusted config adapt to chosen host. |
+
+The grouped rows list **every other tracked file under `src/`, `cli/`, `runner/` and `deploy/`** at this head. Their grouping is by shared disposition; it does not imply each was reviewed beyond the cited studies. The existing local checker/promoter is specifically contrary to the owner's no-local-promoter decision (`D-NO-LOCAL-PROMOTER`). V3 may retain its Git commands and fixtures in a hosted component, but the old machine role is dropped.
+
+## Hosting-independent core, hosting-dependent edges
+
+**STRUCTURAL finding (claims and hosting designs, 16 October 2026):** keep the source-control concepts regardless of provider: one server-controlled canonical `main`; immutable changes; issue custody and actor fences; exclusive code claims with conservative file/symbol overlap; wait order; revision-bound review; exact merged-tree checks; conditional preview dependencies; numbered events and replay; durable land intent, readback and crash reconciliation; and an idempotent ref compare-and-swap. Preserve the browser's safe same-origin fetch, text insertion and role-aware controls. The v3 design should state an API contract for these before visual implementation. The owner wants symbol claims tested, not silently removed (symbol test, `D-TEST-SYMBOLS`), and gains presented beside wait, repair, check and owner costs (full-results decision, `D-GAIN-SEE-RESULTS`).
+
+**CAPABILITY-DEPENDENT finding (Cloudflare study 15 October; hosting recommendation 16 October 2026):** the deployed Worker, tenant catalog, repository Durable Objects and Artifacts are a plausible smallest starting shape. Hosted promotion and isolated checks are still required. Artifacts' Git write token covers the repository, so the actual endpoint must prove that a paused old promoter cannot move `main` after replacement. A coordinator decision and later readback are insufficient. If that fence fails, a hosted server with an enforcing Git receive path is the fallback; the browser can largely keep the same operations but must update clone links, health and host labels. Artifacts is optional by owner decision (Artifacts optional, `D-ARTIFACTS-OPTIONAL`), not a fixed v3 component. Static assets (`wrangler.jsonc:6`) and versioned repository reads can stay while Git placement changes. If canonical Git leaves Artifacts, Workers Builds source and the one-way GitHub mirror need an explicit cutover. No measured v3 capacity, all-in hosting bill or acceptable recovery targets are established by the supplied studies.
+
+## Limits and next decisions
+
+This is a source audit and effort estimate. It does not prove UI behavior in a browser, test v3 endpoints, run a hosted promoter, price the integration, or decide the v3 route schema. No web sources were fetched. The 15 October Cloudflare study observed a small v2 pilot, not v3 scale; its operation-to-billing mapping and retained-fork cost are estimates. The 16 October hosting study's Container numbers are scenarios, not an invoice. The architecture HTML is draft 4 and partly stale; when it conflicts with the claims and hosting studies, those later studies govern this audit. The claims document proposes a local prototype and adjustable issue phase limits, not a production policy. **CAPABILITY-DEPENDENT limits (source dates 15–17 October 2026):** agent behavior, wait-line effectiveness, child-preview savings, check availability and hosted fence safety need later evidence. Current GitHub merges per day are not an accepted baseline (same-work comparison decision, `D-NO-MERGES-PER-DAY`).
+
+Input coverage log (all text read in consecutive chunks of at most 250 lines; binary image read as bytes):
+
+| Input | Coverage |
+| --- | --- |
+| `web/api.js` | read in full (342 lines) |
+| `web/app.js` | read in full (1,124 lines) |
+| `web/avatars/seb.jpeg` | read in full as binary (2,424 bytes; zero text lines) |
+| `web/index.html` | read in full (33 lines) |
+| `web/issues.js` | read in full (178 lines) |
+| `web/milestones.js` | read in full (247 lines) |
+| `web/owner-controls.js` | read in full (122 lines) |
+| `web/repo.js` | read in full (400 lines) |
+| `web/styles.css` | read in full (181 lines) |
+| `web/tracker.js` | read in full (387 lines) |
+| `web/verdicts.js` | read in full (91 lines) |
+| `web/views.js` | read in full (473 lines) |
+| `wrangler.jsonc` | read in full (19 lines) |
+| `src/worker.ts` | read in full (216 lines) |
+| `src/coordinator.ts` | read in full (359 lines) |
+| `src/catalog.ts` | read in full (197 lines) |
+| `src/state.ts` | read in full (277 lines) |
+| `src/auth.ts` | read in full (146 lines) |
+| `src/storage/artifacts.ts` | read in full (182 lines) |
+| `src/leases/units.ts` | read in full (331 lines) |
+| `src/features/leases.ts` | read in full (577 lines) |
+| `src/features/issues.ts` | read in full (183 lines) |
+| `src/features/queue.ts` | read in full (1,266 lines) |
+| `concord-v3-architecture.html` (draft 4) | read in full (741 lines) |
+| `round2-c123-final/c123-claims-design.md` | read in full (208 lines) |
+| `round2-finals/h10-hosting-from-v2.md` | read in full (182 lines) |
+| `v3-direction-2026-10-17.md` | read in full (65 lines) |
+| `h7-our-cloudflare.md` | read in full (73 lines) |
+| `owner-decisions-2026-10-16.md` | read in full (2,189 lines) |
+| `owner-decision-status-2026-10-16.tsv` | read in full (219 lines) |
+| `owner-decisions-2026-10-17.md` | read in full (2,215 lines) |
+| Repository `docs/decisions.md` | read in full (1,946 lines) |
+| Repository `docs/decision-status.tsv` | read in full (191 lines) |
+
+The per-input ranges and working notes are in the run's uncommitted scratch directory. The required `npm run -s decisions` status command was attempted on 17 October 2026 and failed because local `tsx` is absent; it supplied no `Approved but not live:` output. The provided dated owner-decision and status snapshots were used to check policy, and this audit changes no decision or status row. A later build still needs the owner to settle production phase limits, wait handover after the atomicity test, the UI/API schema, and hosting after the promoter fence test.
